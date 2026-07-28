@@ -1,0 +1,3 @@
+# Standard interactive CoilGen install.
+# For a minimal dependency-light install, use: python -m pip install -e .
+-e .[full]

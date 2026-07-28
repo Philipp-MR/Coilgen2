@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+*.asv
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.matplotlib/
+.coverage
+coverage.xml
+htmlcov/
+.venv/
+build/
+dist/
+*.egg-info/
+# All generated project artifacts live below this repository-level directory.
+/outputs/
+# Large project-owned inputs (meshes, field maps, measured data) stay local.
+/project_data/
