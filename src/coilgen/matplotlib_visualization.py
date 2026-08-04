@@ -929,6 +929,7 @@ def plot_problem_setup_geometry_3d(
     *,
     title: str = "Problem Setup Geometry: Current Surface and Target Field",
     field_overlay: ProblemSetupFieldOverlay | None = None,
+    pyplot_managed: bool = True,
     show: bool = True,
     block: bool = False,
 ) -> Figure:
@@ -963,7 +964,7 @@ def plot_problem_setup_geometry_3d(
     if not np.any(finite):
         raise ValueError("Target field point cloud has no finite samples.")
 
-    fig, ax = _new_3d_figure(plt, title)
+    fig, ax = _new_3d_figure(plt, title, pyplot_managed=pyplot_managed)
     all_points: list[np.ndarray] = []
     for part_ind, part in enumerate(result.coil_parts, start=1):
         mesh = part.mesh
@@ -3267,8 +3268,19 @@ def _face_scalar_display_norm(colors: Any, values: np.ndarray, *, percentile: fl
     return colors.Normalize(vmin=float(low), vmax=float(high), clip=True)
 
 
-def _new_3d_figure(plt: Any, title: str) -> tuple[Figure, Any]:
-    fig = plt.figure(num=title, figsize=(9, 7))
+def _new_3d_figure(plt: Any, title: str, *, pyplot_managed: bool = True) -> tuple[Figure, Any]:
+    if pyplot_managed:
+        fig = plt.figure(num=title, figsize=(9, 7))
+    else:
+        # Lazy plot-book factories must not reuse a named pyplot/Qt manager
+        # left in a long-lived Spyder kernel. Its window or toolbar QActions
+        # may already have been deleted when an earlier book was replaced.
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure as MatplotlibFigure
+
+        fig = MatplotlibFigure(figsize=(9, 7))
+        FigureCanvasAgg(fig)
+        fig.set_label(title)
     fig.clf()
     ax = fig.add_subplot(111, projection="3d")
     _set_axis_title(ax, title, width=58)

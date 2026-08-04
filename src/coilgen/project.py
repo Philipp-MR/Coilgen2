@@ -1591,42 +1591,154 @@ def _project_summary_channel_max_fraction(column_count: int) -> float:
 def _plot_project_metric_bars(project_run: CoilProjectRun) -> Any:
     import matplotlib.pyplot as plt
 
-    metrics = _project_comparison_metrics(project_run)
-    column_count = 3
-    row_count = max(1, math.ceil(len(metrics) / column_count))
-    fig, axes = plt.subplots(row_count, column_count, figsize=(15.2, 3.05 + 2.95 * row_count))
-    fig.set_label("Project Channel Metric Comparison")
     rows = list(project_run.summary_rows)
+    requested_metrics = _project_comparison_metrics(project_run)
+    metrics = tuple(metric for metric in requested_metrics if _project_metric_series_available(rows, metric[0]))
+    omitted_metrics = tuple(metric for metric in requested_metrics if metric not in metrics)
+    column_count = 2 if len(metrics) <= 4 else 3
+    row_count = max(1, math.ceil(len(metrics) / column_count))
+    figure_width = 13.6 if column_count == 2 else 15.2
+    fig, axes = plt.subplots(
+        row_count,
+        column_count,
+        figsize=(figure_width, 2.35 + 3.15 * row_count),
+        squeeze=False,
+    )
+    fig.set_label("Project Channel Metric Comparison")
     colors = [_channel_color(project_run, str(row.get("channel", ""))) for row in rows]
     channel_labels = _project_metric_bar_label_map(rows)
-    legend_handles = _project_metric_bar_legend_handles(rows, colors, channel_labels)
-    axes_list = list(axes.flat) if hasattr(axes, "flat") else [axes]
+    single_channel = len(rows) == 1
+    legend_handles = [] if single_channel else _project_metric_bar_legend_handles(rows, colors, channel_labels)
+    axes_list = list(axes.flat)
     for ax, (key, title, unit) in zip(axes_list, metrics):
         labels, values, metric_colors = _metric_values(rows, key, colors, channel_labels)
         if values:
-            ax.bar(labels, values, color=metric_colors, edgecolor="#1f2937", linewidth=0.35)
-        ax.set_title(title)
+            bars = ax.bar(
+                labels,
+                values,
+                width=0.54 if single_channel else 0.72,
+                color=metric_colors,
+                edgecolor="#1f2937",
+                linewidth=0.45,
+            )
+            _annotate_project_metric_bars(ax, bars, values)
+        ax.set_title(title, fontsize=11.5, pad=8)
         ax.set_ylabel(unit)
-        ax.grid(True, axis="y", alpha=0.25)
+        ax.set_axisbelow(True)
+        ax.grid(True, axis="y", alpha=0.22)
         ax.tick_params(axis="x", labelrotation=0, labelsize=8, pad=2)
-        for tick_label in ax.get_xticklabels():
-            tick_label.set_multialignment("center")
+        if single_channel:
+            ax.set_xticks([])
+        else:
+            for tick_label in ax.get_xticklabels():
+                tick_label.set_multialignment("center")
     for ax in axes_list[len(metrics) :]:
         ax.axis("off")
-    fig.suptitle(f"{project_run.project.name} channel comparison", fontsize=14)
+
+    descriptor = _project_metric_page_descriptor(project_run, rows)
+    fig.suptitle(descriptor, y=0.975, fontsize=14.5, fontweight="bold")
+    fig.text(
+        0.5,
+        0.94,
+        "Single-channel performance summary" if single_channel else "Channel metric comparison",
+        ha="center",
+        va="top",
+        fontsize=10.0,
+        color="#475569",
+    )
+    footer_note = _project_metric_omission_note(project_run, omitted_metrics)
+    if footer_note:
+        fig.text(0.5, 0.018, footer_note, ha="center", va="bottom", fontsize=8.5, color="#475569")
+
+    bottom_margin = 0.07 if legend_handles else 0.06 if footer_note else 0.035
     if legend_handles:
         fig.legend(
             handles=legend_handles,
             loc="lower center",
-            bbox_to_anchor=(0.5, 0.01),
+            bbox_to_anchor=(0.5, 0.018 if not footer_note else 0.034),
             ncol=min(max(len(legend_handles), 1), 3),
             fontsize=8,
             frameon=False,
         )
-        fig.tight_layout(rect=(0, 0.07, 1, 0.96))
-    else:
-        fig.tight_layout(rect=(0, 0, 1, 0.96))
+        bottom_margin = 0.09 if footer_note else 0.07
+    fig.tight_layout(rect=(0.025, bottom_margin, 0.985, 0.90), h_pad=2.0, w_pad=2.2)
     return fig
+
+
+_POSITIVE_HARDWARE_COMPARISON_METRICS = {
+    "coil_resistance_total_ohm",
+    "coil_inductance_same_current_H",
+}
+
+
+def _project_metric_series_available(rows: Sequence[Mapping[str, Any]], key: str) -> bool:
+    values = [_safe_float(row.get(key)) for row in rows]
+    finite = [value for value in values if math.isfinite(value)]
+    if not finite:
+        return False
+    if key in _POSITIVE_HARDWARE_COMPARISON_METRICS:
+        return any(value > 0.0 for value in finite)
+    return True
+
+
+def _annotate_project_metric_bars(ax: Any, bars: Any, values: Sequence[float]) -> None:
+    finite = [float(value) for value in values if math.isfinite(float(value))]
+    if not finite:
+        return
+    lower = min([0.0, *finite])
+    upper = max([0.0, *finite])
+    span = max(upper - lower, max(abs(value) for value in finite), 1.0e-12)
+    ax.set_ylim(lower - (0.12 * span if lower < 0.0 else 0.0), upper + 0.18 * span)
+    for bar, value in zip(bars, values, strict=True):
+        value = float(value)
+        if not math.isfinite(value):
+            continue
+        ax.annotate(
+            f"{value:.3g}",
+            xy=(bar.get_x() + 0.5 * bar.get_width(), value),
+            xytext=(0, 4 if value >= 0.0 else -4),
+            textcoords="offset points",
+            ha="center",
+            va="bottom" if value >= 0.0 else "top",
+            fontsize=9.0,
+            fontweight="bold",
+            color="#1e293b",
+        )
+
+
+def _project_metric_page_descriptor(project_run: CoilProjectRun, rows: Sequence[Mapping[str, Any]]) -> str:
+    if len(rows) == 1:
+        descriptor = _project_metric_descriptive_label(rows[0])
+    else:
+        descriptor = str(project_run.project.name)
+    words = [word for word in str(descriptor).replace("-", "_").split("_") if word]
+    replacements = {
+        "b0": "B0",
+        "dbsm": "DBSM",
+        "mri": "MRI",
+        "rf": "RF",
+    }
+    text = " ".join(replacements.get(word.lower(), word) for word in words).strip()
+    return text[:1].upper() + text[1:] if text else "Coil channel performance"
+
+
+def _project_metric_omission_note(
+    project_run: CoilProjectRun,
+    omitted_metrics: Sequence[tuple[str, str, str]],
+) -> str:
+    hardware_titles = [
+        title for key, title, _unit in omitted_metrics if key in _POSITIVE_HARDWARE_COMPARISON_METRICS
+    ]
+    if not hardware_titles:
+        return ""
+    skipped = []
+    for channel_run in project_run.channel_runs:
+        result = getattr(channel_run, "result", None)
+        config = getattr(result, "input_data", None)
+        if config is not None:
+            skipped.append(bool(getattr(config, "skip_inductance_calculation", False)))
+    reason = "calculation disabled for this run" if skipped and all(skipped) else "values unavailable"
+    return f"{' and '.join(hardware_titles)} omitted: {reason}."
 
 
 def _plot_project_channel_spherical_harmonics(project_run: CoilProjectRun) -> Any:
@@ -1802,7 +1914,7 @@ def _has_numeric_project_metrics(rows: Sequence[Mapping[str, Any]]) -> bool:
         context = normalize_design_context(rows[0].get("design_context", "mr_gradient"))
         metrics = _comparison_metrics_for_context(context, unit=_project_field_display_unit(rows))
     for key, _title, _unit in metrics:
-        if any(math.isfinite(_safe_float(row.get(key))) for row in rows):
+        if _project_metric_series_available(rows, key):
             return True
     return False
 
