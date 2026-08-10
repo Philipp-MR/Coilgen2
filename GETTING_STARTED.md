@@ -68,7 +68,9 @@ Each standard example now writes:
 
 - `*_design_report.md`: readable design summary, warnings, errors, timings.
 - `*_design_summary.csv`: compact machine-readable summary.
-- `*_wire_trace.csv`: routed wire center trajectory when `save_wire_trace_csv=True`.
+- `*_wire_trace.csv` or `*_wire_path.csv`: routed XYZ centerline when `save_wire_trace_csv=True`.
+- `*_contour_traces.step`: closed contour XYZ sequences as independent, unswept 1D curve paths.
+- `*_wire_path.step`: the same points as an unswept, piecewise-linear STEP curve path.
 - SVG/CSV diagnostics when enabled.
 
 `needed_current_layout` is the signed current required to realize the requested

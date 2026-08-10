@@ -76,6 +76,29 @@ class Mesh:
 
 
 @dataclass
+class SweptBody:
+    """One independently closed triangulated conductor body.
+
+    ``contour_index`` is one-based for stable diagnostics and export names.  A
+    value of ``None`` denotes the legacy single connected routed-wire body.
+    """
+
+    mesh: Mesh
+    contour_index: int | None = None
+    turn_multiplicity: int = 1
+    diagnostics: ManufacturingDiagnostics = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.contour_index is not None and int(self.contour_index) < 1:
+            raise ValueError("contour_index must be a positive one-based index or None.")
+        if isinstance(self.turn_multiplicity, bool) or int(self.turn_multiplicity) < 1:
+            raise ValueError("turn_multiplicity must be a positive integer.")
+        self.contour_index = None if self.contour_index is None else int(self.contour_index)
+        self.turn_multiplicity = int(self.turn_multiplicity)
+        self.diagnostics = dict(self.diagnostics)
+
+
+@dataclass
 class BasisElement:
     triangles: np.ndarray
     one_ring: np.ndarray
@@ -385,6 +408,7 @@ class CoilPart:
     wire_path: WirePath | None = None
     route_diagnostics: RouteDiagnostics = field(default_factory=dict)
     swept_body: Mesh | None = None
+    swept_bodies: list[SweptBody] = field(default_factory=list)
     manufacturing_diagnostics: ManufacturingDiagnostics = field(default_factory=dict)
     pcb_layout: PcbLayout | None = None
     shift_array: np.ndarray | None = None

@@ -1879,13 +1879,20 @@ def _normalise_contour_loop_pruning_mode(value: Any) -> str:
 def _contour_loop_pruning_groups(
     parts: list[CoilPart],
     config: CoilGenConfig,
+    *,
+    preserve_symmetry: bool | None = None,
 ) -> tuple[list[list[tuple[int, int]]], set[tuple[int, int]], bool]:
     """Return mirror-orbit groups so pruning never deletes only one partner."""
 
     all_keys = [
         (part_ind, contour_ind) for part_ind, part in enumerate(parts) for contour_ind in range(len(part.contour_lines))
     ]
-    if not bool(getattr(config, "contour_loop_pruning_preserve_symmetry", True)):
+    preserve = (
+        bool(getattr(config, "contour_loop_pruning_preserve_symmetry", True))
+        if preserve_symmetry is None
+        else bool(preserve_symmetry)
+    )
+    if not preserve:
         return [[key] for key in all_keys], set(), True
     symmetry_mode = _contour_symmetry_validation_mode(config)
     if symmetry_mode == "off":

@@ -9,11 +9,12 @@ from pathlib import Path
 import numpy as np
 
 from .config import CoilGenConfig
-from .geometry import compute_face_normals, compute_vertex_normals, rotation_matrix_by_vector
-from .models import CoilGenResult, CoilPart, Mesh, WirePathGeometry
+from .geometry import combine_meshes, compute_face_normals, compute_vertex_normals, rotation_matrix_by_vector
+from .models import CoilGenResult, CoilPart, ContourLine, Mesh, SweptBody, WirePath, WirePathGeometry
 from .wire_provenance import transfer_segment_geometry
 
 _DEFAULT_MESH_AREA_TOLERANCE_M2 = 1e-12
+_WIRE_TRACE_STEP_MIN_SEGMENT_LENGTH_M = 1e-12
 
 
 def create_swept_coil_meshes(parts: list[CoilPart], config: CoilGenConfig) -> list[CoilPart]:
@@ -28,11 +29,16 @@ def create_swept_coil_meshes(parts: list[CoilPart], config: CoilGenConfig) -> li
     if config.skip_sweep:
         for part in parts:
             part.swept_body = None
+            part.swept_bodies = []
             part.manufacturing_diagnostics = {"swept_body_created": False, "manufacturing_ok": True}
         return parts
 
+    if config.contour_only_sweep_mode:
+        return create_swept_contour_meshes(parts, config)
+
     cross_section = conductor_cross_section_points(config)
     for part in parts:
+        part.swept_bodies = []
         if part.wire_path is None or len(part.wire_path.v) < 2:
             part.swept_body = None
             part.manufacturing_diagnostics = {"swept_body_created": False, "manufacturing_ok": False}
@@ -48,7 +54,198 @@ def create_swept_coil_meshes(parts: list[CoilPart], config: CoilGenConfig) -> li
             }
         )
         _finalize_manufacturing_diagnostics(part)
+        part.swept_bodies = [
+            SweptBody(
+                mesh=part.swept_body,
+                diagnostics=part.manufacturing_diagnostics,
+            )
+        ]
     return parts
+
+
+def create_swept_contour_meshes(parts: list[CoilPart], config: CoilGenConfig) -> list[CoilPart]:
+    """Sweep every closed contour into an independent manifold mesh body.
+
+    No contour is cut or interconnected.  The original ``swept_body`` field is
+    retained as a disconnected aggregate for legacy plotting; authoritative
+    per-contour bodies and diagnostics are stored in ``swept_bodies``.  When
+    ideal weighted sparsification is active, each body follows one retained
+    representative and its integer turn multiplicity remains explicit metadata.
+    """
+
+    cross_section = conductor_cross_section_points(config)
+    weighted_representatives = (
+        str(getattr(config, "contour_sparsification_mode", "off")).strip().lower() != "off"
+    )
+    for part_index, part in enumerate(parts, start=1):
+        bodies: list[SweptBody] = []
+        for contour_index, contour in enumerate(part.contour_lines, start=1):
+            bodies.append(
+                create_swept_contour_body(
+                    part,
+                    contour,
+                    config,
+                    cross_section=cross_section,
+                    weighted_representative=weighted_representatives,
+                    validate=True,
+                    part_index=part_index,
+                    contour_index=contour_index,
+                )
+            )
+
+        part.swept_bodies = bodies
+        part.swept_body = combine_meshes([body.mesh for body in bodies]) if bodies else None
+        part.manufacturing_diagnostics = _aggregate_swept_body_diagnostics(bodies, part.swept_body)
+    return parts
+
+
+def create_swept_contour_body(
+    part: CoilPart,
+    contour: ContourLine,
+    config: CoilGenConfig,
+    *,
+    part_index: int,
+    contour_index: int,
+    cross_section: np.ndarray | None = None,
+    weighted_representative: bool | None = None,
+    validate: bool = True,
+) -> SweptBody:
+    """Create one independent contour body and its complete diagnostics."""
+
+    section = conductor_cross_section_points(config) if cross_section is None else np.asarray(cross_section, dtype=float)
+    weighted = (
+        str(getattr(config, "contour_sparsification_mode", "off")).strip().lower() != "off"
+        if weighted_representative is None
+        else bool(weighted_representative)
+    )
+    wire_path = _closed_contour_wire_path(
+        contour.v,
+        part_index=part_index,
+        contour_index=contour_index,
+    )
+    contour_part = replace(
+        part,
+        wire_path=wire_path,
+        route_diagnostics={},
+        swept_body=None,
+        swept_bodies=[],
+        manufacturing_diagnostics={},
+    )
+    mesh, sweep_diagnostics = _sweep_wire_path_with_diagnostics(contour_part, section, config)
+    diagnostics = mesh_manufacturing_diagnostics(mesh)
+    diagnostics.update(sweep_diagnostics)
+    diagnostics.update(
+        {
+            "sweep_geometry_backend": "triangular_mesh",
+            "sweep_geometry_role": "independent_contour_volume",
+            "sweep_source": "contour",
+            "sweep_contour_index": int(contour_index),
+            "sweep_turn_multiplicity": int(contour.turn_multiplicity),
+            "sweep_weighted_representative": bool(weighted),
+            "sweep_physical_turns_expanded": False,
+            "analytic_solid_created": False,
+        }
+    )
+    contour_part.swept_body = mesh
+    contour_part.manufacturing_diagnostics = diagnostics
+    _finalize_manufacturing_diagnostics(contour_part)
+    diagnostics = dict(contour_part.manufacturing_diagnostics)
+    if validate:
+        _require_valid_closed_contour_body(
+            diagnostics,
+            part_index=part_index,
+            contour_index=contour_index,
+        )
+    return SweptBody(
+        mesh=mesh,
+        contour_index=contour_index,
+        turn_multiplicity=contour.turn_multiplicity,
+        diagnostics=diagnostics,
+    )
+
+
+def _closed_contour_wire_path(
+    points: np.ndarray,
+    *,
+    part_index: int,
+    contour_index: int,
+    closure_tolerance_m: float = 1e-9,
+) -> WirePath:
+    vertices = np.asarray(points, dtype=float)
+    label = f"Coil part {part_index} contour {contour_index}"
+    if vertices.ndim != 2 or vertices.shape[1] != 3:
+        raise ValueError(f"{label} must have XYZ points with shape (n, 3).")
+    if not np.all(np.isfinite(vertices)):
+        raise ValueError(f"{label} contains non-finite coordinates.")
+    vertices = _dedupe_path(vertices)
+    if len(vertices) < 4:
+        raise ValueError(f"{label} requires at least three distinct points plus closure.")
+    closure_gap = float(np.linalg.norm(vertices[-1] - vertices[0]))
+    if closure_gap > float(closure_tolerance_m):
+        raise ValueError(
+            f"{label} is open by {closure_gap:.6g} m; contour-only sweep requires a closed loop "
+            f"within {float(closure_tolerance_m):.6g} m."
+        )
+    vertices[-1] = vertices[0]
+    if len(np.unique(vertices[:-1], axis=0)) < 3:
+        raise ValueError(f"{label} requires at least three distinct non-collinear loop points.")
+    return WirePath(v=vertices)
+
+
+def _require_valid_closed_contour_body(
+    diagnostics: dict[str, float | int | bool | str],
+    *,
+    part_index: int,
+    contour_index: int,
+) -> None:
+    valid = bool(
+        diagnostics.get("sweep_closed_path", False)
+        and int(diagnostics.get("sweep_end_cap_count", -1)) == 0
+        and bool(diagnostics.get("mesh_solid_ok", False))
+        and not bool(diagnostics.get("sweep_mesh_self_intersection", False))
+        and bool(diagnostics.get("manufacturing_ok", False))
+    )
+    if valid:
+        return
+    raise ValueError(
+        f"Coil part {part_index} contour {contour_index} did not produce a valid closed volume: "
+        f"open_edges={diagnostics.get('open_edge_count', 0)}, "
+        f"nonmanifold_edges={diagnostics.get('nonmanifold_edge_count', 0)}, "
+        f"misoriented_edges={diagnostics.get('misoriented_edge_count', 0)}, "
+        f"degenerate_faces={diagnostics.get('degenerate_face_count', 0)}, "
+        f"self_intersection={diagnostics.get('sweep_mesh_self_intersection', False)}, "
+        f"signed_volume_m3={diagnostics.get('signed_volume_m3', 0.0)}, "
+        f"reasons={diagnostics.get('manufacturing_failure_reasons', '') or 'unspecified'}."
+    )
+
+
+def _aggregate_swept_body_diagnostics(bodies: list[SweptBody], aggregate: Mesh | None) -> dict:
+    if not bodies or aggregate is None:
+        return {
+            "swept_body_created": False,
+            "sweep_source": "contours",
+            "sweep_body_count": 0,
+            "manufacturing_ok": False,
+        }
+    diagnostics = mesh_manufacturing_diagnostics(aggregate)
+    failed = [body for body in bodies if not bool(body.diagnostics.get("manufacturing_ok", False))]
+    diagnostics.update(
+        {
+            "sweep_source": "contours",
+            "sweep_body_count": int(len(bodies)),
+            "sweep_invalid_body_count": int(len(failed)),
+            "mesh_solid_ok": bool(all(body.diagnostics.get("mesh_solid_ok", False) for body in bodies)),
+            "manufacturing_ok": not failed,
+            "manufacturing_failure_reasons": ";".join(
+                f"contour_{body.contour_index:04d}:{body.diagnostics.get('manufacturing_failure_reasons', 'invalid')}"
+                for body in failed
+            ),
+            "sweep_geometry_backend": "triangular_mesh",
+            "sweep_geometry_role": "independent_contour_volume_aggregate",
+            "analytic_solid_created": False,
+        }
+    )
+    return diagnostics
 
 
 def create_swept_coil_bodies(parts: list[CoilPart], config: CoilGenConfig) -> list[CoilPart]:
@@ -58,22 +255,56 @@ def create_swept_coil_bodies(parts: list[CoilPart], config: CoilGenConfig) -> li
 
 
 def manufacturing_diagnostics_rows(result: CoilGenResult) -> list[dict[str, float | int | bool | str]]:
-    """Return one manufacturing diagnostic row per coil part."""
+    """Return one diagnostic row per independently exported swept body."""
 
     rows: list[dict[str, float | int | bool | str]] = []
     for part_ind, part in enumerate(result.coil_parts, start=1):
-        row: dict[str, float | int | bool | str] = {"part_index": part_ind}
-        if part.swept_body is not None:
-            if not part.manufacturing_diagnostics:
-                part.manufacturing_diagnostics = mesh_manufacturing_diagnostics(part.swept_body)
-            _finalize_manufacturing_diagnostics(part)
-            row.update(part.manufacturing_diagnostics)
+        bodies = _part_swept_bodies(part)
+        if bodies:
+            for body_index, body in enumerate(bodies, start=1):
+                diagnostics = _swept_body_diagnostics(part, body)
+                row: dict[str, float | int | bool | str] = {
+                    "part_index": part_ind,
+                    "body_index": body_index,
+                    "sweep_source": "contour" if body.contour_index is not None else "wire_path",
+                    "contour_index": int(body.contour_index or 0),
+                    "turn_multiplicity": int(body.turn_multiplicity),
+                }
+                row.update(diagnostics)
+                rows.append(row)
         elif part.manufacturing_diagnostics:
+            row = {"part_index": part_ind}
             row.update(part.manufacturing_diagnostics)
+            rows.append(row)
         else:
+            row = {"part_index": part_ind}
             row.update({"swept_body_created": False, "manufacturing_ok": False})
-        rows.append(row)
+            rows.append(row)
     return rows
+
+
+def _part_swept_bodies(part: CoilPart) -> list[SweptBody]:
+    swept_bodies = list(getattr(part, "swept_bodies", ()))
+    if swept_bodies:
+        return swept_bodies
+    if part.swept_body is None:
+        return []
+    return [SweptBody(mesh=part.swept_body, diagnostics=part.manufacturing_diagnostics)]
+
+
+def _swept_body_diagnostics(part: CoilPart, body: SweptBody) -> dict[str, float | int | bool | str]:
+    diagnostics = dict(body.diagnostics) if body.diagnostics else mesh_manufacturing_diagnostics(body.mesh)
+    proxy = replace(
+        part,
+        swept_body=body.mesh,
+        swept_bodies=[],
+        manufacturing_diagnostics=diagnostics,
+    )
+    _finalize_manufacturing_diagnostics(proxy)
+    body.diagnostics = dict(proxy.manufacturing_diagnostics)
+    if body.contour_index is None:
+        part.manufacturing_diagnostics = dict(body.diagnostics)
+    return body.diagnostics
 
 
 def save_manufacturing_diagnostics(
@@ -164,19 +395,89 @@ def save_wire_trace_as_csv(
     return [path]
 
 
+def save_wire_trace_artifacts(
+    result: CoilGenResult,
+    output_dir: str | Path,
+    *,
+    prefix: str = "coil",
+) -> list[Path]:
+    """Save contour STEP wires plus routed-path CSV/STEP geometry when available."""
+
+    return [
+        *save_wire_trace_as_csv(result, output_dir, prefix=prefix),
+        *save_contour_traces_as_step(result, output_dir, prefix=prefix),
+        *save_wire_trace_as_step(result, output_dir, prefix=prefix),
+    ]
+
+
+def save_contour_traces_as_step(
+    result: CoilGenResult,
+    output_dir: str | Path,
+    *,
+    prefix: str = "coil",
+) -> list[Path]:
+    """Save all unswept contour XYZ sequences as independent STEP curve paths."""
+
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    contour_parts: list[tuple[int, list[tuple[str, np.ndarray]]]] = []
+    for part_index, part in enumerate(result.coil_parts, start=1):
+        traces = [
+            (f"{prefix}_part{part_index:03d}_contour{contour_index:04d}", np.asarray(contour.v, dtype=float))
+            for contour_index, contour in enumerate(part.contour_lines, start=1)
+            if len(contour.v) >= 2
+        ]
+        if traces:
+            contour_parts.append((part_index, traces))
+
+    multiple = len(contour_parts) > 1
+    files: list[Path] = []
+    for part_index, traces in contour_parts:
+        suffix = f"_part{part_index:03d}" if multiple else ""
+        path = output / f"{prefix}_contour_traces{suffix}.step"
+        product_name = f"{prefix}_contour_traces{suffix}"
+        files.append(
+            _save_xyz_polylines_as_step(
+                traces,
+                path,
+                product_name=product_name,
+                part_index=part_index,
+                description="CoilGen contour centerline curve paths; piecewise-linear; units=m",
+            )
+        )
+    return files
+
+
+def save_wire_trace_as_step(
+    result: CoilGenResult,
+    output_dir: str | Path,
+    *,
+    prefix: str = "coil",
+) -> list[Path]:
+    """Save each routed XYZ centerline as a piecewise-linear STEP curve path.
+
+    Coordinates remain in CoilGen's internal SI metres. Consecutive points are
+    joined by straight STEP ``TRIMMED_CURVE`` segments; no interpolation,
+    smoothing, sweep, surface, or solid is introduced by this export.
+    """
+
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    routed_parts = _routed_wire_parts(result)
+    multiple = len(routed_parts) > 1
+    files: list[Path] = []
+    for part_index, points in routed_parts:
+        suffix = f"_part{part_index:03d}" if multiple else ""
+        path = output / f"{prefix}_wire_path{suffix}.step"
+        wire_name = f"{prefix}_wire_path{suffix}"
+        files.append(_save_xyz_polyline_as_step(points, path, wire_name=wire_name, part_index=part_index))
+    return files
+
+
 def _save_wire_paths_as_xyz_csv(result: CoilGenResult, output: Path, *, prefix: str) -> list[Path]:
     """Write one headerless ordered X,Y,Z file per connected routed part."""
 
-    routed_parts: list[tuple[int, np.ndarray]] = []
-    for part_index, part in enumerate(result.coil_parts, start=1):
-        if part.wire_path is None:
-            continue
-        points = np.asarray(part.wire_path.v, dtype=float)
-        if points.ndim != 2 or points.shape[1] != 3 or len(points) == 0:
-            continue
-        if not np.all(np.isfinite(points)):
-            raise ValueError(f"Wire path for coil part {part_index} contains non-finite coordinates.")
-        routed_parts.append((part_index, points))
+    routed_parts = _routed_wire_parts(result)
 
     config = getattr(result, "input_data", None)
     unit = str(getattr(config, "wire_trace_csv_length_unit", "m")).strip().lower()
@@ -200,6 +501,20 @@ def _save_wire_paths_as_xyz_csv(result: CoilGenResult, output: Path, *, prefix: 
                 writer.writerow(formatter(coordinate_scale * float(value)) for value in point)
         files.append(path)
     return files
+
+
+def _routed_wire_parts(result: CoilGenResult) -> list[tuple[int, np.ndarray]]:
+    routed_parts: list[tuple[int, np.ndarray]] = []
+    for part_index, part in enumerate(result.coil_parts, start=1):
+        if part.wire_path is None:
+            continue
+        points = np.asarray(part.wire_path.v, dtype=float)
+        if points.ndim != 2 or points.shape[1] != 3 or len(points) == 0:
+            continue
+        if not np.all(np.isfinite(points)):
+            raise ValueError(f"Wire path for coil part {part_index} contains non-finite coordinates.")
+        routed_parts.append((part_index, points))
+    return routed_parts
 
 
 def mesh_manufacturing_diagnostics(
@@ -1613,14 +1928,12 @@ def _prepare_sweep_centerline(
         minimum_turn_angle_deg=max(float(config.sweep_tangent_angle_tolerance_deg), 1e-6),
     )
     diagnostics["sweep_min_resampled_bend_radius_m"] = float(np.min(resampled_radii)) if len(resampled_radii) else 0.0
-    required_bend_radius = float(diagnostics.get("sweep_required_bend_radius_m", 0.0))
-    if (
-        _normalised_text(config.sweep_bend_mode) == "fillet"
-        and required_bend_radius > 0.0
-        and len(resampled_radii)
-        and float(np.min(resampled_radii)) < 0.99 * required_bend_radius
-    ):
-        diagnostics["sweep_min_bend_radius_violation"] = True
+    configured_bend_radius = float(diagnostics.get("sweep_configured_min_bend_radius_m", 0.0))
+    if _normalised_text(config.sweep_bend_mode) == "fillet" and configured_bend_radius > 0.0:
+        diagnostics["sweep_min_bend_radius_violation"] = bool(
+            diagnostics.get("sweep_min_bend_radius_violation", False)
+            or (len(resampled_radii) and float(np.min(resampled_radii)) < 0.99 * configured_bend_radius)
+        )
     envelope_radius = _cross_section_envelope_radius(cross_section)
     minimum_resampled_radius = float(np.min(resampled_radii)) if len(resampled_radii) else np.inf
     curvature_envelope_ratio = (
@@ -1994,11 +2307,16 @@ def _resolve_sweep_centerline_bends(
     bend_mode = _normalised_text(config.sweep_bend_mode)
     configured_radius = max(float(config.sweep_min_bend_radius), 0.0)
     curvature_limit = float(config.sweep_max_curvature_envelope_ratio)
-    automatic_radius = envelope_radius / curvature_limit if curvature_limit > 0.0 else 0.0
+    # The projected fillet validator accepts a 1% discretization tolerance.
+    # Give the automatic (profile-derived) radius a 2% construction margin so
+    # that a validated discrete curve remains strictly inside the configured
+    # curvature-envelope limit after adaptive surface resampling.
+    automatic_radius = envelope_radius / (0.98 * curvature_limit) if curvature_limit > 0.0 else 0.0
     required_radius = max(configured_radius, automatic_radius) if bend_mode == "fillet" else configured_radius
     diagnostics: dict[str, float | int | bool | str] = {
         "sweep_bend_points_inserted": 0,
         "sweep_min_effective_bend_radius_m": 0.0,
+        "sweep_configured_min_bend_radius_m": float(configured_radius),
         "sweep_required_bend_radius_m": float(required_radius),
         "sweep_bend_radius_source": (
             "configured_and_profile_envelope"
@@ -2064,7 +2382,7 @@ def _resolve_sweep_centerline_bends(
         source_geometry,
         config,
         closed=closed,
-        simplify_surface=bool(planar_support or analytic_surface is not None),
+        simplify_surface=bool(planar_support or analytic_surface is not None or part.mesh.n_faces > 0),
     )
     diagnostics["sweep_bend_analysis_points_removed"] = int(len(source_points) - len(analysis_points))
     analysis_closed = closed
@@ -2133,15 +2451,22 @@ def _resolve_sweep_centerline_bends(
         diagnostics["sweep_min_bend_radius_violation"] = True
         return source_points, source_geometry, diagnostics
 
+    has_surface_projector = bool(part.mesh.n_faces > 0)
     eligible_candidates = [
         candidate
         for candidate in candidates
-        if candidate.blend_geometry != WirePathGeometry.SURFACE or planar_support or analytic_surface is not None
+        if candidate.blend_geometry != WirePathGeometry.SURFACE
+        or planar_support
+        or analytic_surface is not None
+        or has_surface_projector
     ]
     unsupported_surface_indices = {
         candidate.index
         for candidate in candidates
-        if candidate.blend_geometry == WirePathGeometry.SURFACE and not planar_support and analytic_surface is None
+        if candidate.blend_geometry == WirePathGeometry.SURFACE
+        and not planar_support
+        and analytic_surface is None
+        and not has_surface_projector
     }
     surface_eligible_count = sum(
         candidate.blend_geometry == WirePathGeometry.SURFACE for candidate in eligible_candidates
@@ -2222,7 +2547,7 @@ def _resolve_sweep_centerline_bends(
     diagnostics["sweep_corner_resolved_count"] = int(len(build.resolved_indices))
     diagnostics["sweep_bend_trim_conflict_count"] = int(len(conflicts))
     diagnostics["sweep_bend_infeasible_count"] = int(len(final_infeasible_indices))
-    diagnostics["sweep_min_bend_radius_violation"] = bool(final_infeasible_indices)
+    diagnostics["sweep_min_bend_radius_violation"] = bool(configured_radius > 0.0 and final_infeasible_indices)
     diagnostics["sweep_surface_bend_projection_max_m"] = float(build.maximum_projection_m)
     diagnostics["sweep_surface_corner_resolved_count"] = int(build.surface_resolved_count)
     diagnostics["sweep_surface_corner_validation_failure_count"] = int(build.surface_validation_failure_count)
@@ -3226,6 +3551,27 @@ def _build_radius_controlled_fillet_path(
         outgoing = following - corner
         incoming_unit = incoming / max(float(np.linalg.norm(incoming)), 1e-15)
         outgoing_unit = outgoing / max(float(np.linalg.norm(outgoing)), 1e-15)
+        if candidate.blend_geometry == WirePathGeometry.SURFACE and projector is not None:
+            validated = _validated_mesh_surface_fillet(
+                previous,
+                corner,
+                following,
+                candidate,
+                radius,
+                projector,
+                arc_step,
+            )
+            if validated is None:
+                failed_indices.add(index)
+                surface_validation_failure_count += 1
+                continue
+            start, end, arc, projection, radius_inflation = validated
+            maximum_projection = max(maximum_projection, projection)
+            maximum_radius_inflation = max(maximum_radius_inflation, radius_inflation)
+            surface_resolved_count += 1
+            arcs[index] = (start, end, arc, candidate.blend_geometry)
+            inserted_count += max(len(arc) - 2, 0)
+            continue
         tangent_distance = candidate.tangent_distance_m
         start = corner - incoming_unit * tangent_distance
         end = corner + outgoing_unit * tangent_distance
@@ -3235,14 +3581,6 @@ def _build_radius_controlled_fillet_path(
             continue
         center = corner + center_direction / center_norm * (radius / max(np.cos(candidate.turn_angle_rad / 2.0), 1e-15))
         arc = _circular_arc_points(start, end, center, arc_step)
-        if candidate.blend_geometry == WirePathGeometry.SURFACE and projector is not None and len(arc) > 2:
-            interior = np.asarray(arc[1:-1], dtype=float)
-            projected, _normals = projector.project(interior)
-            maximum_projection = max(
-                maximum_projection,
-                float(np.max(np.linalg.norm(projected - interior, axis=1))),
-            )
-            arc[1:-1] = [point for point in projected]
         arcs[index] = (start, end, arc, candidate.blend_geometry)
         inserted_count += max(len(arc) - 2, 0)
 
@@ -3313,6 +3651,59 @@ def _build_radius_controlled_fillet_path(
         surface_validation_failure_count=surface_validation_failure_count,
         maximum_radius_inflation=maximum_radius_inflation,
     )
+
+
+def _validated_mesh_surface_fillet(
+    previous: np.ndarray,
+    corner: np.ndarray,
+    following: np.ndarray,
+    candidate: _SweepCornerCandidate,
+    required_radius: float,
+    projector: "_SurfaceProjector",
+    arc_step: float,
+) -> tuple[np.ndarray, np.ndarray, list[np.ndarray], float, float] | None:
+    """Construct a projected surface fillet whose final 3-D radius is certified."""
+
+    incoming = corner - previous
+    outgoing = following - corner
+    incoming_length = float(np.linalg.norm(incoming))
+    outgoing_length = float(np.linalg.norm(outgoing))
+    if min(incoming_length, outgoing_length) <= 1e-15:
+        return None
+    incoming_unit = incoming / incoming_length
+    outgoing_unit = outgoing / outgoing_length
+    center_direction = outgoing_unit - incoming_unit
+    center_norm = float(np.linalg.norm(center_direction))
+    half_angle_cosine = float(np.cos(candidate.turn_angle_rad / 2.0))
+    if center_norm <= 1e-15 or half_angle_cosine <= 1e-15:
+        return None
+
+    for inflation in (1.0, 1.05, 1.1, 1.2, 1.35, 1.5, 1.75, 2.0):
+        trial_radius = required_radius * inflation
+        tangent_distance = trial_radius * np.tan(candidate.turn_angle_rad / 2.0)
+        if tangent_distance >= min(incoming_length, outgoing_length) - 1e-9:
+            continue
+        start = corner - incoming_unit * tangent_distance
+        end = corner + outgoing_unit * tangent_distance
+        center = corner + center_direction / center_norm * (trial_radius / half_angle_cosine)
+        arc = _circular_arc_points(start, end, center, arc_step)
+        maximum_projection = 0.0
+        if len(arc) > 2:
+            interior = np.asarray(arc[1:-1], dtype=float)
+            projected, _normals = projector.project(interior)
+            if not np.all(np.isfinite(projected)):
+                continue
+            maximum_projection = float(np.max(np.linalg.norm(projected - interior, axis=1)))
+            arc[1:-1] = [point for point in projected]
+        validation_points = np.vstack((previous, np.asarray(arc, dtype=float), following))
+        radii = _polyline_circumradii(
+            validation_points,
+            closed=False,
+            minimum_turn_angle_deg=1e-7,
+        )
+        if len(radii) and float(np.min(radii)) >= 0.99 * required_radius:
+            return start, end, arc, maximum_projection, float(inflation)
+    return None
 
 
 def _assemble_open_planned_fillet_path(
@@ -3635,6 +4026,122 @@ def save_mesh_as_stl(mesh: Mesh, path: str | Path, *, solid_name: str = "coil_bo
     return path
 
 
+def _save_xyz_polyline_as_step(
+    points: np.ndarray,
+    path: str | Path,
+    *,
+    wire_name: str,
+    part_index: int,
+) -> Path:
+    """Write one ordered XYZ sequence as a geometrically bounded STEP wireframe."""
+
+    return _save_xyz_polylines_as_step(
+        [(wire_name, points)],
+        path,
+        product_name=wire_name,
+        part_index=part_index,
+        description="CoilGen routed centerline curve path; piecewise-linear; units=m",
+    )
+
+
+def _save_xyz_polylines_as_step(
+    traces: list[tuple[str, np.ndarray]],
+    path: str | Path,
+    *,
+    product_name: str,
+    part_index: int,
+    description: str,
+) -> Path:
+    """Write ordered XYZ sequences as OpenCascade-compatible STEP curve sets."""
+
+    if not traces:
+        raise ValueError("STEP wire export requires at least one XYZ trace.")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = _StepWriter()
+    product_shape, context = _write_step_product_header(writer, product_name)
+    origin = writer.add("CARTESIAN_POINT('',(0.,0.,0.))")
+    axis_z = writer.add("DIRECTION('',(0.,0.,1.))")
+    axis_x = writer.add("DIRECTION('',(1.,0.,0.))")
+    placement = writer.add(f"AXIS2_PLACEMENT_3D('',{origin},{axis_z},{axis_x})")
+    curve_set_refs: list[str] = []
+
+    for trace_name, points in traces:
+        vertices, closed = _prepare_step_wire_vertices(points, part_index=part_index)
+        if closed:
+            vertices = np.vstack((vertices, vertices[0]))
+        segment_refs: list[str] = []
+        for start, end in zip(vertices[:-1], vertices[1:]):
+            delta = end - start
+            length = float(np.linalg.norm(delta))
+            line_origin = writer.add(_step_cartesian_point(start))
+            direction = writer.add(_step_direction(delta / length))
+            vector = writer.add(f"VECTOR('',{direction},1.)")
+            line = writer.add(f"LINE('',{line_origin},{vector})")
+            trim_start = writer.add(_step_cartesian_point(start))
+            trim_end = writer.add(_step_cartesian_point(end))
+            segment_refs.append(
+                writer.add(
+                    "TRIMMED_CURVE('',"
+                    f"{line},({trim_start},PARAMETER_VALUE(0.)),"
+                    f"({trim_end},PARAMETER_VALUE({_step_float(length)})),.T.,.PARAMETER.)"
+                )
+            )
+        curve_set_refs.append(
+            writer.add(f"GEOMETRIC_CURVE_SET('{_step_string(trace_name)}',({','.join(segment_refs)}))")
+        )
+
+    representation_items = ",".join((placement, *curve_set_refs))
+    representation = writer.add(f"SHAPE_REPRESENTATION('',({representation_items}),{context})")
+    writer.add(f"SHAPE_DEFINITION_REPRESENTATION({product_shape},{representation})")
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S%z")
+    text = "\n".join(
+        [
+            "ISO-10303-21;",
+            "HEADER;",
+            f"FILE_DESCRIPTION(('{_step_string(description)}'),'2;1');",
+            f"FILE_NAME('{_step_string(path.name)}','{timestamp}',('CoilGen'),('CoilGen'),'CoilGen','CoilGen','');",
+            "FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));",
+            "ENDSEC;",
+            "DATA;",
+            *writer.lines,
+            "ENDSEC;",
+            "END-ISO-10303-21;",
+            "",
+        ]
+    )
+    path.write_text(text, encoding="ascii")
+    return path
+
+
+def _prepare_step_wire_vertices(points: np.ndarray, *, part_index: int) -> tuple[np.ndarray, bool]:
+    vertices = np.asarray(points, dtype=float)
+    if vertices.ndim != 2 or vertices.shape[1] != 3:
+        raise ValueError(f"XYZ trace for coil part {part_index} must have shape (n, 3).")
+    if not np.all(np.isfinite(vertices)):
+        raise ValueError(f"XYZ trace for coil part {part_index} contains non-finite coordinates.")
+    if len(vertices) < 2:
+        raise ValueError(f"XYZ trace for coil part {part_index} requires at least two points for STEP export.")
+
+    kept = [0]
+    for index in range(1, len(vertices)):
+        if float(np.linalg.norm(vertices[index] - vertices[kept[-1]])) > _WIRE_TRACE_STEP_MIN_SEGMENT_LENGTH_M:
+            kept.append(index)
+    vertices = vertices[kept]
+    if len(vertices) < 2:
+        raise ValueError(f"XYZ trace for coil part {part_index} has no nonzero segments for STEP export.")
+
+    closed = bool(
+        len(vertices) > 2 and float(np.linalg.norm(vertices[-1] - vertices[0])) <= _WIRE_TRACE_STEP_MIN_SEGMENT_LENGTH_M
+    )
+    if closed:
+        vertices = vertices[:-1]
+    if len(vertices) < 2:
+        raise ValueError(f"XYZ trace for coil part {part_index} has no nonzero segments for STEP export.")
+    return vertices, closed
+
+
 def save_swept_bodies_as_stl(
     result: CoilGenResult,
     output_dir: str | Path,
@@ -3646,24 +4153,39 @@ def save_swept_bodies_as_stl(
     """Export each swept conductor mesh and its current-carrying surface.
 
     STL carries only triangulated boundaries, not analytic volume semantics.
-    One pair is written for every coil part that has a swept mesh. Strict export
-    readiness is enabled by default; bypass it only for visualization/debugging.
+    Each contour-mode body is written separately.  The current-carrying support
+    surface is written once per coil part.  Strict export readiness is enabled
+    by default; bypass it only for visualization/debugging.
     """
 
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     saved: list[Path] = []
     swept_parts = [
-        (part_ind, part) for part_ind, part in enumerate(result.coil_parts, start=1) if part.swept_body is not None
+        (part_ind, part, _part_swept_bodies(part))
+        for part_ind, part in enumerate(result.coil_parts, start=1)
+        if _part_swept_bodies(part)
     ]
-    for part_ind, part in swept_parts:
-        _check_export_readiness(part, part_ind, min_clearance, fail_on_violations, format_name="STL")
-    for part_ind, part in swept_parts:
-        saved.append(
-            save_mesh_as_stl(
-                part.swept_body, output / f"{prefix}_part{part_ind}.stl", solid_name=f"{prefix}_part{part_ind}"
+    for part_ind, part, bodies in swept_parts:
+        for body in bodies:
+            _check_swept_body_export_readiness(
+                part,
+                body,
+                part_ind,
+                min_clearance,
+                fail_on_violations,
+                format_name="STL",
             )
-        )
+    for part_ind, part, bodies in swept_parts:
+        for body in bodies:
+            body_name = _swept_body_name(prefix, part_ind, body)
+            saved.append(
+                save_mesh_as_stl(
+                    body.mesh,
+                    output / f"{body_name}.stl",
+                    solid_name=body_name,
+                )
+            )
         surface_name = f"{prefix}_part{part_ind}_current_carrying_surface"
         saved.append(
             save_mesh_as_stl(
@@ -3856,20 +4378,76 @@ def save_swept_bodies_as_step(
     output.mkdir(parents=True, exist_ok=True)
     saved: list[Path] = []
     swept_parts = [
-        (part_ind, part) for part_ind, part in enumerate(result.coil_parts, start=1) if part.swept_body is not None
+        (part_ind, part, _part_swept_bodies(part))
+        for part_ind, part in enumerate(result.coil_parts, start=1)
+        if _part_swept_bodies(part)
     ]
-    for part_ind, part in swept_parts:
-        _check_export_readiness(part, part_ind, min_clearance, fail_on_violations, format_name="STEP")
-    for part_ind, part in swept_parts:
-        saved.append(
-            save_mesh_as_step(
-                part.swept_body,
-                output / f"{prefix}_part{part_ind}.step",
-                solid_name=f"{prefix}_part{part_ind}",
-                surface_mode=surface_mode,
+    for part_ind, part, bodies in swept_parts:
+        for body in bodies:
+            _check_swept_body_export_readiness(
+                part,
+                body,
+                part_ind,
+                min_clearance,
+                fail_on_violations,
+                format_name="STEP",
             )
-        )
+    for part_ind, _part, bodies in swept_parts:
+        for body in bodies:
+            body_name = _swept_body_name(prefix, part_ind, body)
+            saved.append(
+                save_mesh_as_step(
+                    body.mesh,
+                    output / f"{body_name}.step",
+                    solid_name=body_name,
+                    surface_mode=surface_mode,
+                )
+            )
     return saved
+
+
+def _swept_body_name(prefix: str, part_index: int, body: SweptBody) -> str:
+    name = f"{prefix}_part{part_index}"
+    if body.contour_index is not None:
+        name += f"_contour{body.contour_index:04d}"
+    return name
+
+
+def _check_swept_body_export_readiness(
+    part: CoilPart,
+    body: SweptBody,
+    part_ind: int,
+    min_clearance: float | None,
+    fail_on_violations: bool,
+    *,
+    format_name: str,
+) -> None:
+    diagnostics = _swept_body_diagnostics(part, body)
+    clearance = None if min_clearance is None else max(float(min_clearance), 0.0)
+    clearance_violation = False
+    if body.contour_index is None and clearance is not None and clearance > 0.0:
+        min_wire_distance = float(part.route_diagnostics.get("min_wire_wire_distance", 0.0))
+        seg_a = int(part.route_diagnostics.get("min_wire_wire_segment_a", -1))
+        seg_b = int(part.route_diagnostics.get("min_wire_wire_segment_b", -1))
+        clearance_violation = seg_a >= 0 and seg_b >= 0 and min_wire_distance < clearance
+        diagnostics["export_min_clearance"] = float(clearance)
+        diagnostics["export_clearance_violation"] = bool(clearance_violation)
+        diagnostics["stl_min_clearance"] = float(clearance)
+        diagnostics["stl_clearance_violation"] = bool(clearance_violation)
+    if not fail_on_violations or (bool(diagnostics.get("manufacturing_ok", False)) and not clearance_violation):
+        return
+    reasons = str(diagnostics.get("manufacturing_failure_reasons", "")).strip() or "unspecified"
+    contour_label = "" if body.contour_index is None else f" contour {body.contour_index}"
+    raise ValueError(
+        f"Part {part_ind}{contour_label} is not ready for {format_name} export: "
+        f"manufacturing_ok={diagnostics.get('manufacturing_ok', False)}, "
+        f"failure_reasons={reasons}, "
+        f"export_clearance_violation={diagnostics.get('export_clearance_violation', False)}, "
+        f"short_edges={diagnostics.get('short_edge_count', 0)}, "
+        f"open_edges={diagnostics.get('open_edge_count', 0)}, "
+        f"misoriented_edges={diagnostics.get('misoriented_edge_count', 0)}, "
+        f"signed_volume_m3={diagnostics.get('signed_volume_m3', 0.0)}."
+    )
 
 
 def _check_export_readiness(
@@ -3882,33 +4460,16 @@ def _check_export_readiness(
 ) -> None:
     if part.swept_body is None:
         return
-    diagnostics = part.manufacturing_diagnostics or mesh_manufacturing_diagnostics(part.swept_body)
-    part.manufacturing_diagnostics = diagnostics
-    _finalize_manufacturing_diagnostics(part)
-    diagnostics = part.manufacturing_diagnostics
-    clearance = None if min_clearance is None else max(float(min_clearance), 0.0)
-    clearance_violation = False
-    if clearance is not None and clearance > 0.0:
-        min_wire_distance = float(part.route_diagnostics.get("min_wire_wire_distance", 0.0))
-        seg_a = int(part.route_diagnostics.get("min_wire_wire_segment_a", -1))
-        seg_b = int(part.route_diagnostics.get("min_wire_wire_segment_b", -1))
-        clearance_violation = seg_a >= 0 and seg_b >= 0 and min_wire_distance < clearance
-        diagnostics["export_min_clearance"] = float(clearance)
-        diagnostics["export_clearance_violation"] = bool(clearance_violation)
-        diagnostics["stl_min_clearance"] = float(clearance)
-        diagnostics["stl_clearance_violation"] = bool(clearance_violation)
-    if fail_on_violations and (not bool(diagnostics.get("manufacturing_ok", False)) or clearance_violation):
-        reasons = str(diagnostics.get("manufacturing_failure_reasons", "")).strip() or "unspecified"
-        raise ValueError(
-            f"Part {part_ind} is not ready for {format_name} export: "
-            f"manufacturing_ok={diagnostics.get('manufacturing_ok', False)}, "
-            f"failure_reasons={reasons}, "
-            f"export_clearance_violation={diagnostics.get('export_clearance_violation', False)}, "
-            f"short_edges={diagnostics.get('short_edge_count', 0)}, "
-            f"open_edges={diagnostics.get('open_edge_count', 0)}, "
-            f"misoriented_edges={diagnostics.get('misoriented_edge_count', 0)}, "
-            f"signed_volume_m3={diagnostics.get('signed_volume_m3', 0.0)}."
-        )
+    body = SweptBody(mesh=part.swept_body, diagnostics=part.manufacturing_diagnostics)
+    _check_swept_body_export_readiness(
+        part,
+        body,
+        part_ind,
+        min_clearance,
+        fail_on_violations,
+        format_name=format_name,
+    )
+    part.manufacturing_diagnostics = body.diagnostics
 
 
 def _validate_mesh_for_step(vertices: np.ndarray, faces: np.ndarray) -> None:
@@ -3996,6 +4557,13 @@ def _step_direction(vector: np.ndarray) -> str:
         raise ValueError("STEP export requires non-zero direction vectors.")
     values = values / norm
     return f"DIRECTION('',({_step_float(values[0])},{_step_float(values[1])},{_step_float(values[2])}))"
+
+
+def _step_cartesian_point(point: np.ndarray) -> str:
+    values = np.asarray(point, dtype=float)
+    if values.shape != (3,) or not np.all(np.isfinite(values)):
+        raise ValueError("STEP export requires finite 3D Cartesian points.")
+    return f"CARTESIAN_POINT('',({_step_float(values[0])},{_step_float(values[1])},{_step_float(values[2])}))"
 
 
 def _step_string(value: str) -> str:

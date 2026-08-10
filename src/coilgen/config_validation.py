@@ -1523,11 +1523,71 @@ def _validate_optimization_settings(config: CoilGenConfig, error, warning) -> No
         getattr(config, "contour_sparsification_realization", "ideal_weighted"),
         {"ideal_weighted"},
     )
+    for field_name, label in (
+        (
+            "contour_sparsification_residual_relative_tolerance",
+            "contour-sparsification cumulative relative residual tolerance",
+        ),
+        (
+            "contour_sparsification_residual_absolute_tolerance_T",
+            "contour-sparsification cumulative absolute residual tolerance",
+        ),
+    ):
+        value = getattr(config, field_name, None)
+        if value is not None:
+            _at_least_float(error, label, field_name, value, 0.0)
+    sparsification_pruning_mode = str(getattr(config, "contour_sparsification_pruning_mode", "off")).strip().lower()
+    _enum(
+        error,
+        "contour_sparsification_pruning_mode",
+        sparsification_pruning_mode,
+        {"off", "residual_budget"},
+    )
+    _at_least_float(
+        error,
+        "post-sparsification pruning relative residual tolerance",
+        "contour_sparsification_pruning_residual_relative_tolerance",
+        getattr(config, "contour_sparsification_pruning_residual_relative_tolerance", 0.0),
+        0.0,
+    )
+    _at_least_float(
+        error,
+        "post-sparsification pruning absolute residual tolerance",
+        "contour_sparsification_pruning_residual_absolute_tolerance_T",
+        getattr(config, "contour_sparsification_pruning_residual_absolute_tolerance_T", 0.0),
+        0.0,
+    )
+    _at_least(
+        error,
+        "post-sparsification pruning maximum removed geometries",
+        "contour_sparsification_pruning_max_removed_geometries",
+        getattr(config, "contour_sparsification_pruning_max_removed_geometries", 0),
+        0,
+    )
+    _at_least(
+        error,
+        "post-sparsification pruning target geometry count",
+        "contour_sparsification_pruning_target_geometry_count",
+        getattr(config, "contour_sparsification_pruning_target_geometry_count", 0),
+        0,
+    )
+    if sparsification_pruning_mode != "off" and sparsification_mode == "off":
+        error(
+            "contour_sparsification_pruning_mode",
+            "Post-sparsification pruning requires active contour sparsification.",
+            "Set contour_sparsification_mode='pairwise' or disable post-sparsification pruning.",
+        )
     if sparsification_mode != "off" and not bool(getattr(config, "skip_postprocessing", False)):
         error(
             "skip_postprocessing",
             "Pairwise contour sparsification currently represents ideal weighted turns only.",
             "Set skip_postprocessing=True until separated physical turn realization and routing are selected.",
+        )
+    if sparsification_mode != "off" and bool(getattr(config, "contour_only_sweep_mode", False)):
+        warning(
+            "contour_only_sweep_mode",
+            "Contour-only sweep will export one solid per ideal weighted representative; turn multiplicity is metadata and is not expanded into separated physical tracks.",
+            "Use the exported multiplicity diagnostics when interpreting the bodies, or disable sparsification for one body per physical unit turn.",
         )
     for name in (
         "contourability_max_rms_error_percent",
@@ -1797,8 +1857,8 @@ def _validate_routing_settings(config: CoilGenConfig, error, warning) -> None:
         if bool(getattr(config, "save_wire_trace_csv", False)):
             warning(
                 "save_wire_trace_csv",
-                "Wire-trace CSV export is enabled, but connected-layout routing is disabled.",
-                "Set skip_postprocessing=False to export the routed wire center trajectory.",
+                "Trace export is enabled while connected-layout routing is disabled.",
+                "Unswept contour STEP wires will be saved; routed-path CSV and STEP files require skip_postprocessing=False.",
             )
     wire_trace_format = str(getattr(config, "wire_trace_csv_format", "detailed")).strip().lower()
     if wire_trace_format not in {"detailed", "xyz_no_header"}:
@@ -1962,12 +2022,19 @@ def _validate_manufacturing_settings(config: CoilGenConfig, error, warning) -> N
     )
     if (
         not config.skip_sweep
+        and not bool(getattr(config, "contour_only_sweep_mode", False))
         and str(getattr(config, "layout_terminal_strategy", "undefined")).strip().lower() == "undefined"
     ):
         warning(
             "layout_terminal_strategy",
             "Swept-body export is enabled without explicit terminal handling.",
             "Define terminal pads/wire stubs or mark terminal handling as waived.",
+        )
+    if bool(getattr(config, "contour_only_sweep_mode", False)) and bool(config.skip_sweep):
+        warning(
+            "contour_only_sweep_mode",
+            "Contour-only sweep mode is enabled while sweep generation is disabled.",
+            "Set skip_sweep=False to generate independent closed-contour bodies.",
         )
     if float(config.conductor_cross_section_width) > 0.05 or float(config.conductor_cross_section_height) > 0.05:
         warning("conductor dimensions", "Conductor dimensions exceed 5 cm.", "Check that SI meters are being used.")

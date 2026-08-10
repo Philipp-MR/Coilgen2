@@ -129,6 +129,7 @@ class OptimizationSettings:
     constrained_optimization_tolerance: float
     constrained_optimization_max_iterations: int
     constrained_optimization_threads: int
+    constrained_optimization_verbose: bool
     constrained_quadratic_fallback_policy: str
     constrained_quadratic_objective_mode: str
     constrained_quadratic_resistance_tiebreak_factor: float
@@ -193,6 +194,14 @@ class OptimizationSettings:
     contour_sparsification_field_fit_candidate_count: int
     contour_sparsification_preserve_symmetry: bool
     contour_sparsification_realization: str
+    contour_sparsification_residual_relative_tolerance: float | None
+    contour_sparsification_residual_absolute_tolerance_T: float | None
+    contour_sparsification_pruning_mode: str
+    contour_sparsification_pruning_residual_relative_tolerance: float
+    contour_sparsification_pruning_residual_absolute_tolerance_T: float
+    contour_sparsification_pruning_max_removed_geometries: int
+    contour_sparsification_pruning_target_geometry_count: int
+    contour_sparsification_pruning_preserve_symmetry: bool
     symmetry_reduction: str
     symmetry_reduction_source: str
     symmetry_reduction_mirror_plane_point: Sequence[float]
@@ -249,6 +258,7 @@ class PerformanceSettings:
 @dataclass(frozen=True, slots=True)
 class ManufacturingSettings:
     skip_sweep: bool
+    contour_only_sweep_mode: bool
     skip_inductance_calculation: bool
     inductance_source: str
     conductor_cross_section_width: float
@@ -392,6 +402,7 @@ class CoilGenConfig:
     constrained_optimization_tolerance: float = 1e-7
     constrained_optimization_max_iterations: int = 20000
     constrained_optimization_threads: int = 0
+    constrained_optimization_verbose: bool = False
     constrained_quadratic_fallback_policy: str = "target_error_scan"
     constrained_quadratic_objective_mode: str = "balanced"
     constrained_quadratic_resistance_tiebreak_factor: float = 1.0e-3
@@ -459,6 +470,14 @@ class CoilGenConfig:
     contour_sparsification_field_fit_candidate_count: int = 5
     contour_sparsification_preserve_symmetry: bool = True
     contour_sparsification_realization: str = "ideal_weighted"
+    contour_sparsification_residual_relative_tolerance: float | None = None
+    contour_sparsification_residual_absolute_tolerance_T: float | None = None
+    contour_sparsification_pruning_mode: str = "off"
+    contour_sparsification_pruning_residual_relative_tolerance: float = 0.0
+    contour_sparsification_pruning_residual_absolute_tolerance_T: float = 0.0
+    contour_sparsification_pruning_max_removed_geometries: int = 0
+    contour_sparsification_pruning_target_geometry_count: int = 0
+    contour_sparsification_pruning_preserve_symmetry: bool = True
     topological_grouping_method: str = "auto"
     symmetry_reduction: str = "auto"
     symmetry_reduction_source: str = "generated_parts"
@@ -816,6 +835,7 @@ class CoilGenConfig:
             constrained_optimization_tolerance=self.constrained_optimization_tolerance,
             constrained_optimization_max_iterations=self.constrained_optimization_max_iterations,
             constrained_optimization_threads=self.constrained_optimization_threads,
+            constrained_optimization_verbose=self.constrained_optimization_verbose,
             constrained_quadratic_fallback_policy=self.constrained_quadratic_fallback_policy,
             constrained_quadratic_objective_mode=self.constrained_quadratic_objective_mode,
             constrained_quadratic_resistance_tiebreak_factor=self.constrained_quadratic_resistance_tiebreak_factor,
@@ -880,6 +900,14 @@ class CoilGenConfig:
             contour_sparsification_field_fit_candidate_count=self.contour_sparsification_field_fit_candidate_count,
             contour_sparsification_preserve_symmetry=self.contour_sparsification_preserve_symmetry,
             contour_sparsification_realization=self.contour_sparsification_realization,
+            contour_sparsification_residual_relative_tolerance=self.contour_sparsification_residual_relative_tolerance,
+            contour_sparsification_residual_absolute_tolerance_T=self.contour_sparsification_residual_absolute_tolerance_T,
+            contour_sparsification_pruning_mode=self.contour_sparsification_pruning_mode,
+            contour_sparsification_pruning_residual_relative_tolerance=self.contour_sparsification_pruning_residual_relative_tolerance,
+            contour_sparsification_pruning_residual_absolute_tolerance_T=self.contour_sparsification_pruning_residual_absolute_tolerance_T,
+            contour_sparsification_pruning_max_removed_geometries=self.contour_sparsification_pruning_max_removed_geometries,
+            contour_sparsification_pruning_target_geometry_count=self.contour_sparsification_pruning_target_geometry_count,
+            contour_sparsification_pruning_preserve_symmetry=self.contour_sparsification_pruning_preserve_symmetry,
             symmetry_reduction=self.symmetry_reduction,
             symmetry_reduction_source=self.symmetry_reduction_source,
             symmetry_reduction_mirror_plane_point=self.symmetry_reduction_mirror_plane_point,
@@ -930,6 +958,7 @@ class CoilGenConfig:
     def manufacturing_settings(self) -> ManufacturingSettings:
         return ManufacturingSettings(
             skip_sweep=self.skip_sweep,
+            contour_only_sweep_mode=self.contour_only_sweep_mode,
             skip_inductance_calculation=self.skip_inductance_calculation,
             inductance_source=self.inductance_source,
             conductor_cross_section_width=self.conductor_cross_section_width,

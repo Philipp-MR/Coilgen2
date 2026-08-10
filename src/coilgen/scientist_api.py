@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .models import CoilGenResult
-from .manufacturing import save_wire_trace_as_csv
+from .manufacturing import save_wire_trace_artifacts
 from .reporting import ResultQuality, result_quality_status, write_design_report, write_design_summary_csv
 from .study import DesignStudyResult, study_result_from_coilgen_result
 
@@ -62,8 +62,8 @@ def run_coil_design(design: Any, options: CoilDesignRunOptions | None = None) ->
             )
         )
         files.append(write_design_summary_csv(result, output_dir / f"{options.output_prefix}_design_summary.csv"))
-    if _save_wire_trace_csv_enabled(result):
-        files.extend(save_wire_trace_as_csv(result, output_dir, prefix=options.output_prefix))
+    if _save_wire_trace_enabled(result):
+        files.extend(save_wire_trace_artifacts(result, output_dir, prefix=options.output_prefix))
 
     figures: list[Any] = []
     if options.open_plot_book:
@@ -94,7 +94,7 @@ def run_user_design(design: Any, options: CoilDesignRunOptions | None = None) ->
     return run_coil_design(design, options)
 
 
-def _save_wire_trace_csv_enabled(result: CoilGenResult) -> bool:
+def _save_wire_trace_enabled(result: CoilGenResult) -> bool:
     return bool(getattr(getattr(result, "input_data", None), "save_wire_trace_csv", False))
 
 

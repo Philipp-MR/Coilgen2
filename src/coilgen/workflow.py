@@ -14,7 +14,7 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 
 from .designs import CoilDesign
-from .manufacturing import save_wire_trace_as_csv
+from .manufacturing import save_wire_trace_artifacts
 from .models import CoilGenResult
 from .reporting import result_quality_status, result_summary_dict, write_design_report, write_design_summary_csv
 from .study import ParameterAxis
@@ -418,8 +418,8 @@ def _save_variant_reports(
         write_design_report(result, report_path, title=f"{variant.name} Design Report", design=variant.design),
         write_design_summary_csv(result, summary_path),
     ]
-    if _save_wire_trace_csv_enabled(result):
-        files.extend(save_wire_trace_as_csv(result, output_dir, prefix=prefix))
+    if _save_wire_trace_enabled(result):
+        files.extend(save_wire_trace_artifacts(result, output_dir, prefix=prefix))
     files.extend(
         write_variant_run_record(
             result,
@@ -434,7 +434,7 @@ def _save_variant_reports(
     return files
 
 
-def _save_wire_trace_csv_enabled(result: CoilGenResult) -> bool:
+def _save_wire_trace_enabled(result: CoilGenResult) -> bool:
     return bool(getattr(getattr(result, "input_data", None), "save_wire_trace_csv", False))
 
 

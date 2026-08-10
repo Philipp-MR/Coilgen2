@@ -521,6 +521,17 @@ class StreamFunctionOptimizationProblem:
     def resistance_norm(self, reduced_stream_function: np.ndarray) -> float:
         return _quadratic_norm(self.reduced_resistance, reduced_stream_function)
 
+    def max_surface_current_density(self, reduced_stream_function: np.ndarray) -> float:
+        """Return peak ``|K|`` in A/m for one reduced stream function.
+
+        Population channel design uses this to normalize a POD mode as a
+        physical stream function per ampere while respecting the maximum drive
+        current.  Keeping the evaluation on the problem guarantees that it uses
+        the same reducer and per-part FEM operators as the original solve.
+        """
+
+        return _solution_max_surface_current_density(self, self.expand(reduced_stream_function))
+
 
 @dataclass
 class StreamFunctionSolution:

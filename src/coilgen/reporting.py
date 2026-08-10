@@ -328,6 +328,66 @@ def result_summary_dict(result: CoilGenResult) -> dict[str, Any]:
         "contour_sparsification_global_peak_field_error_percent": float(
             sparsification_diagnostics.get("contour_sparsification_global_peak_field_error_percent", 0.0)
         ),
+        "contour_sparsification_merge_rms_field_error_percent": float(
+            sparsification_diagnostics.get(
+                "contour_sparsification_merge_rms_field_error_percent",
+                sparsification_diagnostics.get("contour_sparsification_global_rms_field_error_percent", 0.0),
+            )
+        ),
+        "contour_sparsification_merge_peak_field_error_percent": float(
+            sparsification_diagnostics.get(
+                "contour_sparsification_merge_peak_field_error_percent",
+                sparsification_diagnostics.get("contour_sparsification_global_peak_field_error_percent", 0.0),
+            )
+        ),
+        "contour_sparsification_residual_budget_enabled": bool(
+            sparsification_diagnostics.get("contour_sparsification_residual_budget_enabled", False)
+        ),
+        "contour_sparsification_residual_baseline_metric_T": float(
+            sparsification_diagnostics.get("contour_sparsification_residual_baseline_metric_T", np.nan)
+        ),
+        "contour_sparsification_residual_allowed_metric_T": float(
+            sparsification_diagnostics.get("contour_sparsification_residual_allowed_metric_T", np.nan)
+        ),
+        "contour_sparsification_merge_selected_residual_metric_T": float(
+            sparsification_diagnostics.get("contour_sparsification_merge_selected_residual_metric_T", np.nan)
+        ),
+        "contour_sparsification_merge_residual_metric_change_T": float(
+            sparsification_diagnostics.get("contour_sparsification_merge_residual_metric_change_T", np.nan)
+        ),
+        "contour_sparsification_pruning_mode": str(
+            sparsification_diagnostics.get(
+                "contour_sparsification_pruning_mode",
+                getattr(config, "contour_sparsification_pruning_mode", "off"),
+            )
+        ),
+        "contour_sparsification_pruning_removed_geometry_count": int(
+            sparsification_diagnostics.get("contour_sparsification_pruning_removed_geometry_count", 0)
+        ),
+        "contour_sparsification_pruning_removed_turn_count": int(
+            sparsification_diagnostics.get("contour_sparsification_pruning_removed_turn_count", 0)
+        ),
+        "contour_sparsification_pruning_baseline_metric_T": float(
+            sparsification_diagnostics.get("contour_sparsification_pruning_baseline_metric_T", np.nan)
+        ),
+        "contour_sparsification_pruning_selected_metric_T": float(
+            sparsification_diagnostics.get("contour_sparsification_pruning_selected_metric_T", np.nan)
+        ),
+        "contour_sparsification_pruning_metric_change_T": float(
+            sparsification_diagnostics.get("contour_sparsification_pruning_metric_change_T", np.nan)
+        ),
+        "contour_sparsification_pruning_incremental_rms_field_error_percent": float(
+            sparsification_diagnostics.get(
+                "contour_sparsification_pruning_incremental_rms_field_error_percent",
+                0.0,
+            )
+        ),
+        "contour_sparsification_pruning_incremental_peak_field_error_percent": float(
+            sparsification_diagnostics.get(
+                "contour_sparsification_pruning_incremental_peak_field_error_percent",
+                0.0,
+            )
+        ),
         "topological_group_count": int(sum(len(part.groups) for part in result.coil_parts)),
         "effective_contour_levels": int(result.num_levels),
         "contour_discretization_method": str(
@@ -1658,6 +1718,30 @@ def write_design_report(
     lines.extend(["## Numerical Summary", ""])
     lines.extend(_markdown_table(summary))
     lines.append("")
+    pruning_rows = _sparsification_pruning_audit_rows(result)
+    if pruning_rows:
+        lines.extend(["## Post-Sparsification Pruning Audit", ""])
+        lines.append("Each row is one accepted multiplicity-weighted representative or symmetry-orbit removal.")
+        lines.append("")
+        lines.extend(
+            _markdown_rows_table(
+                pruning_rows,
+                (
+                    "step",
+                    "representatives",
+                    "source_contours",
+                    "turns",
+                    "nominal_length_m",
+                    "significance_percent",
+                    "residual_before_T",
+                    "residual_after_T",
+                    "residual_change_T",
+                    "total_rms_field_error_percent",
+                    "total_peak_field_error_percent",
+                ),
+            )
+        )
+        lines.append("")
     try:
         regularization_report = regularization_selection_report(result)
     except ValueError:
@@ -1745,6 +1829,44 @@ def write_design_summary_csv(result: CoilGenResult, path: str | Path) -> Path:
         lines.append(f"{key},{value}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def _sparsification_pruning_audit_rows(result: CoilGenResult) -> list[dict[str, Any]]:
+    for part in result.coil_parts:
+        provenance = part.contour_sparsification
+        if provenance is None:
+            continue
+        records = provenance.diagnostics.get("contour_sparsification_pruning_removal_records", ())
+        if not records:
+            continue
+        rows: list[dict[str, Any]] = []
+        for record in records:
+            representatives = "; ".join(
+                f"part {int(part_index) + 1}, geometry {int(contour_index)}"
+                for part_index, contour_index in record.get("representative_indices", ())
+            )
+            source_contours = "; ".join(
+                f"part {int(source.get('part_index', 0)) + 1}: "
+                + ",".join(str(int(index)) for index in source.get("indices", ()))
+                for source in record.get("source_contour_indices", ())
+            )
+            rows.append(
+                {
+                    "step": int(record.get("step", len(rows) + 1)),
+                    "representatives": representatives,
+                    "source_contours": source_contours,
+                    "turns": int(record.get("removed_turn_count", 0)),
+                    "nominal_length_m": float(record.get("nominal_length_m", np.nan)),
+                    "significance_percent": float(record.get("significance_percent", np.nan)),
+                    "residual_before_T": float(record.get("residual_metric_before_T", np.nan)),
+                    "residual_after_T": float(record.get("residual_metric_after_T", np.nan)),
+                    "residual_change_T": float(record.get("residual_metric_change_T", np.nan)),
+                    "total_rms_field_error_percent": float(record.get("total_rms_field_error_percent", np.nan)),
+                    "total_peak_field_error_percent": float(record.get("total_peak_field_error_percent", np.nan)),
+                }
+            )
+        return rows
+    return []
 
 
 def _inductance_matrix_rows(values: Any) -> list[dict[str, Any]]:

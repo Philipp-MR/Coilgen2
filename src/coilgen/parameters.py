@@ -144,6 +144,14 @@ class OptimizationParameters(CoilParameterSection):
     contour_sparsification_max_turn_multiplicity: int | None = None
     contour_sparsification_field_fit_candidate_count: int | None = None
     contour_sparsification_preserve_symmetry: bool | None = None
+    contour_sparsification_residual_relative_tolerance: float | None = None
+    contour_sparsification_residual_absolute_tolerance_T: float | None = None
+    contour_sparsification_pruning_mode: str | None = None
+    contour_sparsification_pruning_residual_relative_tolerance: float | None = None
+    contour_sparsification_pruning_residual_absolute_tolerance_T: float | None = None
+    contour_sparsification_pruning_max_removed_geometries: int | None = None
+    contour_sparsification_pruning_target_geometry_count: int | None = None
+    contour_sparsification_pruning_preserve_symmetry: bool | None = None
     skip_postprocessing: bool | None = None
     skip_sweep: bool | None = None
     skip_inductance: bool | None = None
@@ -227,6 +235,54 @@ class OptimizationParameters(CoilParameterSection):
             supported,
             "contour_sparsification_preserve_symmetry",
             self.contour_sparsification_preserve_symmetry,
+        )
+        _put_if_supported(
+            values,
+            supported,
+            "contour_sparsification_residual_relative_tolerance",
+            _optional_float(self.contour_sparsification_residual_relative_tolerance),
+        )
+        _put_if_supported(
+            values,
+            supported,
+            "contour_sparsification_residual_absolute_tolerance_T",
+            _optional_float(self.contour_sparsification_residual_absolute_tolerance_T),
+        )
+        _put_if_supported(
+            values,
+            supported,
+            "contour_sparsification_pruning_mode",
+            self.contour_sparsification_pruning_mode,
+        )
+        _put_if_supported(
+            values,
+            supported,
+            "contour_sparsification_pruning_residual_relative_tolerance",
+            _optional_float(self.contour_sparsification_pruning_residual_relative_tolerance),
+        )
+        _put_if_supported(
+            values,
+            supported,
+            "contour_sparsification_pruning_residual_absolute_tolerance_T",
+            _optional_float(self.contour_sparsification_pruning_residual_absolute_tolerance_T),
+        )
+        _put_if_supported(
+            values,
+            supported,
+            "contour_sparsification_pruning_max_removed_geometries",
+            _optional_int(self.contour_sparsification_pruning_max_removed_geometries),
+        )
+        _put_if_supported(
+            values,
+            supported,
+            "contour_sparsification_pruning_target_geometry_count",
+            _optional_int(self.contour_sparsification_pruning_target_geometry_count),
+        )
+        _put_if_supported(
+            values,
+            supported,
+            "contour_sparsification_pruning_preserve_symmetry",
+            self.contour_sparsification_pruning_preserve_symmetry,
         )
         _put_if_supported(values, supported, "skip_postprocessing", self.skip_postprocessing)
         _put_if_supported(values, supported, "skip_sweep", self.skip_sweep)
