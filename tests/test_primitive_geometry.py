@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 
@@ -11,6 +13,7 @@ from coilgen import (
     ConicalFrustumCoilDesign,
     EllipsoidalCapCoilDesign,
     EllipticalCylinderCoilDesign,
+    ImportedMeshCoilDesign,
     ParametricSurfaceCoilDesign,
     PartialCylinderCoilDesign,
     RuledSurfaceCoilDesign,
@@ -21,6 +24,8 @@ from coilgen import (
     ToroidalSegmentCoilDesign,
     validate_config,
 )
+from coilgen.manufacturing import save_mesh_as_stl
+from coilgen.models import Mesh
 from coilgen.geometry import (
     available_geometry_factories,
     build_elliptical_cylinder_mesh,
@@ -33,6 +38,26 @@ from coilgen.surface_topology import mesh_quality_report, mesh_surface_diagnosti
 
 
 class PrimitiveGeometryTest(unittest.TestCase):
+    def test_imported_mesh_length_scale_converts_source_coordinates_to_metres(self) -> None:
+        source_mesh = Mesh(
+            vertices=np.array([[0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [0.0, 50.0, 0.0]]),
+            faces=np.array([[0, 1, 2]], dtype=np.int64),
+        )
+        with TemporaryDirectory() as temporary_directory:
+            source_root = Path(temporary_directory)
+            save_mesh_as_stl(source_mesh, source_root / "surface_mm.stl")
+            design = ImportedMeshCoilDesign(
+                mesh_file="surface_mm.stl",
+                geometry_source_path=source_root,
+                mesh_length_scale_to_m=1.0e-3,
+            )
+
+            config = design.to_config()
+            loaded = load_mesh_from_config(config, project_root=source_root)
+
+        np.testing.assert_allclose(np.ptp(loaded.vertices, axis=0), (0.1, 0.05, 0.0), atol=1.0e-12)
+        self.assertEqual(loaded.metadata["source_length_scale_to_m"], 1.0e-3)
+
     def test_new_primitive_factories_are_registered(self) -> None:
         names = {factory.name for factory in available_geometry_factories()}
 

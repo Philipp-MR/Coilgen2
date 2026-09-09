@@ -183,6 +183,7 @@ class ContourMergeRecord:
     rejection_reason: str = ""
     pass_index: int = 1
     source_turn_multiplicities: tuple[int, ...] = field(default_factory=tuple)
+    stage: str = "pre_pruning"
 
 
 @dataclass

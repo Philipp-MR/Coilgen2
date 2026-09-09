@@ -212,6 +212,7 @@ class ParameterSweepSpec:
     case_cache_dir: Path | None = None
     write_incremental_jsonl: bool = True
     retain_case_results: bool = False
+    cache_revision: str = ""
 
     def parameter_points(self) -> list[dict[str, Any]]:
         if not self.name:
@@ -239,8 +240,14 @@ class ParameterSweepResult:
     failures: list[dict[str, Any]] = field(default_factory=list)
     files: list[Path] = field(default_factory=list)
 
+    _ordered_rows: list[dict[str, Any]] = field(default_factory=list, repr=False)
+
     def rows(self) -> list[dict[str, Any]]:
-        return [*self.cached_rows, *[case_result.row() for case_result in self.case_results]]
+        return (
+            list(self._ordered_rows)
+            if self._ordered_rows
+            else [*self.cached_rows, *[case_result.row() for case_result in self.case_results]]
+        )
 
 
 class ParameterSweepWorkflow:
@@ -261,25 +268,45 @@ class ParameterSweepWorkflow:
         if cache_dir is not None:
             cache_dir.mkdir(parents=True, exist_ok=True)
         jsonl_path = output_dir / f"{_safe_file_stem(spec.name)}_incremental.jsonl" if output_dir is not None else None
+        code_digest = _sweep_code_digest() if cache_dir is not None else ""
 
         for index, point in enumerate(points, start=1):
-            cache_path = _case_cache_path(cache_dir, index, point) if cache_dir is not None else None
-            if spec.resume_from_case_cache and cache_path is not None and cache_path.exists():
-                row = _read_json(cache_path)
-                result.cached_rows.append(dict(row))
-                continue
+            cache_path = None
             try:
                 case_spec = spec.case_factory(point)
+                if cache_dir is not None:
+                    context = _sweep_cache_context(spec, case_spec, code_digest)
+                    cache_path = _case_cache_path(cache_dir, index, {"point": point, "context": context})
+                if spec.resume_from_case_cache and cache_path is not None:
+                    row = _successful_cached_row(cache_path)
+                    if row is not None:
+                        result.cached_rows.append(row)
+                        result._ordered_rows.append(row)
+                        continue
                 case_result = self.case_workflow.run(case_spec)
                 row = case_result.row()
-                if spec.retain_case_results:
-                    result.case_results.append(case_result)
-                else:
-                    result.cached_rows.append(row)
+                if not case_result.ok and not spec.continue_on_failure:
+                    raise RuntimeError(
+                        f"Case {case_spec.name!r} has failed variants: {row.get('failure_messages', '')}"
+                    )
                 if cache_path is not None:
                     _write_json(row, cache_path)
                 if spec.write_incremental_jsonl and jsonl_path is not None:
                     _append_jsonl(row, jsonl_path)
+                result._ordered_rows.append(row)
+                if spec.retain_case_results:
+                    result.case_results.append(case_result)
+                else:
+                    result.cached_rows.append(row)
+                if not case_result.ok:
+                    result.failures.append(
+                        {
+                            "case_index": index,
+                            "parameters": _json_ready(point),
+                            "failure_type": "VariantFailure",
+                            "failure_message": row.get("failure_messages", ""),
+                        }
+                    )
             except Exception as exc:
                 failure = {
                     "case_index": index,
@@ -288,10 +315,17 @@ class ParameterSweepWorkflow:
                     "failure_message": str(exc),
                 }
                 result.failures.append(failure)
+                failure_row = {
+                    "case": f"{spec.name}_{index:04d}",
+                    "status": "failed",
+                    **failure,
+                    **_flatten_prefixed("parameter", point),
+                }
+                result._ordered_rows.append(failure_row)
                 if cache_path is not None:
-                    _write_json({"status": "failed", **failure}, cache_path)
+                    _write_json(failure_row, cache_path)
                 if spec.write_incremental_jsonl and jsonl_path is not None:
-                    _append_jsonl({"status": "failed", **failure}, jsonl_path)
+                    _append_jsonl(failure_row, jsonl_path)
                 if not spec.continue_on_failure:
                     raise
 
@@ -616,6 +650,9 @@ def _run_metrics_row(record: Mapping[str, Any]) -> dict[str, Any]:
         "failure_count": quality.get("failure_count", 0),
         "warning_count": quality.get("warning_count", 0),
     }
+    # Reserve columns for engineering decisions before optional parameters and
+    # the growing diagnostic summary consume the fixed CSV budget.
+    row.update(_compact_log_metrics(record.get("metrics", {})))
     row.update(_flatten_prefixed("parameter", record.get("case_parameters", {})))
     for key, value in record.get("metrics", {}).items():
         if _is_scalar_report_value(value):
@@ -745,8 +782,10 @@ def _write_run_log_markdown(record: Mapping[str, Any], path: Path) -> None:
 
 
 def _compact_log_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
+    """Select engineering metrics retained first in every compact run format."""
     keys = (
         "report_schema_version",
+        "design_context",
         "part_count",
         "target_point_count",
         "dsv_target_point_count",
@@ -755,22 +794,47 @@ def _compact_log_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
         "regularization_factor",
         "regularization_lambda",
         "needed_current_A",
+        "layout_needed_current_A",
         "layout_gradient_efficiency_mT_per_m_per_A",
         "layout_mean_rel_error_percent",
         "layout_max_rel_error_percent",
         "stream_function_mean_rel_error_percent",
         "stream_function_max_rel_error_percent",
         "suppression_field_rms_T",
+        "suppression_field_peak_T",
+        "target_error_constraint_met",
+        "layout_target_checked",
+        "layout_target_met",
+        "layout_target_metric_T",
+        "layout_target_effective_limit_T",
+        "constrained_solver_backend",
+        "constrained_solver_name",
+        "constrained_solver_status",
+        "constrained_solver_contract_met",
+        "constrained_solver_physical_constraints_met",
+        "constrained_solver_diagnostic_result",
+        "constrained_solver_diagnostic_reason",
+        "constrained_solver_failed_constraints",
         "coil_length_total_m",
         "coil_resistance_total_ohm",
         "coil_inductance_same_current_H",
+        "resistive_power_target_gradient_W",
+        "current_density_A_per_mm2",
+        "surface_current_density_max_A_per_m",
+        "surface_current_density_limit_met",
         "min_contour_distance_m",
         "unconnected_contours_min_wire_distance_m",
         "min_wire_wire_distance_m",
         "route_statuses",
         "execution_time_s",
     )
-    return {key: metrics.get(key, "") for key in keys if key in metrics}
+    display_unit = str(metrics.get("field_display_units", "T"))
+    keys += (
+        f"shim_layout_residual_rms_{display_unit}",
+        f"shim_layout_residual_std_{display_unit}",
+        f"shim_layout_residual_max_abs_{display_unit}",
+    )
+    return {key: metrics[key] for key in keys if key in metrics and _is_scalar_report_value(metrics[key])}
 
 
 def _markdown_key_value_table(values: Mapping[str, Any]) -> list[str]:
@@ -948,7 +1012,9 @@ def _write_json(payload: Any, path: Path) -> None:
 
 def _write_run_record_json(record: Mapping[str, Any], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    compact = _bounded_json_ready(record)
+    metrics = record.get("metrics", {})
+    prioritized_record = {**record, "metrics": {**_compact_log_metrics(metrics), **metrics}}
+    compact = _bounded_json_ready(prioritized_record)
     text = json.dumps(compact, indent=2, sort_keys=True)
     if len(text.encode("utf-8")) > RUN_RECORD_MAX_SUMMARY_BYTES:
         compact = _minimal_run_record(record, reason="summary exceeded run-record byte budget")
@@ -1118,6 +1184,106 @@ def _prune_run_record_artifacts(output_dir: Path, *, keep: int = RUN_RECORD_RETE
                     path.unlink()
             except OSError:
                 pass
+
+
+def _successful_cached_row(path: Path) -> dict[str, Any] | None:
+    """Incomplete writes and failed attempts must be retried on resume."""
+
+    try:
+        row = _read_json(path)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(row, dict) or row.get("status") != "success" or row.get("failure_count") != 0:
+        return None
+    return row
+
+
+def _sweep_code_digest() -> str:
+    digest = hashlib.sha256()
+    for path in sorted(Path(__file__).parent.glob("*.py")):
+        digest.update(path.name.encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _sweep_cache_context(spec: ParameterSweepSpec, case: CoilCaseSpec, code_digest: str) -> dict[str, Any]:
+    """Fingerprint resolved designs and standard inputs before reusing metrics.
+
+    Custom factory/metric dependencies and external solver changes must be
+    identified by ``cache_revision``. The factory is always called on resume.
+    """
+
+    root = Path.cwd() if case.project_root is None else Path(case.project_root)
+    variants = []
+    for variant in case.variants:
+        config = variant.design.to_config() if hasattr(variant.design, "to_config") else None
+        variants.append(
+            {
+                "name": variant.name,
+                "role": variant.role,
+                "design_type": f"{type(variant.design).__module__}.{type(variant.design).__qualname__}",
+                "design": _design_record(variant.design),
+                "config": _config_record(config),
+                "inputs": _sweep_input_digests(config, root) if config is not None else {},
+                "metadata": variant.metadata,
+            }
+        )
+    return {
+        "schema": "coilgen_case_cache_v2",
+        "sweep": spec.name,
+        "revision": spec.cache_revision,
+        "code": code_digest,
+        "case": case.name,
+        "parameters": case.parameters,
+        "project_root": root.resolve(),
+        "variants": variants,
+        "metric_functions": [
+            f"{getattr(function, '__module__', type(function).__module__)}."
+            f"{getattr(function, '__qualname__', type(function).__qualname__)}"
+            for function in case.metric_functions
+        ],
+    }
+
+
+def _sweep_input_digests(config: Any, root: Path) -> dict[str, Any]:
+    from .object_registry import (
+        get_in_memory_mesh,
+        get_in_memory_target_field,
+        is_in_memory_mesh_key,
+        is_in_memory_target_key,
+    )
+    from .preoptimization import _resolve_preoptimized_path, preoptimized_stream_function_source
+
+    inputs: dict[str, Any] = {}
+    sources = {
+        key: str(getattr(config, key, "none"))
+        for key in ("coil_mesh_file", "target_mesh_file", "secondary_target_mesh_file", "target_field_definition_file")
+    }
+    sources["preoptimized_stream_function_file"] = preoptimized_stream_function_source(config)
+    for key, source in sources.items():
+        if source.lower() == "none" or not source or source.lower().startswith("create "):
+            continue
+        if is_in_memory_mesh_key(source):
+            mesh = get_in_memory_mesh(source)
+            inputs[key] = _stable_digest({"vertices": mesh.vertices, "faces": mesh.faces})
+            continue
+        if is_in_memory_target_key(source):
+            inputs[key] = _stable_digest(asdict(get_in_memory_target_field(source)))
+            continue
+        path = Path(source)
+        if key.endswith("mesh_file") and hasattr(config, "resolved_geometry_source_path"):
+            path = config.resolved_geometry_source_path(root) / path
+        elif key == "preoptimized_stream_function_file":
+            path = _resolve_preoptimized_path(source, root)
+        if not path.is_file():
+            inputs[key] = {"path": str(path.resolve()), "missing": True}
+            continue
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        inputs[key] = {"path": str(path.resolve()), "sha256": digest.hexdigest()}
+    return inputs
 
 
 def _case_cache_path(cache_dir: Path | None, index: int, point: Mapping[str, Any]) -> Path | None:

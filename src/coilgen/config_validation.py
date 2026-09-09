@@ -136,6 +136,13 @@ def _validate_mesh_settings(config: CoilGenConfig, error, warning, *, project_ro
     if int(config.iteration_num_mesh_refinement) < 0:
         error("iteration_num_mesh_refinement", "Mesh refinement iterations must be non-negative.")
     try:
+        imported_mesh_length_scale_to_m = float(config.imported_mesh_length_scale_to_m)
+    except (TypeError, ValueError):
+        error("imported_mesh_length_scale_to_m", "Imported-mesh length scale must be numeric.")
+    else:
+        if not np.isfinite(imported_mesh_length_scale_to_m) or imported_mesh_length_scale_to_m <= 0.0:
+            error("imported_mesh_length_scale_to_m", "Imported-mesh length scale must be finite and positive.")
+    try:
         rotation_angle = float(config.generated_mesh_rotation_angle)
     except (TypeError, ValueError):
         error("generated_mesh_rotation_angle", "Generated-mesh rotation angle must be numeric.")
@@ -769,6 +776,8 @@ def _validate_optimization_settings(config: CoilGenConfig, error, warning) -> No
             "smoothness-priority",
             "smoothest_feasible",
             "contourability_priority",
+            "minimax_current_density",
+            "minimax-current-density",
         },
     )
     _enum(
@@ -915,7 +924,20 @@ def _validate_optimization_settings(config: CoilGenConfig, error, warning) -> No
         if not np.isfinite(value) or value < 0.0:
             error(name, f"{name} must be a finite non-negative number.")
     objective_mode = str(getattr(config, "constrained_quadratic_objective_mode", "balanced"))
+    for name in ("target_error_constraint_acceptance_absolute_T", "target_error_constraint_acceptance_tolerance"):
+        value = _finite_float(getattr(config, name, 0.0))
+        if not np.isfinite(value) or value < 0.0:
+            error(name, f"{name} must be finite and non-negative.")
     objective_mode = objective_mode.strip().lower().replace("-", "_")
+    if objective_mode == "minimax_current_density":
+        if str(config.sf_opt_method).lower().replace("-", "_") not in {
+            "constrained_quadratic", "cvxpy_constrained", "minimum_resistance_constrained",
+            "minimum_resistance_subject_to_field_error_socp", "direct_fixed_error", "socp", "second_order_cone",
+        }:
+            error("sf_opt_method", "Minimax current density requires the direct constrained_quadratic method.")
+        for name in ("stream_function_smoothness_factor", "turn_spacing_regularization_factor"):
+            if _finite_float(getattr(config, name, 0.0)) > 0.0:
+                error(name, "Pure minimax current density requires zero quadratic penalty factors.")
     tiebreak = _finite_float(getattr(config, "constrained_quadratic_resistance_tiebreak_factor", 1.0e-3))
     if not np.isfinite(tiebreak) or tiebreak < 0.0:
         error(
@@ -1571,11 +1593,53 @@ def _validate_optimization_settings(config: CoilGenConfig, error, warning) -> No
         getattr(config, "contour_sparsification_pruning_target_geometry_count", 0),
         0,
     )
+    _enum(
+        error,
+        "contour_sparsification_pruning_search_mode",
+        getattr(config, "contour_sparsification_pruning_search_mode", "auto"),
+        {"auto", "exact", "beam"},
+    )
+    _at_least(
+        error,
+        "post-sparsification exact-search maximum symmetry orbits",
+        "contour_sparsification_pruning_exact_max_orbits",
+        getattr(config, "contour_sparsification_pruning_exact_max_orbits", 16),
+        0,
+    )
+    _at_least(
+        error,
+        "post-sparsification beam-search width",
+        "contour_sparsification_pruning_beam_width",
+        getattr(config, "contour_sparsification_pruning_beam_width", 128),
+        1,
+    )
+    post_pruning_merge_mode = str(
+        getattr(config, "contour_sparsification_post_pruning_merge_mode", "off")
+    ).strip().lower()
+    _enum(
+        error,
+        "contour_sparsification_post_pruning_merge_mode",
+        post_pruning_merge_mode,
+        {"off", "retained_adjacent"},
+    )
+    _at_least(
+        error,
+        "post-pruning contour-merge maximum passes",
+        "contour_sparsification_post_pruning_max_passes",
+        getattr(config, "contour_sparsification_post_pruning_max_passes", 1),
+        1,
+    )
     if sparsification_pruning_mode != "off" and sparsification_mode == "off":
         error(
             "contour_sparsification_pruning_mode",
             "Post-sparsification pruning requires active contour sparsification.",
             "Set contour_sparsification_mode='pairwise' or disable post-sparsification pruning.",
+        )
+    if post_pruning_merge_mode != "off" and sparsification_pruning_mode == "off":
+        error(
+            "contour_sparsification_post_pruning_merge_mode",
+            "Post-pruning contour consolidation requires active post-sparsification pruning.",
+            "Set contour_sparsification_pruning_mode='residual_budget' or disable post-pruning merging.",
         )
     if sparsification_mode != "off" and not bool(getattr(config, "skip_postprocessing", False)):
         error(

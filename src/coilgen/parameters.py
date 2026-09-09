@@ -152,6 +152,11 @@ class OptimizationParameters(CoilParameterSection):
     contour_sparsification_pruning_max_removed_geometries: int | None = None
     contour_sparsification_pruning_target_geometry_count: int | None = None
     contour_sparsification_pruning_preserve_symmetry: bool | None = None
+    contour_sparsification_pruning_search_mode: str | None = None
+    contour_sparsification_pruning_exact_max_orbits: int | None = None
+    contour_sparsification_pruning_beam_width: int | None = None
+    contour_sparsification_post_pruning_merge_mode: str | None = None
+    contour_sparsification_post_pruning_max_passes: int | None = None
     skip_postprocessing: bool | None = None
     skip_sweep: bool | None = None
     skip_inductance: bool | None = None
@@ -283,6 +288,36 @@ class OptimizationParameters(CoilParameterSection):
             supported,
             "contour_sparsification_pruning_preserve_symmetry",
             self.contour_sparsification_pruning_preserve_symmetry,
+        )
+        _put_if_supported(
+            values,
+            supported,
+            "contour_sparsification_pruning_search_mode",
+            self.contour_sparsification_pruning_search_mode,
+        )
+        _put_if_supported(
+            values,
+            supported,
+            "contour_sparsification_pruning_exact_max_orbits",
+            _optional_int(self.contour_sparsification_pruning_exact_max_orbits),
+        )
+        _put_if_supported(
+            values,
+            supported,
+            "contour_sparsification_pruning_beam_width",
+            _optional_int(self.contour_sparsification_pruning_beam_width),
+        )
+        _put_if_supported(
+            values,
+            supported,
+            "contour_sparsification_post_pruning_merge_mode",
+            self.contour_sparsification_post_pruning_merge_mode,
+        )
+        _put_if_supported(
+            values,
+            supported,
+            "contour_sparsification_post_pruning_max_passes",
+            _optional_int(self.contour_sparsification_post_pruning_max_passes),
         )
         _put_if_supported(values, supported, "skip_postprocessing", self.skip_postprocessing)
         _put_if_supported(values, supported, "skip_sweep", self.skip_sweep)

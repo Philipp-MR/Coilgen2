@@ -260,7 +260,7 @@ from .contour_smoothing import (
     ParameterizedContourSmoothingResult,
     smooth_contour_on_parameterized_mesh,
 )
-from .contour_sparsification import prune_sparsified_contours, sparsify_contours
+from .contour_sparsification import consolidate_pruned_contours, prune_sparsified_contours, sparsify_contours
 from .layout import (
     LoopCut,
     LoopCutShape,
@@ -468,6 +468,12 @@ from .optimization_schemes import (
     available_stream_function_optimization_schemes,
     stream_function_optimization_scheme,
 )
+from .optimization_solvers import (
+    ConicSolverCapability,
+    conic_solver_capabilities,
+    conic_solver_order,
+    supported_conic_solvers,
+)
 from .validation import (
     ActiveShieldBenchmarkResult,
     BiplanarGradientScalingResult,
@@ -553,6 +559,7 @@ __all__ = [
     "validate_and_repair_contourability",
     "sparsify_contours",
     "prune_sparsified_contours",
+    "consolidate_pruned_contours",
     "CoilDesign",
     "CoilGenConfigDesign",
     "CylinderCoilDesign",
@@ -922,6 +929,10 @@ __all__ = [
     "StreamFunctionOptimizationScheme",
     "available_stream_function_optimization_schemes",
     "stream_function_optimization_scheme",
+    "ConicSolverCapability",
+    "conic_solver_capabilities",
+    "conic_solver_order",
+    "supported_conic_solvers",
     "ActiveShieldBenchmarkResult",
     "BiplanarGradientScalingResult",
     "CircularLoopValidationResult",

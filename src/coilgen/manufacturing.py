@@ -597,6 +597,8 @@ def _finalize_manufacturing_diagnostics(part: CoilPart) -> None:
         reasons.append("route_topology_failure")
     if bool(diagnostics.get("sweep_route_clearance_violation", False)):
         reasons.append("route_clearance_violation")
+    if bool(diagnostics.get("sweep_capsule_clearance_violation", False)):
+        reasons.append("sweep_clearance_violation")
     if bool(diagnostics.get("sweep_capsule_self_intersection", False)):
         reasons.append("sweep_self_intersection")
     if bool(diagnostics.get("sweep_mesh_self_intersection", False)):
@@ -860,12 +862,13 @@ def _sweep_wire_path_with_diagnostics(
     diagnostics.update(
         _physical_clearance_diagnostics(
             part,
-            points,
+            points + mounting_offset * normals,
             cross_section,
             config,
             closed=closed_path,
         )
     )
+    diagnostics["sweep_capsule_centerline_reference"] = "mounted_profile_origin"
     diagnostics.update(_final_mesh_collision_diagnostics(part, mesh, diagnostics))
     return mesh, diagnostics
 
@@ -1129,7 +1132,7 @@ def _swept_mesh_self_intersection_diagnostics(
     minima = np.min(triangles, axis=1)
     maxima = np.max(triangles, axis=1)
     centroids = 0.5 * (minima + maxima)
-    scale = max(float(np.max(maxima) - np.min(minima)), 1.0)
+    scale = max(float(np.max(np.max(maxima, axis=0) - np.min(minima, axis=0))), 1.0)
     tolerance = 1e-12 * scale
 
     def build(indices: np.ndarray) -> _SegmentBvhNode:
@@ -1223,7 +1226,9 @@ def _triangle_pair_intersects_robust(
     second_normal = np.cross(second[1] - second[0], second[2] - second[0])
     first_length = float(np.linalg.norm(first_normal))
     second_length = float(np.linalg.norm(second_normal))
-    if first_length <= tolerance or second_length <= tolerance:
+    first_edge_length = float(np.max(np.linalg.norm(np.roll(first, -1, axis=0) - first, axis=1)))
+    second_edge_length = float(np.max(np.linalg.norm(np.roll(second, -1, axis=0) - second, axis=1)))
+    if first_length <= tolerance * first_edge_length or second_length <= tolerance * second_edge_length:
         return False
     unit_first = first_normal / first_length
     unit_second = second_normal / second_length
@@ -1259,19 +1264,33 @@ def _segment_triangle_intersects(
     edge_second = triangle[2] - triangle[0]
     cross_direction = np.cross(direction, edge_second)
     determinant = float(np.dot(edge_first, cross_direction))
-    if abs(determinant) <= tolerance:
+    direction_length = float(np.linalg.norm(direction))
+    edge_first_length = float(np.linalg.norm(edge_first))
+    edge_second_length = float(np.linalg.norm(edge_second))
+    # The determinant has units m^3, whereas the geometric tolerance is in m.
+    # An absolute determinant cutoff misses crossings in fine conductor meshes.
+    determinant_tolerance = (
+        32.0 * np.finfo(float).eps * direction_length * edge_first_length * edge_second_length
+    )
+    if abs(determinant) <= determinant_tolerance or direction_length <= tolerance:
         return False
+    area_twice = float(np.linalg.norm(np.cross(edge_first, edge_second)))
+    maximum_edge_length = max(edge_first_length, edge_second_length, float(np.linalg.norm(edge_second - edge_first)))
+    if area_twice <= tolerance * maximum_edge_length:
+        return False
+    barycentric_tolerance = tolerance * maximum_edge_length / area_twice
+    segment_tolerance = tolerance / direction_length
     inverse = 1.0 / determinant
     offset = start - triangle[0]
     first_coordinate = inverse * float(np.dot(offset, cross_direction))
-    if first_coordinate < -tolerance or first_coordinate > 1.0 + tolerance:
+    if first_coordinate < -barycentric_tolerance or first_coordinate > 1.0 + barycentric_tolerance:
         return False
     cross_offset = np.cross(offset, edge_first)
     second_coordinate = inverse * float(np.dot(direction, cross_offset))
-    if second_coordinate < -tolerance or first_coordinate + second_coordinate > 1.0 + tolerance:
+    if second_coordinate < -barycentric_tolerance or first_coordinate + second_coordinate > 1.0 + barycentric_tolerance:
         return False
     segment_coordinate = inverse * float(np.dot(edge_second, cross_offset))
-    return bool(-tolerance <= segment_coordinate <= 1.0 + tolerance)
+    return bool(-segment_tolerance <= segment_coordinate <= 1.0 + segment_tolerance)
 
 
 def _coplanar_triangles_intersect(
@@ -1313,16 +1332,18 @@ def _segments_intersect_or_touch_2d(
         orientation(second_start, second_end, first_start),
         orientation(second_start, second_end, first_end),
     )
-    if values[0] * values[1] < -(tolerance**2) and values[2] * values[3] < -(tolerance**2):
+    first_tolerance = tolerance * float(np.linalg.norm(first_end - first_start))
+    second_tolerance = tolerance * float(np.linalg.norm(second_end - second_start))
+    if values[0] * values[1] < -(first_tolerance**2) and values[2] * values[3] < -(second_tolerance**2):
         return True
-    for value, point, start, end in (
-        (values[0], second_start, first_start, first_end),
-        (values[1], second_end, first_start, first_end),
-        (values[2], first_start, second_start, second_end),
-        (values[3], first_end, second_start, second_end),
+    for value, point, start, end, area_tolerance in (
+        (values[0], second_start, first_start, first_end, first_tolerance),
+        (values[1], second_end, first_start, first_end, first_tolerance),
+        (values[2], first_start, second_start, second_end, second_tolerance),
+        (values[3], first_end, second_start, second_end, second_tolerance),
     ):
         if (
-            abs(value) <= tolerance
+            abs(value) <= area_tolerance
             and np.all(point >= np.minimum(start, end) - tolerance)
             and np.all(point <= np.maximum(start, end) + tolerance)
         ):
@@ -1332,13 +1353,18 @@ def _segments_intersect_or_touch_2d(
 
 def _point_in_triangle_2d(point: np.ndarray, triangle: np.ndarray, tolerance: float) -> bool:
     signs = []
+    tolerances = []
     for edge_index in range(3):
         start = triangle[edge_index]
         end = triangle[(edge_index + 1) % 3]
         edge = end - start
         offset = point - start
         signs.append(float(edge[0] * offset[1] - edge[1] * offset[0]))
-    return bool(all(value >= -tolerance for value in signs) or all(value <= tolerance for value in signs))
+        tolerances.append(tolerance * float(np.linalg.norm(edge)))
+    return bool(
+        all(value >= -limit for value, limit in zip(signs, tolerances))
+        or all(value <= limit for value, limit in zip(signs, tolerances))
+    )
 
 
 def _support_conformity_diagnostics(
@@ -5460,21 +5486,24 @@ def _segment_distance(p1: np.ndarray, q1: np.ndarray, p2: np.ndarray, q2: np.nda
     a = float(np.dot(d1, d1))
     e = float(np.dot(d2, d2))
     f = float(np.dot(d2, r))
-    eps = 1e-15
-    if a <= eps and e <= eps:
+    if a == 0.0 and e == 0.0:
         return float(np.linalg.norm(p1 - p2))
-    if a <= eps:
+    if a == 0.0:
         s = 0.0
         t = np.clip(f / e, 0.0, 1.0)
     else:
         c = float(np.dot(d1, r))
-        if e <= eps:
+        if e == 0.0:
             t = 0.0
             s = np.clip(-c / a, 0.0, 1.0)
         else:
             b = float(np.dot(d1, d2))
-            denom = a * e - b * b
-            s = 0.0 if denom <= eps else np.clip((b * f - c * e) / denom, 0.0, 1.0)
+            # A cross-product form avoids cancellation for nearly parallel
+            # lines and a dimensionally inconsistent absolute m^4 cutoff.
+            normal = np.cross(d1, d2)
+            denom = float(np.dot(normal, normal))
+            numerator = float(np.dot(np.cross(-r, d2), normal))
+            s = 0.0 if denom == 0.0 else np.clip(numerator / denom, 0.0, 1.0)
             t = (b * s + f) / e
             if t < 0.0:
                 t = 0.0

@@ -26,6 +26,7 @@ from .gradient_linearity import (
     gradient_linearity_region_mask,
 )
 from .models import CoilPart, Mesh, TargetField
+from .optimization_solvers import conic_solver_order
 from .progress import ProgressReporter
 from .spectral_stream_function import build_spectral_stream_function_basis, cotangent_stiffness_and_lumped_mass
 from .symmetry import (
@@ -46,13 +47,12 @@ STREAM_FUNCTION_COST_FORMULAS = {
         " + mu x^T S x when min_turn_distance/min_wire_distance_m > 0"
     ),
     "minimum_resistance_subject_to_field_error": (
-        "min_x ||R x||_2 subject to separate DSV and optional suppression-field "
-        "residual constraints. The DSV constraint can be an L2 norm, RMS field "
-        "error, or mean-free standard deviation, solved by search over the "
-        "equivalent Tikhonov multiplier"
+        "Search the Tikhonov family for the lowest x^T R x meeting the configured "
+        "residual budgets. This restricted scalar search is not a general "
+        "multiple-constraint optimum."
     ),
     "minimum_resistance_subject_to_field_error_socp": (
-        "min_x ||R x||_2^2 + eta psi^T C M^-1 C psi subject to "
+        "min_x x^T Q x, Q = weighted R + configured quadratic penalties, subject to "
         "DSV_error(x) <= fixed_limit_dsv using the configured DSV metric and, "
         "when suppression targets are present, "
         "suppression_field_rms(x) <= fixed_limit_sup, optionally "
@@ -60,6 +60,11 @@ STREAM_FUNCTION_COST_FORMULAS = {
         "||K_face(x)||_2 <= surface_current_density_limit_A_per_m, and optionally "
         "g_shield(x) dot g_target_unit <= configured_fraction * |g_target|. "
         "Solved directly as convex second-order cone constraints when CVXPY is available"
+    ),
+    "minimum_peak_current_density_subject_to_field_error_socp": (
+        "min_{x,t} t subject to ||K_face(x)||_2 <= t on every face, "
+        "the configured field-error budgets, and all requested engineering bounds. "
+        "t is the peak surface current density in A/m."
     ),
 }
 
@@ -595,6 +600,35 @@ def stream_function_optimization(
         )
     )
     solution.diagnostics.update(density_limit_diagnostics)
+    if solution.diagnostics.get("stream_function_scheme") == "constrained_quadratic" and bool(
+        density_limit_diagnostics.get("surface_current_density_scaling_applied", False)
+    ):
+        solution.reduced_stream_function *= float(density_limit_diagnostics["surface_current_density_scaling_factor"])
+        if solution.diagnostics.get("minimax_current_density_enabled", False):
+            peak, _face_count, _reason = _contract_surface_current_density(
+                problem, problem.expand(solution.reduced_stream_function)
+            )
+            solution.diagnostics["minimax_current_density_pre_scale_peak_A_per_m"] = solution.diagnostics.get(
+                "minimax_current_density_peak_A_per_m", float("nan")
+            )
+            solution.diagnostics["minimax_current_density_peak_A_per_m"] = peak
+            solution.diagnostics["minimax_current_density_epigraph_describes_pre_scale_solution"] = True
+            solution.diagnostics["constrained_solver_objective_value"] = peak
+        solution.diagnostics.update(
+            _constrained_solution_contract_diagnostics(problem, solution.reduced_stream_function, config)
+        )
+        solution.diagnostics["constrained_solver_contract_met"] = bool(
+            solution.diagnostics.get("constrained_solver_hard_constraints_enforced", False)
+            and solution.diagnostics["constrained_solver_physical_constraints_met"]
+        )
+        if not solution.diagnostics["constrained_solver_contract_met"]:
+            reason = _constrained_contract_failure_summary(solution.diagnostics)
+            if _normalise_constrained_quadratic_fallback_policy(config) == "strict":
+                raise RuntimeError(
+                    f"Post-solve current-density scaling violates the constrained-solver contract. {reason}"
+                )
+            solution.diagnostics["constrained_solver_diagnostic_result"] = True
+            solution.diagnostics["constrained_solver_diagnostic_reason"] = reason
     solution.diagnostics.update(stream_function_current_density_diagnostics(parts, config))
     return parts, problem.combined_mesh, b_field_opt_sf, solution.diagnostics
 
@@ -778,17 +812,14 @@ def solve_target_error_constrained_efficiency_stream_function(
     problem: StreamFunctionOptimizationProblem,
     config: CoilGenConfig,
 ) -> StreamFunctionSolution:
-    """Minimize current/resistance norm for a fixed target-field error budget.
+    """Search the Tikhonov family for low sheet power within field-error budgets.
 
-    Mathematical problem:
-        min_x ||R x||_2
-        subject to DSV_error_metric(A x - b) <= configured budget
-
-    The KKT equations are equivalent to a Tikhonov solve with an unknown
-    multiplier. Since the residual increases monotonically with that multiplier,
-    CoilGen searches for the largest regularization multiplier that still meets
-    the requested error budget. This directly fixes target deviation and lets
-    geometry studies compare efficiency without the L-curve ambiguity.
+    A scalar multiplier parameterizes the constrained minimum-power solution
+    for one matching squared-L2 residual constraint without additional objective
+    penalties. Multiple independent bounds, mean-free metrics, and fixed extra
+    penalties generally need multiple multipliers or a different normal system.
+    This search is a restricted family in those cases; use the direct conic
+    method to solve the full constrained problem.
     """
 
     solution = _select_target_error_constrained_efficiency(problem, config)
@@ -813,7 +844,7 @@ def solve_constrained_quadratic_stream_function(
     """Solve a fixed-field-error stream-function problem by direct constraints.
 
     Mathematical problem:
-        min_x ||R x||_2^2 + eta ||L psi||_2^2 + optional spacing penalties
+        min_x x^T Q x, or min_x max_f ||K_f x||_2 in minimax-current-density mode
         subject to DSV_error_metric(A_dsv x - b_dsv) <= configured budget
                    ||A_sup x||_2 / sqrt(N_sup) <= B_sup,rms,max
         when suppression rows are present and target_error_constraint_mode is
@@ -822,12 +853,13 @@ def solve_constrained_quadratic_stream_function(
         is used for compatibility. The legacy weighted-combined residual is
         available with target_error_constraint_mode="combined".
 
-    This is a convex quadratic objective with second-order cone residual
-    constraints. CVXPY is used when installed. If CVXPY or a suitable conic
-    solver is unavailable, CoilGen falls back to the Tikhonov-multiplier scan
-    using the same residual blocks and records that fallback explicitly in the
-    diagnostics. This keeps scripts runnable on standard Python installations
-    while allowing exact constrained solves for reproducible geometry sweeps.
+    Q contains the requested quadratic penalties; K_f maps reduced stream
+    function to the vector surface current density on face f. CVXPY solves the
+    convex problem. Every returned bound is independently checked in physical
+    units. A residual-only problem may fall back to a Tikhonov-multiplier scan,
+    reported without a full constrained-solver contract. Requested density,
+    current-step, shield-sign, or minimax requirements need a direct solver;
+    only explicit diagnostic mode permits their unsupported scan fallback.
     """
 
     fallback_policy = _normalise_constrained_quadratic_fallback_policy(config)
@@ -836,32 +868,30 @@ def solve_constrained_quadratic_stream_function(
     except Exception as exc:
         if fallback_policy == "strict":
             raise RuntimeError(
-                "Direct constrained-quadratic solve failed and constrained_quadratic_fallback_policy='strict'."
+                f"Direct constrained-quadratic solve failed and constrained_quadratic_fallback_policy='strict'. {exc}"
             ) from exc
-        solution = _select_target_error_constrained_efficiency(problem, config)
-        solution.diagnostics.update(
-            {
-                "constrained_solver_backend": "tikhonov_scan_fallback",
-                "constrained_solver_status": "fallback",
-                "constrained_solver_fallback_reason": str(exc),
-                "constrained_solver_hard_constraints_enforced": False,
-                "constrained_solver_contract_met": False,
-            }
-        )
+        solution = _constrained_scan_fallback(problem, config, reason=str(exc), backend="tikhonov_scan_fallback")
     else:
-        direct_met = _target_error_solution_meets_constraint(solution)
+        solution.diagnostics.update(
+            _constrained_solution_contract_diagnostics(problem, solution.reduced_stream_function, config)
+        )
+        direct_met = bool(solution.diagnostics["constrained_solver_physical_constraints_met"])
+        solution.diagnostics["constrained_solver_hard_constraints_enforced"] = bool(
+            solution.diagnostics["constrained_solver_constraint_data_available"]
+        )
+        solution.diagnostics["constrained_solver_contract_met"] = direct_met
         if not direct_met and fallback_policy == "strict":
             direct_diagnostics = dict(solution.diagnostics)
-            failure_summary = _constraint_failure_summary(direct_diagnostics)
+            failure_summary = _constrained_contract_failure_summary(direct_diagnostics)
             raise RuntimeError(
                 "Direct constrained-quadratic solve returned a solution that does not satisfy "
-                "all residual constraints and constrained_quadratic_fallback_policy='strict'. "
+                "all physical constraints and constrained_quadratic_fallback_policy='strict'. "
                 f"{failure_summary} "
                 f"Minimum residual slack: {direct_diagnostics.get('constrained_solver_residual_slack_T', float('nan'))}."
             )
         if not direct_met and fallback_policy == "diagnostic":
             direct_diagnostics = dict(solution.diagnostics)
-            failure_summary = _constraint_failure_summary(direct_diagnostics)
+            failure_summary = _constrained_contract_failure_summary(direct_diagnostics)
             if bool(getattr(config, "progress_flag", False)):
                 print(
                     "Constrained quadratic diagnostic: keeping direct CVXPY stream function "
@@ -871,7 +901,6 @@ def solve_constrained_quadratic_stream_function(
                 {
                     "constrained_solver_diagnostic_result": True,
                     "constrained_solver_diagnostic_reason": failure_summary,
-                    "constrained_solver_hard_constraints_enforced": True,
                     "constrained_solver_contract_met": False,
                 }
             )
@@ -881,15 +910,15 @@ def solve_constrained_quadratic_stream_function(
             and _target_error_auto_retry_max_reruns(config) > 0
         ):
             direct_diagnostics = dict(solution.diagnostics)
-            solution = _select_target_error_constrained_efficiency(problem, config)
+            solution = _constrained_scan_fallback(
+                problem,
+                config,
+                reason="Direct solve failed its physical post-check. "
+                + _constrained_contract_failure_summary(direct_diagnostics),
+                backend="cvxpy_tikhonov_retry_fallback",
+            )
             solution.diagnostics.update(
                 {
-                    "constrained_solver_backend": "cvxpy_tikhonov_retry_fallback",
-                    "constrained_solver_status": "fallback",
-                    "constrained_solver_fallback_reason": (
-                        "direct constrained quadratic solve returned an unmet residual constraint; "
-                        "reran the dependency-free fixed-error search with automatic retry settings"
-                    ),
                     "constrained_solver_initial_status": direct_diagnostics.get("constrained_solver_status", ""),
                     "constrained_solver_initial_residual_met": bool(
                         direct_diagnostics.get("target_error_constraint_met", False)
@@ -907,14 +936,22 @@ def solve_constrained_quadratic_stream_function(
                 }
             )
         else:
-            solution.diagnostics.setdefault("constrained_solver_hard_constraints_enforced", True)
-            solution.diagnostics.setdefault("constrained_solver_contract_met", direct_met)
+            if not direct_met:
+                solution.diagnostics["constrained_solver_diagnostic_result"] = True
+                solution.diagnostics["constrained_solver_diagnostic_reason"] = _constrained_contract_failure_summary(
+                    solution.diagnostics
+                )
 
+    cost_function = (
+        "minimum_peak_current_density_subject_to_field_error_socp"
+        if _normalise_constrained_quadratic_objective_mode(config) == "minimax_current_density"
+        else "minimum_resistance_subject_to_field_error_socp"
+    )
     solution.diagnostics.update(
         {
             "stream_function_scheme": "constrained_quadratic",
-            "stream_function_cost_function": "minimum_resistance_subject_to_field_error_socp",
-            "cost_function_formula": STREAM_FUNCTION_COST_FORMULAS["minimum_resistance_subject_to_field_error_socp"],
+            "stream_function_cost_function": cost_function,
+            "cost_function_formula": STREAM_FUNCTION_COST_FORMULAS[cost_function],
             "unknown_count": int(problem.reduced_sensitivity.shape[1]),
             "target_sample_count": int(problem.reduced_sensitivity.shape[0]),
             "constrained_quadratic_fallback_policy": fallback_policy,
@@ -924,6 +961,261 @@ def solve_constrained_quadratic_stream_function(
     if problem.symmetry_diagnostics is not None:
         solution.diagnostics.update(problem.symmetry_diagnostics)
     return solution
+
+
+def _constrained_scan_fallback(
+    problem: StreamFunctionOptimizationProblem,
+    config: CoilGenConfig,
+    *,
+    reason: str,
+    backend: str,
+) -> StreamFunctionSolution:
+    unsupported: list[str] = []
+    if _normalise_constrained_quadratic_objective_mode(config) == "minimax_current_density":
+        unsupported.append("minimax_current_density_objective")
+    if engineering_surface_current_density_limit_A_per_m(config) > 0.0:
+        unsupported.append("surface_current_density")
+    if _constrained_contour_step_limit(config)["contour_step_constraint_enabled"]:
+        unsupported.append("contour_step")
+    if bool(getattr(config, "shield_gradient_opposition_enabled", False)):
+        unsupported.append("shield_gradient_opposition")
+    if unsupported and _normalise_constrained_quadratic_fallback_policy(config) != "diagnostic":
+        raise RuntimeError(
+            "The Tikhonov scan fallback cannot enforce the requested hard constraints: "
+            + ", ".join(unsupported)
+            + ". Use a supported direct conic solver or explicit diagnostic mode. Direct solver: "
+            + reason
+        )
+    solution = _select_target_error_constrained_efficiency(problem, config)
+    solution.diagnostics.update(
+        _constrained_solution_contract_diagnostics(problem, solution.reduced_stream_function, config)
+    )
+    solution.diagnostics.update(
+        {
+            "constrained_solver_backend": backend,
+            "constrained_solver_status": "fallback",
+            "constrained_solver_fallback_reason": reason,
+            "constrained_solver_fallback_unsupported_constraints": unsupported,
+            "constrained_solver_hard_constraints_enforced": False,
+            "constrained_solver_contract_met": False,
+            "constrained_solver_diagnostic_result": True,
+            "constrained_solver_diagnostic_reason": (
+                "The fallback is a restricted regularization scan; it does not certify the full constrained optimum."
+                + (" Unsupported hard constraints: " + ", ".join(unsupported) + "." if unsupported else "")
+            ),
+        }
+    )
+    return solution
+
+
+def _constrained_solution_contract_diagnostics(
+    problem: StreamFunctionOptimizationProblem,
+    reduced_stream_function: np.ndarray,
+    config: CoilGenConfig,
+) -> dict[str, Any]:
+    """Recompute every constrained-solver bound from the returned physical solution."""
+
+    reduced = np.asarray(reduced_stream_function, dtype=float).reshape(-1)
+    full = np.asarray(problem.expand(reduced), dtype=float).reshape(-1)
+    finite_solution = bool(np.all(np.isfinite(reduced)) and np.all(np.isfinite(full)))
+    blocks = _target_error_constraint_blocks(problem, config)
+    diagnostics = _residual_constraint_diagnostics(problem, reduced, blocks, config)
+    rows: list[dict[str, Any]] = []
+    for block in blocks:
+        denominator = _constraint_field_metric_denominator(block) if block.metric in {"std", "rms"} else 1.0
+        rows.append(
+            {
+                "name": block.name,
+                "value": float(diagnostics[f"{block.name}_constraint_residual_norm_T"]) / denominator,
+                "limit": float(block.allowed_residual) / denominator,
+                "effective_limit": float(
+                    diagnostics[f"{block.name}_constraint_allowed_with_acceptance_residual_norm_T"]
+                )
+                / denominator,
+                "unit": "T/m" if block.name in {"gradient_strength", "cross_gradient"} else "T",
+                "met": bool(diagnostics[f"{block.name}_constraint_met"]),
+                "available": bool(
+                    np.isfinite(diagnostics[f"{block.name}_constraint_residual_norm_T"])
+                    and np.isfinite(block.allowed_residual)
+                ),
+            }
+        )
+    requested_residual_blocks = {
+        "linearity_rms": "linearity_rms_tolerance_percent",
+        "linearity_peak": "linearity_peak_tolerance_percent",
+        "gradient_strength": "gradient_strength_tolerance_percent",
+        "cross_gradient": "linearity_cross_gradient_tolerance_percent",
+        "suppression": "suppression_field_rms_limit_T",
+        "suppression_peak": "suppression_field_peak_limit_T",
+    }
+    built_blocks = {block.name for block in blocks}
+    for name, parameter in requested_residual_blocks.items():
+        if _positive_config_float(config, parameter) <= 0.0 or name in built_blocks:
+            continue
+        diagnostics[f"{name}_constraint_met"] = False
+        rows.append(
+            {
+                "name": name,
+                "value": float("nan"),
+                "limit": float("nan"),
+                "effective_limit": float("nan"),
+                "unit": "T/m" if name in {"gradient_strength", "cross_gradient"} else "T",
+                "met": False,
+                "available": False,
+                "reason": f"Requested {parameter}, but no corresponding residual constraint could be constructed.",
+            }
+        )
+
+    relative_tolerance = _constraint_acceptance_relative_tolerance(config)
+    density_limit = engineering_surface_current_density_limit_A_per_m(config)
+    if density_limit > 0.0:
+        peak, face_count, reason = _contract_surface_current_density(problem, full)
+        available = bool(np.isfinite(peak) and face_count > 0)
+        effective_limit = density_limit * (1.0 + relative_tolerance)
+        met = bool(available and peak <= effective_limit)
+        diagnostics.update(
+            {
+                "surface_current_density_constraint_enabled": True,
+                "surface_current_density_constraint_limit_A_per_m": float(density_limit),
+                "surface_current_density_constraint_max_A_per_m": float(peak),
+                "surface_current_density_constraint_effective_limit_A_per_m": float(effective_limit),
+                "surface_current_density_constraint_count": face_count,
+                "surface_current_density_constraint_met": met,
+                "surface_current_density_constraint_available": available,
+                "surface_current_density_constraint_reason": reason,
+            }
+        )
+        rows.append(
+            {
+                "name": "surface_current_density",
+                "value": peak,
+                "limit": density_limit,
+                "effective_limit": effective_limit,
+                "unit": "A/m",
+                "met": met,
+                "available": available,
+                "reason": reason,
+            }
+        )
+
+    contour = _constrained_contour_step_limit(config)
+    diagnostics.update(contour)
+    if contour["contour_step_constraint_enabled"]:
+        stream_range = float(np.ptp(full)) if full.size and finite_solution else float("nan")
+        limit = float(contour["contour_step_constraint_max_range_A"])
+        effective_limit = limit * (1.0 + relative_tolerance)
+        available = bool(np.isfinite(stream_range))
+        met = bool(available and stream_range <= effective_limit)
+        diagnostics.update(
+            {
+                "contour_step_constraint_range_A": stream_range,
+                "contour_step_constraint_effective_max_range_A": effective_limit,
+                "contour_step_constraint_met": met,
+                "contour_step_constraint_actual_step_A": stream_range
+                / float(contour["contour_step_constraint_denominator"]),
+            }
+        )
+        rows.append(
+            {
+                "name": "contour_step",
+                "value": stream_range,
+                "limit": limit,
+                "effective_limit": effective_limit,
+                "unit": "A",
+                "met": met,
+                "available": available,
+            }
+        )
+
+    shield = _shield_gradient_opposition_constraint_data(problem, config)
+    shield_diagnostics = _shield_gradient_opposition_constraint_diagnostics(shield, reduced)
+    diagnostics.update(shield_diagnostics)
+    if shield["requested"]:
+        value = float(shield_diagnostics["shield_gradient_opposition_value_T_per_m"])
+        limit = float(shield["limit_T_per_m"])
+        available = bool(shield["enabled"] and np.isfinite(value) and np.isfinite(limit))
+        tolerance = relative_tolerance * abs(float(shield["scale_T_per_m"]))
+        effective_limit = limit + tolerance
+        met = bool(available and value <= effective_limit)
+        diagnostics["shield_gradient_opposition_constraint_met"] = met
+        diagnostics["shield_gradient_opposition_effective_limit_T_per_m"] = effective_limit
+        rows.append(
+            {
+                "name": "shield_gradient_opposition",
+                "value": value,
+                "limit": limit,
+                "effective_limit": effective_limit,
+                "unit": "T/m",
+                "met": met,
+                "available": available,
+                "reason": shield["reason"],
+            }
+        )
+
+    failed = [str(row["name"]) for row in rows if not row["met"]]
+    if not finite_solution:
+        failed.append("finite_stream_function")
+    diagnostics.update(
+        {
+            "constrained_solver_physical_constraints_met": not failed,
+            "constrained_solver_constraint_data_available": all(row["available"] for row in rows),
+            "constrained_solver_solution_finite": finite_solution,
+            "constrained_solver_failed_constraints": failed,
+            "constrained_solver_contract_constraint_diagnostics": rows,
+            "constrained_solver_hardware_acceptance_relative_tolerance": relative_tolerance,
+        }
+    )
+    return diagnostics
+
+
+def _contract_surface_current_density(
+    problem: StreamFunctionOptimizationProblem,
+    full_stream_function: np.ndarray,
+) -> tuple[float, int, str]:
+    counts = problem.part_vertex_counts
+    records = (problem.part_current_density_mats, problem.part_faces, problem.part_face_basis_currents)
+    if not counts or any(len(record) != len(counts) for record in records) or sum(counts) != len(full_stream_function):
+        return float("nan"), 0, "Current-density operators do not cover every stream-function vertex."
+    peak = 0.0
+    face_count = 0
+    offset = 0
+    for count, dense, faces, local in zip(counts, *records):
+        values = full_stream_function[offset : offset + count]
+        offset += count
+        faces = np.asarray(faces, dtype=np.int64)
+        if dense is not None:
+            dense = np.asarray(dense, dtype=float)
+            if dense.shape != (count, len(faces), 3) or not np.all(np.isfinite(dense)):
+                return float("nan"), face_count, "A dense current-density operator is incomplete or nonfinite."
+            components = np.einsum("vfa,v->fa", dense, values, optimize=True)
+        else:
+            local = np.asarray(local, dtype=float)
+            if faces.shape != (len(faces), 3) or local.shape != (len(faces), 3, 3):
+                return float("nan"), face_count, "A local current-density operator has inconsistent dimensions."
+            if np.any(faces < 0) or np.any(faces >= count) or not np.all(np.isfinite(local)):
+                return float("nan"), face_count, "A local current-density operator is invalid or nonfinite."
+            components = np.einsum("fva,fv->fa", local, values[faces], optimize=True)
+        if not len(faces) or not np.all(np.isfinite(components)):
+            return float("nan"), face_count, "A coil part has no finite face-current-density values."
+        magnitudes = np.linalg.norm(components, axis=1)
+        if not np.all(np.isfinite(magnitudes)):
+            return float("nan"), face_count, "Surface-current-density evaluation overflowed."
+        peak = max(peak, float(np.max(magnitudes)))
+        face_count += len(faces)
+    return peak, face_count, "Every coil face was checked."
+
+
+def _constrained_contract_failure_summary(diagnostics: dict[str, Any]) -> str:
+    failed = [
+        row for row in diagnostics.get("constrained_solver_contract_constraint_diagnostics", ()) if not row["met"]
+    ]
+    details = [
+        f"{row['name']}: value={row['value']:.6g} {row['unit']}, allowed={row['effective_limit']:.6g} {row['unit']}"
+        for row in failed
+    ]
+    if not diagnostics.get("constrained_solver_solution_finite", True):
+        details.append("stream function contains nonfinite values")
+    return "Failed physical constraint(s): " + "; ".join(details) + "."
 
 
 def minimum_residual_optimality_certificate(
@@ -1291,6 +1583,14 @@ def _select_constrained_quadratic(
     problem: StreamFunctionOptimizationProblem,
     config: CoilGenConfig,
 ) -> StreamFunctionSolution:
+    if _normalise_constrained_quadratic_objective_mode(config) == "minimax_current_density":
+        if _stream_function_smoothness_requested(config) or _positive_config_float(
+            config, "turn_spacing_regularization_factor"
+        ):
+            raise ValueError(
+                "Pure minimax_current_density requires zero smoothness and turn-spacing penalty factors. "
+                "Field, current-density, and contour-step hard bounds remain available."
+            )
     ata, rtr, _rhs = problem.normal_equation_matrices()
     spacing = _turn_spacing_penalty_context(problem, ata, config)
     smoothness = _stream_function_smoothness_context(problem, config)
@@ -1551,6 +1851,11 @@ def _constrained_quadratic_choice(
 ) -> StreamFunctionSolution:
     constraint_blocks = _target_error_constraint_blocks(problem, config)
     objective_mode = _normalise_constrained_quadratic_objective_mode(config)
+    if objective_mode == "minimax_current_density" and fixed_quadratic is not None and np.any(fixed_quadratic):
+        raise ValueError(
+            "Pure minimax_current_density does not combine quadratic smoothness/spacing penalties. "
+            "Disable these penalties, or use balanced mode with a hard surface-current-density bound."
+        )
     resistance_weight = _constrained_quadratic_resistance_weight(config, objective_mode)
     objective_quadratic = _quadratic_objective_matrix(resistance_weight * rtr, fixed_quadratic)
     reduced_sf, solver_diagnostics = _solve_constrained_quadratic_cvxpy(
@@ -1592,6 +1897,15 @@ def _constrained_quadratic_choice(
         "constrained_solver_status": solver_diagnostics["status"],
         "constrained_solver_name": solver_diagnostics["solver"],
         "constrained_solver_objective_value": solver_diagnostics["objective_value"],
+        "constrained_solver_objective_unit": solver_diagnostics.get("objective_unit", "weighted_quadratic"),
+        "minimax_current_density_enabled": bool(solver_diagnostics.get("minimax_current_density_enabled", False)),
+        "minimax_current_density_peak_A_per_m": float(
+            solver_diagnostics.get("minimax_current_density_peak_A_per_m", np.nan)
+        ),
+        "minimax_current_density_epigraph_A_per_m": float(
+            solver_diagnostics.get("minimax_current_density_epigraph_A_per_m", np.nan)
+        ),
+        "minimax_current_density_face_count": int(solver_diagnostics.get("minimax_current_density_face_count", 0)),
         "constrained_solver_problem_unknown_count": int(solver_diagnostics.get("problem_unknown_count", 0)),
         "constrained_solver_residual_constraint_block_count": int(
             solver_diagnostics.get("residual_constraint_block_count", 0)
@@ -3000,7 +3314,11 @@ def _residual_constraint_diagnostics(
         mean_residual = float(np.mean(residual_values)) if len(residual_values) else float("nan")
         reference = max(float(block.reference_norm), 1.0e-30)
         relative_percent = 100.0 * residual / reference
-        allowed_with_acceptance = float(block.allowed_residual) * (1.0 + tolerance) + absolute_acceptance
+        # Gradient residuals are T/m; a field-valued T allowance cannot be added
+        # to them. Keep relative numerical acceptance for these fitted gradients.
+        residual_unit = "T/m" if block.name in {"gradient_strength", "cross_gradient"} else "T"
+        block_absolute_acceptance = absolute_acceptance if residual_unit == "T" else 0.0
+        allowed_with_acceptance = float(block.allowed_residual) * (1.0 + tolerance) + block_absolute_acceptance
         met = residual <= allowed_with_acceptance
         all_met = all_met and bool(met)
         prefix = block.name
@@ -3024,6 +3342,7 @@ def _residual_constraint_diagnostics(
         diagnostics.update(
             {
                 f"{prefix}_constraint_met": bool(met),
+                f"{prefix}_constraint_residual_unit": residual_unit,
                 f"{prefix}_constraint_metric": metric,
                 f"{prefix}_constraint_component": str(block.component),
                 f"{prefix}_constraint_weighting": str(block.weighting),
@@ -3284,7 +3603,7 @@ def _constraint_residual_measure(block: ResidualConstraintBlock, reduced_stream_
     residual_values = np.asarray(block.matrix @ reduced_stream_function - block.target, dtype=float).reshape(-1)
     if str(block.metric).lower() == "linf":
         value = _constraint_linf_residual(block, residual_values)
-        return float(value) if np.isfinite(value) else 0.0
+        return float(value) if np.isfinite(value) else float("inf")
     return float(np.linalg.norm(residual_values))
 
 
@@ -3322,13 +3641,19 @@ def _normalise_constrained_quadratic_objective_mode(config: CoilGenConfig) -> st
         "smoothness_priority": "smoothness_priority",
         "smoothest_feasible": "smoothness_priority",
         "contourability_priority": "smoothness_priority",
+        "minimax_current_density": "minimax_current_density",
     }
     if key not in aliases:
-        raise ValueError("constrained_quadratic_objective_mode must be 'balanced' or 'smoothness_priority'.")
+        raise ValueError(
+            "constrained_quadratic_objective_mode must be 'balanced', 'smoothness_priority', "
+            "or 'minimax_current_density'."
+        )
     return aliases[key]
 
 
 def _constrained_quadratic_resistance_weight(config: CoilGenConfig, objective_mode: str) -> float:
+    if objective_mode == "minimax_current_density":
+        return 0.0
     if objective_mode != "smoothness_priority":
         return 1.0
     try:
@@ -3483,9 +3808,39 @@ def _solve_constrained_quadratic_cvxpy(
         force=True,
     )
     variable = cp.Variable(n_unknowns)
-    objective_scale = _cvxpy_matrix_scale(objective_quadratic)
-    objective_matrix = np.asarray(objective_quadratic, dtype=float) / objective_scale
-    objective = cp.Minimize(cp.quad_form(variable, cp.psd_wrap(objective_matrix)))
+    minimax = _normalise_constrained_quadratic_objective_mode(config) == "minimax_current_density"
+    peak_variable = None
+    density_operators: tuple[np.ndarray, ...] = ()
+    if minimax:
+        expansion = np.asarray(problem.reducer.expansion_matrix, dtype=float)
+        peak, _face_count, reason = _contract_surface_current_density(problem, np.zeros(expansion.shape[0]))
+        if not np.isfinite(peak):
+            raise ValueError("Minimax requires complete finite face-current operators. " + reason)
+        density_operators = _reduced_surface_current_density_operators(problem)
+        # Normalize each basis column by its physical current gain. Then choose
+        # an A/m scale from the field drive. Both survive a rescaling of basis DOFs.
+        gains = np.maximum.reduce([np.max(np.linalg.norm(operator, axis=1), axis=0) for operator in density_operators])
+        if not np.all(np.isfinite(gains)):
+            raise ValueError("Minimax current-density basis gains overflowed; rescale the input basis.")
+        coefficient_scales = np.ones(n_unknowns)
+        np.divide(1.0, gains, out=coefficient_scales, where=gains > 0.0)
+        drive_scales = []
+        for block in constraint_blocks:
+            field_gain = float(np.max(np.abs(block.matrix * coefficient_scales)))
+            target_magnitude = float(np.max(np.abs(block.target)))
+            if field_gain > 0.0 and target_magnitude > 0.0:
+                drive_scales.append(target_magnitude / field_gain)
+        objective_scale = _cvxpy_positive_scale(max(drive_scales, default=1.0), "minimax current-density scale")
+        variable = cp.multiply(coefficient_scales * objective_scale, variable)
+        peak_variable = cp.Variable(nonneg=True)
+        objective = cp.Minimize(peak_variable)
+    else:
+        objective_scale = _cvxpy_matrix_scale(objective_quadratic)
+        objective_matrix = np.asarray(objective_quadratic, dtype=float) / objective_scale
+        eigenvalues = np.linalg.eigvalsh(objective_matrix)
+        if eigenvalues.size and eigenvalues[0] < -1.0e-10 * max(float(np.max(np.abs(eigenvalues))), 1.0):
+            raise ValueError("The conic quadratic objective must be positive semidefinite.")
+        objective = cp.Minimize(cp.quad_form(variable, cp.psd_wrap(objective_matrix)))
     residual_scales = tuple(
         _cvxpy_positive_scale(block.allowed_residual, f"{block.name} allowed residual") for block in constraint_blocks
     )
@@ -3493,6 +3848,10 @@ def _solve_constrained_quadratic_cvxpy(
         _cvxpy_residual_constraint(cp, block, variable, scale=scale)
         for block, scale in zip(constraint_blocks, residual_scales)
     ]
+    if minimax:
+        for operator in density_operators:
+            components = cp.vstack([(operator[:, axis, :] / objective_scale) @ variable for axis in range(3)]).T
+            constraints.append(cp.norm(components, 2, axis=1) <= peak_variable)
     contour_step_limit = _constrained_contour_step_limit(config)
     contour_step_normalization = float("nan")
     if bool(contour_step_limit["contour_step_constraint_enabled"]):
@@ -3517,7 +3876,10 @@ def _solve_constrained_quadratic_cvxpy(
     current_density_limit = float(engineering_diagnostics["engineering_surface_current_density_limit_A_per_m"])
     current_density_limit_source = str(engineering_diagnostics["engineering_surface_current_density_limit_source"])
     current_density_constraint_count = 0
-    if current_density_limit > 0.0:
+    if current_density_limit > 0.0 and minimax:
+        constraints.append(peak_variable <= current_density_limit / objective_scale)
+        current_density_constraint_count = sum(len(operator) for operator in density_operators)
+    elif current_density_limit > 0.0:
         density_constraints, current_density_constraint_count = _cvxpy_surface_current_density_constraints(
             cp,
             problem,
@@ -3589,12 +3951,39 @@ def _solve_constrained_quadratic_cvxpy(
             solver_errors.append(f"{solver_name}: returned non-finite solution")
             task.advance(1, message=f"{solver_name} returned a non-finite solution after {elapsed:.2f} s", force=True)
             continue
+        peak_current = float("nan")
+        epigraph_current = float("nan")
+        if minimax:
+            peak_current = max(
+                float(np.max(np.linalg.norm(operator @ candidate, axis=1))) for operator in density_operators
+            )
+            epigraph_current = (
+                float(peak_variable.value) * objective_scale if peak_variable.value is not None else float("nan")
+            )
+            acceptance = _constraint_acceptance_relative_tolerance(config) * max(
+                peak_current, abs(epigraph_current), objective_scale
+            )
+            if (
+                not np.isfinite(peak_current)
+                or not np.isfinite(epigraph_current)
+                or peak_current > epigraph_current + acceptance
+            ):
+                solver_errors.append(f"{solver_name}: minimax epigraph failed independent face-current check")
+                task.advance(1, message=f"{solver_name} failed minimax face-current check", force=True)
+                continue
         task.advance(1, message=f"{solver_name} solved with status {cvx_problem.status} in {elapsed:.2f} s", force=True)
         task.done(message="done")
         diagnostics = {
             "solver": str(solver_name),
             "status": str(cvx_problem.status),
-            "objective_value": float(candidate @ np.asarray(objective_quadratic, dtype=float) @ candidate),
+            "objective_value": (
+                peak_current if minimax else float(candidate @ np.asarray(objective_quadratic, dtype=float) @ candidate)
+            ),
+            "objective_unit": "A/m" if minimax else "weighted_quadratic",
+            "minimax_current_density_enabled": minimax,
+            "minimax_current_density_peak_A_per_m": peak_current,
+            "minimax_current_density_epigraph_A_per_m": epigraph_current,
+            "minimax_current_density_face_count": sum(len(operator) for operator in density_operators),
             "solver_scaled_objective_value": (
                 float(cvx_problem.value) if cvx_problem.value is not None else float("nan")
             ),
@@ -3683,9 +4072,21 @@ def _cvxpy_surface_current_density_constraints(
     variable: Any,
     current_density_limit: float,
 ) -> tuple[list[Any], int]:
-    expansion = np.asarray(problem.reducer.expansion_matrix, dtype=float)
+    scale = _cvxpy_positive_scale(current_density_limit, "surface-current-density limit")
     constraints: list[Any] = []
     constraint_count = 0
+    for operator in _reduced_surface_current_density_operators(problem):
+        components = cp.vstack([(operator[:, axis, :] / scale) @ variable for axis in range(3)]).T
+        constraints.append(cp.norm(components, 2, axis=1) <= 1.0)
+        constraint_count += len(operator)
+    return constraints, constraint_count
+
+
+def _reduced_surface_current_density_operators(problem: StreamFunctionOptimizationProblem) -> tuple[np.ndarray, ...]:
+    """Return each part's face-by-Cartesian-component-by-reduced-DOF operator."""
+
+    expansion = np.asarray(problem.reducer.expansion_matrix, dtype=float)
+    result: list[np.ndarray] = []
     offset = 0
     for vertex_count, current_density_mat, faces, face_basis_currents in zip(
         problem.part_vertex_counts,
@@ -3695,16 +4096,15 @@ def _cvxpy_surface_current_density_constraints(
     ):
         part_expansion = expansion[offset : offset + vertex_count]
         offset += vertex_count
-        scale = _cvxpy_positive_scale(current_density_limit, "surface-current-density limit")
         if current_density_mat is not None:
             current_density_mat = np.asarray(current_density_mat, dtype=float)
             if current_density_mat.ndim != 3 or current_density_mat.shape[0] != vertex_count:
                 raise ValueError("Surface-current-density matrix has inconsistent dimensions.")
             operators = [
-                (np.asarray(current_density_mat[:, :, component], dtype=float).T @ part_expansion) / scale
+                np.asarray(current_density_mat[:, :, component], dtype=float).T @ part_expansion
                 for component in range(3)
             ]
-            face_count = int(current_density_mat.shape[1])
+            reduced_operators = np.stack(operators, axis=1)
         else:
             faces = np.asarray(faces, dtype=np.int64)
             face_basis_currents = np.asarray(face_basis_currents, dtype=float)
@@ -3716,12 +4116,10 @@ def _cvxpy_surface_current_density_constraints(
                 part_expansion[faces],
                 optimize=True,
             )
-            operators = [reduced_operators[:, component, :] / scale for component in range(3)]
-            face_count = int(len(faces))
-        components = cp.vstack([operator @ variable for operator in operators]).T
-        constraints.append(cp.norm(components, 2, axis=1) <= 1.0)
-        constraint_count += face_count
-    return constraints, constraint_count
+        if not np.all(np.isfinite(reduced_operators)):
+            raise ValueError("Surface-current-density operators contain nonfinite values.")
+        result.append(reduced_operators)
+    return tuple(result)
 
 
 def _constrained_contour_step_limit(config: CoilGenConfig) -> dict[str, float | int | bool | str]:
@@ -3791,14 +4189,12 @@ def _contour_step_denominator(level_count: int, config: CoilGenConfig) -> float:
 
 
 def _cvxpy_conic_solver_order(cp: Any, config: CoilGenConfig) -> list[str]:
-    requested = str(getattr(config, "constrained_optimization_solver", "auto")).strip().upper()
-    installed = {str(name).upper(): str(name) for name in cp.installed_solvers()}
-    preferred = ["CLARABEL", "ECOS", "SCS"]
-    if requested and requested != "AUTO":
-        if requested not in installed:
-            raise RuntimeError(f"Requested CVXPY solver '{requested}' is not installed.")
-        return [installed[requested]]
-    return [installed[name] for name in preferred if name in installed]
+    return list(
+        conic_solver_order(
+            str(getattr(config, "constrained_optimization_solver", "auto")),
+            installed_solvers=cp.installed_solvers(),
+        )
+    )
 
 
 def _cvxpy_solver_options(solver_name: str, config: CoilGenConfig) -> dict[str, Any]:
@@ -5903,6 +6299,13 @@ def _turn_spacing_metric_requested(config: CoilGenConfig) -> bool:
 
 
 def _turn_spacing_penalty_requested(config: CoilGenConfig) -> bool:
+    # Minimax directly spreads peak current; retain geometric spacing as a bound,
+    # without silently changing the objective through the engineering-mode heuristic.
+    if (
+        _normalise_stream_function_method(getattr(config, "sf_opt_method", "tikhonov")) == "constrained_quadratic"
+        and _normalise_constrained_quadratic_objective_mode(config) == "minimax_current_density"
+    ):
+        return False
     threshold = _turn_spacing_threshold(config)
     factor = _turn_spacing_regularization_factor(config)
     return threshold > 0.0 and factor > 0.0
@@ -6003,7 +6406,7 @@ def _turn_spacing_penalty_context(
     max_attempts = max(int(getattr(config, "turn_spacing_max_iterations", 4)), 1)
     metric = problem.reduced_turn_spacing_metric
     reference_length = float(problem.turn_spacing_reference_length)
-    enabled = threshold > 0.0 and factor > 0.0 and metric is not None and metric.size > 0
+    enabled = _turn_spacing_penalty_requested(config) and metric is not None and metric.size > 0
 
     if not enabled:
         return {

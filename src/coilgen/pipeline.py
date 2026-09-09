@@ -10,7 +10,11 @@ from .config import CoilGenConfig
 from .config_validation import validate_config
 from .contourability import validate_and_repair_contourability
 from .contour_angles import analyze_contour_angle_stability
-from .contour_sparsification import prune_sparsified_contours, sparsify_contours
+from .contour_sparsification import (
+    consolidate_pruned_contours,
+    prune_sparsified_contours,
+    sparsify_contours,
+)
 from .contours import (
     calc_potential_levels,
     extract_contours,
@@ -193,10 +197,16 @@ class CoilGenPipeline:
             self.config,
             progress=ProgressReporter.from_config(self.config, label="Sparse contour pruning"),
         )
+        parts = consolidate_pruned_contours(
+            parts,
+            target_field,
+            self.config,
+            progress=ProgressReporter.from_config(self.config, label="Post-pruning contour merge"),
+        )
         parts = analyze_contour_angle_stability(parts)
         if 0 <= primary_surface_ind < len(parts):
             regularization_diagnostics.update(dict(parts[primary_surface_ind].contour_level_diagnostics))
-        stage("processed contour sparsification and pruning")
+        stage("processed contour sparsification, pruning, and retained-contour consolidation")
         if self.config.skip_calculation_min_winding_distance:
             regularization_diagnostics["contour_distance_diagnostics_skipped"] = True
         else:

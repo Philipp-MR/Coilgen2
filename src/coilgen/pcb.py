@@ -104,6 +104,16 @@ def cylindrical_unwrap_frame(part: CoilPart) -> CylindricalUnwrapFrame:
     centered = vertices - vertices.mean(axis=0)
     _, _, axes = np.linalg.svd(centered, full_matrices=False)
     axis_z = axes[0]
+    # Cylinder side-wall normals span the radial plane regardless of aspect
+    # ratio. The longest positional PCA axis is radial for a short cylinder.
+    triangles = vertices[part.mesh.faces]
+    normals = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+    lengths = np.linalg.norm(normals, axis=1)
+    normals = normals[lengths > 1e-15] / lengths[lengths > 1e-15, None]
+    if len(normals) >= 3:
+        _, singular_values, normal_axes = np.linalg.svd(normals, full_matrices=False)
+        if singular_values[1] > 1e-10 * singular_values[0] and singular_values[2] < 1e-8 * singular_values[1]:
+            axis_z = normal_axes[-1]
     radial = centered - np.outer(centered @ axis_z, axis_z)
     _, _, radial_axes = np.linalg.svd(radial, full_matrices=False)
     axis_x = radial_axes[0]
@@ -127,10 +137,9 @@ def unwrap_points(points: np.ndarray, frame: CylindricalUnwrapFrame) -> np.ndarr
 def _wire_parts_from_centerline(centerline: np.ndarray, track_width: float) -> list[PcbWirePart]:
     if len(centerline) < 2:
         return []
-    parts = _split_large_wrap_jumps(centerline)
-    return [
-        PcbWirePart(centerline=part, track_shape=_track_polygon(part, track_width)) for part in parts if len(part) >= 2
-    ]
+    # unwrap_points has already removed angular branch jumps. A long interval
+    # can be an intentional straight connector and must remain conductive.
+    return [PcbWirePart(centerline=centerline, track_shape=_track_polygon(centerline, track_width))]
 
 
 def _split_large_wrap_jumps(centerline: np.ndarray) -> list[np.ndarray]:
@@ -230,7 +239,7 @@ def _save_single_pcb_dxf(layout: PcbLayout, path: Path) -> Path:
         "9",
         "$INSUNITS",
         "70",
-        "6",
+        "4",
         "0",
         "ENDSEC",
         "0",

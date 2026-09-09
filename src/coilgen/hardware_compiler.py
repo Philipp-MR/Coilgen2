@@ -528,7 +528,7 @@ def evaluate_discrete_hardware(result: CoilGenResult, hardware: HardwareSpec) ->
     bend_radius = _result_min_bend_radius_m(result)
     turn_count = int(sum(part.physical_turn_count for part in result.coil_parts))
     violations: dict[str, float] = {}
-    physical_realization_available = all(
+    physical_realization_available = bool(result.coil_parts) and all(
         part.contour_sparsification is None or bool(part.contour_sparsification.realized_turn_contours)
         for part in result.coil_parts
     )
@@ -536,12 +536,21 @@ def evaluate_discrete_hardware(result: CoilGenResult, hardware: HardwareSpec) ->
         violations["physical_turn_realization"] = 1.0
     if hardware.max_current_A is not None and current > hardware.max_current_A * (1.0 + 1e-12):
         violations["current"] = float(current / max(hardware.max_current_A, 1e-30) - 1.0)
-    if hardware.max_power_W is not None and power > hardware.max_power_W * (1.0 + 1e-9):
-        violations["power"] = float(power / max(hardware.max_power_W, 1e-30) - 1.0)
-    if hardware.min_wire_spacing_m > 0.0 and np.isfinite(spacing) and spacing < hardware.min_wire_spacing_m:
-        violations["wire_spacing"] = float(hardware.min_wire_spacing_m / max(spacing, 1e-30) - 1.0)
-    if hardware.min_bend_radius_m > 0.0 and np.isfinite(bend_radius) and bend_radius < hardware.min_bend_radius_m:
-        violations["bend_radius"] = float(hardware.min_bend_radius_m / max(bend_radius, 1e-30) - 1.0)
+    if hardware.max_power_W is not None:
+        if not np.isfinite(power):
+            violations["power_unavailable"] = 1.0
+        elif power > hardware.max_power_W * (1.0 + 1e-9):
+            violations["power"] = float(power / max(hardware.max_power_W, 1e-30) - 1.0)
+    if hardware.min_wire_spacing_m > 0.0:
+        if not np.isfinite(spacing):
+            violations["wire_spacing_unavailable"] = 1.0
+        elif spacing < hardware.min_wire_spacing_m:
+            violations["wire_spacing"] = float(hardware.min_wire_spacing_m / max(spacing, 1e-30) - 1.0)
+    if hardware.min_bend_radius_m > 0.0:
+        if not np.isfinite(bend_radius):
+            violations["bend_radius_unavailable"] = 1.0
+        elif bend_radius < hardware.min_bend_radius_m:
+            violations["bend_radius"] = float(hardware.min_bend_radius_m / max(bend_radius, 1e-30) - 1.0)
     if hardware.max_turns is not None and turn_count > int(hardware.max_turns):
         violations["turn_count"] = float(turn_count / max(int(hardware.max_turns), 1) - 1.0)
     field_rms_error_percent, field_max_error_percent = _result_field_error_percent(result)

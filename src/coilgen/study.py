@@ -132,11 +132,27 @@ class DesignStudyTable:
     def rows(self) -> list[dict[str, Any]]:
         return [result.flat_row() for result in self.results]
 
-    def best_by(self, metric_name: str, *, maximize: bool = True) -> DesignStudyResult | None:
+    def best_by(
+        self,
+        metric_name: str,
+        *,
+        maximize: bool = True,
+        allowed_statuses: Sequence[str] | None = ("PASS", "WARNING"),
+    ) -> DesignStudyResult | None:
+        """Rank evaluated candidates, excluding failed/unknown designs by default.
+
+        Use ``allowed_statuses=("PASS",)`` for strict quality screening or
+        ``None`` to inspect all finite results, including infeasible designs.
+        A WARNING candidate still requires inspection of its notes.
+        """
+
+        statuses = None if allowed_statuses is None else {status.upper() for status in allowed_statuses}
         valid = [
             result
             for result in self.results
-            if metric_name in result.metrics and np.isfinite(result.metrics[metric_name].value)
+            if (statuses is None or result.status.upper() in statuses)
+            and metric_name in result.metrics
+            and np.isfinite(result.metrics[metric_name].value)
         ]
         if not valid:
             return None

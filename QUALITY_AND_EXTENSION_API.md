@@ -82,6 +82,26 @@ best = table.best_by("layout_gradient_efficiency_mT_per_m_per_A", maximize=True)
 These objects avoid fragile dictionary conventions in sweep plotting and CSV
 export.
 
+`best_by` excludes `FAIL` and `UNKNOWN` rows by default. Use
+`allowed_statuses=("PASS",)` for strict screening; `allowed_statuses=None`
+includes every finite candidate for diagnostic comparisons. Inspect warnings
+before selecting a `WARNING` candidate; this ranking does not establish
+manufacturing or hardware feasibility.
+
+`ParameterSweepWorkflow` resumes successful case rows only, retries failed or
+invalid cache entries, and preserves parameter order in tables even when some
+cases are cached and others run again. Failed cases remain visible in the
+tables. The case factory is called on resume to fingerprint the resolved
+design/configuration, standard mesh/target/preoptimized input contents, and
+core Python source. Old caches are consequently recomputed once.
+
+Set `ParameterSweepSpec.cache_revision` when changing custom factory or metric
+dependencies, external solver versions, or data not referenced by the standard
+config inputs. Cache reuse restores scalar rows, not full result objects or
+missing exported files; rerun with `resume_from_case_cache=False` to regenerate
+artifacts. Compare finalists using the same target samples, operating current,
+field-error constraints, and manufacturing checks.
+
 ## General Extension Priorities
 
 CoilGen should stay application-neutral at the core. Conventional MRI gradients,

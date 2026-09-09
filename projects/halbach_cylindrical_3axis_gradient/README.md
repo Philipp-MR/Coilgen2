@@ -1,9 +1,9 @@
 # Halbach Cylindrical 3-Axis Gradient Project
 
-Clean starting point for an unshielded cylindrical MRI gradient set. It builds
-three independent layouts on the same cylinder. The cylinder/bore axis is
-global `-y`, orthogonal to the global `B0` direction `+z`, matching a
-transverse-field Halbach geometry:
+Unshielded octagonal MRI gradient set. It builds three independent layouts on
+axis-specific imported winding surfaces. The surface/bore axis is global `y`,
+orthogonal to the global `B0` direction `+z`, matching a transverse-field
+Halbach geometry:
 
 - `Gx`: target `Bz = x`
 - `Gy`: target `Bz = y`
@@ -14,7 +14,8 @@ The project is intentionally small. Most users only edit
 `CoilProject` with one channel per gradient axis, calls `project.solve()`, and
 opens the optional project plot book. Shared geometry, target, optimization,
 conductor, system, and numerical settings live on the `GRADIENT_TEMPLATE`
-object; the channel objects only override the requested target expression.
+object; each channel overrides the requested target expression and its imported
+winding-surface file.
 
 ## Run
 
@@ -31,9 +32,13 @@ run the file.
 
 ## Inputs
 
-The default design generates its cylindrical support and target field in
-memory, so it requires no static input files. Future imported meshes, measured
-fields, or preoptimized solutions belong under:
+The default design loads these remeshed STL winding surfaces:
+
+- `Octagonal Gradients - Gx Surface_remeshed.stl`
+- `Octagonal Gradients - Gy Surface_remeshed.stl`
+- `Octagonal Gradients - Gz Surface_remeshed.stl`
+
+They belong under:
 
 ```text
 project_data/halbach_cylindrical_3axis_gradient/
@@ -47,13 +52,14 @@ from version control.
 
 The supplied manufacturing geometry is configured as follows:
 
-- Gx, Gy, and Gz current-carrying surface diameters: 168, 182, and 196 mm.
-- Cylinder length: 270 mm; spherical DSV diameter: 50 mm.
-- The first winding surface is 1 mm radially below the 170 mm outer surface
-  of the first cylinder. Each gradient cylinder is specified as 4 mm thick.
-- The active sweep is a square rectangular cross-section, 1.70 mm wide and
-  1.70 mm deep. The retained alternatives are a 1.40 mm round wire and the
-  previous 1.96/1.60 mm by 1.80 mm trapezoid.
+- Gx, Gy, and Gz use their corresponding remeshed octagonal STL surfaces.
+- The STL coordinates are in millimetres and are scaled by `1e-3` on import;
+  all downstream geometry and electromagnetic calculations remain in SI units.
+- The imported surface envelopes are 170 x 290 x 170 mm (Gx),
+  184 x 290 x 184 mm (Gy), and 198 x 290 x 198 mm (Gz).
+- The spherical DSV diameter is 50 mm.
+- The active sweep is a 1.96/1.60 mm by 1.80 mm trapezoid. The retained
+  alternatives are a 1.70 mm square conductor and a 1.40 mm round wire.
 - The visualization sweep uses exact-mode path simplification to remove only
   redundant, nearly collinear rings that would otherwise create micron-scale
   triangle edges. Manufacturing diagnostics are written before STL readiness
@@ -66,13 +72,9 @@ The supplied manufacturing geometry is configured as follows:
 - `PROJECT.channels`
   Keep `GX`, `GY`, and `GZ`, or remove channels to solve only one or two axes.
 
-- `GRADIENT_TEMPLATE.radius_m` and `GRADIENT_TEMPLATE.length_m`
-  Shared unshielded cylindrical support.
-
-- `GRADIENT_TEMPLATE.rotation_axis` and `rotation_angle_rad`
-  The default `(1, 0, 0)` and `pi/2` rotate the native cylinder axis from
-  global `+z` to global `-y`; keep `b0_direction=(0, 0, 1)` for the
-  transverse Halbach field convention.
+- `SURFACE_MESH_FILES` and `SURFACE_MESH_LENGTH_SCALE_TO_M`
+  Axis-to-STL mapping and the explicit millimetre-to-metre conversion. Keep
+  `b0_direction=(0, 0, 1)` for the transverse Halbach field convention.
 
 - `GRADIENT_TEMPLATE.target_scale`
   Requested gradient amplitude. `0.010` means 10 mT/m.
@@ -130,7 +132,7 @@ SVG plot gallery. SVG galleries are off by default to avoid accumulating plot
 files. The root output folder also contains the CoilProject summary files:
 
 When STL export is enabled, each axis `stl` folder contains both the swept
-conductor volume and the corresponding cylindrical current-carrying surface.
+conductor volume and the corresponding octagonal current-carrying surface.
 The two files share the same part number for manufacturing association.
 
 - `halbach_cylindrical_3axis_gradient_project_summary.csv`

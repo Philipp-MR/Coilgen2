@@ -1378,6 +1378,7 @@ def _single_mesh_contour_report(
             "symmetry_single_mesh_contour_count": 0,
         }
     potentials = np.asarray([float(contour.potential) for contour in contours], dtype=float)
+    multiplicities = np.asarray([int(contour.turn_multiplicity) for contour in contours], dtype=np.int64)
     centroids = np.asarray([np.mean(np.asarray(contour.v, dtype=float), axis=0) for contour in contours], dtype=float)
     contour_points = [np.asarray(contour.v, dtype=float) for contour in contours if len(contour.v)]
     scale = (
@@ -1403,7 +1404,10 @@ def _single_mesh_contour_report(
     for contour_ind, contour in enumerate(contours):
         expected_potential = sign * float(contour.potential) + offset
         candidate_errors = np.abs(potentials - expected_potential)
-        eligible = np.flatnonzero(candidate_errors <= potential_tolerance)
+        eligible = np.flatnonzero(
+            (candidate_errors <= potential_tolerance)
+            & (multiplicities == int(contour.turn_multiplicity))
+        )
         if eligible.size:
             centroid_distances = np.linalg.norm(centroids[eligible] - reflected_centroids[contour_ind][None, :], axis=1)
             assignment_cost[contour_ind, eligible] = candidate_errors[eligible] / max(
@@ -1447,6 +1451,7 @@ def _single_mesh_contour_report(
         "symmetry_single_mesh_matched_contour_count": matched_count,
         "symmetry_single_mesh_unmatched_contour_count": int(unmatched),
         "symmetry_single_mesh_unique_matched_contour_count": unique_matched_count,
+        "symmetry_single_mesh_turn_multiplicity_checked": True,
         "symmetry_single_mesh_contour_geometry_tolerance_m": float(geometry_tolerance),
         "symmetry_single_mesh_contour_geometry_max_distance_m": geometry_max,
         "symmetry_single_mesh_contour_geometry_rms_distance_m": geometry_rms,
@@ -1931,6 +1936,11 @@ def _contour_loop_pruning_groups(
             indices_a = sorted(by_level_a.get(level_a, ()), key=lambda ind: part_a.contour_lines[ind].length)
             indices_b = sorted(by_level_b.get(level_b, ()), key=lambda ind: part_b.contour_lines[ind].length)
             for contour_a, contour_b in zip(indices_a, indices_b):
+                if (
+                    part_a.contour_lines[contour_a].turn_multiplicity
+                    != part_b.contour_lines[contour_b].turn_multiplicity
+                ):
+                    continue
                 group = [(pair[0], contour_a), (pair[1], contour_b)]
                 groups.append(group)
                 assigned.update(group)
@@ -1949,6 +1959,7 @@ def _single_mesh_contour_pruning_groups(
         return [], set(), True
     point, normal = _configured_mirror_plane(config)
     potentials = np.asarray([float(contour.potential) for contour in contours], dtype=float)
+    multiplicities = np.asarray([int(contour.turn_multiplicity) for contour in contours], dtype=np.int64)
     centroids = np.asarray([np.mean(np.asarray(contour.v, dtype=float), axis=0) for contour in contours])
     reflected_centroids = _reflect_points(centroids, point, normal)
     contour_points = [np.asarray(contour.v, dtype=float) for contour in contours if len(contour.v)]
@@ -1967,7 +1978,10 @@ def _single_mesh_contour_pruning_groups(
     for contour_ind, contour in enumerate(contours):
         expected = sign * float(contour.potential) + offset
         potential_errors = np.abs(potentials - expected)
-        eligible = np.flatnonzero(potential_errors <= potential_tolerance)
+        eligible = np.flatnonzero(
+            (potential_errors <= potential_tolerance)
+            & (multiplicities == int(contour.turn_multiplicity))
+        )
         if eligible.size:
             centroid_distances = np.linalg.norm(
                 centroids[eligible] - reflected_centroids[contour_ind][None, :],

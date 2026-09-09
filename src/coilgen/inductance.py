@@ -307,10 +307,10 @@ def _wire_length(part: CoilPart) -> float:
 
 def _cross_section_area(config: CoilGenConfig) -> float:
     points = np.asarray(config.cross_sectional_points, dtype=float)
-    if points.ndim == 2 and len(points) >= 3:
+    if points.ndim == 2:
         if points.shape[0] == 2 and points.shape[1] != 2:
             points = points.T
-        if points.shape[1] == 2:
+        if points.shape[1] == 2 and len(points) >= 3:
             x = points[:, 0]
             y = points[:, 1]
             area = 0.5 * abs(float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))

@@ -123,7 +123,9 @@ def layout_target_residual_diagnostics(
     layout_values = field_component_values(field_by_layout, component, b0_direction=b0_direction).reshape(-1)
     mask = component_sample_values(dsv_target_mask(target_field), component).astype(bool).reshape(-1)
     weights = component_sample_values(np.asarray(target_field.weights, dtype=float), component).reshape(-1)
-    finite = mask & np.isfinite(target_values) & np.isfinite(layout_values) & np.isfinite(weights) & (weights > 0.0)
+    active = mask & np.isfinite(weights) & (weights > 0.0)
+    finite = active & np.isfinite(target_values) & np.isfinite(layout_values)
+    invalid_sample_count = int(np.count_nonzero(active & ~finite))
     metric_key = str(getattr(config, "target_error_constraint_metric", "std"))
     metric_key = metric_key.strip().lower().replace("-", "_")
     std_limit = max(float(getattr(config, "layout_target_error_std_limit_T", 0.0)), 0.0)
@@ -152,6 +154,7 @@ def layout_target_residual_diagnostics(
             "layout_target_acceptance_absolute_T": float(acceptance),
             "layout_target_metric_ratio": float("nan"),
             "layout_target_sample_count": 0,
+            "layout_target_invalid_sample_count": invalid_sample_count,
             "layout_target_source": "connected_wire" if not config.skip_postprocessing else "unconnected_contours",
         }
     residual = layout_values[finite] - target_values[finite]
@@ -162,7 +165,10 @@ def layout_target_residual_diagnostics(
     residual_rms = float(np.sqrt(np.dot(active_weights, residual**2) / weight_sum))
     metric_value = residual_std if metric == "std" else residual_rms
     effective_limit = limit + acceptance
-    met = bool(not checked or (np.isfinite(metric_value) and metric_value <= effective_limit))
+    met = bool(
+        not checked
+        or (invalid_sample_count == 0 and np.isfinite(metric_value) and metric_value <= effective_limit)
+    )
     return {
         "layout_target_checked": checked,
         "layout_target_met": met,
@@ -175,6 +181,7 @@ def layout_target_residual_diagnostics(
         "layout_target_acceptance_absolute_T": float(acceptance),
         "layout_target_metric_ratio": float(metric_value / max(effective_limit, 1.0e-30)) if checked else float("nan"),
         "layout_target_sample_count": int(np.count_nonzero(finite)),
+        "layout_target_invalid_sample_count": invalid_sample_count,
         "layout_target_source": "connected_wire" if not config.skip_postprocessing else "unconnected_contours",
     }
 

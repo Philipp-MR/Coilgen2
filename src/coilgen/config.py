@@ -8,6 +8,7 @@ from typing import Sequence
 @dataclass(frozen=True, slots=True)
 class MeshSettings:
     coil_mesh_file: str
+    imported_mesh_length_scale_to_m: float
     surface_is_cylinder_flag: bool
     cylinder_mesh_parameter_list: Sequence[float]
     planar_mesh_parameter_list: Sequence[float]
@@ -91,6 +92,7 @@ class OptimizationSettings:
     suppression_surface_weighting: str
     suppression_normal_source: str
     target_error_constraint_acceptance_absolute_T: float
+    target_error_constraint_acceptance_tolerance: float
     target_error_constraint_factor_count: int
     target_error_constraint_factor_min_multiplier: float
     target_error_constraint_factor_max_multiplier: float
@@ -202,6 +204,11 @@ class OptimizationSettings:
     contour_sparsification_pruning_max_removed_geometries: int
     contour_sparsification_pruning_target_geometry_count: int
     contour_sparsification_pruning_preserve_symmetry: bool
+    contour_sparsification_pruning_search_mode: str
+    contour_sparsification_pruning_exact_max_orbits: int
+    contour_sparsification_pruning_beam_width: int
+    contour_sparsification_post_pruning_merge_mode: str
+    contour_sparsification_post_pruning_max_passes: int
     symmetry_reduction: str
     symmetry_reduction_source: str
     symmetry_reduction_mirror_plane_point: Sequence[float]
@@ -365,6 +372,7 @@ class CoilGenConfig:
     suppression_surface_weighting: str = "uniform"
     suppression_normal_source: str = "mesh"
     target_error_constraint_acceptance_absolute_T: float = 1.0e-7
+    target_error_constraint_acceptance_tolerance: float = 0.0
     target_error_constraint_factor_count: int = 61
     target_error_constraint_factor_min_multiplier: float = 1e-10
     target_error_constraint_factor_max_multiplier: float = 1e10
@@ -478,6 +486,11 @@ class CoilGenConfig:
     contour_sparsification_pruning_max_removed_geometries: int = 0
     contour_sparsification_pruning_target_geometry_count: int = 0
     contour_sparsification_pruning_preserve_symmetry: bool = True
+    contour_sparsification_pruning_search_mode: str = "auto"
+    contour_sparsification_pruning_exact_max_orbits: int = 16
+    contour_sparsification_pruning_beam_width: int = 128
+    contour_sparsification_post_pruning_merge_mode: str = "off"
+    contour_sparsification_post_pruning_max_passes: int = 1
     topological_grouping_method: str = "auto"
     symmetry_reduction: str = "auto"
     symmetry_reduction_source: str = "generated_parts"
@@ -517,6 +530,7 @@ class CoilGenConfig:
     b_0_direction: Sequence[float] = (0.0, 0.0, 1.0)
     b_0_strength_T: float = 1.0
     geometry_source_path: Path | None = None
+    imported_mesh_length_scale_to_m: float = 1.0
     output_directory: Path | None = None
     progress_flag: bool = False
     progress_min_interval_seconds: float = 1.0
@@ -718,6 +732,7 @@ class CoilGenConfig:
     def mesh_settings(self) -> MeshSettings:
         return MeshSettings(
             coil_mesh_file=self.coil_mesh_file,
+            imported_mesh_length_scale_to_m=self.imported_mesh_length_scale_to_m,
             surface_is_cylinder_flag=self.surface_is_cylinder_flag,
             cylinder_mesh_parameter_list=self.cylinder_mesh_parameter_list,
             planar_mesh_parameter_list=self.planar_mesh_parameter_list,
@@ -797,6 +812,7 @@ class CoilGenConfig:
             suppression_surface_weighting=self.suppression_surface_weighting,
             suppression_normal_source=self.suppression_normal_source,
             target_error_constraint_acceptance_absolute_T=self.target_error_constraint_acceptance_absolute_T,
+            target_error_constraint_acceptance_tolerance=self.target_error_constraint_acceptance_tolerance,
             target_error_constraint_factor_count=self.target_error_constraint_factor_count,
             target_error_constraint_factor_min_multiplier=self.target_error_constraint_factor_min_multiplier,
             target_error_constraint_factor_max_multiplier=self.target_error_constraint_factor_max_multiplier,
@@ -908,6 +924,11 @@ class CoilGenConfig:
             contour_sparsification_pruning_max_removed_geometries=self.contour_sparsification_pruning_max_removed_geometries,
             contour_sparsification_pruning_target_geometry_count=self.contour_sparsification_pruning_target_geometry_count,
             contour_sparsification_pruning_preserve_symmetry=self.contour_sparsification_pruning_preserve_symmetry,
+            contour_sparsification_pruning_search_mode=self.contour_sparsification_pruning_search_mode,
+            contour_sparsification_pruning_exact_max_orbits=self.contour_sparsification_pruning_exact_max_orbits,
+            contour_sparsification_pruning_beam_width=self.contour_sparsification_pruning_beam_width,
+            contour_sparsification_post_pruning_merge_mode=self.contour_sparsification_post_pruning_merge_mode,
+            contour_sparsification_post_pruning_max_passes=self.contour_sparsification_post_pruning_max_passes,
             symmetry_reduction=self.symmetry_reduction,
             symmetry_reduction_source=self.symmetry_reduction_source,
             symmetry_reduction_mirror_plane_point=self.symmetry_reduction_mirror_plane_point,

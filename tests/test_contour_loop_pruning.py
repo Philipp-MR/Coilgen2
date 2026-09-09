@@ -164,3 +164,80 @@ def test_single_mesh_pruning_groups_mirror_partners() -> None:
     assert complete
     assert not protected
     assert groups == [[(0, 0), (0, 1)]]
+
+
+def test_single_mesh_pruning_groups_use_arbitrary_configured_plane() -> None:
+    angles = np.linspace(0.0, 2.0 * np.pi, 33)
+    plane_point = np.asarray([0.2, -0.1, 0.3])
+    plane_normal = np.asarray([1.0, 2.0, -0.5])
+    plane_normal /= np.linalg.norm(plane_normal)
+    tangent_a = np.cross(plane_normal, np.asarray([0.0, 0.0, 1.0]))
+    tangent_a /= np.linalg.norm(tangent_a)
+    tangent_b = np.cross(plane_normal, tangent_a)
+    right_center = plane_point + 0.4 * plane_normal
+    right = (
+        right_center[None, :]
+        + 0.1 * np.cos(angles)[:, None] * tangent_a[None, :]
+        + 0.07 * np.sin(angles)[:, None] * tangent_b[None, :]
+    )
+    signed_distance = (right - plane_point) @ plane_normal
+    left = right - 2.0 * signed_distance[:, None] * plane_normal[None, :]
+    mesh = Mesh(
+        vertices=np.vstack((right[:3], left[:3])),
+        faces=np.asarray([[0, 1, 2], [3, 5, 4]], dtype=np.int64),
+    )
+    part = CoilPart(
+        mesh=mesh,
+        contour_step=1.0,
+        contour_lines=[ContourLine(v=right, potential=0.0), ContourLine(v=left, potential=0.0)],
+    )
+    part.contour_level_diagnostics.update(
+        {"symmetry_stream_function_sign": 1, "symmetry_stream_function_offset_A": 0.0}
+    )
+    config = CoilGenConfig(
+        symmetry_reduction_source="single_mesh",
+        contour_symmetry_validation="strict",
+        symmetry_reduction_mirror_plane_point=tuple(plane_point),
+        symmetry_reduction_mirror_plane_normal=tuple(plane_normal),
+        contour_symmetry_geometry_tolerance=1.0e-6,
+    )
+
+    groups, protected, complete = _single_mesh_contour_pruning_groups(part, config)
+
+    assert complete
+    assert not protected
+    assert groups == [[(0, 0), (0, 1)]]
+
+
+def test_single_mesh_pruning_rejects_multiplicity_mismatch() -> None:
+    angles = np.linspace(0.0, 2.0 * np.pi, 33)
+    right = np.column_stack((np.ones_like(angles), np.cos(angles), np.sin(angles)))
+    left = right.copy()
+    left[:, 0] *= -1.0
+    mesh = Mesh(
+        vertices=np.asarray([[-1.0, -1.0, 0.0], [-1.0, 1.0, 0.0], [1.0, -1.0, 0.0], [1.0, 1.0, 0.0]]),
+        faces=np.asarray([[0, 2, 1], [1, 2, 3]], dtype=np.int64),
+    )
+    part = CoilPart(
+        mesh=mesh,
+        contour_step=1.0,
+        contour_lines=[
+            ContourLine(v=right, potential=0.0, turn_multiplicity=2),
+            ContourLine(v=left, potential=0.0, turn_multiplicity=1),
+        ],
+    )
+    part.contour_level_diagnostics.update(
+        {"symmetry_stream_function_sign": 1, "symmetry_stream_function_offset_A": 0.0}
+    )
+    config = CoilGenConfig(
+        symmetry_reduction_source="single_mesh",
+        contour_symmetry_validation="strict",
+        symmetry_reduction_mirror_plane_normal=(1.0, 0.0, 0.0),
+        contour_symmetry_geometry_tolerance=1.0e-6,
+    )
+
+    groups, protected, complete = _single_mesh_contour_pruning_groups(part, config)
+
+    assert not complete
+    assert protected == {(0, 0), (0, 1)}
+    assert groups == [[(0, 0)], [(0, 1)]]

@@ -30,6 +30,12 @@ def nearest_source_segment_indices(
         return np.zeros(0, dtype=np.int64)
     if source_segment_count == 0:
         raise ValueError("source_points must contain at least one segment")
+    # Exact paths have an unambiguous interval map even when distinct visits
+    # retrace the same coordinates. Geometric matching would lose that order.
+    if np.array_equal(source, target):
+        return np.arange(source_segment_count, dtype=np.int64)
+    if np.array_equal(source[::-1], target):
+        return np.arange(source_segment_count - 1, -1, -1, dtype=np.int64)
 
     source_starts = source[:-1]
     source_vectors = np.diff(source, axis=0)
@@ -138,11 +144,14 @@ def dedupe_path_with_segment_owners(
     """Remove consecutive duplicate points while preserving segment provenance."""
 
     points = np.asarray(points, dtype=float)
+    if owners and len(owners) != max(len(points) - 1, 0):
+        raise ValueError("owners must contain one entry per source segment")
     if len(points) < 2:
         return points.copy(), []
     keep = np.ones(len(points), dtype=bool)
     keep[1:] = np.linalg.norm(np.diff(points, axis=0), axis=1) > float(tolerance)
     deduped = points[keep]
-    if len(deduped) == len(points):
-        return deduped, list(owners)
-    return deduped, transfer_segment_owners(points, owners, deduped)
+    if not owners:
+        return deduped, []
+    source_indices = np.flatnonzero(keep)[1:] - 1
+    return deduped, [owners[int(index)] for index in source_indices]

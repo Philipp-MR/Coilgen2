@@ -296,7 +296,17 @@ def load_mesh_from_config(config: CoilGenConfig, project_root: Path) -> Mesh:
         return normalize_mesh(get_in_memory_mesh(mesh_name))
     if mesh_name.lower().endswith(".stl"):
         mesh_path = config.resolved_geometry_source_path(project_root) / mesh_name
-        return normalize_mesh(read_stl(mesh_path))
+        mesh = read_stl(mesh_path)
+        length_scale_to_m = float(config.imported_mesh_length_scale_to_m)
+        if length_scale_to_m != 1.0:
+            mesh.vertices = np.asarray(mesh.vertices, dtype=float) * length_scale_to_m
+            mesh.metadata.update(
+                {
+                    "source_length_scale_to_m": length_scale_to_m,
+                    "units": "SI",
+                }
+            )
+        return normalize_mesh(mesh)
     registered = geometry_factory(mesh_name)
     if registered is not None:
         return normalize_mesh(registered.build(config))

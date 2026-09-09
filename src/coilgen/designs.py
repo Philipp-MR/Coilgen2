@@ -917,12 +917,14 @@ class ShieldedFlangedSplitBoreCoilDesign(FlangedSplitBoreCoilDesign):
 class ImportedMeshCoilDesign(CoilDesign):
     mesh_file: str = "coil_surface.stl"
     geometry_source_path: str | Path | None = None
+    mesh_length_scale_to_m: float = 1.0
     surface_is_cylinder: bool = False
 
     def geometry_config(self) -> dict[str, Any]:
         return {
             "coil_mesh_file": self.mesh_file,
             "geometry_source_path": None if self.geometry_source_path is None else Path(self.geometry_source_path),
+            "imported_mesh_length_scale_to_m": self.mesh_length_scale_to_m,
             "surface_is_cylinder_flag": self.surface_is_cylinder,
         }
 

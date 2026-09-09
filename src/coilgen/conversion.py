@@ -57,6 +57,7 @@ def coil_design_problem_to_config(
             ),
             "conductor_cross_section_width": float(problem.conductor.width_m),
             "conductor_cross_section_height": float(problem.conductor.height_m),
+            "sweep_insulation_thickness": float(problem.conductor.insulation_thickness_m),
             "specific_conductivity_conductor": float(problem.conductor.resistivity_ohm_m),
             "sf_opt_method": str(problem.optimization.method),
             "stream_function_cost_function": str(problem.optimization.cost_function),
@@ -84,6 +85,35 @@ def coil_design_problem_to_config(
     values.update(_support_geometry_config(problem))
     if problem.optimization.regularization_factor is not None:
         values["tikonov_reg_factor"] = float(problem.optimization.regularization_factor)
+    if problem.conductor.effective_sheet_thickness_m is not None:
+        values["conductor_thickness"] = float(problem.conductor.effective_sheet_thickness_m)
+    optimization_fields = {
+        "constrained_objective_mode": "constrained_quadratic_objective_mode",
+        "conic_solver": "constrained_optimization_solver",
+        "conic_tolerance": "constrained_optimization_tolerance",
+        "conic_max_iterations": "constrained_optimization_max_iterations",
+        "conic_fallback_policy": "constrained_quadratic_fallback_policy",
+        "target_error_mode": "target_error_constraint_mode",
+        "target_error_metric": "target_error_constraint_metric",
+        "target_error_tolerance_absolute_T": "target_error_tolerance_absolute_T",
+        "target_error_constraint_acceptance_absolute_T": "target_error_constraint_acceptance_absolute_T",
+        "target_error_constraint_acceptance_tolerance": "target_error_constraint_acceptance_tolerance",
+        "target_error_rms_limit_T": "target_error_rms_limit_T",
+        "target_error_std_limit_T": "target_error_std_limit_T",
+        "suppression_rms_limit_T": "suppression_field_rms_limit_T",
+        "suppression_peak_limit_T": "suppression_field_peak_limit_T",
+        "surface_current_density_limit_A_per_m": "surface_current_density_limit_A_per_m",
+        "smoothness_factor": "stream_function_smoothness_factor",
+        "basis": "stream_function_basis",
+        "spectral_cutoff_length_m": "stream_function_spectral_cutoff_length_m",
+        "spectral_cutoff_policy": "stream_function_spectral_cutoff_policy",
+        "spectral_min_modes": "stream_function_spectral_min_modes",
+        "spectral_max_modes": "stream_function_spectral_max_modes",
+    }
+    for spec_field, config_field in optimization_fields.items():
+        value = getattr(problem.optimization, spec_field)
+        if value is not None:
+            values[config_field] = value
     values.update(_metadata_config_overrides(problem))
     if config_overrides:
         values.update(dict(config_overrides))

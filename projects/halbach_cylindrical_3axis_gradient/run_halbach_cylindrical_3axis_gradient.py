@@ -14,14 +14,14 @@ for import_path in (PROJECT_ROOT / "src", PROJECT_ROOT):
 
 from coilgen import (
     CoilProject,
-    CylinderCoilDesign,
     GradientLinearitySpec,
     GradientSliceMapSpec,
+    ImportedMeshCoilDesign,
     save_manufacturing_diagnostics,
     save_swept_bodies_as_stl,
 )
 from projects._shared.example_utils import open_project_plot_book_after_run
-from projects.halbach_cylindrical_3axis_gradient.paths import halbach_output_dir
+from projects.halbach_cylindrical_3axis_gradient.paths import HALBACH_DATA_ROOT, halbach_output_dir
 
 
 OUTPUT_ROOT = halbach_output_dir()
@@ -69,19 +69,14 @@ ENABLE_NORMAL_SHIFT = True
 NORMAL_SHIFT_LENGTH_M = 0.003  # 3 mm maximum shift per routing level.
 NORMAL_SHIFT_TRANSITION_FACTOR = 5.0  # Transition length = factor * shift length.
 
-# Current-carrying surface diameters for Gx, Gy, and Gz.  For the first
-# cylinder, the Gx surface lies 1 mm radially below its 170 mm outer surface.
-BASE_SURFACE_DIAMETER_M = 0.168
-SURFACE_DIAMETER_STEP_M = 0.014
-SURFACE_DIAMETERS_M = {
-    "x": BASE_SURFACE_DIAMETER_M,
-    "y": BASE_SURFACE_DIAMETER_M + SURFACE_DIAMETER_STEP_M,
-    "z": BASE_SURFACE_DIAMETER_M + 2.0 * SURFACE_DIAMETER_STEP_M,
+# Axis-specific octagonal current-carrying surfaces exported in millimetres.
+# CoilGen converts their coordinates to metres as they are loaded.
+SURFACE_MESH_FILES = {
+    "x": "Octagonal Gradients - Gx Surface_remeshed.stl",
+    "y": "Octagonal Gradients - Gy Surface_remeshed.stl",
+    "z": "Octagonal Gradients - Gz Surface_remeshed.stl",
 }
-FIRST_CYLINDER_OUTER_DIAMETER_M = 0.170
-CURRENT_CARRYING_SURFACE_DEPTH_M = 0.001
-GRADIENT_CYLINDER_THICKNESS_M = 0.004
-COIL_LENGTH_M = 0.270
+SURFACE_MESH_LENGTH_SCALE_TO_M = 1.0e-3
 DSV_DIAMETER_M = 0.050
 DSV_RADIUS_M = DSV_DIAMETER_M / 2.0
 WIRE_DIAMETER_M = 0.0014  # Used when SWEEP_CROSS_SECTION is "round".
@@ -93,17 +88,6 @@ TRAPEZOID_BOTTOM_WIDTH_M = 0.00196
 TRAPEZOID_TOP_WIDTH_M = 0.00160
 TRAPEZOID_HEIGHT_M = 0.00180
 TRAPEZOID_TOP_WIDTH_RATIO = TRAPEZOID_TOP_WIDTH_M / TRAPEZOID_BOTTOM_WIDTH_M
-
-if not math.isclose(
-    BASE_SURFACE_DIAMETER_M + 2.0 * CURRENT_CARRYING_SURFACE_DEPTH_M,
-    FIRST_CYLINDER_OUTER_DIAMETER_M,
-    rel_tol=0.0,
-    abs_tol=1.0e-12,
-):
-    raise ValueError(
-        "The first current-carrying surface diameter and radial depth must match FIRST_CYLINDER_OUTER_DIAMETER_M"
-    )
-
 
 def _round_wire_cross_section_points(diameter_m: float, point_count: int = 64) -> tuple[tuple[float, float], ...]:
     radius = float(diameter_m) / 2.0
@@ -240,19 +224,14 @@ ENGINEERING_CONTOUR_MAX_LEVELS = 80
 CONTOUR_LEVELS = 8
 GRADIENT_HARDWARE_INFEASIBLE_POLICY = "scale_to_limit"
 
-GRADIENT_TEMPLATE = CylinderCoilDesign(
+GRADIENT_TEMPLATE = ImportedMeshCoilDesign(
     name=f"{PROJECT_NAME}_template",
     design_context="mr_gradient",
-    radius_m=BASE_SURFACE_DIAMETER_M / 2.0,
-    length_m=COIL_LENGTH_M,
-    # A 42 x 30 mesh gives about 12.6 mm circumferential and 9.0 mm axial
-    # support sampling here. This materially reduces mesh-induced contour
-    # zig-zag without the much higher solve cost observed at 56 x 40.
-    angular_divisions=42,
-    length_divisions=30,
-    rotation_axis=(1.0, 0.0, 0.0),
-    # Native cylinder +z is rotated about +x onto global -y, orthogonal to B0 (+z).
-    rotation_angle_rad=math.pi / 2.0,
+    mesh_file=SURFACE_MESH_FILES["x"],
+    geometry_source_path=HALBACH_DATA_ROOT,
+    mesh_length_scale_to_m=SURFACE_MESH_LENGTH_SCALE_TO_M,
+    # The imported meshes are axially extruded octagons with two open ends.
+    surface_is_cylinder=True,
     target_scale=TARGET_GRADIENT_STRENGTH_T_PER_M,
     target_gradient_normalization="linear_fit",
     target_gradient_axis="auto",
@@ -378,7 +357,7 @@ PROJECT.gradient_channel(
     gradient_hardware_infeasible_policy=GRADIENT_HARDWARE_INFEASIBLE_POLICY,
     design_overrides={
         "name": f"{PROJECT_NAME}_gx",
-        "radius_m": SURFACE_DIAMETERS_M["x"] / 2.0,
+        "mesh_file": SURFACE_MESH_FILES["x"],
         "min_turn_spacing_m": AXIS_MIN_WIRE_DISTANCE_M["x"],
     },
     label="GX",
@@ -401,7 +380,7 @@ PROJECT.gradient_channel(
     gradient_hardware_infeasible_policy=GRADIENT_HARDWARE_INFEASIBLE_POLICY,
     design_overrides={
         "name": f"{PROJECT_NAME}_gy",
-        "radius_m": SURFACE_DIAMETERS_M["y"] / 2.0,
+        "mesh_file": SURFACE_MESH_FILES["y"],
         "min_turn_spacing_m": AXIS_MIN_WIRE_DISTANCE_M["y"],
     },
     label="GY",
@@ -424,7 +403,7 @@ PROJECT.gradient_channel(
     gradient_hardware_infeasible_policy=GRADIENT_HARDWARE_INFEASIBLE_POLICY,
     design_overrides={
         "name": f"{PROJECT_NAME}_gz",
-        "radius_m": SURFACE_DIAMETERS_M["z"] / 2.0,
+        "mesh_file": SURFACE_MESH_FILES["z"],
         "min_turn_spacing_m": AXIS_MIN_WIRE_DISTANCE_M["z"],
     },
     label="GZ",

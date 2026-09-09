@@ -16,12 +16,12 @@ the Python CoilGen design workflow.
 
 ## Target Field
 
-- The inverse problem currently optimizes the Bz component at target samples.
-- For conventional MRI this usually means the useful field component parallel to
-  the scanner B0 direction. For transverse-B0, Halbach-style, or non-MRI field
-  shaping systems, this Bz convention must be checked carefully. A future
-  general vector-target API should allow `B dot b0_hat` or full vector-field
-  targets instead of assuming global Cartesian Bz.
+- Bz is the default target component. The core also supports Bx, By,
+  `B dot b0_hat`, and vector-field targets through the field-component API.
+- For transverse-B0 or Halbach systems, specify the useful component and B0
+  direction explicitly. Some gradient-efficiency and engineering reports still
+  fit Cartesian Bz; support in the optimizer does not establish that every
+  downstream report uses the same component.
 - Symbolic target expressions such as `x`, `y`, or `z` describe the requested Bz
   spatial dependence before scaling to `target_gradient_strength`.
 - CSV/JSON/NPZ target-field imports are interpreted in SI units: coordinates in
@@ -54,15 +54,17 @@ For geometry-comparison studies with active shielding, the physically preferred
 formulation separates useful-field accuracy from fringe-field suppression:
 
 ```text
-minimize_x  ||R x||_2^2 + eta ||L psi||_2^2
+minimize_x  x^T R x + eta ||L psi||_2^2
 subject to  ||A_dsv x - b_dsv||_2 <= eps_dsv ||b_dsv||_2 + delta_dsv
             ||A_sup x||_2 / sqrt(N_sup) <= B_sup,rms,max
 ```
 
 `x` is the reduced stream-function vector, `A_dsv` maps `x` to Bz on the
 internal DSV target samples, `A_sup` maps `x` to Bz on the external suppression
-surface, `R` is the resistance/current metric, and `L` is the optional surface
-smoothness metric. The suppression bound is an RMS Bz amplitude in tesla and is
+surface, `R` is the quadratic resistance matrix, and `L` is the optional surface
+smoothness operator. Using `||R x||^2` instead would apply `R^T R` and change the
+physical objective. This example uses Bz; generalized targets use their selected
+field component. The suppression bound is an RMS Bz amplitude in tesla and is
 therefore independent of the number of suppression samples. If no RMS field
 limit is configured, CoilGen keeps the older residual-norm form
 `||A_sup x - b_sup||_2 <= eps_sup ||b_dsv||_2 + delta_sup` for compatibility.
@@ -170,8 +172,8 @@ complete engineering or clinical-device readiness claim.
 - Automatic whole-wire rerouting is not implemented. CoilGen detects and
   reports close wire contacts and can normal-shift return segments, but final
   clearance violations still require inspection or manual parameter adjustment.
-- General vector-field optimization is not yet implemented. Most public APIs are
-  Bz-first, with target expressions describing scalar Bz fields.
+- Vector and B0-projected optimization are implemented, while many convenience
+  APIs and gradient engineering reports remain Bz-first.
 - Intrinsic contour topology assumes an orientable surface with usable mesh
   normals. Non-orientable surfaces are outside the intended design domain.
 - Surface geodesic routing currently uses Dijkstra-style mesh-graph distances.

@@ -153,6 +153,11 @@ class SurfaceGeodesicSolver:
         ):
             return _empty_result()
 
+        direct = self._same_face_point_path(samples_a, samples_b)
+        if direct is not None:
+            self.last_dijkstra_settled_count = 0
+            return direct
+
         dijkstra = self._multi_source_dijkstra(
             samples_a.vertices,
             samples_a.offsets,
@@ -190,6 +195,44 @@ class SurfaceGeodesicSolver:
             index_b=best_target_point_ind,
             path_v=path_v,
         )
+
+    def _same_face_point_path(
+        self, samples_a: _SurfaceSamples, samples_b: _SurfaceSamples
+    ) -> GeodesicPathResult | None:
+        """Use a straight interval only when one triangle contains both endpoints."""
+
+        if len(samples_a.points) != 1 or len(samples_b.points) != 1:
+            return None
+        faces_a = {face for vertex in samples_a.vertices for face in self.vertex_faces[int(vertex)]}
+        faces_b = {face for vertex in samples_b.vertices for face in self.vertex_faces[int(vertex)]}
+        point_a = samples_a.points[0]
+        point_b = samples_b.points[0]
+        for face_index in sorted(faces_a & faces_b):
+            triangle = self.mesh.vertices[self.mesh.faces[face_index]]
+            edge_a, edge_b = triangle[1:] - triangle[0]
+            edge_scale = float(np.linalg.norm(edge_a) * np.linalg.norm(edge_b))
+            if np.linalg.norm(np.cross(edge_a, edge_b)) <= 64.0 * np.finfo(float).eps * edge_scale:
+                continue
+            scale = max(
+                float(np.max(np.abs(triangle))),
+                float(np.linalg.norm(edge_a)),
+                float(np.linalg.norm(edge_b)),
+                np.finfo(float).tiny,
+            )
+            tolerance_sq = (64.0 * np.finfo(float).eps * scale) ** 2
+            if (
+                _point_triangle_distance_sq(point_a, triangle) <= tolerance_sq
+                and _point_triangle_distance_sq(point_b, triangle) <= tolerance_sq
+            ):
+                return GeodesicPathResult(
+                    distance=float(np.linalg.norm(point_b - point_a)),
+                    point_a=point_a.copy(),
+                    index_a=0,
+                    point_b=point_b.copy(),
+                    index_b=0,
+                    path_v=np.vstack((point_a, point_b)),
+                )
+        return None
 
     def nearest_vertices(self, points: np.ndarray, *, chunk_size: int = 4096) -> np.ndarray:
         return self._nearest_vertex_candidates(points, k=1, chunk_size=chunk_size)[:, 0]

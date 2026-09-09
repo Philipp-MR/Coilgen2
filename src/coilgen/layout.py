@@ -2780,6 +2780,19 @@ def _greedy_fuse_connected_groups(
                 "The route was not completed because a straight 3D connector would leave the support surface."
             )
         v_path = _stack_path_sections((v_path, connector_v, v_rot))
+    if not _is_closed_path_array(v_path, 1e-10):
+        closing_connector_v = _inter_group_connector_path(
+            v_path[-1],
+            v_path[0],
+            geodesic_solver,
+            allow_direct_fallback=allow_direct_fallback,
+        )
+        if len(closing_connector_v) < 2:
+            raise ValueError(
+                "Unable to close the greedily fused route with a surface-geodesic connector. "
+                "The route was not completed because a straight 3D connector would leave the support surface."
+            )
+        v_path = _stack_path_sections((v_path, closing_connector_v))
     return _rotate_wire_path_to_max_z(WirePath(v=v_path))
 
 

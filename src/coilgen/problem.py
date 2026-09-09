@@ -1090,7 +1090,12 @@ class TargetFieldSpec:
 
 @dataclass(frozen=True, slots=True)
 class ConductorSpec:
-    """Physical conductor parameters used for resistance and layout constraints."""
+    """Physical wire parameters and an optional continuous-sheet thickness.
+
+    ``effective_sheet_thickness_m`` sets the sheet Joule-power metric used by
+    stream-function optimization; it is independent of the routed wire height.
+    Leaving it unset preserves the base configuration's sheet thickness.
+    """
 
     width_m: float = 0.002
     height_m: float = 0.002
@@ -1098,6 +1103,7 @@ class ConductorSpec:
     insulation_thickness_m: float = 0.0
     min_turn_spacing_m: float = 0.0
     material: str = "copper"
+    effective_sheet_thickness_m: float | None = None
 
     def __post_init__(self) -> None:
         if self.width_m <= 0 or self.height_m <= 0:
@@ -1106,6 +1112,10 @@ class ConductorSpec:
             raise ValueError("Conductor resistivity must be positive [Ohm m].")
         if self.insulation_thickness_m < 0 or self.min_turn_spacing_m < 0:
             raise ValueError("Conductor insulation and minimum spacing cannot be negative.")
+        if self.effective_sheet_thickness_m is not None and (
+            not np.isfinite(self.effective_sheet_thickness_m) or self.effective_sheet_thickness_m <= 0.0
+        ):
+            raise ValueError("Effective sheet thickness must be finite and positive [m].")
 
     @property
     def cross_section_area_m2(self) -> float:
@@ -1225,7 +1235,17 @@ class CoilSupportSpec:
 
 @dataclass(frozen=True, slots=True)
 class OptimizationSpec:
-    """Stream-function optimization choices."""
+    """Stream-function optimization choices.
+
+    Optional advanced controls preserve ``base_config`` settings when ``None``.
+    Conic controls apply to ``method='constrained_quadratic'``. Field limits are
+    in tesla, surface-current-density limits in A/m, and spectral lengths in m.
+    ``target_error_constraint_acceptance_*`` controls post-solve numerical
+    acceptance slack, separately from the requested field-error budget. Set its
+    absolute slack explicitly for small shim fields; the inherited configuration
+    default is 1e-7 T. These controls do not relax the solver's requested limit.
+    Metadata config overrides and explicit conversion overrides take precedence.
+    """
 
     method: str = "tikhonov"
     cost_function: str = "field_error_plus_resistance"
@@ -1235,6 +1255,27 @@ class OptimizationSpec:
     min_turn_spacing_m: float = 0.0
     use_symmetry_reduction: bool = False
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    constrained_objective_mode: str | None = None
+    conic_solver: str | None = None
+    conic_tolerance: float | None = None
+    conic_max_iterations: int | None = None
+    conic_fallback_policy: str | None = None
+    target_error_mode: str | None = None
+    target_error_metric: str | None = None
+    target_error_tolerance_absolute_T: float | None = None
+    target_error_constraint_acceptance_absolute_T: float | None = None
+    target_error_constraint_acceptance_tolerance: float | None = None
+    target_error_rms_limit_T: float | None = None
+    target_error_std_limit_T: float | None = None
+    suppression_rms_limit_T: float | None = None
+    suppression_peak_limit_T: float | None = None
+    surface_current_density_limit_A_per_m: float | None = None
+    smoothness_factor: float | None = None
+    basis: str | None = None
+    spectral_cutoff_length_m: float | None = None
+    spectral_cutoff_policy: str | None = None
+    spectral_min_modes: int | None = None
+    spectral_max_modes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

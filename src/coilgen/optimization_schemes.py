@@ -17,7 +17,7 @@ STREAM_FUNCTION_OPTIMIZATION_SCHEMES: tuple[StreamFunctionOptimizationScheme, ..
     StreamFunctionOptimizationScheme(
         name="tikhonov",
         cost_function="field_error_plus_resistance",
-        formula=("min_x ||A x - b||_2^2 + ||lambda R x||_2^2 + eta x^T C M^-1 C x + mu x^T S x"),
+        formula=("min_x ||A x - b||_2^2 + lambda^2 x^T R x + eta x^T C M^-1 C x + mu x^T S x"),
         description=(
             "Default linear stream-function solve. The optional smoothness and "
             "turn-spacing quadratic terms are active only when their factors are positive."
@@ -26,21 +26,23 @@ STREAM_FUNCTION_OPTIMIZATION_SCHEMES: tuple[StreamFunctionOptimizationScheme, ..
     StreamFunctionOptimizationScheme(
         name="target_error_constrained_efficiency",
         cost_function="minimum_resistance_subject_to_field_error",
-        formula="min_x ||R x||_2 subject to ||A x - b||_2 <= epsilon ||b||_2",
+        formula="search the Tikhonov family for low x^T R x within the configured field-error budgets",
         description=(
-            "Selects the highest-efficiency stream function that still satisfies a user-specified "
-            "weighted target-field error budget. This is useful for geometry studies where target "
-            "error should be held fixed while comparing efficiency."
+            "Restricted scalar regularization search. For one matching L2 residual bound and "
+            "no extra objective penalties it parameterizes the constrained minimum-sheet-power "
+            "solution. Separate constraints or different residual metrics require the direct "
+            "conic method for a general constrained optimum."
         ),
     ),
     StreamFunctionOptimizationScheme(
         name="constrained_quadratic",
         cost_function="minimum_resistance_subject_to_field_error_socp",
-        formula="min_x ||R x||_2^2 subject to ||A x - b||_2 <= epsilon ||b||_2",
+        formula="min_x x^T Q x, or min_{x,t} t with ||K_face x||_2 <= t; subject to physical field and engineering bounds",
         description=(
             "Direct fixed-error constrained solve using CVXPY and an installed conic solver "
-            "(CLARABEL, ECOS, or SCS). If CVXPY is unavailable, CoilGen falls back to the "
-            "Tikhonov multiplier search and records that fallback in the diagnostics."
+            "(CLARABEL, ECOS, or SCS). Objectives: sheet power plus optional quadratic penalties, "
+            "smoothness priority, or pure minimax vector current density. A scalar-search fallback "
+            "is diagnostic and cannot certify the full conic contract."
         ),
     ),
 )
