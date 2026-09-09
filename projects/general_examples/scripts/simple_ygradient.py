@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+# Support direct terminal/Spyder execution from any working directory.
+if __package__ in {None, ""}:
+    import sys
+    from pathlib import Path as _Path
+
+    for _path in (_Path(__file__).resolve().parents[3], _Path(__file__).resolve().parents[3] / "src"):
+        if str(_path) not in sys.path:
+            sys.path.insert(0, str(_path))
+
 from projects._shared.object_parameters import object_parameters
 
 from projects._shared.example_utils import (
+    interactive_plots_enabled,
+    native_thread_budget,
     PROJECT_ROOT,
     example_output_dir,
     open_project_plot_book_after_run,
@@ -19,21 +30,23 @@ from projects.general_examples.parameters import SIMPLE_YGRADIENT_DEFAULT_PARAME
 
 ################################################################################
 # USER SETTINGS
+# Runtime/chunking defaults are shared in parameters/defaults.py.
 ################################################################################
 # Run this file directly in Spyder. Edit values in this object, then run again.
 PARAMETERS = object_parameters(
     {
         "coilgen": {
             # Bz target field: "x", "y", "z", or an expression such as "x + 0.5*y".
-            "field_shape_function": "xy",
+            "field_shape_function": "y",
+            # Compact demonstration mesh; refine explicitly for convergence studies.
             # Generated cylinder: height, radius, circular divisions, height divisions, rotation axis x/y/z, rotation angle.
             "coil_mesh_file": "create cylinder mesh",
-            "cylinder_mesh_parameter_list": (0.5, 0.25, 40, 40, 1, 0, 0, 0),
+            "cylinder_mesh_parameter_list": (0.5, 0.25, 24, 16, 1, 0, 0, 0),
             # Spherical target cloud used for fitting the requested field.
             "target_region_radius": 0.1,
-            "target_region_resolution": 40,
+            "target_region_resolution": 7,
             # Number of stream-function levels converted to contours.
-            "levels": 30,
+            "levels": 8,
             # Relative contour offset between min/max stream-function values.
             "pot_offset_factor": 0.25,
             # Small contours with fewer points are removed.
@@ -77,26 +90,9 @@ PARAMETERS = object_parameters(
             "turn_spacing_max_iterations": 4,
             "turn_spacing_penalty_growth": 10.0,
             # Parallel CPU usage: 0 uses all logical cores, 1 is serial, -1 keeps one core free.
-            "parallel_worker_count": 0,
-            # Minimum estimated operation count before parallel workers are used.
-            "parallel_min_work_size": 50000,
-            # Sensitivity-matrix chunking; higher values create more, smaller worker tasks.
-            "sensitivity_chunks_per_worker": 4,
-            "sensitivity_calculation_method": "vectorized",
-            # Segment chunk sizes for Biot-Savart field evaluation and Neumann inductance.
-            "biot_savart_chunk_size": 512,
-            "inductance_chunk_size": 256,
-            "wire_distance_method": "auto",
-            "wire_distance_chunk_size": 512,
-            "wire_distance_spatial_min_segments": 3000,
-            # Approximate memory cap per numerical chunk.
-            "parallel_max_chunk_memory_mb": 64.0,
-            "optimization_solver": "auto",
-            "optimization_solver_residual_tolerance": 1e-8,
+            "parallel_worker_count": 1,
             # Print progress percentages for long calculation stages.
             "progress_flag": True,
-            "progress_min_interval_seconds": 1.0,
-            "progress_percent_step": 5.0,
             # Inter-group connector method: "direct_3d" or "geodesic".
             "inter_group_connection_path_method": "direct_3d",
             # Keep postprocessing and sweep enabled for a complete layout.
@@ -185,7 +181,7 @@ def main():
             close_previous=plots["close_previous"],
             mode=plots.get("mode", "book"),
         )
-        if plots["show_active"]
+        if interactive_plots_enabled(plots["show_active"])
         else []
     )
     print_result_summary(result, title="Simple y-gradient design")
@@ -194,7 +190,9 @@ def main():
 
 
 if __name__ == "__main__":
-    project, project_run, result, files, figures = main()
-    plot_book = open_project_plot_book_after_run(
-        project_run, figures=figures, include=get_parameters()["plots"].get("include")
-    )
+    with native_thread_budget():
+        project, project_run, result, files, figures = main()
+        plot_settings = get_parameters()["plots"]
+        plot_book = open_project_plot_book_after_run(
+            project_run, figures=figures, include=plot_settings.get("include"), enabled=plot_settings["show_active"]
+        )

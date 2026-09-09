@@ -10,7 +10,15 @@ PROJECT_DIR = SCRIPT_DIR.parent
 REPOSITORY_ROOT = PROJECT_DIR.parents[1]
 PROJECT_ROOT = REPOSITORY_ROOT
 
+if __package__ in {None, ""}:
+    import sys
+
+    for _import_path in (REPOSITORY_ROOT / "src", REPOSITORY_ROOT):
+        if str(_import_path) not in sys.path:
+            sys.path.insert(0, str(_import_path))
+
 from projects._shared.example_utils import (
+    interactive_plots_enabled,
     open_project_plot_book_after_run,
     parse_example_parameters,
     print_result_summary,
@@ -283,7 +291,7 @@ def run_design(name: str, design: CoilDesign, parameters: dict[str, Any]) -> Non
         output_dir=OUTPUT_ROOT / name,
         project_root=PROJECT_ROOT,
         save_reports=bool(parameters["run"]["save_reports"]),
-        open_plot_book=bool(parameters["run"]["show_plots"]),
+        open_plot_book=interactive_plots_enabled(parameters["run"]["show_plots"]),
         plot_include=("raw_contours", "contour_groups", "layout_field_overview", "performance_table"),
         max_plot_parts=4,
     )
@@ -298,14 +306,20 @@ def build_configs(parameters: dict[str, Any] | None = None):
     """Return low-level CoilGenConfig objects for tests or external scripts."""
 
     params = parse_example_parameters(
-        parameters or PARAMETERS, DEFAULT_PARAMETERS, example_name="primitive_support_structures"
+        PARAMETERS if parameters is None else parameters,
+        DEFAULT_PARAMETERS,
+        example_name="primitive_support_structures",
     )
     return {name: design.to_config() for name, design in selected_designs(params).items()}
 
 
-def main() -> None:
-    parameters = parse_example_parameters(PARAMETERS, DEFAULT_PARAMETERS, example_name="primitive_support_structures")
-    validate_selected_designs(parameters)
+def main(parameters: dict[str, Any] | None = None) -> tuple[CoilProject, Any] | None:
+    parameters = parse_example_parameters(
+        PARAMETERS if parameters is None else parameters,
+        DEFAULT_PARAMETERS,
+        example_name="primitive_support_structures",
+    )
+    designs = validate_selected_designs(parameters)
     if not parameters["run"]["run_design"]:
         print("run.run_design is False; stopping after validation.")
         return
@@ -314,12 +328,12 @@ def main() -> None:
         output_dir=OUTPUT_ROOT,
         project_root=PROJECT_ROOT,
         save_reports=bool(parameters["run"]["save_reports"]),
-        open_plot_book=bool(parameters["run"]["show_plots"]),
+        open_plot_book=interactive_plots_enabled(parameters["run"]["show_plots"]),
         plot_include=("raw_contours", "contour_groups", "layout_field_overview", "performance_table"),
         max_plot_parts=4,
         metadata={"selected_cases": tuple(parameters["run"]["selected_cases"])},
     )
-    for name, design in selected_designs(parameters).items():
+    for name, design in designs.items():
         project.channel(
             name,
             label=name,
@@ -339,5 +353,5 @@ if __name__ == "__main__":
     if run_outputs is not None:
         project, project_run = run_outputs
         plot_book = open_project_plot_book_after_run(
-            project_run, figures=project_run.figures, include=project.plot_include
+            project_run, figures=project_run.figures, include=project.plot_include, enabled=project.open_plot_book
         )

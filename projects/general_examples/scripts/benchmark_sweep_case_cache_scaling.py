@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+# Direct execution from Spyder or any working directory uses this checkout.
+if __package__ in {None, ""}:
+    import sys
+    from pathlib import Path as _Path
+
+    for _path in (_Path(__file__).resolve().parents[3], _Path(__file__).resolve().parents[3] / "src"):
+        if str(_path) not in sys.path:
+            sys.path.insert(0, str(_path))
+
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from projects._shared.object_parameters import object_parameters
 
-from projects._shared.example_utils import example_output_dir
+from projects._shared.example_utils import example_output_dir, native_thread_budget
 
 from coilgen import (
     CylinderCoilDesign,
@@ -44,6 +54,7 @@ def _case_factory(output_root: Path):
             min_contour_points=3,
             regularization_method="fixed",
             regularization_factor=40.0,
+            cpu_workers=1,
             skip_postprocessing=True,
             skip_sweep=True,
             skip_inductance=True,
@@ -51,7 +62,6 @@ def _case_factory(output_root: Path):
             advanced_parameters={
                 "low_memory_mode": True,
                 "retain_heavy_fields": False,
-                "contour_only_sweep_mode": True,
             },
         )
         return CoilCaseSpec(
@@ -76,14 +86,20 @@ def main():
         output_dir=output_root,
         resume_from_case_cache=True,
         retain_case_results=bool(PARAMETERS["retain_case_results"]),
+        continue_on_failure=False,
     )
     workflow = ParameterSweepWorkflow()
     start = time.perf_counter()
-    first = workflow.run(spec)
+    # Always execute the cold pass; an old cache must not masquerade as a solve.
+    with native_thread_budget():
+        first = workflow.run(replace(spec, resume_from_case_cache=False))
     first_elapsed = time.perf_counter() - start
     start = time.perf_counter()
-    second = workflow.run(spec)
+    with native_thread_budget():
+        second = workflow.run(replace(spec, retain_case_results=True))
     second_elapsed = time.perf_counter() - start
+    if len(second.cached_rows) != len(first.rows()) or second.case_results:
+        raise RuntimeError("The resume pass did not reuse every successful cold-run case.")
     report = output_root / "sweep_case_cache_scaling_report.md"
     report.write_text(
         "\n".join(

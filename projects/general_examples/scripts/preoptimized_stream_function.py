@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+# Support direct terminal/Spyder execution from any working directory.
+if __package__ in {None, ""}:
+    import sys
+    from pathlib import Path as _Path
+
+    for _path in (_Path(__file__).resolve().parents[3], _Path(__file__).resolve().parents[3] / "src"):
+        if str(_path) not in sys.path:
+            sys.path.insert(0, str(_path))
+
 from projects._shared.object_parameters import object_parameters
 
 from pathlib import Path
@@ -7,6 +16,8 @@ from pathlib import Path
 import numpy as np
 
 from projects._shared.example_utils import (
+    interactive_plots_enabled,
+    native_thread_budget,
     PROJECT_ROOT,
     example_output_dir,
     open_project_plot_book_after_run,
@@ -25,6 +36,7 @@ from projects.general_examples.parameters import PREOPTIMIZED_STREAM_FUNCTION_DE
 
 ################################################################################
 # USER SETTINGS
+# Runtime/chunking defaults are shared in parameters/defaults.py.
 ################################################################################
 # This example writes readable CSV inputs and then uses them as imported data.
 PARAMETERS = object_parameters(
@@ -151,7 +163,7 @@ def main():
             close_previous=plots["close_previous"],
             mode=plots.get("mode", "book"),
         )
-        if plots["show_active"]
+        if interactive_plots_enabled(plots["show_active"])
         else []
     )
     print_result_summary(result, title="Preoptimized stream-function example")
@@ -189,7 +201,9 @@ def write_custom_target_map_csv(path: Path, parameters: dict | None = None) -> N
 
 
 if __name__ == "__main__":
-    project, project_run, result, files, figures = main()
-    plot_book = open_project_plot_book_after_run(
-        project_run, figures=figures, include=get_parameters()["plots"].get("include")
-    )
+    with native_thread_budget():
+        project, project_run, result, files, figures = main()
+        plot_settings = get_parameters()["plots"]
+        plot_book = open_project_plot_book_after_run(
+            project_run, figures=figures, include=plot_settings.get("include"), enabled=plot_settings["show_active"]
+        )

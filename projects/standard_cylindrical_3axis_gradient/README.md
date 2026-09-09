@@ -1,7 +1,7 @@
 # Standard Cylindrical 3-Axis Gradient Project
 
 Clean starting point for an unshielded cylindrical MRI gradient set. It builds
-three independent layouts on the same cylinder:
+three independent layouts on nested cylinders (130, 132 and 134 mm diameter):
 
 - `Gx`: target `Bz = x`
 - `Gy`: target `Bz = y`
@@ -26,6 +26,12 @@ cd "<repo-root>"
 From Spyder, open `run_standard_cylindrical_3axis_gradient.py`, edit the
 top-level `SHOW_PLOT_BOOK`, `GRADIENT_TEMPLATE`, and `PROJECT` objects, and
 run the file.
+
+For a headless run, add `--headless` or set `MPLBACKEND=Agg`. `NATIVE_THREADS`
+bounds BLAS threads inside CoilGen workers, independently of `cpu_workers`.
+`main(project)` accepts an explicit project variant without changing the default
+template. The default three-axis solve and all seven 64-by-64 diagnostic slices
+were executed during the example audit with one worker and one native thread.
 
 ## Useful Settings
 

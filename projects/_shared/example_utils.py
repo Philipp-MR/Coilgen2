@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import contextmanager
+import os
+import sys
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -12,6 +15,30 @@ from projects._shared.paths import REPOSITORY_ROOT, project_output_dir, project_
 
 PROJECT_ROOT = REPOSITORY_ROOT
 GENERAL_EXAMPLES_OUTPUT_ROOT = project_output_root("general_examples")
+
+
+def interactive_plots_enabled(requested: bool) -> bool:
+    """Honor plot choices and explicit headless command/environment settings."""
+    static_backends = {"agg", "pdf", "pgf", "ps", "svg", "template"}
+    return (
+        bool(requested)
+        and "--headless" not in sys.argv[1:]
+        and os.environ.get("MPLBACKEND", "").lower() not in static_backends
+    )
+
+
+@contextmanager
+def native_thread_budget(threads: int = 1):
+    """Bound inner BLAS pools when threadpoolctl is installed; restore on exit."""
+    if isinstance(threads, bool) or not isinstance(threads, int) or threads < 1:
+        raise ValueError("Native thread count must be a positive integer.")
+    try:
+        from threadpoolctl import threadpool_limits
+    except ModuleNotFoundError:
+        yield
+    else:
+        with threadpool_limits(limits=threads):
+            yield
 
 
 def example_output_dir(name: str) -> Path:
@@ -136,7 +163,7 @@ def plot_figures_book_if_requested(
 ) -> list:
     """Open non-result study figures in one active plot-book window."""
 
-    if not enabled or not figures:
+    if not interactive_plots_enabled(enabled) or not figures:
         if close_previous:
             close_previous_matplotlib_plots(except_figures=figures)
         return []
@@ -172,6 +199,7 @@ def open_project_plot_book_after_run(
     include: Sequence[str] | None = None,
     close_previous: bool = False,
     max_parts: int | None = None,
+    enabled: bool = True,
 ) -> Any | None:
     """Open or reopen a plot book from already-computed script variables.
 
@@ -180,6 +208,8 @@ def open_project_plot_book_after_run(
     ``plot_book.open()`` to show the book again without rerunning CoilGen.
     """
 
+    if not interactive_plots_enabled(enabled):
+        return None
     for figure in figures or ():
         if hasattr(figure, "open"):
             figure.open(block=False)

@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+# Support direct terminal/Spyder execution from any working directory.
+if __package__ in {None, ""}:
+    import sys
+    from pathlib import Path as _Path
+
+    for _path in (_Path(__file__).resolve().parents[3], _Path(__file__).resolve().parents[3] / "src"):
+        if str(_path) not in sys.path:
+            sys.path.insert(0, str(_path))
+
 from projects._shared.object_parameters import object_parameters
 
 from projects._shared.example_utils import (
+    interactive_plots_enabled,
+    native_thread_budget,
     example_output_dir,
     open_project_plot_book_after_run,
     parse_example_parameters,
@@ -18,6 +29,7 @@ from projects.general_examples.parameters import SCIENTIST_CYLINDER_Y_GRADIENT_D
 
 ################################################################################
 # USER SETTINGS
+# Runtime/chunking defaults are shared in parameters/defaults.py.
 ################################################################################
 # Legacy compact cylinder-gradient entry point. New scripts should prefer
 # conventional_cylindrical_mri_gradient.py. All design values use SI units.
@@ -60,7 +72,7 @@ PARAMETERS = object_parameters(
             "regularization_method": "l_curve",
             "regularization_factor": 50.0,
             # Runtime controls.
-            "cpu_workers": 0,
+            "cpu_workers": 1,
             "progress": True,
             "skip_sweep": True,
             "skip_inductance": False,
@@ -126,7 +138,7 @@ def main():
             close_previous=bool(plots["close_previous"]),
             mode=plots.get("mode", "book"),
         )
-        if bool(plots["show_active"])
+        if interactive_plots_enabled(plots["show_active"])
         else []
     )
     print_result_summary(result, title="Cylinder y-gradient design")
@@ -135,7 +147,9 @@ def main():
 
 
 if __name__ == "__main__":
-    project, project_run, design, result, files, figures = main()
-    plot_book = open_project_plot_book_after_run(
-        project_run, figures=figures, include=get_parameters()["plots"].get("include")
-    )
+    with native_thread_budget():
+        project, project_run, design, result, files, figures = main()
+        plot_settings = get_parameters()["plots"]
+        plot_book = open_project_plot_book_after_run(
+            project_run, figures=figures, include=plot_settings.get("include"), enabled=plot_settings["show_active"]
+        )

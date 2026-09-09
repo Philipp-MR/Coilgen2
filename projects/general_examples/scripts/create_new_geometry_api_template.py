@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+# Support direct terminal/Spyder execution from any working directory.
+if __package__ in {None, ""}:
+    import sys
+    from pathlib import Path as _Path
+
+    for _path in (_Path(__file__).resolve().parents[3], _Path(__file__).resolve().parents[3] / "src"):
+        if str(_path) not in sys.path:
+            sys.path.insert(0, str(_path))
+
 from projects._shared.object_parameters import object_parameters
 
-from projects._shared.example_utils import example_output_dir, parse_example_parameters
+from projects._shared.example_utils import example_output_dir, native_thread_budget, parse_example_parameters
 
 from coilgen import write_coil_geometry_api_template
 
@@ -53,4 +62,5 @@ def main():
 
 
 if __name__ == "__main__":
-    path = main()
+    with native_thread_budget():
+        path = main()

@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+# Support direct terminal/Spyder execution from any working directory.
+if __package__ in {None, ""}:
+    import sys
+    from pathlib import Path as _Path
+
+    for _path in (_Path(__file__).resolve().parents[3], _Path(__file__).resolve().parents[3] / "src"):
+        if str(_path) not in sys.path:
+            sys.path.insert(0, str(_path))
+
 from projects._shared.object_parameters import object_parameters
 
 from projects._shared.example_utils import (
+    interactive_plots_enabled,
+    native_thread_budget,
     PROJECT_ROOT,
     example_output_dir,
     open_project_plot_book_after_run,
@@ -19,6 +30,7 @@ from projects.general_examples.parameters import SPLIT_BORE_FLANGE_SMOKE_DEFAULT
 
 ################################################################################
 # USER SETTINGS
+# Runtime/chunking defaults are shared in parameters/defaults.py.
 ################################################################################
 # This example designs on a generated flanged split-bore surface.
 PARAMETERS = object_parameters(
@@ -62,27 +74,8 @@ PARAMETERS = object_parameters(
             "l_curve_factor_min_multiplier": 1e-4,
             "l_curve_factor_max_multiplier": 1e4,
             "l_curve_regularization_factors": (),
-            # Parallel CPU usage: 0 uses all logical cores, 1 is serial, -1 keeps one core free.
-            "parallel_worker_count": 0,
-            # Minimum estimated operation count before parallel workers are used.
-            "parallel_min_work_size": 50000,
-            # Sensitivity-matrix chunking; higher values create more, smaller worker tasks.
-            "sensitivity_chunks_per_worker": 4,
-            "sensitivity_calculation_method": "vectorized",
-            # Segment chunk sizes for Biot-Savart field evaluation and Neumann inductance.
-            "biot_savart_chunk_size": 512,
-            "inductance_chunk_size": 256,
-            "wire_distance_method": "auto",
-            "wire_distance_chunk_size": 512,
-            "wire_distance_spatial_min_segments": 3000,
-            # Approximate memory cap per numerical chunk.
-            "parallel_max_chunk_memory_mb": 64.0,
-            "optimization_solver": "auto",
-            "optimization_solver_residual_tolerance": 1e-8,
             # Print progress percentages for long calculation stages.
             "progress_flag": True,
-            "progress_min_interval_seconds": 1.0,
-            "progress_percent_step": 5.0,
             # Inter-group connector method: "direct_3d" or "geodesic".
             "inter_group_connection_path_method": "direct_3d",
             # Keep final electrical estimates active. They use a thin-wire
@@ -160,7 +153,7 @@ def main():
             close_previous=plots["close_previous"],
             mode=plots.get("mode", "book"),
         )
-        if plots["show_active"]
+        if interactive_plots_enabled(plots["show_active"])
         else []
     )
     print_result_summary(result, title="Split-bore flange example")
@@ -168,7 +161,9 @@ def main():
 
 
 if __name__ == "__main__":
-    project, project_run, result, files, figures = main()
-    plot_book = open_project_plot_book_after_run(
-        project_run, figures=figures, include=get_parameters()["plots"].get("include")
-    )
+    with native_thread_budget():
+        project, project_run, result, files, figures = main()
+        plot_settings = get_parameters()["plots"]
+        plot_book = open_project_plot_book_after_run(
+            project_run, figures=figures, include=plot_settings.get("include"), enabled=plot_settings["show_active"]
+        )

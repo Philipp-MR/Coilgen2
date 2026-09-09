@@ -20,7 +20,11 @@ from coilgen import (
     save_manufacturing_diagnostics,
     save_swept_bodies_as_stl,
 )
-from projects._shared.example_utils import open_project_plot_book_after_run
+from projects._shared.example_utils import (
+    interactive_plots_enabled,
+    native_thread_budget,
+    open_project_plot_book_after_run,
+)
 from projects._shared.paths import project_output_root
 
 
@@ -35,6 +39,7 @@ OUTPUT_ROOT = project_output_root("standard_cylindrical_3axis_gradient")
 
 PROJECT_NAME = "standard_cylindrical_3axis_gradient"
 SHOW_PLOT_BOOK = False
+NATIVE_THREADS = 1  # BLAS threads inside each CoilGen worker; increase deliberately for large serial solves.
 EXPORT_STL = True
 EXPORT_WIRE_TRACE_CSV = True
 ENABLE_SWEEP = False
@@ -275,11 +280,23 @@ def export_project_stls(project_run) -> tuple[Path, ...]:
 # SCRIPT ENTRY POINT
 ################################################################################
 
+
+def main(project: CoilProject | None = None):
+    """Solve the configured project; callers may pass an explicit study variant."""
+    project = PROJECT if project is None else project
+    print(project.describe())
+    with native_thread_budget(NATIVE_THREADS):
+        project_run = project.solve(open_plot_book=interactive_plots_enabled(project.open_plot_book))
+    export_project_stls(project_run)
+    return project_run
+
+
 if __name__ == "__main__":
     project = PROJECT
-    print(project.describe())
-    project_run = project.solve()
-    stl_files = export_project_stls(project_run)
+    project_run = main(project)
+    stl_files = tuple(path for path in project_run.files if path.suffix.lower() == ".stl")
     system_run = project_run
     results = project_run.results
-    plot_book = open_project_plot_book_after_run(project_run, figures=project_run.figures, include=PLOT_INCLUDE)
+    plot_book = open_project_plot_book_after_run(
+        project_run, figures=project_run.figures, include=PLOT_INCLUDE, enabled=SHOW_PLOT_BOOK
+    )

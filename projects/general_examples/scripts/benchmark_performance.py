@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+# Direct execution from Spyder or any working directory uses this checkout.
+if __package__ in {None, ""}:
+    import sys
+    from pathlib import Path as _Path
+
+    for _path in (_Path(__file__).resolve().parents[3], _Path(__file__).resolve().parents[3] / "src"):
+        if str(_path) not in sys.path:
+            sys.path.insert(0, str(_path))
+
 from projects._shared.object_parameters import object_parameters
 
 import csv
@@ -7,7 +16,12 @@ import time
 from dataclasses import replace
 from typing import Any
 
-from projects._shared.example_utils import PROJECT_ROOT, example_output_dir, parse_example_parameters
+from projects._shared.example_utils import (
+    PROJECT_ROOT,
+    example_output_dir,
+    native_thread_budget,
+    parse_example_parameters,
+)
 
 from coilgen import CircularBiplanarCoilDesign, result_summary_dict
 
@@ -58,7 +72,7 @@ PARAMETERS = object_parameters(
             "cases": (
                 {"name": "serial_no_symmetry", "cpu_workers": 1, "symmetry_reduction": "off"},
                 {"name": "serial_symmetry_auto", "cpu_workers": 1, "symmetry_reduction": "auto"},
-                {"name": "parallel_symmetry_auto", "cpu_workers": 0, "symmetry_reduction": "auto"},
+                {"name": "parallel_symmetry_auto", "cpu_workers": 2, "symmetry_reduction": "auto"},
             ),
         },
         "numerics": {
@@ -101,8 +115,8 @@ def get_parameters() -> dict[str, Any]:
 ################################################################################
 
 
-def main():
-    parameters = get_parameters()
+def main(parameters=None):
+    parameters = get_parameters() if parameters is None else parameters
     base_design = build_base_design(parameters)
     rows: list[dict[str, Any]] = []
     repetitions = max(int(parameters["benchmark"]["repetitions"]), 1)
@@ -111,7 +125,8 @@ def main():
             design = configure_case(base_design, parameters, case)
             print(f"Benchmark {case['name']} repetition {repetition}/{repetitions}")
             started = time.perf_counter()
-            result = design.run(project_root=PROJECT_ROOT)
+            with native_thread_budget():
+                result = design.run(project_root=PROJECT_ROOT)
             wall_time = time.perf_counter() - started
             row = benchmark_row(case, repetition, result, wall_time)
             rows.append(row)
@@ -196,8 +211,8 @@ def benchmark_row(case: dict[str, Any], repetition: int, result: Any, wall_time:
         "symmetry_reduction_active": bool(diagnostics.get("symmetry_reduction_active", False)),
         "symmetry_reduction_factor": summary["symmetry_reduction_factor"],
         "contour_count": summary["contour_count"],
-        "mean_layout_error_percent": summary.get("mean_rel_error_layout_vs_target_percent", float("nan")),
-        "max_layout_error_percent": summary.get("max_rel_error_layout_vs_target_percent", float("nan")),
+        "mean_layout_error_percent": summary.get("layout_mean_rel_error_percent", float("nan")),
+        "max_layout_error_percent": summary.get("layout_max_rel_error_percent", float("nan")),
     }
 
 

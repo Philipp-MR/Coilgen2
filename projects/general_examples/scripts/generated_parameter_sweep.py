@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+# Direct execution from Spyder or any working directory uses this checkout.
+if __package__ in {None, ""}:
+    import sys
+    from pathlib import Path as _Path
+
+    for _path in (_Path(__file__).resolve().parents[3], _Path(__file__).resolve().parents[3] / "src"):
+        if str(_path) not in sys.path:
+            sys.path.insert(0, str(_path))
+
 from projects._shared.object_parameters import object_parameters
 
 import csv
-import json
+from copy import deepcopy
 from itertools import product
 from pathlib import Path
 from typing import Any
@@ -11,11 +20,14 @@ from typing import Any
 from projects._shared.example_utils import (
     PROJECT_ROOT,
     example_output_dir,
+    interactive_plots_enabled,
+    native_thread_budget,
     open_project_plot_book_after_run,
     parse_example_parameters,
 )
 
 from coilgen import CoilGenConfig, CoilGenConfigDesign, CoilProject
+from coilgen.persistence import atomic_json
 from projects.general_examples.scripts.run_standard_examples import validate_generated_example_result
 
 
@@ -56,8 +68,8 @@ PARAMETERS = object_parameters(
             # Bz target field and generated cylinder geometry shared by all sweep rows.
             "field_shape_function": "y",
             "coil_mesh_file": "create cylinder mesh",
-            "cylinder_radius": 0.5,
-            "cylinder_height": 0.25,
+            "cylinder_radius": 0.25,
+            "cylinder_height": 0.5,
             "cylinder_normal_sign": 1,
             "cylinder_rotation": (0, 0, 0),
             # Spherical target cloud used for fitting the requested field.
@@ -85,8 +97,8 @@ PARAMETERS = object_parameters(
             "l_curve_factor_min_multiplier": 1e-4,
             "l_curve_factor_max_multiplier": 1e4,
             "l_curve_regularization_factors": (),
-            # Parallel CPU usage: 0 uses all logical cores, 1 is serial, -1 keeps one core free.
-            "parallel_worker_count": 0,
+            # One outer worker avoids oversubscribing the native numerical libraries.
+            "parallel_worker_count": 1,
             # Minimum estimated operation count before parallel workers are used.
             "parallel_min_work_size": 50000,
             # Sensitivity-matrix chunking; higher values create more, smaller worker tasks.
@@ -156,8 +168,12 @@ def get_parameters() -> dict:
 ################################################################################
 
 
-def main():
-    parameters = get_parameters()
+def main(parameters=None, *, smoke=False, headless=False):
+    parameters = get_parameters() if parameters is None else deepcopy(parameters)
+    if smoke:
+        parameters["run"]["full_sweep"] = False
+        for key in ("offset_values", "mesh_values", "regularization_values", "cut_width_values"):
+            parameters["sweep"][key] = parameters["sweep"][key][:1]
     output = example_output_dir(parameters["output"]["name"])
     rows, last_project = run_sweep(
         full=parameters["run"]["full_sweep"], return_last_project=True, parameters=parameters
@@ -165,7 +181,7 @@ def main():
     csv_path = output / parameters["output"]["csv_filename"]
     json_path = output / parameters["output"]["json_filename"]
     _write_csv(csv_path, rows)
-    json_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+    atomic_json(json_path, rows)
     print(f"Wrote {len(rows)} sweep rows to {csv_path}")
     figures = []
     if last_project is not None:
@@ -176,7 +192,7 @@ def main():
                 close_previous=plots["close_previous"],
                 mode=plots.get("mode", "book"),
             )
-            if plots["show_active_for_last_result"]
+            if not headless and interactive_plots_enabled(plots["show_active_for_last_result"])
             else []
         )
     return rows, last_project, figures
@@ -201,6 +217,9 @@ def run_sweep(
     last_result = None
     last_project = None
     output_root = example_output_dir(parameters["output"]["name"])
+    from projects.general_examples.scripts.run_standard_examples import get_parameters as standard_parameters
+
+    expectations = standard_parameters()["expectations"]
 
     for levels, offset, mesh_density, reg, cut_width in product(
         levels_values,
@@ -218,15 +237,17 @@ def run_sweep(
             save_reports=False,
         )
         project.channel("main", design=CoilGenConfigDesign(name=name, config=config))
-        project_run = project.solve()
+        with native_thread_budget():
+            project_run = project.solve()
         result = project_run.channel_runs[0].result
         last_result = result
         last_project = project
-        failures, warnings = validate_generated_example_result(name, result)
+        failures, warnings = validate_generated_example_result(name, result, expectations=expectations)
         part = result.coil_parts[0]
         diag = part.route_diagnostics
         row = {
             "name": name,
+            "accepted": not failures,
             "levels": levels,
             "pot_offset_factor": offset,
             "mesh_circular_divisions": mesh_density[0],
@@ -270,61 +291,21 @@ def _sweep_config(
     cut_width: float,
     parameters: dict,
 ) -> CoilGenConfig:
-    base = parameters["coilgen"]
-    cylinder_rotation = base["cylinder_rotation"]
-    return CoilGenConfig(
-        field_shape_function=base["field_shape_function"],
-        coil_mesh_file=base["coil_mesh_file"],
-        cylinder_mesh_parameter_list=(
-            base["cylinder_radius"],
-            base["cylinder_height"],
-            mesh_density[0],
-            mesh_density[1],
-            base["cylinder_normal_sign"],
-            cylinder_rotation[0],
-            cylinder_rotation[1],
-            cylinder_rotation[2],
-        ),
-        target_region_radius=base["target_region_radius"],
-        target_region_resolution=base["target_region_resolution"],
+    base = dict(parameters["coilgen"])
+    radius = base.pop("cylinder_radius")
+    height = base.pop("cylinder_height")
+    axis_x = base.pop("cylinder_normal_sign")
+    rotation = base.pop("cylinder_rotation")
+    # Geometry takes length, radius, divisions, rotation axis and angle.
+    # Copy all remaining native options so material/inductance settings are used.
+    base.update(
+        cylinder_mesh_parameter_list=(height, radius, *mesh_density, axis_x, *rotation),
         levels=levels,
         pot_offset_factor=offset,
-        min_point_loop_number=base["min_point_loop_number"],
-        gauss_order=base["gauss_order"],
-        sf_opt_method=base["sf_opt_method"],
-        stream_function_cost_function=base["stream_function_cost_function"],
         tikonov_reg_factor=regularization,
-        regularization_selection_method=base["regularization_selection_method"],
-        l_curve_factor_count=base["l_curve_factor_count"],
-        l_curve_factor_min_multiplier=base["l_curve_factor_min_multiplier"],
-        l_curve_factor_max_multiplier=base["l_curve_factor_max_multiplier"],
-        l_curve_regularization_factors=base["l_curve_regularization_factors"],
         interconnection_cut_width=cut_width,
-        within_group_cut_candidate_count=base["within_group_cut_candidate_count"],
-        parallel_worker_count=base["parallel_worker_count"],
-        parallel_min_work_size=base["parallel_min_work_size"],
-        sensitivity_chunks_per_worker=base["sensitivity_chunks_per_worker"],
-        sensitivity_calculation_method=base["sensitivity_calculation_method"],
-        biot_savart_chunk_size=base["biot_savart_chunk_size"],
-        inductance_chunk_size=base["inductance_chunk_size"],
-        wire_distance_method=base["wire_distance_method"],
-        wire_distance_chunk_size=base["wire_distance_chunk_size"],
-        wire_distance_spatial_min_segments=base["wire_distance_spatial_min_segments"],
-        parallel_max_chunk_memory_mb=base["parallel_max_chunk_memory_mb"],
-        optimization_solver=base["optimization_solver"],
-        optimization_solver_residual_tolerance=base["optimization_solver_residual_tolerance"],
-        target_error_tolerance_percent=base["target_error_tolerance_percent"],
-        target_error_tolerance_absolute_T=base["target_error_tolerance_absolute_T"],
-        target_error_constraint_factor_count=base["target_error_constraint_factor_count"],
-        progress_flag=base["progress_flag"],
-        progress_min_interval_seconds=base["progress_min_interval_seconds"],
-        progress_percent_step=base["progress_percent_step"],
-        skip_calculation_min_winding_distance=base["skip_calculation_min_winding_distance"],
-        plot_flag=base["plot_flag"],
-        save_stl_flag=base["save_stl_flag"],
-        skip_sweep=base["skip_sweep"],
-        skip_inductance_calculation=base["skip_inductance_calculation"],
     )
+    return CoilGenConfig(**base)
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -336,9 +317,15 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 if __name__ == "__main__":
-    rows, last_project, figures = main()
-    plot_book = open_project_plot_book_after_run(
-        getattr(last_project, "last_run", None),
-        figures=figures,
-        include=get_parameters()["plots"].get("include"),
-    )
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Compare contour levels, mesh density and routing choices.")
+    parser.add_argument("--smoke", action="store_true", help="Run two contour-level cases on the first mesh.")
+    parser.add_argument("--headless", action="store_true", help="Suppress interactive plotting.")
+    args = parser.parse_args()
+    rows, last_project, figures = main(smoke=args.smoke, headless=args.headless)
+    plot_book = None
+    if not args.headless and interactive_plots_enabled(get_parameters()["plots"]["show_active_for_last_result"]):
+        plot_book = open_project_plot_book_after_run(
+            getattr(last_project, "last_run", None), figures=figures, include=get_parameters()["plots"].get("include")
+        )

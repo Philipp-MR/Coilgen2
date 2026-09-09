@@ -1,5 +1,10 @@
 # Halbach Cylindrical 3-Axis Gradient Project
 
+The entrypoint checks all three required STL paths before starting a solve.
+`main(project)` accepts an explicit study variant; the default research settings
+remain unchanged. Add `--headless` or set `MPLBACKEND=Agg` to suppress interactive
+windows. `NATIVE_THREADS` bounds BLAS threads inside each CoilGen worker.
+
 Unshielded octagonal MRI gradient set. It builds three independent layouts on
 axis-specific imported winding surfaces. The surface/bore axis is global `y`,
 orthogonal to the global `B0` direction `+z`, matching a transverse-field

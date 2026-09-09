@@ -20,7 +20,11 @@ from coilgen import (
     save_manufacturing_diagnostics,
     save_swept_bodies_as_stl,
 )
-from projects._shared.example_utils import open_project_plot_book_after_run
+from projects._shared.example_utils import (
+    interactive_plots_enabled,
+    native_thread_budget,
+    open_project_plot_book_after_run,
+)
 from projects.halbach_cylindrical_3axis_gradient.paths import HALBACH_DATA_ROOT, halbach_output_dir
 
 
@@ -35,6 +39,7 @@ OUTPUT_ROOT = halbach_output_dir()
 
 PROJECT_NAME = "halbach_cylindrical_3axis_gradient"
 SHOW_PLOT_BOOK = False
+NATIVE_THREADS = 1  # BLAS threads inside each CoilGen worker; increase deliberately for large serial solves.
 EXPORT_STL = True
 EXPORT_WIRE_TRACE_CSV = True
 ENABLE_SWEEP = True
@@ -88,6 +93,7 @@ TRAPEZOID_BOTTOM_WIDTH_M = 0.00196
 TRAPEZOID_TOP_WIDTH_M = 0.00160
 TRAPEZOID_HEIGHT_M = 0.00180
 TRAPEZOID_TOP_WIDTH_RATIO = TRAPEZOID_TOP_WIDTH_M / TRAPEZOID_BOTTOM_WIDTH_M
+
 
 def _round_wire_cross_section_points(diameter_m: float, point_count: int = 64) -> tuple[tuple[float, float], ...]:
     radius = float(diameter_m) / 2.0
@@ -456,11 +462,35 @@ def export_project_stls(project_run) -> tuple[Path, ...]:
 # SCRIPT ENTRY POINT
 ################################################################################
 
+
+def main(project: CoilProject | None = None):
+    """Validate every axis before starting the imported-surface study."""
+    project = PROJECT if project is None else project
+    reports = project.validate()
+    invalid = [f"{name}: {report.format()}" for name, report in reports.items() if not report.ok]
+    root = Path(project.project_root) if project.project_root is not None else PROJECT_ROOT
+    for name, design in project.resolved_designs().items():
+        config = design.to_config()
+        source = str(config.coil_mesh_file)
+        if source.lower().endswith(".stl"):
+            path = config.resolved_geometry_source_path(root) / Path(source).expanduser()
+            if not path.is_file():
+                invalid.append(f"{name}: input surface STL not found: {path.resolve()}")
+    if invalid:
+        raise ValueError("Halbach project input/configuration preflight failed:\n" + "\n".join(invalid))
+    print(project.describe())
+    with native_thread_budget(NATIVE_THREADS):
+        project_run = project.solve(open_plot_book=interactive_plots_enabled(project.open_plot_book))
+    export_project_stls(project_run)
+    return project_run
+
+
 if __name__ == "__main__":
     project = PROJECT
-    print(project.describe())
-    project_run = project.solve()
-    stl_files = export_project_stls(project_run)
+    project_run = main(project)
+    stl_files = tuple(path for path in project_run.files if path.suffix.lower() == ".stl")
     system_run = project_run
     results = project_run.results
-    plot_book = open_project_plot_book_after_run(project_run, figures=project_run.figures, include=PLOT_INCLUDE)
+    plot_book = open_project_plot_book_after_run(
+        project_run, figures=project_run.figures, include=PLOT_INCLUDE, enabled=SHOW_PLOT_BOOK
+    )

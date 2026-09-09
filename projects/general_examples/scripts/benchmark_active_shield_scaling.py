@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+# Direct execution from Spyder or any working directory uses this checkout.
+if __package__ in {None, ""}:
+    import sys
+    from pathlib import Path as _Path
+
+    for _path in (_Path(__file__).resolve().parents[3], _Path(__file__).resolve().parents[3] / "src"):
+        if str(_path) not in sys.path:
+            sys.path.insert(0, str(_path))
+
 from projects._shared.object_parameters import object_parameters
 
 from projects.general_examples.scripts._benchmark_scaling_common import (

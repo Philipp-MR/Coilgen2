@@ -6,7 +6,7 @@ import tracemalloc
 from pathlib import Path
 from typing import Any, Iterable
 
-from projects._shared.example_utils import example_output_dir
+from projects._shared.example_utils import PROJECT_ROOT, example_output_dir, native_thread_budget
 
 from coilgen import CoilGenConfig, result_summary_dict, run_coilgen
 
@@ -34,7 +34,7 @@ def base_benchmark_config(**overrides: Any) -> CoilGenConfig:
         "progress_flag": False,
         "low_memory_mode": True,
         "retain_heavy_fields": False,
-        "contour_only_sweep_mode": True,
+        "parallel_worker_count": 1,
     }
     values.update(overrides)
     return CoilGenConfig(**values)
@@ -43,10 +43,13 @@ def base_benchmark_config(**overrides: Any) -> CoilGenConfig:
 def run_timed_config(name: str, config: CoilGenConfig) -> dict[str, Any]:
     tracemalloc.start()
     start = time.perf_counter()
-    result = run_coilgen(config)
-    elapsed = time.perf_counter() - start
-    _, peak_bytes = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
+    try:
+        with native_thread_budget():
+            result = run_coilgen(config, project_root=PROJECT_ROOT)
+        elapsed = time.perf_counter() - start
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
     summary = result_summary_dict(result)
     return {
         "case": name,

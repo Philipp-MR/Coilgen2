@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+# Support direct terminal/Spyder execution from any working directory.
+if __package__ in {None, ""}:
+    import sys
+    from pathlib import Path as _Path
+
+    for _path in (_Path(__file__).resolve().parents[3], _Path(__file__).resolve().parents[3] / "src"):
+        if str(_path) not in sys.path:
+            sys.path.insert(0, str(_path))
+
 from projects._shared.object_parameters import object_parameters
 
 from projects._shared.example_utils import (
+    interactive_plots_enabled,
+    native_thread_budget,
     example_output_dir,
     open_project_plot_book_after_run,
     print_result_summary,
@@ -52,7 +63,7 @@ def main():
         name=str(PARAMETERS.output.name),
         template=design,
         output_dir=example_output_dir(PARAMETERS.output.name),
-        open_plot_book=bool(PARAMETERS.output.open_plot_book),
+        open_plot_book=interactive_plots_enabled(PARAMETERS.output.open_plot_book),
         save_reports=True,
     )
     project.channel(
@@ -73,5 +84,8 @@ def main():
 
 
 if __name__ == "__main__":
-    project, project_run, design, artifacts = main()
-    plot_book = open_project_plot_book_after_run(project_run, figures=getattr(artifacts, "figures", ()))
+    with native_thread_budget():
+        project, project_run, design, artifacts = main()
+        plot_book = open_project_plot_book_after_run(
+            project_run, figures=getattr(artifacts, "figures", ()), enabled=PARAMETERS.output.open_plot_book
+        )

@@ -1,8 +1,18 @@
 from __future__ import annotations
 
+# Direct execution from Spyder or any working directory uses this checkout.
+if __package__ in {None, ""}:
+    import sys
+    from pathlib import Path as _Path
+
+    for _path in (_Path(__file__).resolve().parents[3], _Path(__file__).resolve().parents[3] / "src"):
+        if str(_path) not in sys.path:
+            sys.path.insert(0, str(_path))
+
 from projects._shared.object_parameters import object_parameters
 
 from pathlib import Path
+from copy import deepcopy
 from typing import Any
 
 import numpy as np
@@ -10,6 +20,8 @@ import numpy as np
 from projects._shared.example_utils import (
     PROJECT_ROOT,
     example_output_dir,
+    interactive_plots_enabled,
+    native_thread_budget,
     open_project_plot_book_after_run,
     parse_example_parameters,
 )
@@ -45,7 +57,7 @@ PARAMETERS = object_parameters(
             # Output folder below outputs/.
             "name": "standard_examples",
             # Save the full SVG gallery for every generated example.
-            "save_svg_galleries": True,
+            "save_svg_galleries": False,
         },
         "plots": {
             # Open active Matplotlib windows for the first generated result.
@@ -95,8 +107,8 @@ PARAMETERS = object_parameters(
             "l_curve_factor_min_multiplier": 1e-4,
             "l_curve_factor_max_multiplier": 1e4,
             "l_curve_regularization_factors": (),
-            # Parallel CPU usage: 0 uses all logical cores, 1 is serial, -1 keeps one core free.
-            "parallel_worker_count": 0,
+            # One outer worker avoids oversubscribing the native numerical libraries.
+            "parallel_worker_count": 1,
             # Minimum estimated operation count before parallel workers are used.
             "parallel_min_work_size": 50000,
             # Sensitivity-matrix chunking; higher values create more, smaller worker tasks.
@@ -281,8 +293,16 @@ def get_parameters() -> dict:
 ################################################################################
 
 
-def main():
-    parameters = get_parameters()
+def main(parameters=None, *, smoke=False, headless=False):
+    parameters = get_parameters() if parameters is None else deepcopy(parameters)
+    if smoke:
+        parameters["run"]["dense_examples"] = False
+        parameters["run"]["selected_examples"] = (
+            "cylinder_ygradient_direct3d",
+            "planary_xgradient_direct3d",
+            "biplanar_ygradient_direct3d",
+        )
+        parameters["output"]["save_svg_galleries"] = False
     output_root = example_output_dir(parameters["output"]["name"])
     failures: list[str] = []
     results: dict[str, CoilGenResult] = {}
@@ -291,6 +311,9 @@ def main():
     figures = []
     selected = set(parameters["run"]["selected_examples"])
     configs = generated_example_configs(include_dense=parameters["run"]["dense_examples"], parameters=parameters)
+    unknown = selected - {name for name, _config in configs}
+    if unknown:
+        raise ValueError(f"Unknown selected example(s): {', '.join(sorted(unknown))}")
     if selected:
         configs = [(name, config) for name, config in configs if name in selected]
     for example_index, (name, config) in enumerate(configs):
@@ -308,7 +331,8 @@ def main():
             design=CoilGenConfigDesign(name=name, config=config),
             save_gallery=bool(parameters["output"]["save_svg_galleries"]),
         )
-        project_run = project.solve()
+        with native_thread_budget():
+            project_run = project.solve()
         result = project_run.channel_runs[0].result
         results[name] = result
         projects[name] = project
@@ -329,7 +353,7 @@ def main():
                     close_previous=plots["close_previous"],
                     mode=plots.get("mode", "book"),
                 )
-                if plots["show_active_for_first_result"]
+                if not headless and interactive_plots_enabled(plots["show_active_for_first_result"])
                 else []
             )
 
@@ -545,8 +569,16 @@ def _example_expectation(
 
 
 if __name__ == "__main__":
-    results, projects, project_runs, figures = main()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run generated geometry and routing regression examples.")
+    parser.add_argument("--smoke", action="store_true", help="Run cylinder, planar and biplanar examples.")
+    parser.add_argument("--headless", action="store_true", help="Suppress interactive plotting.")
+    args = parser.parse_args()
+    results, projects, project_runs, figures = main(smoke=args.smoke, headless=args.headless)
     first_project_run = next(iter(project_runs.values()), None)
-    plot_book = open_project_plot_book_after_run(
-        first_project_run, figures=figures, include=get_parameters()["plots"].get("include")
-    )
+    plot_book = None
+    if not args.headless and interactive_plots_enabled(get_parameters()["plots"]["show_active_for_first_result"]):
+        plot_book = open_project_plot_book_after_run(
+            first_project_run, figures=figures, include=get_parameters()["plots"].get("include")
+        )

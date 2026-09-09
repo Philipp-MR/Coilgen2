@@ -6,15 +6,23 @@ Outputs use SI units. Accepted continuous sheets still require routing and
 fabrication validation. These examples deliberately reserve a field margin.
 """
 
-from dataclasses import replace
-from pathlib import Path
+from __future__ import annotations
 
-from coilgen import CoilGenConfig
-from coilgen.research.application import run_design
-from coilgen.research.requests import ResearchRequest
+from dataclasses import replace
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from coilgen import CoilGenConfig
+
+if __package__:
+    from ._example_support import example_options, example_runtime
+else:
+    from _example_support import example_options, example_runtime
 
 
 def cylinder_config() -> CoilGenConfig:
+    from coilgen import CoilGenConfig
+
     return CoilGenConfig(
         coil_mesh_file="create cylinder mesh",
         cylinder_mesh_parameter_list=(0.30, 0.12, 12, 6, 1, 0, 0, 0),
@@ -43,31 +51,38 @@ def cylinder_config() -> CoilGenConfig:
     )
 
 
-def main() -> None:
-    root = Path(__file__).resolve().parents[1] / "outputs" / "research_basic"
-    cylinder = cylinder_config()
-    biplanar = replace(
-        cylinder,
-        coil_mesh_file="create bi-planary mesh",
-        biplanar_mesh_parameter_list=(0.3, 0.3, 6, 6, 0, 0, 1, 0, 0, 0, 0.2),
-        surface_is_cylinder_flag=False,
-        field_shape_function="z",
-        target_region_radius=0.04,
-    )
-    for name, config in (("cylinder_gradient", cylinder), ("biplanar_gradient", biplanar)):
-        request = ResearchRequest.from_config(config, name=name, design_margin=0.8)
-        payload = run_design(request, root / name)
-        summary = payload["summary"]
-        print(
-            name,
-            "accepted:",
-            summary["accepted"],
-            "independent relative field error:",
-            summary["validated_relative_field_error"],
-            "sheet power [W]:",
-            summary["power_w"],
+def main(argv=None) -> None:
+    options = example_options("outputs/research_basic", argv)
+    with example_runtime(extra="research", required=("numpy", "cvxpy", "scipy", "threadpoolctl")):
+        from coilgen.research.application import run_design
+        from coilgen.research.requests import ResearchRequest
+
+        root = options.output_dir
+        cylinder = cylinder_config()
+        biplanar = replace(
+            cylinder,
+            coil_mesh_file="create bi-planary mesh",
+            biplanar_mesh_parameter_list=(0.3, 0.3, 6, 6, 0, 0, 1, 0, 0, 0, 0.2),
+            surface_is_cylinder_flag=False,
+            field_shape_function="z",
+            target_region_radius=0.04,
         )
-        print("Evidence:", root / name / "result.json")
+        for name, config in (("cylinder_gradient", cylinder), ("biplanar_gradient", biplanar)):
+            request = ResearchRequest.from_config(config, name=name, design_margin=0.8)
+            payload = run_design(request, root / name)
+            summary = payload["summary"]
+            print(
+                name,
+                "accepted:",
+                summary["accepted"],
+                "independent relative field error:",
+                summary["validated_relative_field_error"],
+                "sheet power [W]:",
+                summary["power_w"],
+            )
+            print("Evidence:", root / name / "result.json")
+            if not summary["accepted"]:
+                raise RuntimeError(f"{name} failed independent physical acceptance; inspect its evidence.")
 
 
 if __name__ == "__main__":

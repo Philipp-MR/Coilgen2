@@ -1,0 +1,179 @@
+{
+  "basic_designs": {
+    "cylinder_gradient": {
+      "accepted": true,
+      "scope": "continuous_sheet",
+      "relative_field_error": 0.03999798889819624,
+      "validated_relative_field_error": 0.042579114863566095,
+      "power_w": 8.833602297174261
+    },
+    "biplanar_gradient": {
+      "accepted": true,
+      "scope": "continuous_sheet",
+      "relative_field_error": 0.03999999764712179,
+      "validated_relative_field_error": 0.03819410732959051,
+      "power_w": 1.1219973651279198
+    }
+  },
+  "tolerance_resume": {
+    "normalization_scales": {
+      "power": 8.833602297174261,
+      "magnetic_energy": 0.016445949669630807
+    },
+    "operator_assembly_count": 0,
+    "cvxpy_graph_reused": false,
+    "scope": "continuous_sheet_sampled_constraints",
+    "independent_validation_performed": false,
+    "candidates": [
+      {
+        "tolerance_scale": 0.75,
+        "status": "completed",
+        "reused": true,
+        "summary": {
+          "accepted": true,
+          "scope": "continuous_sheet_sampled_constraints",
+          "relative_field_error": 0.030000000058606167,
+          "power_w": 11.080768202587592,
+          "energy_j": 0.01942427041348857
+        }
+      },
+      {
+        "tolerance_scale": 1.0,
+        "status": "completed",
+        "reused": true,
+        "summary": {
+          "accepted": true,
+          "scope": "continuous_sheet_sampled_constraints",
+          "relative_field_error": 0.0400000001336765,
+          "power_w": 8.840071902965157,
+          "energy_j": 0.016407793859922783
+        }
+      },
+      {
+        "tolerance_scale": 1.5,
+        "status": "completed",
+        "reused": true,
+        "summary": {
+          "accepted": true,
+          "scope": "continuous_sheet_sampled_constraints",
+          "relative_field_error": 0.06000000007947028,
+          "power_w": 5.587994518842411,
+          "energy_j": 0.011938276059353917
+        }
+      }
+    ]
+  },
+  "minimax": {
+    "comparison": "same 3% relative weighted Bz error budget; continuous-sheet FEM only",
+    "peak_current_reduction_percent": 45.53813177116153,
+    "sheet_power_increase_percent": 63.23387787405215,
+    "cases": [
+      {
+        "mode": "balanced",
+        "peak_surface_current_density_A_per_m": 51971.73601972065,
+        "sheet_power_W": 377.78799776674276,
+        "field_relative_error_percent": 3.0000000004295932,
+        "independent_validation_relative_error_percent": 2.233465868583547,
+        "conic_contract_met": true,
+        "independent_K_operator_max_error_A_per_m": 1.8339910484497325e-11
+      },
+      {
+        "mode": "minimax_current_density",
+        "peak_surface_current_density_A_per_m": 28304.77838730004,
+        "sheet_power_W": 616.6779988973917,
+        "field_relative_error_percent": 2.999999999435203,
+        "independent_validation_relative_error_percent": 2.3494493552681037,
+        "conic_contract_met": true,
+        "independent_K_operator_max_error_A_per_m": 1.8383551860731275e-11
+      }
+    ]
+  },
+  "single_turn": {
+    "ready_geometry": true,
+    "closed_mathematical_turn": true,
+    "drive_feed_designed": false,
+    "centroid_export_and_frames_verified": true,
+    "field_uses_exported_centroid": true,
+    "analytic_circle_relative_error_percent": 0.012817883648370136,
+    "electrical": {
+      "body_id": "part001_body0001",
+      "current_A": 2.0,
+      "cross_section_area_m2": 7.653668647301794e-07,
+      "length_m": 0.2513021800746218,
+      "resistance_ohm": 0.005910158186607509,
+      "joule_power_W": 0.023640632746430038,
+      "inductance_H": 2.1440110673667967e-07,
+      "inductance_kind": "closed_path_self",
+      "circuit_complete": true,
+      "mutual_inductance_included": false
+    },
+    "winding_operation_count": 1,
+    "sampled_interval_count": 128,
+    "sheet_objective_material_assumption": {
+      "model": "single_layer_locally_parallel_uniform_pitch_dc",
+      "wire_area_m2": 7.653668647301794e-07,
+      "pitch_m": 0.004,
+      "resistivity_ohm_m": 1.8e-08,
+      "effective_thickness_m": 0.00019134171618254487,
+      "sheet_resistance_ohm": 9.407253347109911e-05,
+      "spacing_and_temperature_assumed_uniform": true,
+      "leads_and_interconnects_included": false
+    },
+    "limits": "Feed break, drive terminals and external leads are not designed; isolated self L only, no mutual coupling or finite-cross-section field integration."
+  },
+  "geometry_benchmark": {
+    "python": "3.12.14",
+    "numpy": "2.5.1",
+    "numba": "0.67.0",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "float_type": "float64",
+    "fastmath": false,
+    "native_threads": 1,
+    "fresh_numba_cache": true,
+    "kernels": [
+      {
+        "primitive": "segment",
+        "pair_count": 20000,
+        "cold_compile_and_single_pair_s": 1.9354716998059303,
+        "reference_batch_s": 0.5453286999836564,
+        "warm_compiled_batch_s": 0.011686000041663647,
+        "warm_speedup": 46.66512904667268,
+        "maximum_absolute_distance_difference_m": 0.0
+      },
+      {
+        "primitive": "triangle",
+        "pair_count": 2000,
+        "cold_compile_and_single_pair_s": 2.4783232000190765,
+        "reference_batch_s": 0.7815237999893725,
+        "warm_compiled_batch_s": 0.017043899977579713,
+        "warm_speedup": 45.85357817268483,
+        "maximum_absolute_distance_difference_m": 0.0
+      }
+    ],
+    "complete_sweep": {
+      "source_points": 129,
+      "faces": 1024,
+      "seconds": {
+        "reference": 0.8037735000252724,
+        "numba": 0.11280809994786978
+      },
+      "speedup": 7.125139953573436,
+      "collision_candidate_pairs": 1504,
+      "mesh_and_selected_diagnostics_equal": true
+    },
+    "limitations": "Synthetic distance batches; full sweep also spends time in uncompiled projection, frames, BVH and quality checks. Hardware-dependent timings."
+  },
+  "halbach_coarse_configuration": {
+    "source": "./project_data/halbach_cylindrical_3axis_gradient/Octagonal Gradients - Gx Surface_remeshed.stl",
+    "source_vertices": 7164,
+    "source_faces": 14104,
+    "coarse_vertices": 392,
+    "coarse_faces": 728,
+    "cluster_voxel_size_mm": 21.253778267974855,
+    "channel": "GX",
+    "target_region_resolution": 5,
+    "diagnostic_grid_size": 12,
+    "diagnostic_slices": 3
+  },
+  "halbach_coarse_scope": "Only GX, actual imported support coarsened explicitly; workflow completed but manufacturing failed. Visualization STL does not constitute a fabrication-ready coil."
+}

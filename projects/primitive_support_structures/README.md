@@ -43,3 +43,9 @@ For faster configuration checks without numerical optimization, set:
 
 All dimensions are SI units. The default mesh and target resolutions are small
 on purpose; increase them only after the geometry and target field are correct.
+
+Direct-file execution resolves the repository from the script location, including
+when launched from another working directory. Add `--headless` (or set
+`MPLBACKEND=Agg`) to retain reports while suppressing interactive windows.
+Programmatic callers can pass an explicit parameter mapping to `main(parameters)`;
+the validated design objects are reused for the solve.

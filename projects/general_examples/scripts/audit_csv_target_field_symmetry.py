@@ -1,12 +1,26 @@
 from __future__ import annotations
 
+# Support direct terminal/Spyder execution from any working directory.
+if __package__ in {None, ""}:
+    import sys
+    from pathlib import Path as _Path
+
+    for _path in (_Path(__file__).resolve().parents[3], _Path(__file__).resolve().parents[3] / "src"):
+        if str(_path) not in sys.path:
+            sys.path.insert(0, str(_path))
+
 from projects._shared.object_parameters import object_parameters
 
 import csv
 from pathlib import Path
 from typing import Any
 
-from projects._shared.example_utils import PROJECT_ROOT, example_output_dir, parse_example_parameters
+from projects._shared.example_utils import (
+    PROJECT_ROOT,
+    example_output_dir,
+    native_thread_budget,
+    parse_example_parameters,
+)
 from projects._shared.paths import resolve_project_path as resolve_shared_project_path
 
 from coilgen import CoilGenConfig, load_target_field_definition, target_field_symmetry_audit
@@ -131,4 +145,5 @@ def print_audit(audit: dict[str, Any], target_file: Path, csv_path: Path) -> Non
 
 
 if __name__ == "__main__":
-    target, audit, csv_path = main()
+    with native_thread_budget():
+        target, audit, csv_path = main()

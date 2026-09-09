@@ -3,6 +3,10 @@
 This project contains general, generated-data CoilGen scripts that can be run
 directly from Spyder or a terminal.
 
+Direct execution works from any working directory. Add `--headless` to suppress
+interactive plots; `MPLBACKEND=Agg` also requests a noninteractive run. Output
+folders are timestamped below `outputs/general_examples/`.
+
 ## Structure
 
 - `scripts/`: runnable example scripts.
@@ -30,9 +34,21 @@ New general scripts should be added under `projects/general_examples/scripts`.
 - `open_biplanar_gradient.py`: open biplanar gradient starting point.
 - `imported_target_shim_example.py`: generated CSV target/shim import example.
 - `export_swept_body.py`: swept volumetric conductor export as STL and STEP
-  advanced BREP solids in meter coordinates.
+  advanced BREP solids in meter coordinates. The default is four independent
+  constant-Bz turns with valid mesh diagnostics; feed breaks, terminals and
+  interconnections remain undesigned.
 
 Each writes one output folder with a Markdown report and summary CSV.
+
+`simple_ygradient.py` is a compact y-gradient starting point; increase its mesh
+and target-grid resolution for convergence studies. `export_visualizations.py`
+saves the SVG gallery by default. Shared fallback runtime/chunking parameters
+remain in `parameters/defaults.py`.
+
+For quick checks, use `run_standard_examples.py --smoke --headless` or
+`generated_parameter_sweep.py --smoke --headless`. Omit `--smoke` for their full
+compact example sets. Native thread limits prevent nested BLAS oversubscription
+when `threadpoolctl` is available.
 
 ## Scaling Benchmarks
 
