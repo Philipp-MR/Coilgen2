@@ -16,3 +16,6 @@ dist/
 /outputs/
 # Large project-owned inputs (meshes, field maps, measured data) stay local.
 /project_data/
+# Independent research repository and local investigation artifacts.
+/CoilGenResearch/
+/tmp/

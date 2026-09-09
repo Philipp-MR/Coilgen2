@@ -46,7 +46,9 @@ def define_target_field(
         target_points = _spherical_target_points(config)
         if config.set_roi_into_mesh_center:
             all_vertices = np.vstack([mesh.vertices for mesh in coil_meshes])
-            target_points = target_points - all_vertices.mean(axis=0)
+            # Mesh and field-expression coordinates are in the world frame.
+            # Move the origin-centred ROI to the mesh, preserving that frame.
+            target_points = target_points + all_vertices.mean(axis=0)
 
     target_points = _unique_rows_stable(target_points)
     target_b = np.zeros((len(target_points), 3), dtype=float)

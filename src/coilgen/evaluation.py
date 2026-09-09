@@ -79,7 +79,7 @@ def evaluate_field_errors(
         float(config.target_gradient_strength),
         component_dsv_mask,
         contour_step=float(contour_step),
-        source=str(getattr(config, "field_evaluation_current_source", "target_fit")),
+        source=field_evaluation_current_source(config),
         component=component,
         b0_direction=b0_direction,
         sample_weights=component_weights,
@@ -166,8 +166,7 @@ def layout_target_residual_diagnostics(
     metric_value = residual_std if metric == "std" else residual_rms
     effective_limit = limit + acceptance
     met = bool(
-        not checked
-        or (invalid_sample_count == 0 and np.isfinite(metric_value) and metric_value <= effective_limit)
+        not checked or (invalid_sample_count == 0 and np.isfinite(metric_value) and metric_value <= effective_limit)
     )
     return {
         "layout_target_checked": checked,
@@ -224,9 +223,7 @@ def _field_by_contours(
     target_coords = target_field.coords
     if not part.contour_lines:
         return np.zeros((len(target_coords), 3), dtype=float)
-    contour_paths = [
-        (contour, contour_evaluation_points(part.mesh, contour, config)) for contour in part.contour_lines
-    ]
+    contour_paths = [(contour, contour_evaluation_points(part.mesh, contour, config)) for contour in part.contour_lines]
     work_size = sum(max(len(points) - 1, 0) for _contour, points in contour_paths) * len(target_coords)
     task = reporter.task(f"part {part_ind}/{part_count} contour fields", len(part.contour_lines))
     if should_parallelize(work_size, config, worker_count=worker_count) and len(part.contour_lines) > 1:
@@ -294,6 +291,17 @@ def calculate_layout_gradient(field: np.ndarray, target_field: TargetField) -> d
         "qyz": float(data["qyz_T_per_m2"]),
         "second_order_rms": float(data["second_order_rms_T_per_m2"]),
     }
+
+
+def field_evaluation_current_source(config: CoilGenConfig) -> str:
+    """Keep physical optimization's certified current throughout discretization.
+
+    Refitting a coil's drive after solving would change its power, energy,
+    torque and scenario bounds. Legacy designs retain the requested policy.
+    """
+    if config.research_physics is not None:
+        return "stream_function"
+    return str(getattr(config, "field_evaluation_current_source", "target_fit"))
 
 
 def _field_evaluation_current(

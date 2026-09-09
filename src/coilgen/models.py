@@ -76,6 +76,53 @@ class Mesh:
 
 
 @dataclass
+class FabricationPath:
+    """Actual swept profile-centroid trace and route provenance, in SI units.
+
+    Points and frames contain one row per unique ring. A repeated endpoint is
+    added only by ``wire_points_m`` for a closed path. Electrical feeds and
+    external return paths are never inferred from geometric closure.
+    """
+
+    points_m: np.ndarray
+    tangents: np.ndarray
+    normals: np.ndarray
+    transverse: np.ndarray
+    cross_section_m: np.ndarray
+    source_points_m: np.ndarray
+    closed: bool = False
+    source_kind: str = "wire_path"
+    segment_owners: tuple[WireSegmentOwner, ...] = ()
+    segment_geometry: tuple[WirePathGeometry, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in ("points_m", "tangents", "normals", "transverse", "cross_section_m", "source_points_m"):
+            value = np.array(getattr(self, name), dtype=np.float64, copy=True)
+            dimensions = 2 if name == "cross_section_m" else 3
+            if value.ndim != 2 or value.shape[1] != dimensions or not np.all(np.isfinite(value)):
+                raise ValueError(f"FabricationPath.{name} requires finite (n, {dimensions}) values.")
+            value.flags.writeable = False
+            setattr(self, name, value)
+        if len(self.points_m) < (3 if self.closed else 2):
+            raise ValueError("FabricationPath requires enough points to define its winding.")
+        if any(len(getattr(self, name)) != len(self.points_m) for name in ("tangents", "normals", "transverse")):
+            raise ValueError("FabricationPath frames must correspond to every sweep ring.")
+        self.segment_owners = tuple(WireSegmentOwner(**vars(owner)) for owner in self.segment_owners)
+        self.segment_geometry = tuple(WirePathGeometry(value) for value in self.segment_geometry)
+        count = len(self.points_m) if self.closed else len(self.points_m) - 1
+        if any(values and len(values) != count for values in (self.segment_owners, self.segment_geometry)):
+            raise ValueError("FabricationPath provenance requires one entry per physical interval.")
+
+    @property
+    def wire_points_m(self) -> np.ndarray:
+        return np.vstack((self.points_m, self.points_m[0])) if self.closed else self.points_m.copy()
+
+    @property
+    def length_m(self) -> float:
+        return float(np.linalg.norm(np.diff(self.wire_points_m, axis=0), axis=1).sum())
+
+
+@dataclass
 class SweptBody:
     """One independently closed triangulated conductor body.
 
@@ -87,6 +134,7 @@ class SweptBody:
     contour_index: int | None = None
     turn_multiplicity: int = 1
     diagnostics: ManufacturingDiagnostics = field(default_factory=dict)
+    fabrication_path: FabricationPath | None = None
 
     def __post_init__(self) -> None:
         if self.contour_index is not None and int(self.contour_index) < 1:
@@ -428,6 +476,7 @@ class CoilPart:
     unconnected_contour_min_wire_distance: float = 0.0
     unconnected_contour_wire_distance_diagnostics: dict[str, float | int | bool] = field(default_factory=dict)
     contour_distance_matrix: np.ndarray | None = None
+    fabrication_path: FabricationPath | None = None
 
     @property
     def nominal_contour_count(self) -> int:

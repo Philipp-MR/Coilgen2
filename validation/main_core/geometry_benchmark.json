@@ -1,0 +1,42 @@
+{
+  "python": "3.12.14",
+  "numpy": "2.5.1",
+  "numba": "0.67.0",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "float_type": "float64",
+  "fastmath": false,
+  "native_threads": 1,
+  "fresh_numba_cache": true,
+  "kernels": [
+    {
+      "primitive": "segment",
+      "pair_count": 20000,
+      "cold_compile_and_single_pair_s": 1.9539749999530613,
+      "reference_batch_s": 0.541181500069797,
+      "warm_compiled_batch_s": 0.011622500140219927,
+      "warm_speedup": 46.563260360567874,
+      "maximum_absolute_distance_difference_m": 0.0
+    },
+    {
+      "primitive": "triangle",
+      "pair_count": 2000,
+      "cold_compile_and_single_pair_s": 2.5315624999348074,
+      "reference_batch_s": 0.7829988000448793,
+      "warm_compiled_batch_s": 0.016845300095155835,
+      "warm_speedup": 46.481736485658956,
+      "maximum_absolute_distance_difference_m": 0.0
+    }
+  ],
+  "complete_sweep": {
+    "source_points": 129,
+    "faces": 1024,
+    "seconds": {
+      "reference": 0.7843418999109417,
+      "numba": 0.10636359988711774
+    },
+    "speedup": 7.374157143452772,
+    "collision_candidate_pairs": 1504,
+    "mesh_and_selected_diagnostics_equal": true
+  },
+  "limitations": "Synthetic distance batches; full sweep also spends time in uncompiled projection, frames, BVH and quality checks. Hardware-dependent timings."
+}

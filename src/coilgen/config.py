@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +54,7 @@ class TargetSettings:
 class OptimizationSettings:
     sf_opt_method: str
     stream_function_cost_function: str
+    research_physics: dict[str, Any] | None
     preoptimized_stream_function_file: str
     preoptimized_stream_function_field_name: str
     tikonov_reg_factor: float
@@ -272,6 +273,7 @@ class ManufacturingSettings:
     conductor_cross_section_height: float
     cross_sectional_points: Sequence[Sequence[float]]
     conductor_mounting_mode: str
+    sweep_surface_realization: str
     sweep_path_simplification: str
     sweep_collinearity_tolerance: float
     sweep_tangent_angle_tolerance_deg: float
@@ -326,6 +328,7 @@ class CoilGenConfig:
     field_display_units: str = "T"
     sf_opt_method: str = "tikhonov"
     stream_function_cost_function: str = "field_error_plus_resistance"
+    research_physics: dict[str, Any] | None = None
     preoptimized_stream_function_file: str = "none"
     preoptimized_stream_function_field_name: str = "stream_function"
     preoptimized_stream_function_match_tolerance: float = 1e-8
@@ -604,6 +607,7 @@ class CoilGenConfig:
     conductor_cross_section_height: float = 0.002
     conductor_mounting_mode: str = "centered"
     sweep_path_simplification: str = "off"
+    sweep_surface_realization: str = "analytic"
     sweep_collinearity_tolerance: float = 1e-8
     sweep_tangent_angle_tolerance_deg: float = 0.5
     sweep_frame_angle_tolerance_deg: float = 0.5
@@ -774,6 +778,7 @@ class CoilGenConfig:
         return OptimizationSettings(
             sf_opt_method=self.sf_opt_method,
             stream_function_cost_function=self.stream_function_cost_function,
+            research_physics=self.research_physics,
             preoptimized_stream_function_file=self.preoptimized_stream_function_file,
             preoptimized_stream_function_field_name=self.preoptimized_stream_function_field_name,
             tikonov_reg_factor=self.tikonov_reg_factor,
@@ -986,6 +991,7 @@ class CoilGenConfig:
             conductor_cross_section_height=self.conductor_cross_section_height,
             cross_sectional_points=self.cross_sectional_points,
             conductor_mounting_mode=self.conductor_mounting_mode,
+            sweep_surface_realization=self.sweep_surface_realization,
             sweep_path_simplification=self.sweep_path_simplification,
             sweep_collinearity_tolerance=self.sweep_collinearity_tolerance,
             sweep_tangent_angle_tolerance_deg=self.sweep_tangent_angle_tolerance_deg,

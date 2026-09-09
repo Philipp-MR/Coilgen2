@@ -591,14 +591,22 @@ def stream_function_optimization(
         else:
             part.current_density = current_density_from_basis(part)
         offset += count
-    parts, problem.combined_mesh, b_field_opt_sf, density_limit_diagnostics = (
-        enforce_stream_function_current_density_limit(
-            parts,
-            problem.combined_mesh,
-            b_field_opt_sf,
-            config,
+    if solution.diagnostics.get("research_physics_enabled", False):
+        # Physical constraints certify this amplitude; post-solve rescaling
+        # would invalidate arbitrary field equalities and scenarios.
+        density_limit_diagnostics = {
+            "surface_current_density_scaling_applied": False,
+            "surface_current_density_scaling_factor": 1.0,
+        }
+    else:
+        parts, problem.combined_mesh, b_field_opt_sf, density_limit_diagnostics = (
+            enforce_stream_function_current_density_limit(
+                parts,
+                problem.combined_mesh,
+                b_field_opt_sf,
+                config,
+            )
         )
-    )
     solution.diagnostics.update(density_limit_diagnostics)
     if solution.diagnostics.get("stream_function_scheme") == "constrained_quadratic" and bool(
         density_limit_diagnostics.get("surface_current_density_scaling_applied", False)
@@ -792,6 +800,10 @@ def solve_stream_function_problem(
     branch here. Keep the mathematical objective in that solver's docstring.
     """
 
+    if config.research_physics is not None:
+        from .research.convex import solve_research_problem
+
+        return solve_research_problem(problem, config)
     scheme = _normalise_stream_function_method(config.sf_opt_method)
     if scheme == "tikhonov":
         solution = solve_tikhonov_stream_function(problem, config)

@@ -5,6 +5,15 @@ does not yet implement every important physical objective. Backend count is not
 a measure of mathematical coverage: first specify the physical problem, then
 select a compatible numerical solver.
 
+Main integration update (2026-09-09): physical energy/power/current-density
+objectives, generalized field bounds, finite scenarios, force/torque constraints,
+power/energy caps and reusable DPP tolerance studies are now available through
+the opt-in [headless physical API](RESEARCH_PHYSICS_API.md). The numerical
+formulations and original audit evidence below remain useful; the numbered
+gaps section records the audit's original recommendations rather than current
+implementation status. See [main integration](MAIN_CORE_IMPROVEMENTS.md) for
+current limits and validation.
+
 ## Physical model
 
 Let `psi = E x` be the nodal stream function, `A x` the sampled magnetic field,
@@ -132,7 +141,7 @@ requested hardware bounds. Use `strict` for studies requiring the direct model.
 Independent validation targets, mesh refinement, contouring/routing reevaluation
 and physical winding clearances remain necessary after a continuous solve.
 
-## Important gaps, in priority order
+## Original audit recommendations (current status linked above)
 
 1. **Surface magnetic energy.** Assemble a symmetric PSD energy matrix including
    self terms and cross-part coupling, then expose `W = 0.5 x^T L x` and normalized

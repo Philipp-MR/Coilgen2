@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 
 from .config_validation import ConfigValidationReport, validate_config
+from .evaluation import field_evaluation_current_source
 from .design_context import (
     CoilDesignContext,
     EvaluationFeature,
@@ -153,7 +154,9 @@ def result_quality_status(
                 "the layout target could not be validated."
             )
         else:
-            failures.append(f"Realized {source} {metric} residual {measured:.6g} T exceeds the layout limit {limit:.6g} T.")
+            failures.append(
+                f"Realized {source} {metric} residual {measured:.6g} T exceeds the layout limit {limit:.6g} T."
+            )
     try:
         regularization_report = regularization_selection_report(result)
     except ValueError:
@@ -167,7 +170,7 @@ def result_quality_status(
 
 
 def _gradient_linearity_field_for_result(result: CoilGenResult) -> np.ndarray:
-    """Return connected-layout field at the fitted gradient operating current."""
+    """Return layout field at its permitted operating current, without a physical refit."""
 
     field_per_amp = getattr(result, "field_layout_per1Amp", None)
     current = _gradient_linearity_layout_current_A(result)
@@ -181,6 +184,11 @@ def _gradient_linearity_field_for_result(result: CoilGenResult) -> np.ndarray:
 def _gradient_linearity_layout_current_A(result: CoilGenResult) -> float:
     layout_gradient = getattr(result, "layout_gradient", None)
     config = getattr(result, "input_data", None)
+    if getattr(config, "research_physics", None) is not None:
+        try:
+            return float(getattr(result, "needed_current_layout", np.nan))
+        except (TypeError, ValueError):
+            return float("nan")
     if isinstance(layout_gradient, dict):
         try:
             achieved_per_amp = float(layout_gradient.get("achieved_gradient", np.nan))
@@ -307,10 +315,10 @@ def result_summary_dict(result: CoilGenResult) -> dict[str, Any]:
         "design_context_is_mr": bool(design_context.is_mr),
         "design_context_evaluation_features": ", ".join(design_context.feature_keys()),
         "target_field_component": str(getattr(config, "target_field_component", "Bz")),
-        "field_evaluation_current_source": str(getattr(config, "field_evaluation_current_source", "target_fit")),
+        "field_evaluation_current_source": field_evaluation_current_source(config),
         "field_source_label": (
             f"{getattr(config, 'target_field_component', 'Bz')} target, "
-            f"{getattr(config, 'field_evaluation_current_source', 'target_fit')} current"
+            f"{field_evaluation_current_source(config)} current"
         ),
         "layout_terminal_strategy": str(getattr(config, "layout_terminal_strategy", "undefined")),
         "layout_terminal_pad_count": int(getattr(config, "layout_terminal_pad_count", 0)),
@@ -797,6 +805,27 @@ def result_summary_dict(result: CoilGenResult) -> dict[str, Any]:
         "constrained_solver_name": str(result.regularization_diagnostics.get("constrained_solver_name", "")),
         "constrained_solver_status": str(result.regularization_diagnostics.get("constrained_solver_status", "")),
         "constrained_solver_contract_met": result.regularization_diagnostics.get("constrained_solver_contract_met"),
+        **(
+            {
+                key: result.regularization_diagnostics.get(key)
+                for key in (
+                    "research_objective",
+                    "sheet_power_W",
+                    "energy_J",
+                    "force_N",
+                    "torque_Nm",
+                    "torque_origin_m",
+                    "b0_T",
+                    "force_model",
+                    "research_objective_scales",
+                    "research_tolerance_scale",
+                    "research_scenario_count",
+                    "max_surface_current_density_A_per_m",
+                )
+            }
+            if result.regularization_diagnostics.get("research_physics_enabled")
+            else {}
+        ),
         "constrained_solver_physical_constraints_met": result.regularization_diagnostics.get(
             "constrained_solver_physical_constraints_met"
         ),
@@ -1035,6 +1064,18 @@ def result_performance_table_rows(result: CoilGenResult) -> list[list[str]]:
     add("Routing", "potential step per turn", "potential_step_A", "A")
 
     add("Optimization", "stream-function solver", "stream_function_scheme")
+    if "research_objective" in summary:
+        add("Sheet physics", "physical objective", "research_objective")
+        add("Sheet physics", "continuous-sheet Joule power", "sheet_power_W", "W")
+        add("Sheet physics", "continuous-current magnetic energy", "energy_J", "J")
+        add("Sheet physics", "peak surface current density", "max_surface_current_density_A_per_m", "A/m")
+        add("Sheet physics", "net force [x,y,z]", "force_N", "N")
+        add("Sheet physics", "net torque [x,y,z]", "torque_Nm", "N m")
+        add("Sheet physics", "torque origin [x,y,z]", "torque_origin_m", "m")
+        add("Sheet physics", "prescribed uniform background [x,y,z]", "b0_T", "T")
+        add("Sheet physics", "background load model", "force_model")
+        add("Sheet physics", "fixed objective reference scales", "research_objective_scales", "W, J, A/m")
+        add("Sheet physics", "finite uncertainty scenarios", "research_scenario_count")
     add("Optimization", "regularization method", "regularization_method")
     add("Optimization", "regularization factor", "regularization_factor")
     add("Optimization", "regularization lambda", "regularization_lambda")
@@ -1771,7 +1812,9 @@ def write_design_report(
         lines.extend(_markdown_table(pruning_summary))
         lines.append("")
     if pruning_rows:
-        lines.append("Each row is one selected multiplicity-weighted representative or complete symmetry-orbit removal.")
+        lines.append(
+            "Each row is one selected multiplicity-weighted representative or complete symmetry-orbit removal."
+        )
         lines.append("")
         lines.extend(
             _markdown_rows_table(
@@ -1922,27 +1965,15 @@ def _sparsification_pruning_summary(result: CoilGenResult) -> dict[str, Any]:
             "optimality proven": diagnostics.get("contour_sparsification_pruning_optimality_proven", False),
             "evaluated subsets": diagnostics.get("contour_sparsification_pruning_evaluated_subset_count", 0),
             "feasible subsets": diagnostics.get("contour_sparsification_pruning_feasible_subset_count", 0),
-            "removable symmetry orbits": diagnostics.get(
-                "contour_sparsification_pruning_removable_orbit_count", 0
-            ),
+            "removable symmetry orbits": diagnostics.get("contour_sparsification_pruning_removable_orbit_count", 0),
             "pre-pruning geometries": diagnostics.get("contour_sparsification_pruning_pre_geometry_count", 0),
             "retained geometries": diagnostics.get("contour_sparsification_pruning_retained_geometry_count", 0),
             "target geometry count": diagnostics.get("contour_sparsification_pruning_target_geometry_count", 0),
-            "target count feasible": diagnostics.get(
-                "contour_sparsification_pruning_target_count_feasible", False
-            ),
-            "final symmetry closure": diagnostics.get(
-                "contour_sparsification_pruning_final_symmetry_ok", False
-            ),
-            "baseline residual metric [T]": diagnostics.get(
-                "contour_sparsification_pruning_baseline_metric_T", np.nan
-            ),
-            "selected residual metric [T]": diagnostics.get(
-                "contour_sparsification_pruning_selected_metric_T", np.nan
-            ),
-            "allowed residual metric [T]": diagnostics.get(
-                "contour_sparsification_pruning_allowed_metric_T", np.nan
-            ),
+            "target count feasible": diagnostics.get("contour_sparsification_pruning_target_count_feasible", False),
+            "final symmetry closure": diagnostics.get("contour_sparsification_pruning_final_symmetry_ok", False),
+            "baseline residual metric [T]": diagnostics.get("contour_sparsification_pruning_baseline_metric_T", np.nan),
+            "selected residual metric [T]": diagnostics.get("contour_sparsification_pruning_selected_metric_T", np.nan),
+            "allowed residual metric [T]": diagnostics.get("contour_sparsification_pruning_allowed_metric_T", np.nan),
         }
     return {}
 
@@ -1995,24 +2026,14 @@ def _post_pruning_merge_summary(result: CoilGenResult) -> dict[str, Any]:
             continue
         return {
             "mode": diagnostics.get("contour_sparsification_post_pruning_merge_mode", "off"),
-            "completed passes": diagnostics.get(
-                "contour_sparsification_post_pruning_completed_pass_count", 0
-            ),
-            "proposed merges": diagnostics.get(
-                "contour_sparsification_post_pruning_proposed_merge_count", 0
-            ),
-            "accepted merges": diagnostics.get(
-                "contour_sparsification_post_pruning_accepted_merge_count", 0
-            ),
+            "completed passes": diagnostics.get("contour_sparsification_post_pruning_completed_pass_count", 0),
+            "proposed merges": diagnostics.get("contour_sparsification_post_pruning_proposed_merge_count", 0),
+            "accepted merges": diagnostics.get("contour_sparsification_post_pruning_accepted_merge_count", 0),
             "pre-consolidation geometries": diagnostics.get(
                 "contour_sparsification_post_pruning_pre_geometry_count", 0
             ),
-            "final geometries": diagnostics.get(
-                "contour_sparsification_post_pruning_final_geometry_count", 0
-            ),
-            "represented turns": diagnostics.get(
-                "contour_sparsification_post_pruning_final_turn_count", 0
-            ),
+            "final geometries": diagnostics.get("contour_sparsification_post_pruning_final_geometry_count", 0),
+            "represented turns": diagnostics.get("contour_sparsification_post_pruning_final_turn_count", 0),
             "baseline residual metric [T]": diagnostics.get(
                 "contour_sparsification_post_pruning_baseline_metric_T", np.nan
             ),
@@ -2037,9 +2058,7 @@ def _post_pruning_merge_audit_rows(result: CoilGenResult) -> list[dict[str, Any]
         provenance = part.contour_sparsification
         if provenance is None:
             continue
-        records = provenance.diagnostics.get(
-            "contour_sparsification_post_pruning_merge_records", ()
-        )
+        records = provenance.diagnostics.get("contour_sparsification_post_pruning_merge_records", ())
         if not records:
             continue
         return [
@@ -2048,22 +2067,16 @@ def _post_pruning_merge_audit_rows(result: CoilGenResult) -> list[dict[str, Any]
                 "source_representatives": ",".join(
                     str(int(index)) for index in record.get("source_representative_indices", ())
                 ),
-                "source_contours": ",".join(
-                    str(int(index)) for index in record.get("source_contour_indices", ())
-                ),
+                "source_contours": ",".join(str(int(index)) for index in record.get("source_contour_indices", ())),
                 "selected_potential_A": float(record.get("selected_potential_A", np.nan)),
                 "multiplicity": int(record.get("turn_multiplicity", 0)),
                 "accepted": bool(record.get("accepted", False)),
                 "reason": str(record.get("rejection_reason", "")),
                 "residual_metric_T": float(record.get("residual_metric_T", np.nan)),
-                "total_rms_field_error_percent": float(
-                    record.get("total_rms_field_error_percent", np.nan)
-                ),
+                "total_rms_field_error_percent": float(record.get("total_rms_field_error_percent", np.nan)),
                 "minimum_spacing_m": float(record.get("minimum_spacing_m", np.nan)),
                 "manufacturing_ok": bool(record.get("manufacturing_ok", False)),
-                "curvature_ratio": float(
-                    record.get("max_curvature_envelope_ratio", np.nan)
-                ),
+                "curvature_ratio": float(record.get("max_curvature_envelope_ratio", np.nan)),
                 "curvature_limit": float(record.get("curvature_envelope_limit", np.nan)),
             }
             for record in records

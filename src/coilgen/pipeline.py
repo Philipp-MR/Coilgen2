@@ -109,6 +109,10 @@ class CoilGenPipeline:
             self.config,
         )
         symmetry_mesh_diagnostics.update(refinement_symmetry_diagnostics)
+        if self.config.research_physics is not None:
+            from .research.convex import preflight_research_physics
+
+            preflight_research_physics(self.config.research_physics, sum(mesh.n_faces for mesh in prepared_meshes))
         mesh_quality_diagnostics = _validate_prepared_mesh_quality(prepared_meshes, self.config)
         symmetry_mesh_diagnostics.update(mesh_quality_diagnostics)
         parts = [CoilPart(mesh=mesh) for mesh in prepared_meshes]

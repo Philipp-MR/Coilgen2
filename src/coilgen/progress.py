@@ -1,7 +1,33 @@
 from __future__ import annotations
 
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
+from typing import Callable, Iterator
+
+
+class DesignCancelled(RuntimeError):
+    """Raised at a numerical stage boundary when a worker is cancelled."""
+
+
+_progress_sink: ContextVar[Callable[[dict], None] | None] = ContextVar("coilgen_progress_sink", default=None)
+_cancel_check: ContextVar[Callable[[], bool] | None] = ContextVar("coilgen_cancel_check", default=None)
+
+
+@contextmanager
+def progress_context(
+    sink: Callable[[dict], None],
+    cancel_check: Callable[[], bool] | None = None,
+) -> Iterator[None]:
+    """Capture progress in this execution context without changing solver inputs."""
+    sink_token = _progress_sink.set(sink)
+    cancel_token = _cancel_check.set(cancel_check)
+    try:
+        yield
+    finally:
+        _cancel_check.reset(cancel_token)
+        _progress_sink.reset(sink_token)
 
 
 def format_elapsed(seconds: float) -> str:
@@ -32,6 +58,12 @@ class ProgressReporter:
         )
 
     def report(self, percent: float, message: str, *, force: bool = False) -> None:
+        cancel = _cancel_check.get()
+        if cancel is not None and cancel():
+            raise DesignCancelled("Design cancelled by the user.")
+        sink = _progress_sink.get()
+        if sink is not None:
+            sink({"label": self.label, "percent": max(0.0, min(100.0, float(percent))), "message": message})
         if not self.enabled:
             return
         print(f"{self.label} {max(0.0, min(100.0, float(percent))):6.1f}% - {message}", flush=True)
@@ -73,7 +105,7 @@ class ProgressTask:
         self.update(self.completed + int(amount), message=message, force=force)
 
     def update(self, completed: int, *, message: str | None = None, force: bool = False) -> None:
-        if not self.reporter.enabled:
+        if not self.reporter.enabled and _progress_sink.get() is None and _cancel_check.get() is None:
             self.completed = max(int(completed), 0)
             return
         self.completed = min(max(int(completed), 0), self.total)

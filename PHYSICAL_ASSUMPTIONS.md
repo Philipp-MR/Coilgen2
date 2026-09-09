@@ -143,9 +143,13 @@ be interpreted separately.
   pulsed-gradient screening results unless a thermal model and duty cycle are
   supplied.
 - Resistance minimization reduces global Ohmic power, but it does not guarantee
-  that local current-density hot spots are acceptable. Peak or minimax
-  current-density objectives are a natural future extension for practical coil
-  engineering.
+  that local current-density hot spots are acceptable. Facewise vector minimax
+  objectives and current-density limits are available. These constrain the
+  continuous sheet, not connector hot spots or final wire temperature.
+- The opt-in [physical API](RESEARCH_PHYSICS_API.md) supports sheet magnetic
+  energy and prescribed-background net force/torque constraints. Its physical
+  current is preserved through contour/wire evaluation. Net load balance does
+  not establish local stress, vibration or full-circuit construction readiness.
 
 ## MR Gradient Engineering Checks Outside The Static Model
 
@@ -158,7 +162,7 @@ fields. A finished MR gradient coil also needs time-domain and system checks:
 - amplifier voltage and slew-rate margins;
 - peripheral nerve stimulation from induced electric fields;
 - acoustic noise and mechanical resonance;
-- Lorentz-force loads in the B0 field;
+- local Lorentz-force stress and structural response in the B0 field;
 - eddy-current coupling into cryostat, magnet, RF shields, and patient-support
   structures;
 - cryostat heating and conductive shielding losses;

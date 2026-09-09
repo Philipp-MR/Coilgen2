@@ -14,7 +14,7 @@ from .contours import (
     filter_loop_significance,
     regularize_contour_paths,
 )
-from .evaluation import _field_evaluation_current, calculate_unconnected_contour_field
+from .evaluation import _field_evaluation_current, calculate_unconnected_contour_field, field_evaluation_current_source
 from .field_components import component_sample_values, field_component_values
 from .metrics import dsv_target_mask
 from .models import CoilPart, Mesh, TargetField
@@ -430,7 +430,7 @@ def _target_contour_field_report(
         float(getattr(config, "target_gradient_strength", 1.0)),
         mask,
         contour_step=contour_step,
-        source=str(getattr(config, "field_evaluation_current_source", "target_fit")),
+        source=field_evaluation_current_source(config),
         component=component,
         b0_direction=b0_direction,
         sample_weights=weights,
@@ -487,6 +487,7 @@ def _target_contour_field_report(
     denominator = effective_allowed if effective_allowed > 0.0 else reference
     return {
         "contourability_target_fitted_current_A": float(fitted_current),
+        "contourability_target_current_source": field_evaluation_current_source(config),
         "contourability_target_residual_std_T": float(residual_std),
         "contourability_target_residual_rms_T": float(residual_rms),
         "contourability_target_metric": metric,

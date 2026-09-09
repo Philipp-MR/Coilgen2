@@ -56,6 +56,11 @@ def _config(solver="CLARABEL", **kwargs):
         constrained_optimization_tolerance=1.0e-9,
         target_error_tolerance_percent=1.0,
         target_error_constraint_acceptance_absolute_T=0.0,
+        # SCS stops on a normalized system, so its 1e-9 solver tolerance is
+        # not a 1e-9 relative tolerance on this 1%-of-target residual budget.
+        # Request an explicit 1e-14 T numerical allowance for this analytic
+        # optimum comparison; the production acceptance rules stay strict.
+        target_error_constraint_acceptance_tolerance=1.0e-6,
         progress_flag=False,
         **kwargs,
     )

@@ -72,6 +72,22 @@ def validate_config(config: CoilGenConfig, *, project_root: str | Path | None = 
     _validate_target_settings(config, error, warning)
     _validate_design_context(config, error, warning)
     _validate_optimization_settings(config, error, warning)
+    if config.research_physics is not None:
+        from .research.convex import ResearchPhysicsSpec
+
+        try:
+            ResearchPhysicsSpec.from_dict(config.research_physics)
+        except (TypeError, ValueError) as exc:
+            error("research_physics", str(exc))
+        if any(
+            str(value).strip().lower() not in {"", "none"}
+            for value in (config.preoptimized_stream_function_file, config.sf_source_file)
+        ):
+            error(
+                "research_physics",
+                "Physical optimization cannot be combined with a preoptimized stream-function source; "
+                "that source bypasses optimization.",
+            )
     _validate_routing_settings(config, error, warning)
     _validate_performance_settings(config, error, warning)
     _validate_manufacturing_settings(config, error, warning)
@@ -931,8 +947,13 @@ def _validate_optimization_settings(config: CoilGenConfig, error, warning) -> No
     objective_mode = objective_mode.strip().lower().replace("-", "_")
     if objective_mode == "minimax_current_density":
         if str(config.sf_opt_method).lower().replace("-", "_") not in {
-            "constrained_quadratic", "cvxpy_constrained", "minimum_resistance_constrained",
-            "minimum_resistance_subject_to_field_error_socp", "direct_fixed_error", "socp", "second_order_cone",
+            "constrained_quadratic",
+            "cvxpy_constrained",
+            "minimum_resistance_constrained",
+            "minimum_resistance_subject_to_field_error_socp",
+            "direct_fixed_error",
+            "socp",
+            "second_order_cone",
         }:
             error("sf_opt_method", "Minimax current density requires the direct constrained_quadratic method.")
         for name in ("stream_function_smoothness_factor", "turn_spacing_regularization_factor"):
@@ -1613,9 +1634,9 @@ def _validate_optimization_settings(config: CoilGenConfig, error, warning) -> No
         getattr(config, "contour_sparsification_pruning_beam_width", 128),
         1,
     )
-    post_pruning_merge_mode = str(
-        getattr(config, "contour_sparsification_post_pruning_merge_mode", "off")
-    ).strip().lower()
+    post_pruning_merge_mode = (
+        str(getattr(config, "contour_sparsification_post_pruning_merge_mode", "off")).strip().lower()
+    )
     _enum(
         error,
         "contour_sparsification_post_pruning_merge_mode",
@@ -1997,6 +2018,7 @@ def _validate_manufacturing_settings(config: CoilGenConfig, error, warning) -> N
         error, "conductor_mounting_mode", config.conductor_mounting_mode, {"centered", "surface_outer", "surface_inner"}
     )
     _enum(error, "sweep_path_simplification", config.sweep_path_simplification, {"off", "exact", "toleranced"})
+    _enum(error, "sweep_surface_realization", config.sweep_surface_realization, {"analytic", "mesh"})
     _enum(error, "sweep_bend_mode", config.sweep_bend_mode, {"miter", "fillet"})
     _enum(
         error,

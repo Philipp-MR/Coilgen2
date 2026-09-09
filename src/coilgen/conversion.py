@@ -87,6 +87,8 @@ def coil_design_problem_to_config(
         values["tikonov_reg_factor"] = float(problem.optimization.regularization_factor)
     if problem.conductor.effective_sheet_thickness_m is not None:
         values["conductor_thickness"] = float(problem.conductor.effective_sheet_thickness_m)
+    if problem.layout.sweep_surface_realization is not None:
+        values["sweep_surface_realization"] = problem.layout.sweep_surface_realization
     optimization_fields = {
         "constrained_objective_mode": "constrained_quadratic_objective_mode",
         "conic_solver": "constrained_optimization_solver",
@@ -109,6 +111,7 @@ def coil_design_problem_to_config(
         "spectral_cutoff_policy": "stream_function_spectral_cutoff_policy",
         "spectral_min_modes": "stream_function_spectral_min_modes",
         "spectral_max_modes": "stream_function_spectral_max_modes",
+        "research_physics": "research_physics",
     }
     for spec_field, config_field in optimization_fields.items():
         value = getattr(problem.optimization, spec_field)

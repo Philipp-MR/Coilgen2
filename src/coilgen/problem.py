@@ -1276,6 +1276,8 @@ class OptimizationSpec:
     spectral_cutoff_policy: str | None = None
     spectral_min_modes: int | None = None
     spectral_max_modes: int | None = None
+    # Serialized ResearchPhysicsSpec; None preserves the base configuration.
+    research_physics: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1300,10 +1302,13 @@ class LayoutSpec:
     keepout_region_count: int = 0
     manufacturing_intent: str = "contour_screening"
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    sweep_surface_realization: Literal["analytic", "mesh"] | None = None
 
     def __post_init__(self) -> None:
         if int(self.contour_count) < 1:
             raise ValueError("contour_count must be positive.")
+        if self.sweep_surface_realization not in {None, "analytic", "mesh"}:
+            raise ValueError("sweep_surface_realization must be 'analytic', 'mesh', or None.")
         allowed_terminal_strategies = {"undefined", "waived", "pads", "wire_stubs"}
         if self.terminal_strategy not in allowed_terminal_strategies:
             known = ", ".join(sorted(allowed_terminal_strategies))

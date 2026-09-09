@@ -10,8 +10,8 @@ import numpy as np
 
 from .config import CoilGenConfig
 from .geometry import combine_meshes, compute_face_normals, compute_vertex_normals, rotation_matrix_by_vector
-from .models import CoilGenResult, CoilPart, ContourLine, Mesh, SweptBody, WirePath, WirePathGeometry
-from .wire_provenance import transfer_segment_geometry
+from .models import CoilGenResult, CoilPart, ContourLine, FabricationPath, Mesh, SweptBody, WirePath, WirePathGeometry
+from .wire_provenance import nearest_source_segment_indices, transfer_segment_geometry
 
 _DEFAULT_MESH_AREA_TOLERANCE_M2 = 1e-12
 _WIRE_TRACE_STEP_MIN_SEGMENT_LENGTH_M = 1e-12
@@ -30,6 +30,7 @@ def create_swept_coil_meshes(parts: list[CoilPart], config: CoilGenConfig) -> li
         for part in parts:
             part.swept_body = None
             part.swept_bodies = []
+            part.fabrication_path = None
             part.manufacturing_diagnostics = {"swept_body_created": False, "manufacturing_ok": True}
         return parts
 
@@ -39,6 +40,7 @@ def create_swept_coil_meshes(parts: list[CoilPart], config: CoilGenConfig) -> li
     cross_section = conductor_cross_section_points(config)
     for part in parts:
         part.swept_bodies = []
+        part.fabrication_path = None
         if part.wire_path is None or len(part.wire_path.v) < 2:
             part.swept_body = None
             part.manufacturing_diagnostics = {"swept_body_created": False, "manufacturing_ok": False}
@@ -58,6 +60,7 @@ def create_swept_coil_meshes(parts: list[CoilPart], config: CoilGenConfig) -> li
             SweptBody(
                 mesh=part.swept_body,
                 diagnostics=part.manufacturing_diagnostics,
+                fabrication_path=part.fabrication_path,
             )
         ]
     return parts
@@ -74,10 +77,9 @@ def create_swept_contour_meshes(parts: list[CoilPart], config: CoilGenConfig) ->
     """
 
     cross_section = conductor_cross_section_points(config)
-    weighted_representatives = (
-        str(getattr(config, "contour_sparsification_mode", "off")).strip().lower() != "off"
-    )
+    weighted_representatives = str(getattr(config, "contour_sparsification_mode", "off")).strip().lower() != "off"
     for part_index, part in enumerate(parts, start=1):
+        part.fabrication_path = None
         bodies: list[SweptBody] = []
         for contour_index, contour in enumerate(part.contour_lines, start=1):
             bodies.append(
@@ -112,7 +114,9 @@ def create_swept_contour_body(
 ) -> SweptBody:
     """Create one independent contour body and its complete diagnostics."""
 
-    section = conductor_cross_section_points(config) if cross_section is None else np.asarray(cross_section, dtype=float)
+    section = (
+        conductor_cross_section_points(config) if cross_section is None else np.asarray(cross_section, dtype=float)
+    )
     weighted = (
         str(getattr(config, "contour_sparsification_mode", "off")).strip().lower() != "off"
         if weighted_representative is None
@@ -130,6 +134,7 @@ def create_swept_contour_body(
         swept_body=None,
         swept_bodies=[],
         manufacturing_diagnostics={},
+        fabrication_path=None,
     )
     mesh, sweep_diagnostics = _sweep_wire_path_with_diagnostics(contour_part, section, config)
     diagnostics = mesh_manufacturing_diagnostics(mesh)
@@ -161,6 +166,9 @@ def create_swept_contour_body(
         contour_index=contour_index,
         turn_multiplicity=contour.turn_multiplicity,
         diagnostics=diagnostics,
+        fabrication_path=replace(contour_part.fabrication_path, source_kind="contour")
+        if contour_part.fabrication_path is not None
+        else None,
     )
 
 
@@ -605,10 +613,18 @@ def _finalize_manufacturing_diagnostics(part: CoilPart) -> None:
         reasons.append("swept_mesh_self_intersection")
     if bool(diagnostics.get("sweep_self_intersection_skipped", False)):
         reasons.append("self_intersection_check_skipped")
-    if bool(diagnostics.get("sweep_min_bend_radius_violation", False)):
+    if bool(diagnostics.get("sweep_min_bend_radius_violation", False)) or bool(
+        diagnostics.get("sweep_final_min_bend_radius_violation", False)
+    ):
         reasons.append("minimum_bend_radius_violation")
-    if bool(diagnostics.get("sweep_curvature_envelope_violation", False)):
+    if bool(diagnostics.get("sweep_curvature_envelope_violation", False)) or bool(
+        diagnostics.get("sweep_final_curvature_envelope_violation", False)
+    ):
         reasons.append("curvature_envelope_violation")
+    if bool(diagnostics.get("sweep_final_collinear_reversal", False)):
+        reasons.append("collinear_path_reversal")
+    if bool(diagnostics.get("sweep_final_zero_length_interval", False)):
+        reasons.append("zero_length_physical_interval")
     if bool(diagnostics.get("sweep_min_segment_length_violation", False)):
         reasons.append("minimum_segment_length_violation")
     if bool(diagnostics.get("sweep_local_fold_violation", False)):
@@ -870,7 +886,86 @@ def _sweep_wire_path_with_diagnostics(
     )
     diagnostics["sweep_capsule_centerline_reference"] = "mounted_profile_origin"
     diagnostics.update(_final_mesh_collision_diagnostics(part, mesh, diagnostics))
+    centroid = _polygon_centroid(cross_section)
+    mounted_points = points + (mounting_offset + centroid[1]) * normals + centroid[0] * binormals
+    physical_points = np.vstack((mounted_points, mounted_points[0])) if closed_path else mounted_points
+    final_support_points = np.vstack((points, points[0])) if closed_path else points
+    source_indices = nearest_source_segment_indices(source_points, final_support_points)
+    part.fabrication_path = FabricationPath(
+        points_m=mounted_points,
+        tangents=tangents,
+        normals=normals,
+        transverse=binormals,
+        cross_section_m=cross_section,
+        source_points_m=source_points,
+        closed=closed_path,
+        segment_owners=tuple(part.wire_path.segment_owners[index] for index in source_indices)
+        if part.wire_path.segment_owners
+        else (),
+        segment_geometry=tuple(part.wire_path.segment_geometry[index] for index in source_indices),
+    )
+    diagnostics.update(_final_path_bend_diagnostics(mounted_points, cross_section, config, closed=closed_path))
+    diagnostics.update(_source_path_displacement_diagnostics(source_points, physical_points, source_indices))
+    diagnostics["sweep_surface_realization"] = getattr(config, "sweep_surface_realization", "analytic")
+    diagnostics["sweep_physics_geometry"] = "mounted_profile_centroid"
     return mesh, diagnostics
+
+
+def _final_path_bend_diagnostics(points, cross_section, config, *, closed):
+    """Check the manufactured centroid after projection, mounting and ring repair.
+
+    The minimum bend radius is a physical postcondition even when automatic
+    filleting is disabled. Coarser precursor checks cannot certify this path.
+    """
+    radii = _polyline_circumradii(points, closed=closed, minimum_turn_angle_deg=1e-6)
+    minimum = float(np.min(radii)) if len(radii) else np.inf
+    radius = max(float(config.sweep_min_bend_radius), 0.0)
+    lengths = _centerline_segment_lengths(points, closed=closed)
+    # A collinear reversal has undefined circumcircle and must not look straight.
+    angles = _polyline_turn_angles_deg(points, closed=closed)
+    reversal = bool(np.any(angles >= 180.0 - 1e-6))
+    if reversal:
+        minimum = 0.0
+    # This check uses the physical centroid trace, so its enclosing radius
+    # must also be centred on the profile centroid rather than the CAD origin.
+    envelope = _cross_section_envelope_radius(cross_section - _polygon_centroid(cross_section))
+    ratio = envelope / minimum if minimum > 0.0 else np.inf
+    return {
+        "sweep_final_min_bend_radius_m": minimum if np.isfinite(minimum) else None,
+        "sweep_final_bend_radius_reference": "mounted_profile_centroid_after_ring_repair",
+        "sweep_final_min_bend_radius_violation": bool(radius > 0.0 and minimum < 0.99 * radius),
+        "sweep_final_collinear_reversal": reversal,
+        "sweep_final_zero_length_interval": bool(np.any(lengths <= 1e-12)),
+        "sweep_final_max_curvature_envelope_ratio": ratio if np.isfinite(ratio) else None,
+        "sweep_final_curvature_envelope_violation": bool(ratio >= float(config.sweep_max_curvature_envelope_ratio)),
+    }
+
+
+def _source_path_displacement_diagnostics(source_points, physical_points, source_indices=None):
+    """Measure final sampled centroids against the original source polyline."""
+    indices = (
+        nearest_source_segment_indices(source_points, physical_points) if source_indices is None else source_indices
+    )
+    midpoints = 0.5 * (physical_points[:-1] + physical_points[1:])
+    starts, ends = source_points[indices], source_points[indices + 1]
+    vectors = ends - starts
+    lengths_sq = np.einsum("ij,ij->i", vectors, vectors)
+    fractions = np.divide(
+        np.einsum("ij,ij->i", midpoints - starts, vectors),
+        lengths_sq,
+        out=np.zeros(len(indices)),
+        where=lengths_sq > 0.0,
+    )
+    displacement = np.linalg.norm(midpoints - starts - np.clip(fractions, 0.0, 1.0)[:, None] * vectors, axis=1)
+    return {
+        "sweep_source_to_centroid_max_midpoint_displacement_m": float(np.max(displacement))
+        if len(displacement)
+        else 0.0,
+        "sweep_source_to_centroid_rms_midpoint_displacement_m": float(np.sqrt(np.mean(displacement**2)))
+        if len(displacement)
+        else 0.0,
+        "sweep_source_displacement_sampling": "final_interval_midpoints_to_matched_source_segments",
+    }
 
 
 def _sweep_section_conservation_diagnostics(
@@ -1120,6 +1215,16 @@ def _swept_mesh_self_intersection_diagnostics(
 ) -> dict[str, float | int | bool | str]:
     """Check non-adjacent swept triangles using a BVH broad phase."""
 
+    from .research.kernels import active_geometry_backend
+
+    backend = active_geometry_backend()
+    if backend is not None:
+        from .research.fabrication import accelerated_mesh_collision_diagnostics
+
+        return accelerated_mesh_collision_diagnostics(
+            mesh, backend=backend, maximum_reported_intersections=maximum_reported_intersections
+        )
+
     triangles = np.asarray(mesh.vertices, dtype=float)[np.asarray(mesh.faces, dtype=np.int64)]
     if len(triangles) < 2:
         return {
@@ -1269,9 +1374,7 @@ def _segment_triangle_intersects(
     edge_second_length = float(np.linalg.norm(edge_second))
     # The determinant has units m^3, whereas the geometric tolerance is in m.
     # An absolute determinant cutoff misses crossings in fine conductor meshes.
-    determinant_tolerance = (
-        32.0 * np.finfo(float).eps * direction_length * edge_first_length * edge_second_length
-    )
+    determinant_tolerance = 32.0 * np.finfo(float).eps * direction_length * edge_first_length * edge_second_length
     if abs(determinant) <= determinant_tolerance or direction_length <= tolerance:
         return False
     area_twice = float(np.linalg.norm(np.cross(edge_first, edge_second)))
@@ -1496,12 +1599,8 @@ def _build_sweep_rings(
     quality_safety_factor = 1.25
     quality_edge_tolerance = max(
         edge_tolerance,
-        quality_safety_factor
-        * minimum_profile_edge
-        / max(float(config.mesh_quality_max_triangle_edge_ratio), 1.0),
-        quality_safety_factor
-        * minimum_profile_edge
-        / max(float(config.mesh_quality_max_altitude_aspect_ratio), 1.0),
+        quality_safety_factor * minimum_profile_edge / max(float(config.mesh_quality_max_triangle_edge_ratio), 1.0),
+        quality_safety_factor * minimum_profile_edge / max(float(config.mesh_quality_max_altitude_aspect_ratio), 1.0),
     )
     removed_count = 0
     quality_coarsening_removed_count = 0
@@ -1536,9 +1635,8 @@ def _build_sweep_rings(
             closed=closed,
         )
         if (
-            (len(quality_segment_indices) == 0 and folded_quad_count == 0 and poor_quad_count == 0)
-            or _iteration == max_iterations
-        ):
+            len(quality_segment_indices) == 0 and folded_quad_count == 0 and poor_quad_count == 0
+        ) or _iteration == max_iterations:
             return (
                 points,
                 tangents,
@@ -1654,6 +1752,27 @@ def _build_sweep_rings(
                 or trial_short_count < current_short_count
             )
         )
+        # Ring coarsening may improve triangle aspect ratios while damaging a
+        # previously valid bend on the mounted conductor. Keep the physical
+        # postcondition when choosing an otherwise reversible mesh repair.
+        centroid = _polygon_centroid(cross_section)
+        current_bends = _final_path_bend_diagnostics(
+            points + (mounting_offset + centroid[1]) * normals + centroid[0] * binormals,
+            cross_section,
+            config,
+            closed=closed,
+        )
+        trial_bends = _final_path_bend_diagnostics(
+            next_points + (mounting_offset + centroid[1]) * trial_normals + centroid[0] * trial_binormals,
+            cross_section,
+            config,
+            closed=closed,
+        )
+        worsens_valid_bend = any(
+            not current_bends[key] and trial_bends[key]
+            for key in ("sweep_final_min_bend_radius_violation", "sweep_final_curvature_envelope_violation")
+        )
+        improves_quality = improves_quality and not worsens_valid_bend
         if not improves_quality:
             return (
                 points,
@@ -3202,7 +3321,7 @@ def _plan_open_sweep_corner_intervals(
                 tuple[int, float, int, float],
             ]
         ] = []
-        for enforce_window_extent in ((True, False) if requires_window_envelope else (True,)):
+        for enforce_window_extent in (True, False) if requires_window_envelope else (True,):
             previous_options = _open_corner_support_options(
                 points,
                 segment_geometry,
@@ -3369,7 +3488,9 @@ def _open_corner_support_options(
         deviation = float(np.max(deviations)) if len(deviations) else 0.0
         if deviation > maximum_deviation:
             break
-        required_support_index = candidate.required_previous_support_index if side < 0 else candidate.required_following_support_index
+        required_support_index = (
+            candidate.required_previous_support_index if side < 0 else candidate.required_following_support_index
+        )
         has_enveloped_window = not enforce_window_extent or (
             support_index <= required_support_index if side < 0 else support_index >= required_support_index
         )
@@ -3424,12 +3545,10 @@ def _corner_support_geometry_is_compatible(
     if any(rank > blend_rank for rank in ranks):
         return False
     transition_count = sum(
-        previous != following
-        for previous, following in zip(crossed_geometry[:-1], crossed_geometry[1:])
+        previous != following for previous, following in zip(crossed_geometry[:-1], crossed_geometry[1:])
     )
     return bool(
-        transition_count <= 1
-        and all(following <= previous for previous, following in zip(ranks[:-1], ranks[1:]))
+        transition_count <= 1 and all(following <= previous for previous, following in zip(ranks[:-1], ranks[1:]))
     )
 
 
@@ -4923,6 +5042,11 @@ def _analytic_cylinder_surface_constraint(
 ) -> _AnalyticCylinderSurface | None:
     """Return a verified analytic cylinder matching the generated support mesh."""
 
+    realization = getattr(config, "sweep_surface_realization", "analytic")
+    if realization not in {"mesh", "analytic"}:
+        raise ValueError("sweep_surface_realization must be 'mesh' or 'analytic'.")
+    if realization == "mesh":
+        return None
     if not bool(config.surface_is_cylinder_flag):
         return None
     if _normalised_text(config.coil_mesh_file) != "create cylinder mesh":
