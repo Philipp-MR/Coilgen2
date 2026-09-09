@@ -27,6 +27,13 @@ From Spyder, open `run_standard_cylindrical_3axis_gradient.py`, edit the
 top-level `SHOW_PLOT_BOOK`, `GRADIENT_TEMPLATE`, and `PROJECT` objects, and
 run the file.
 
+The plot book opens by default (`SHOW_PLOT_BOOK = True`). If the solve has already
+finished in Spyder, open it without recomputing the coils:
+
+```python
+plot_book = project_run.show_plot_book()
+```
+
 For a headless run, add `--headless` or set `MPLBACKEND=Agg`. `NATIVE_THREADS`
 bounds BLAS threads inside CoilGen workers, independently of `cpu_workers`.
 `main(project)` accepts an explicit project variant without changing the default

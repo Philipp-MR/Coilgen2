@@ -38,7 +38,7 @@ OUTPUT_ROOT = project_output_root("standard_cylindrical_3axis_gradient")
 # All lengths are metres. A gradient strength of 0.010 means 10 mT/m.
 
 PROJECT_NAME = "standard_cylindrical_3axis_gradient"
-SHOW_PLOT_BOOK = False
+SHOW_PLOT_BOOK = True  # Open after solving; --headless or MPLBACKEND=Agg suppresses it.
 NATIVE_THREADS = 1  # BLAS threads inside each CoilGen worker; increase deliberately for large serial solves.
 EXPORT_STL = True
 EXPORT_WIRE_TRACE_CSV = True
