@@ -3,20 +3,23 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from coilgen.manufacturing import _segment_distance, _swept_mesh_self_intersection_diagnostics
+from coilgen import geometry_kernels
+from coilgen.manufacturing import _swept_mesh_self_intersection_diagnostics
 from coilgen.models import Mesh
 from coilgen.research import kernels
 from coilgen.research.fabrication import accelerated_mesh_collision_diagnostics
 
 
 @pytest.mark.parametrize("scale", [1e-6, 1.0, 1e3])
-def test_reference_segment_distances_match_geometry_reference(scale):
+def test_vectorized_segment_distances_match_scalar_reference(scale):
     rng = np.random.default_rng(141)
     first, second = rng.normal(size=(2, 100, 2, 3)) * scale
     first[0, 1] = first[0, 0]
     second[1] = first[1] + np.array([0, 0, scale])
-    measured = kernels.segment_pair_distances(first, second, backend="reference").values_m
-    expected = np.array([_segment_distance(*a, *b) for a, b in zip(first, second)])
+    measured = geometry_kernels.segment_distances(
+        first[:, 0], first[:, 1] - first[:, 0], second[:, 0], second[:, 1] - second[:, 0]
+    )
+    expected = kernels.segment_pair_distances(first, second, backend="reference").values_m
     np.testing.assert_allclose(measured, expected, rtol=1e-12, atol=1e-14 * scale)
 
 
@@ -62,7 +65,7 @@ def test_safe_auto_fallback_and_context_reset(monkeypatch):
     def unavailable(*args):
         raise RuntimeError("test compiler unavailable")
 
-    monkeypatch.setattr(kernels, "_segments_compiled", unavailable)
+    monkeypatch.setattr(geometry_kernels, "_compiled_kernel", lambda vertices: unavailable)
     points = np.zeros((1, 2, 3))
     with pytest.warns(RuntimeWarning, match="reference"):
         result = kernels.segment_pair_distances(points, points, backend="auto")

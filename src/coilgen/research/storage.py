@@ -1,59 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import asdict, fields, is_dataclass
+from dataclasses import fields, is_dataclass
 from hashlib import sha256
 from importlib.metadata import PackageNotFoundError, version
 import json
-import math
 import os
 from pathlib import Path
 import platform
 from typing import Any
-import uuid
 
 import numpy as np
 
-
-def json_value(value: Any) -> Any:
-    """Strict JSON: unavailable/nonfinite results become null, never success."""
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if isinstance(value, Path):
-        return str(value)
-    if is_dataclass(value):
-        return json_value(asdict(value))
-    if isinstance(value, dict):
-        return {str(k): json_value(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [json_value(v) for v in value]
-    if hasattr(value, "tolist"):
-        return json_value(value.tolist())
-    raise TypeError(f"Cannot save {type(value).__name__} as reproducible JSON.")
-
-
-def atomic_json(path: Path, value: Any) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        with temporary.open("w", encoding="utf-8", newline="\n") as output:
-            json.dump(json_value(value), output, allow_nan=False, indent=2)
-            output.write("\n")
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def file_digest(path: Path) -> str:
-    digest = sha256()
-    with path.open("rb") as source:
-        for block in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+from ..persistence import (
+    atomic_json as atomic_json,
+    file_digest as file_digest,
+    json_value as json_value,
+    source_digest,
+)
 
 
 def operator_fingerprint(value: Any) -> Any:
@@ -99,11 +62,6 @@ def environment_manifest() -> dict:
 
 def request_identity(request: dict, resolved: dict) -> tuple[str, dict]:
     package_root = Path(__file__).resolve().parents[1]
-    code = sha256()
-    for path in sorted(package_root.rglob("*")):
-        if path.is_file() and path.suffix == ".py":
-            code.update(path.relative_to(package_root).as_posix().encode())
-            code.update(path.read_bytes())
     inputs = {}
     for key, value in resolved.items():
         if isinstance(value, str) and any(token in key for token in ("file", "path")):
@@ -114,7 +72,7 @@ def request_identity(request: dict, resolved: dict) -> tuple[str, dict]:
         "schema": "coilgen-research-request-v1",
         "request": request,
         "resolved_config": resolved,
-        "source_sha256": code.hexdigest(),
+        "source_sha256": source_digest(package_root),
         "input_files": inputs,
         "environment": environment_manifest(),
     }
@@ -123,7 +81,9 @@ def request_identity(request: dict, resolved: dict) -> tuple[str, dict]:
     # Relative/absolute spelling and a display name must not create mismatches
     # when a request crosses a process boundary.
     identity = dict(manifest, request={k: v for k, v in request.items() if k not in {"name", "config"}})
-    encoded = json.dumps(json_value(identity), sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    encoded = json.dumps(
+        json_value(identity, nonfinite="raise"), sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode()
     return sha256(encoded).hexdigest(), manifest
 
 

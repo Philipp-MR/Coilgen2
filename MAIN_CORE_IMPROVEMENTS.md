@@ -81,11 +81,35 @@ the computed field and saved frames/profile reproduce the swept mesh. It is a
 geometrically closed turn with no designed feed break or supply terminals.
 
 A fresh-cache benchmark on Windows/Python 3.12.14, NumPy 2.5.1 and Numba 0.67.0
-measured 46.6x/46.5x warm segment/triangle distance speedups. A complete 1,024-face
-sweep took 0.784 s with the reference implementation and 0.106 s with the compiled
+measured 43.4x/46.7x warm segment/triangle distance speedups. A complete 1,024-face
+sweep took 0.794 s with the reference implementation and 0.108 s with the compiled
 path (7.37x), with identical mesh arrays and selected diagnostics. Cold compilation
-of both kernels took 4.49 s. These are workload-specific measurements, not a
-whole-pipeline speed guarantee.
+and single-pair execution of both kernels took 4.19 s. These are workload-specific
+measurements, not a whole-pipeline speed guarantee.
+
+## Consolidation after integration
+
+The cleanup removes 799 production Python lines net, including the new shared
+modules. Twenty unused private helpers were removed; the dense current-density
+Gram calculation was moved into its regression test as an independent reference.
+The Tikhonov, constrained-quadratic and physical conic solver paths remain distinct.
+
+- Routing, manufacturing and optional compiled geometry use shared distance
+  kernels. A unit-dependent degeneracy cutoff previously reported 50 micrometres
+  of clearance for crossing 100-micrometre segments; the corrected calculation
+  returns zero. Analytic, vectorized and compiled checks cover scales from
+  nanometres to kilometres. Core imports and default sweeps do not load Numba
+  or the research package.
+- Shared persistence hashes Python sources recursively, so edits inside
+  `research/` invalidate both study caches. Complete report/cache writes use
+  temporary files and atomic replacement. Non-finite cache inputs are rejected;
+  unavailable result values are serialized as JSON `null`. Incremental JSONL
+  records remain append-only.
+- The 206-name `coilgen.api` interface delegates to canonical package exports.
+  Six settings projections and 15 generated-geometry adapters use existing
+  definitions instead of maintaining duplicate mappings. Regression tests retain
+  export order and identity, field defaults, mutable-value behavior, validation
+  and non-default geometry arguments.
 
 ## Compatibility and validation
 
@@ -103,11 +127,12 @@ Validation covers analytic energy/self/mutual and loop-field benchmarks,
 coordinate/scaling invariants, solver feasibility, fixed-reference graph reuse,
 post-mount bend failures, source/realized field differences, compiled/reference
 equivalence, process ownership and corrupt-cache rejection. The final
-main-environment suite passed **868 tests and 26 subtests** in 70.92 s with
+main-environment suite passed **919 tests and 26 subtests** in 75.31 s with
 `MPLBACKEND=Agg`; 10 existing Matplotlib deprecation warnings remain. Ruff lint
 passes across `src`, `tests`, `examples` and `projects`; formatting passes for
 the integration files. Unrelated pre-existing formatting differences were
-retained. `pip check` passes and the built wheel contains no GUI files.
+retained. The four working examples above were rerun successfully after cleanup.
+`pip check` passes and the built wheel includes the shared modules and no GUI files.
 The measured benchmark and test log are retained in `validation/main_core/`.
 
 ## Deliberate limits

@@ -777,21 +777,6 @@ def _positive_float(value: object, *, default: float) -> float:
     return float(number)
 
 
-def _scale_target_gradient(points: np.ndarray, target_b: np.ndarray, target_gradient_strength: float) -> np.ndarray:
-    z_field = target_b[:, 2]
-    if len(z_field) == 0:
-        return target_b
-    max_ind = int(np.argmax(z_field))
-    min_ind = int(np.argmin(z_field))
-    max_target_distance = np.linalg.norm(points[max_ind] - points[min_ind])
-    max_field_difference = z_field[max_ind] - z_field[min_ind]
-    if abs(max_field_difference) > 1e-10 and max_target_distance > 0:
-        target_b = target_b / (max_field_difference / max_target_distance) * target_gradient_strength
-    else:
-        target_b = target_b * target_gradient_strength
-    return target_b
-
-
 def symbolic_gradient_fallback(expression: str, points: np.ndarray) -> np.ndarray:
     eps = 1e-6
     gradient = np.zeros((len(points), 3), dtype=float)

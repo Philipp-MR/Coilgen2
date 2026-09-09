@@ -16,6 +16,7 @@ import numpy as np
 from .designs import CoilDesign
 from .manufacturing import save_wire_trace_artifacts
 from .models import CoilGenResult
+from .persistence import atomic_text, atomic_text_writer, file_digest, json_value, source_digest
 from .reporting import result_quality_status, result_summary_dict, write_design_report, write_design_summary_csv
 from .study import ParameterAxis
 from .visualization import save_plot_gallery
@@ -777,8 +778,7 @@ def _write_run_log_markdown(record: Mapping[str, Any], path: Path) -> None:
             lines.append(f"- `{artifact.get('path', '')}`")
     else:
         lines.append("No artifacts recorded.")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_bounded_text("\n".join(lines) + "\n", RUN_RECORD_MAX_MARKDOWN_BYTES), encoding="utf-8")
+    atomic_text(path, _bounded_text("\n".join(lines) + "\n", RUN_RECORD_MAX_MARKDOWN_BYTES))
 
 
 def _compact_log_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
@@ -892,6 +892,8 @@ def _design_record(design: Any) -> dict[str, Any]:
 
 
 def _stable_digest(value: Any) -> str:
+    # Legacy short digests also identify result summaries with missing metrics.
+    # Keep their NaN tokens distinct from None; actual cache inputs are strict.
     payload = json.dumps(_json_ready(value), sort_keys=True)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
@@ -992,13 +994,12 @@ def _flatten_prefixed(prefix: str, values: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _write_rows_csv(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     keys: list[str] = []
     for row in rows:
         for key in row:
             if key not in keys:
                 keys.append(key)
-    with path.open("w", newline="", encoding="utf-8") as handle:
+    with atomic_text_writer(path, newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=keys)
         writer.writeheader()
         for row in rows:
@@ -1006,26 +1007,24 @@ def _write_rows_csv(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
 
 
 def _write_json(payload: Any, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_json_ready(payload), indent=2, sort_keys=True), encoding="utf-8")
+    atomic_text(path, json.dumps(json_value(_json_ready(payload)), indent=2, sort_keys=True, allow_nan=False))
 
 
 def _write_run_record_json(record: Mapping[str, Any], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     metrics = record.get("metrics", {})
     prioritized_record = {**record, "metrics": {**_compact_log_metrics(metrics), **metrics}}
     compact = _bounded_json_ready(prioritized_record)
-    text = json.dumps(compact, indent=2, sort_keys=True)
+    text = json.dumps(json_value(compact), indent=2, sort_keys=True, allow_nan=False)
     if len(text.encode("utf-8")) > RUN_RECORD_MAX_SUMMARY_BYTES:
         compact = _minimal_run_record(record, reason="summary exceeded run-record byte budget")
-        text = json.dumps(compact, indent=2, sort_keys=True)
+        text = json.dumps(json_value(compact), indent=2, sort_keys=True, allow_nan=False)
     if len(text.encode("utf-8")) > RUN_RECORD_MAX_SUMMARY_BYTES:
         compact = _minimal_run_record(record, reason="minimal summary exceeded run-record byte budget")
         compact["metrics"] = {}
         compact["timing"] = []
         compact["artifacts"] = []
-        text = json.dumps(compact, indent=2, sort_keys=True)
-    path.write_text(text, encoding="utf-8")
+        text = json.dumps(json_value(compact), indent=2, sort_keys=True, allow_nan=False)
+    atomic_text(path, text)
 
 
 def _minimal_run_record(record: Mapping[str, Any], *, reason: str) -> dict[str, Any]:
@@ -1131,16 +1130,18 @@ def _read_json(path: Path) -> Any:
 
 
 def _append_jsonl(payload: Any, path: Path) -> None:
+    # Serialize before opening: an invalid row cannot leave a partial JSON value.
+    # Incremental events remain a streaming log; resume uses atomic case files.
+    text = json.dumps(json_value(_json_ready(payload)), sort_keys=True, allow_nan=False) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(_json_ready(payload), sort_keys=True) + "\n")
+        handle.write(text)
 
 
 def _write_jsonl(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
+    with atomic_text_writer(path) as handle:
         for row in rows:
-            handle.write(json.dumps(_json_ready(row), sort_keys=True) + "\n")
+            handle.write(json.dumps(json_value(_json_ready(row)), sort_keys=True, allow_nan=False) + "\n")
 
 
 def _prune_run_record_artifacts(output_dir: Path, *, keep: int = RUN_RECORD_RETENTION_COUNT) -> None:
@@ -1199,11 +1200,7 @@ def _successful_cached_row(path: Path) -> dict[str, Any] | None:
 
 
 def _sweep_code_digest() -> str:
-    digest = hashlib.sha256()
-    for path in sorted(Path(__file__).parent.glob("*.py")):
-        digest.update(path.name.encode("utf-8"))
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
+    return source_digest(Path(__file__).resolve().parent)
 
 
 def _sweep_cache_context(spec: ParameterSweepSpec, case: CoilCaseSpec, code_digest: str) -> dict[str, Any]:
@@ -1278,18 +1275,14 @@ def _sweep_input_digests(config: Any, root: Path) -> dict[str, Any]:
         if not path.is_file():
             inputs[key] = {"path": str(path.resolve()), "missing": True}
             continue
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        inputs[key] = {"path": str(path.resolve()), "sha256": digest.hexdigest()}
+        inputs[key] = {"path": str(path.resolve()), "sha256": file_digest(path)}
     return inputs
 
 
 def _case_cache_path(cache_dir: Path | None, index: int, point: Mapping[str, Any]) -> Path | None:
     if cache_dir is None:
         return None
-    payload = json.dumps(_json_ready(point), sort_keys=True)
+    payload = json.dumps(_json_ready(point), sort_keys=True, allow_nan=False)
     digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
     return cache_dir / f"case_{index:04d}_{digest}.json"
 

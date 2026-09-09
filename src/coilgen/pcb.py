@@ -142,26 +142,6 @@ def _wire_parts_from_centerline(centerline: np.ndarray, track_width: float) -> l
     return [PcbWirePart(centerline=centerline, track_shape=_track_polygon(centerline, track_width))]
 
 
-def _split_large_wrap_jumps(centerline: np.ndarray) -> list[np.ndarray]:
-    if len(centerline) < 2:
-        return [centerline]
-    jumps = np.linalg.norm(np.diff(centerline, axis=0), axis=1)
-    median = float(np.median(jumps[jumps > 0])) if np.any(jumps > 0) else 0.0
-    if median <= 0:
-        return [centerline]
-    cut_after = np.where(jumps > 8.0 * median)[0]
-    if len(cut_after) == 0:
-        return [centerline]
-    parts = []
-    start = 0
-    for cut in cut_after:
-        parts.append(centerline[start : cut + 1])
-        start = cut + 1
-    if start < len(centerline):
-        parts.append(centerline[start:])
-    return parts
-
-
 def _track_polygon(centerline: np.ndarray, track_width: float) -> np.ndarray:
     if len(centerline) < 2:
         return centerline.copy()

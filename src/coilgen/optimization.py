@@ -2364,19 +2364,6 @@ def _suppression_target_diagnostics(
     return diagnostics
 
 
-def _active_weights_for_points(problem: StreamFunctionOptimizationProblem, point_mask: np.ndarray) -> np.ndarray:
-    point_count = len(point_mask)
-    weights = problem.target_weights
-    if weights is None:
-        return np.ones(int(np.count_nonzero(point_mask)), dtype=float)
-    values = np.asarray(weights, dtype=float).reshape(-1)
-    if len(values) == point_count:
-        return values[point_mask]
-    if len(values) == 3 * point_count:
-        return np.mean(values.reshape(point_count, 3)[point_mask], axis=1)
-    return np.ones(int(np.count_nonzero(point_mask)), dtype=float)
-
-
 def _empty_suppression_target_diagnostics(config: CoilGenConfig) -> dict[str, Any]:
     return {
         "suppression_target_enabled": False,
@@ -2437,13 +2424,6 @@ def _unweighted_constraint_system(problem: StreamFunctionOptimizationProblem) ->
     if a_matrix is None or target is None:
         return np.asarray(problem.reduced_sensitivity, dtype=float), np.asarray(problem.target_z, dtype=float)
     return np.asarray(a_matrix, dtype=float), np.asarray(target, dtype=float)
-
-
-def _centered_constraint_system(a_matrix: np.ndarray, target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    return (
-        np.asarray(a_matrix, dtype=float) - np.mean(np.asarray(a_matrix, dtype=float), axis=0, keepdims=True),
-        np.asarray(target, dtype=float) - float(np.mean(np.asarray(target, dtype=float))),
-    )
 
 
 def _weighted_constraint_system(
@@ -3525,24 +3505,6 @@ def _constraint_field_metric_denominator(block: ResidualConstraintBlock) -> floa
         if np.isfinite(value) and value > 0.0:
             return value
     return float(np.sqrt(max(int(block.matrix.shape[0]), 1)))
-
-
-def _constraint_failure_summary(diagnostics: dict[str, Any]) -> str:
-    rows = diagnostics.get("target_error_constraint_block_diagnostics", ())
-    failed = [row for row in rows if not bool(row.get("met", False))] if isinstance(rows, list) else []
-    if not failed:
-        return "No block-level residual diagnostics were available."
-    pieces = []
-    for row in failed:
-        pieces.append(
-            (
-                f"{row.get('name', 'unknown')}: "
-                f"value={_format_diagnostic_number(row.get('field_metric_T'))} T, "
-                f"allowed={_format_diagnostic_number(row.get('allowed_field_metric_T'))} T, "
-                f"ratio={_format_diagnostic_number(row.get('violation_ratio'))}"
-            )
-        )
-    return "Failed residual block(s): " + "; ".join(pieces) + "."
 
 
 def _print_constraint_status(label: str, diagnostics: dict[str, Any]) -> None:
@@ -6523,15 +6485,6 @@ def _estimated_contour_step(stream_function: np.ndarray, config: CoilGenConfig) 
     return sf_range / denominator
 
 
-def _combined_surface_current_density_metric(parts: list[CoilPart]) -> np.ndarray:
-    metrics: list[np.ndarray] = []
-    for part in parts:
-        if part.current_density_mat is None:
-            raise ValueError("Every coil part must have current_density_mat before turn-spacing regularization.")
-        metrics.append(_surface_current_density_metric(part))
-    return _block_diag(metrics)
-
-
 def _reduced_surface_current_density_metric(
     parts: list[CoilPart],
     reducer: BoundaryReducer | SymmetryReducer | GaugeReducer | SpectralReducer,
@@ -6584,12 +6537,6 @@ def _face_local_basis_currents(part: CoilPart) -> np.ndarray:
         local_slots = np.argmax(faces[triangle_indices] == int(node_ind), axis=1)
         currents[triangle_indices, local_slots] = np.asarray(basis.current, dtype=float)
     return currents
-
-
-def _surface_current_density_metric(part: CoilPart) -> np.ndarray:
-    current_density_mat = np.asarray(part.current_density_mat, dtype=float)
-    face_areas = _mesh_face_areas(part.mesh)
-    return np.einsum("ifa,jfa,f->ij", current_density_mat, current_density_mat, face_areas, optimize=True)
 
 
 def _surface_biharmonic_metric(mesh: Mesh) -> np.ndarray:

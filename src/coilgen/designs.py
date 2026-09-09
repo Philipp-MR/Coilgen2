@@ -21,6 +21,7 @@ from .geometry import (
 from .models import CoilGenResult
 from .object_registry import register_in_memory_mesh
 from .pipeline import run_coilgen
+from .problem import PipelineGeometrySpec
 
 
 @dataclass(slots=True)
@@ -304,18 +305,14 @@ class CylinderCoilDesign(CoilDesign):
     rotation_angle_rad: float = 0.0
 
     def geometry_config(self) -> dict[str, Any]:
-        return {
-            "coil_mesh_file": "create cylinder mesh",
-            "surface_is_cylinder_flag": True,
-            "cylinder_mesh_parameter_list": (
-                self.length_m,
-                self.radius_m,
-                self.angular_divisions,
-                self.length_divisions,
-                *self.rotation_axis,
-                self.rotation_angle_rad,
-            ),
-        }
+        return PipelineGeometrySpec.cylinder(
+            length_m=self.length_m,
+            radius_m=self.radius_m,
+            angular_divisions=self.angular_divisions,
+            length_divisions=self.length_divisions,
+            rotation_axis=self.rotation_axis,
+            rotation_angle_rad=self.rotation_angle_rad,
+        ).to_config_overrides()
 
 
 @dataclass(slots=True)
@@ -329,19 +326,15 @@ class PlanarCoilDesign(CoilDesign):
     center_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def geometry_config(self) -> dict[str, Any]:
-        return {
-            "coil_mesh_file": "create planary mesh",
-            "surface_is_cylinder_flag": False,
-            "planar_mesh_parameter_list": (
-                self.height_m,
-                self.width_m,
-                self.lateral_divisions,
-                self.longitudinal_divisions,
-                *self.rotation_axis,
-                self.rotation_angle_rad,
-                *self.center_m,
-            ),
-        }
+        return PipelineGeometrySpec.planar(
+            width_m=self.width_m,
+            height_m=self.height_m,
+            lateral_divisions=self.lateral_divisions,
+            longitudinal_divisions=self.longitudinal_divisions,
+            rotation_axis=self.rotation_axis,
+            rotation_angle_rad=self.rotation_angle_rad,
+            center_m=self.center_m,
+        ).to_config_overrides()
 
 
 @dataclass(slots=True)
@@ -355,17 +348,13 @@ class CircularDiscCoilDesign(CoilDesign):
     center_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def geometry_config(self) -> dict[str, Any]:
-        return {
-            "coil_mesh_file": "create circular mesh",
-            "surface_is_cylinder_flag": False,
-            "circular_mesh_parameter_list": (
-                self.radius_m,
-                self.radial_divisions,
-                *self.rotation_axis,
-                self.rotation_angle_rad,
-                *self.center_m,
-            ),
-        }
+        return PipelineGeometrySpec.circular(
+            radius_m=self.radius_m,
+            radial_divisions=self.radial_divisions,
+            rotation_axis=self.rotation_axis,
+            rotation_angle_rad=self.rotation_angle_rad,
+            center_m=self.center_m,
+        ).to_config_overrides()
 
 
 @dataclass(slots=True)
@@ -380,18 +369,14 @@ class AnnularDiscCoilDesign(CoilDesign):
     center_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def geometry_config(self) -> dict[str, Any]:
-        return {
-            "coil_mesh_file": "create annular disc mesh",
-            "surface_is_cylinder_flag": False,
-            "annular_disc_mesh_parameter_list": (
-                self.inner_radius_m,
-                self.outer_radius_m,
-                self.radial_divisions,
-                self.circular_divisions,
-                *self.normal,
-                *self.center_m,
-            ),
-        }
+        return PipelineGeometrySpec.annular_disc(
+            inner_radius_m=self.inner_radius_m,
+            outer_radius_m=self.outer_radius_m,
+            radial_divisions=self.radial_divisions,
+            circular_divisions=self.circular_divisions,
+            normal=self.normal,
+            center_m=self.center_m,
+        ).to_config_overrides()
 
 
 @dataclass(slots=True)
@@ -409,21 +394,17 @@ class PartialCylinderCoilDesign(CoilDesign):
     center_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def geometry_config(self) -> dict[str, Any]:
-        return {
-            "coil_mesh_file": "create partial cylinder mesh",
-            "surface_is_cylinder_flag": True,
-            "partial_cylinder_mesh_parameter_list": (
-                self.length_m,
-                self.radius_m,
-                self.start_angle_rad,
-                self.end_angle_rad,
-                self.angular_divisions,
-                self.length_divisions,
-                *self.rotation_axis,
-                self.rotation_angle_rad,
-                *self.center_m,
-            ),
-        }
+        return PipelineGeometrySpec.partial_cylinder(
+            length_m=self.length_m,
+            radius_m=self.radius_m,
+            start_angle_rad=self.start_angle_rad,
+            end_angle_rad=self.end_angle_rad,
+            angular_divisions=self.angular_divisions,
+            length_divisions=self.length_divisions,
+            rotation_axis=self.rotation_axis,
+            rotation_angle_rad=self.rotation_angle_rad,
+            center_m=self.center_m,
+        ).to_config_overrides()
 
 
 @dataclass(slots=True)
@@ -440,20 +421,16 @@ class EllipticalCylinderCoilDesign(CoilDesign):
     center_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def geometry_config(self) -> dict[str, Any]:
-        return {
-            "coil_mesh_file": "create elliptical cylinder mesh",
-            "surface_is_cylinder_flag": True,
-            "elliptical_cylinder_mesh_parameter_list": (
-                self.length_m,
-                self.radius_x_m,
-                self.radius_y_m,
-                self.angular_divisions,
-                self.length_divisions,
-                *self.rotation_axis,
-                self.rotation_angle_rad,
-                *self.center_m,
-            ),
-        }
+        return PipelineGeometrySpec.elliptical_cylinder(
+            length_m=self.length_m,
+            radius_x_m=self.radius_x_m,
+            radius_y_m=self.radius_y_m,
+            angular_divisions=self.angular_divisions,
+            length_divisions=self.length_divisions,
+            rotation_axis=self.rotation_axis,
+            rotation_angle_rad=self.rotation_angle_rad,
+            center_m=self.center_m,
+        ).to_config_overrides()
 
 
 @dataclass(slots=True)
@@ -464,14 +441,10 @@ class SurfaceOfRevolutionCoilDesign(CoilDesign):
     z_radius_pairs_m: tuple[tuple[float, float], ...] = ((-0.25, 0.18), (0.0, 0.25), (0.25, 0.18))
 
     def geometry_config(self) -> dict[str, Any]:
-        flattened: list[float] = [float(self.circular_divisions)]
-        for z_value, radius in self.z_radius_pairs_m:
-            flattened.extend((float(z_value), float(radius)))
-        return {
-            "coil_mesh_file": "create surface of revolution mesh",
-            "surface_is_cylinder_flag": True,
-            "surface_of_revolution_mesh_parameter_list": tuple(flattened),
-        }
+        return PipelineGeometrySpec.surface_of_revolution(
+            circular_divisions=self.circular_divisions,
+            z_radius_pairs_m=self.z_radius_pairs_m,
+        ).to_config_overrides()
 
 
 @dataclass(slots=True)
@@ -489,21 +462,17 @@ class SuperellipseCylinderCoilDesign(CoilDesign):
     center_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def geometry_config(self) -> dict[str, Any]:
-        return {
-            "coil_mesh_file": "create superellipse cylinder mesh",
-            "surface_is_cylinder_flag": True,
-            "superellipse_cylinder_mesh_parameter_list": (
-                self.length_m,
-                self.radius_x_m,
-                self.radius_y_m,
-                self.exponent,
-                self.angular_divisions,
-                self.length_divisions,
-                *self.rotation_axis,
-                self.rotation_angle_rad,
-                *self.center_m,
-            ),
-        }
+        return PipelineGeometrySpec.superellipse_cylinder(
+            length_m=self.length_m,
+            radius_x_m=self.radius_x_m,
+            radius_y_m=self.radius_y_m,
+            exponent=self.exponent,
+            angular_divisions=self.angular_divisions,
+            length_divisions=self.length_divisions,
+            rotation_axis=self.rotation_axis,
+            rotation_angle_rad=self.rotation_angle_rad,
+            center_m=self.center_m,
+        ).to_config_overrides()
 
 
 @dataclass(slots=True)
@@ -519,19 +488,15 @@ class SphericalCapCoilDesign(CoilDesign):
     center_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def geometry_config(self) -> dict[str, Any]:
-        return {
-            "coil_mesh_file": "create spherical cap mesh",
-            "surface_is_cylinder_flag": False,
-            "spherical_cap_mesh_parameter_list": (
-                self.radius_m,
-                self.cap_polar_angle_rad,
-                self.azimuthal_divisions,
-                self.polar_divisions,
-                *self.rotation_axis,
-                self.rotation_angle_rad,
-                *self.center_m,
-            ),
-        }
+        return PipelineGeometrySpec.spherical_cap(
+            radius_m=self.radius_m,
+            cap_polar_angle_rad=self.cap_polar_angle_rad,
+            azimuthal_divisions=self.azimuthal_divisions,
+            polar_divisions=self.polar_divisions,
+            rotation_axis=self.rotation_axis,
+            rotation_angle_rad=self.rotation_angle_rad,
+            center_m=self.center_m,
+        ).to_config_overrides()
 
 
 @dataclass(slots=True)
@@ -549,21 +514,17 @@ class EllipsoidalCapCoilDesign(CoilDesign):
     center_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def geometry_config(self) -> dict[str, Any]:
-        return {
-            "coil_mesh_file": "create ellipsoidal cap mesh",
-            "surface_is_cylinder_flag": False,
-            "ellipsoidal_cap_mesh_parameter_list": (
-                self.radius_x_m,
-                self.radius_y_m,
-                self.radius_z_m,
-                self.cap_polar_angle_rad,
-                self.azimuthal_divisions,
-                self.polar_divisions,
-                *self.rotation_axis,
-                self.rotation_angle_rad,
-                *self.center_m,
-            ),
-        }
+        return PipelineGeometrySpec.ellipsoidal_cap(
+            radius_x_m=self.radius_x_m,
+            radius_y_m=self.radius_y_m,
+            radius_z_m=self.radius_z_m,
+            cap_polar_angle_rad=self.cap_polar_angle_rad,
+            azimuthal_divisions=self.azimuthal_divisions,
+            polar_divisions=self.polar_divisions,
+            rotation_axis=self.rotation_axis,
+            rotation_angle_rad=self.rotation_angle_rad,
+            center_m=self.center_m,
+        ).to_config_overrides()
 
 
 @dataclass(slots=True)
@@ -580,20 +541,16 @@ class ConicalFrustumCoilDesign(CoilDesign):
     center_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def geometry_config(self) -> dict[str, Any]:
-        return {
-            "coil_mesh_file": "create conical frustum mesh",
-            "surface_is_cylinder_flag": True,
-            "conical_frustum_mesh_parameter_list": (
-                self.length_m,
-                self.radius_bottom_m,
-                self.radius_top_m,
-                self.angular_divisions,
-                self.length_divisions,
-                *self.rotation_axis,
-                self.rotation_angle_rad,
-                *self.center_m,
-            ),
-        }
+        return PipelineGeometrySpec.conical_frustum(
+            length_m=self.length_m,
+            radius_bottom_m=self.radius_bottom_m,
+            radius_top_m=self.radius_top_m,
+            angular_divisions=self.angular_divisions,
+            length_divisions=self.length_divisions,
+            rotation_axis=self.rotation_axis,
+            rotation_angle_rad=self.rotation_angle_rad,
+            center_m=self.center_m,
+        ).to_config_overrides()
 
 
 @dataclass(slots=True)
@@ -613,23 +570,19 @@ class ToroidalSegmentCoilDesign(CoilDesign):
     center_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def geometry_config(self) -> dict[str, Any]:
-        return {
-            "coil_mesh_file": "create toroidal segment mesh",
-            "surface_is_cylinder_flag": False,
-            "toroidal_segment_mesh_parameter_list": (
-                self.major_radius_m,
-                self.minor_radius_m,
-                self.start_angle_rad,
-                self.end_angle_rad,
-                self.tube_start_angle_rad,
-                self.tube_end_angle_rad,
-                self.major_divisions,
-                self.minor_divisions,
-                *self.rotation_axis,
-                self.rotation_angle_rad,
-                *self.center_m,
-            ),
-        }
+        return PipelineGeometrySpec.toroidal_segment(
+            major_radius_m=self.major_radius_m,
+            minor_radius_m=self.minor_radius_m,
+            start_angle_rad=self.start_angle_rad,
+            end_angle_rad=self.end_angle_rad,
+            tube_start_angle_rad=self.tube_start_angle_rad,
+            tube_end_angle_rad=self.tube_end_angle_rad,
+            major_divisions=self.major_divisions,
+            minor_divisions=self.minor_divisions,
+            rotation_axis=self.rotation_axis,
+            rotation_angle_rad=self.rotation_angle_rad,
+            center_m=self.center_m,
+        ).to_config_overrides()
 
 
 @dataclass(slots=True)
@@ -760,19 +713,15 @@ class BiplanarCoilDesign(CoilDesign):
     center_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def geometry_config(self) -> dict[str, Any]:
-        return {
-            "coil_mesh_file": "create bi-planary mesh",
-            "surface_is_cylinder_flag": False,
-            "biplanar_mesh_parameter_list": (
-                self.height_m,
-                self.width_m,
-                self.lateral_divisions,
-                self.longitudinal_divisions,
-                *self.normal,
-                *self.center_m,
-                self.plane_distance_m,
-            ),
-        }
+        return PipelineGeometrySpec.biplanar(
+            width_m=self.width_m,
+            height_m=self.height_m,
+            lateral_divisions=self.lateral_divisions,
+            longitudinal_divisions=self.longitudinal_divisions,
+            plane_distance_m=self.plane_distance_m,
+            normal=self.normal,
+            center_m=self.center_m,
+        ).to_config_overrides()
 
 
 @dataclass(slots=True)
@@ -784,17 +733,13 @@ class CircularBiplanarCoilDesign(CoilDesign):
     center_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def geometry_config(self) -> dict[str, Any]:
-        return {
-            "coil_mesh_file": "create circular bi-planary mesh",
-            "surface_is_cylinder_flag": False,
-            "circular_biplanar_mesh_parameter_list": (
-                self.edge_length_m,
-                self.outer_radius_m,
-                *self.normal,
-                *self.center_m,
-                self.plane_distance_m,
-            ),
-        }
+        return PipelineGeometrySpec.circular_biplanar(
+            outer_radius_m=self.outer_radius_m,
+            edge_length_m=self.edge_length_m,
+            plane_distance_m=self.plane_distance_m,
+            normal=self.normal,
+            center_m=self.center_m,
+        ).to_config_overrides()
 
 
 @dataclass(slots=True)
@@ -821,20 +766,16 @@ class ShieldedCircularBiplanarCoilDesign(CoilDesign):
     center_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def geometry_config(self) -> dict[str, Any]:
-        return {
-            "coil_mesh_file": "create shielded bi-planary mesh",
-            "surface_is_cylinder_flag": False,
-            "shielded_circular_biplanar_mesh_parameter_list": (
-                self.primary_outer_radius_m,
-                self.primary_edge_length_m,
-                self.shield_outer_radius_m,
-                self.shield_edge_length_m,
-                *self.normal,
-                *self.center_m,
-                self.plane_distance_m,
-                self.shield_gap_m,
-            ),
-        }
+        return PipelineGeometrySpec.shielded_circular_biplanar(
+            primary_outer_radius_m=self.primary_outer_radius_m,
+            primary_edge_length_m=self.primary_edge_length_m,
+            shield_outer_radius_m=self.shield_outer_radius_m,
+            shield_edge_length_m=self.shield_edge_length_m,
+            plane_distance_m=self.plane_distance_m,
+            shield_gap_m=self.shield_gap_m,
+            normal=self.normal,
+            center_m=self.center_m,
+        ).to_config_overrides()
 
 
 @dataclass(slots=True)

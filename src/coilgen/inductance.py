@@ -299,12 +299,6 @@ def _mutual_inductance_chunk(
     return float(np.sum(contribution))
 
 
-def _wire_length(part: CoilPart) -> float:
-    if part.wire_path is None or len(part.wire_path.v) < 2:
-        return 0.0
-    return float(np.linalg.norm(np.diff(part.wire_path.v, axis=0), axis=1).sum())
-
-
 def _cross_section_area(config: CoilGenConfig) -> float:
     points = np.asarray(config.cross_sectional_points, dtype=float)
     if points.ndim == 2:

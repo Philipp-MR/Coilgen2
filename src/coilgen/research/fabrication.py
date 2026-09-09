@@ -21,7 +21,6 @@ from ..manufacturing import (
     _polygon_area,
     _polygon_centroid,
     _save_xyz_polyline_as_step,
-    _segment_bvh_candidate_pairs,
     create_swept_coil_meshes,
     create_swept_contour_body,
     save_mesh_as_step,
@@ -30,7 +29,11 @@ from ..manufacturing import (
 from ..models import CoilPart, FabricationPath, Mesh, WirePath
 from ..physics import biot_savart_wire_path
 from ..progress import ProgressReporter
-from .kernels import geometry_acceleration, segment_pair_distances, triangle_pair_distances
+from ..geometry_collision import (
+    _segment_bvh_candidate_pairs,
+    accelerated_mesh_collision_diagnostics as accelerated_mesh_collision_diagnostics,
+)
+from ..geometry_kernels import geometry_acceleration, segment_pair_distances, triangle_pair_distances
 
 
 def _candidate_pairs(first, second, distance):
@@ -49,31 +52,6 @@ def _candidate_pairs(first, second, distance):
     pairs = pairs[np.einsum("ij,ij->i", delta, delta) <= distance**2]
     pairs[:, 1] -= len(first)
     return pairs
-
-
-def accelerated_mesh_collision_diagnostics(mesh, *, backend="auto", maximum_reported_intersections=100):
-    """Batch the same remote-triangle test used by research sweep validation."""
-    triangles = mesh.vertices[mesh.faces]
-    tolerance = max(float(np.max(np.ptp(mesh.vertices, axis=0))), 1.0) * 1e-12 if len(mesh.vertices) else 1e-12
-    minima, maxima = triangles.min(axis=1), triangles.max(axis=1)
-    pairs = _segment_bvh_candidate_pairs(minima, maxima, tolerance)
-    if len(pairs):
-        delta = np.maximum(
-            0.0, np.maximum(minima[pairs[:, 0]] - maxima[pairs[:, 1]], minima[pairs[:, 1]] - maxima[pairs[:, 0]])
-        )
-        pairs = pairs[np.einsum("ij,ij->i", delta, delta) <= tolerance**2]
-        adjacent = np.any(mesh.faces[pairs[:, 0], :, None] == mesh.faces[pairs[:, 1], None, :], axis=(1, 2))
-        pairs = pairs[~adjacent]
-    measured = triangle_pair_distances(triangles[pairs[:, 0]], triangles[pairs[:, 1]], backend=backend)
-    count = int(np.count_nonzero(measured.values_m <= tolerance))
-    return {
-        "sweep_mesh_collision_broad_phase": "triangle_bvh",
-        "sweep_mesh_collision_kernel": measured.backend,
-        "sweep_mesh_collision_candidate_pair_count": len(pairs),
-        "sweep_mesh_self_intersection_count": min(count, maximum_reported_intersections),
-        "sweep_mesh_self_intersection_truncated": count >= maximum_reported_intersections,
-        "sweep_mesh_self_intersection": count > 0,
-    }
 
 
 def _inside_closed_mesh(point, mesh):

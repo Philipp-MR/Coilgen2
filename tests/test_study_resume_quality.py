@@ -72,6 +72,24 @@ def test_resume_invalidates_changed_target_file_contents(tmp_path):
     assert len(runner.calls) == 4
 
 
+def test_resume_invalidates_nested_source_change(tmp_path, monkeypatch):
+    import coilgen.workflow as module
+
+    package = tmp_path / "package"
+    (package / "research").mkdir(parents=True)
+    (package / "workflow.py").write_text("version = 1\n", encoding="utf-8")
+    solver = package / "research" / "solver.py"
+    solver.write_text("tolerance = 1e-6\n", encoding="utf-8")
+    monkeypatch.setattr(module, "__file__", str(package / "workflow.py"))
+    spec, _, runner, workflow = sweep_fixture(tmp_path)
+    workflow.run(spec)
+    workflow.run(spec)
+    assert len(runner.calls) == 2
+    solver.write_text("tolerance = 1e-9\n", encoding="utf-8")
+    workflow.run(spec)
+    assert len(runner.calls) == 4
+
+
 @pytest.mark.parametrize("partial", [False, True])
 def test_resume_retries_failed_cases_and_preserves_failure_rows(tmp_path, partial):
     spec, _, runner, workflow = sweep_fixture(tmp_path)

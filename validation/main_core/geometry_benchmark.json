@@ -11,19 +11,19 @@
     {
       "primitive": "segment",
       "pair_count": 20000,
-      "cold_compile_and_single_pair_s": 1.9539749999530613,
-      "reference_batch_s": 0.541181500069797,
-      "warm_compiled_batch_s": 0.011622500140219927,
-      "warm_speedup": 46.563260360567874,
+      "cold_compile_and_single_pair_s": 1.760859000030905,
+      "reference_batch_s": 0.520334400003776,
+      "warm_compiled_batch_s": 0.01199380005709827,
+      "warm_speedup": 43.38361466146231,
       "maximum_absolute_distance_difference_m": 0.0
     },
     {
       "primitive": "triangle",
       "pair_count": 2000,
-      "cold_compile_and_single_pair_s": 2.5315624999348074,
-      "reference_batch_s": 0.7829988000448793,
-      "warm_compiled_batch_s": 0.016845300095155835,
-      "warm_speedup": 46.481736485658956,
+      "cold_compile_and_single_pair_s": 2.4282874998170882,
+      "reference_batch_s": 0.7895108999218792,
+      "warm_compiled_batch_s": 0.016917899949476123,
+      "warm_speedup": 46.66719287143716,
       "maximum_absolute_distance_difference_m": 0.0
     }
   ],
@@ -31,10 +31,10 @@
     "source_points": 129,
     "faces": 1024,
     "seconds": {
-      "reference": 0.7843418999109417,
-      "numba": 0.10636359988711774
+      "reference": 0.7935255998745561,
+      "numba": 0.1075997999869287
     },
-    "speedup": 7.374157143452772,
+    "speedup": 7.37478694171322,
     "collision_candidate_pairs": 1504,
     "mesh_and_selected_diagnostics_equal": true
   },

@@ -9,6 +9,12 @@ from pathlib import Path
 import numpy as np
 
 from .config import CoilGenConfig
+from .geometry_collision import (
+    _SegmentBvhNode,
+    _segment_bvh_candidate_pairs,
+    accelerated_mesh_collision_diagnostics,
+)
+from .geometry_kernels import active_geometry_backend, segment_distance as _segment_distance
 from .geometry import combine_meshes, compute_face_normals, compute_vertex_normals, rotation_matrix_by_vector
 from .models import CoilGenResult, CoilPart, ContourLine, FabricationPath, Mesh, SweptBody, WirePath, WirePathGeometry
 from .wire_provenance import nearest_source_segment_indices, transfer_segment_geometry
@@ -1215,12 +1221,8 @@ def _swept_mesh_self_intersection_diagnostics(
 ) -> dict[str, float | int | bool | str]:
     """Check non-adjacent swept triangles using a BVH broad phase."""
 
-    from .research.kernels import active_geometry_backend
-
     backend = active_geometry_backend()
     if backend is not None:
-        from .research.fabrication import accelerated_mesh_collision_diagnostics
-
         return accelerated_mesh_collision_diagnostics(
             mesh, backend=backend, maximum_reported_intersections=maximum_reported_intersections
         )
@@ -4595,28 +4597,6 @@ def _check_swept_body_export_readiness(
     )
 
 
-def _check_export_readiness(
-    part: CoilPart,
-    part_ind: int,
-    min_clearance: float | None,
-    fail_on_violations: bool,
-    *,
-    format_name: str = "STL",
-) -> None:
-    if part.swept_body is None:
-        return
-    body = SweptBody(mesh=part.swept_body, diagnostics=part.manufacturing_diagnostics)
-    _check_swept_body_export_readiness(
-        part,
-        body,
-        part_ind,
-        min_clearance,
-        fail_on_violations,
-        format_name=format_name,
-    )
-    part.manufacturing_diagnostics = body.diagnostics
-
-
 def _validate_mesh_for_step(vertices: np.ndarray, faces: np.ndarray) -> None:
     if vertices.ndim != 2 or vertices.shape[1] != 3:
         raise ValueError("STEP export requires mesh vertices with shape (n, 3).")
@@ -5494,150 +5474,6 @@ def _capsule_clearance_diagnostics(
         "sweep_capsule_clearance_violation": bool(violation_count > 0),
         "sweep_capsule_self_intersection": bool(intersection_count > 0),
     }
-
-
-class _SegmentBvhNode:
-    __slots__ = ("indices", "minimum", "maximum", "left", "right")
-
-    def __init__(
-        self,
-        indices: np.ndarray,
-        minimum: np.ndarray,
-        maximum: np.ndarray,
-        left: "_SegmentBvhNode | None" = None,
-        right: "_SegmentBvhNode | None" = None,
-    ) -> None:
-        self.indices = indices
-        self.minimum = minimum
-        self.maximum = maximum
-        self.left = left
-        self.right = right
-
-    @property
-    def leaf(self) -> bool:
-        return self.left is None
-
-
-def _segment_bvh_candidate_pairs(
-    starts: np.ndarray,
-    ends: np.ndarray,
-    distance: float,
-    *,
-    leaf_size: int = 12,
-) -> np.ndarray:
-    """Return segment pairs whose AABBs are within ``distance`` using a BVH."""
-
-    if len(starts) < 2:
-        return np.zeros((0, 2), dtype=np.int64)
-    segment_minima = np.minimum(starts, ends)
-    segment_maxima = np.maximum(starts, ends)
-    centroids = 0.5 * (segment_minima + segment_maxima)
-
-    def build(indices: np.ndarray) -> _SegmentBvhNode:
-        minimum = np.min(segment_minima[indices], axis=0)
-        maximum = np.max(segment_maxima[indices], axis=0)
-        if len(indices) <= leaf_size:
-            return _SegmentBvhNode(indices, minimum, maximum)
-        spread = np.ptp(centroids[indices], axis=0)
-        axis = int(np.argmax(spread))
-        order = indices[np.argsort(centroids[indices, axis], kind="stable")]
-        middle = len(order) // 2
-        return _SegmentBvhNode(
-            np.zeros(0, dtype=np.int64),
-            minimum,
-            maximum,
-            build(order[:middle]),
-            build(order[middle:]),
-        )
-
-    def boxes_within_distance(first: _SegmentBvhNode, second: _SegmentBvhNode) -> bool:
-        separation = np.maximum(0.0, np.maximum(first.minimum - second.maximum, second.minimum - first.maximum))
-        return bool(np.dot(separation, separation) <= distance * distance)
-
-    pairs: list[tuple[int, int]] = []
-
-    def collect(first: _SegmentBvhNode, second: _SegmentBvhNode) -> None:
-        if not boxes_within_distance(first, second):
-            return
-        if first is second:
-            if first.leaf:
-                for local_i in range(len(first.indices)):
-                    for local_j in range(local_i + 1, len(first.indices)):
-                        i = int(first.indices[local_i])
-                        j = int(first.indices[local_j])
-                        pairs.append((min(i, j), max(i, j)))
-                return
-            collect(first.left, first.left)
-            collect(first.left, first.right)
-            collect(first.right, first.right)
-            return
-        if first.leaf and second.leaf:
-            for i in first.indices:
-                for j in second.indices:
-                    start = int(min(i, j))
-                    end = int(max(i, j))
-                    if start != end:
-                        pairs.append((start, end))
-            return
-        first_size = (
-            len(first.indices) if first.leaf else np.dot(first.maximum - first.minimum, first.maximum - first.minimum)
-        )
-        second_size = (
-            len(second.indices)
-            if second.leaf
-            else np.dot(second.maximum - second.minimum, second.maximum - second.minimum)
-        )
-        if not first.leaf and (second.leaf or first_size >= second_size):
-            collect(first.left, second)
-            collect(first.right, second)
-        else:
-            collect(first, second.left)
-            collect(first, second.right)
-
-    root = build(np.arange(len(starts), dtype=np.int64))
-    collect(root, root)
-    if not pairs:
-        return np.zeros((0, 2), dtype=np.int64)
-    return np.unique(np.asarray(pairs, dtype=np.int64), axis=0)
-
-
-def _segment_distance(p1: np.ndarray, q1: np.ndarray, p2: np.ndarray, q2: np.ndarray) -> float:
-    # Closest distance between two 3D segments; adapted from the standard
-    # clamped two-line solution and kept local to avoid geometry dependencies.
-    d1 = q1 - p1
-    d2 = q2 - p2
-    r = p1 - p2
-    a = float(np.dot(d1, d1))
-    e = float(np.dot(d2, d2))
-    f = float(np.dot(d2, r))
-    if a == 0.0 and e == 0.0:
-        return float(np.linalg.norm(p1 - p2))
-    if a == 0.0:
-        s = 0.0
-        t = np.clip(f / e, 0.0, 1.0)
-    else:
-        c = float(np.dot(d1, r))
-        if e == 0.0:
-            t = 0.0
-            s = np.clip(-c / a, 0.0, 1.0)
-        else:
-            b = float(np.dot(d1, d2))
-            # A cross-product form avoids cancellation for nearly parallel
-            # lines and a dimensionally inconsistent absolute m^4 cutoff.
-            normal = np.cross(d1, d2)
-            denom = float(np.dot(normal, normal))
-            numerator = float(np.dot(np.cross(-r, d2), normal))
-            s = 0.0 if denom == 0.0 else np.clip(numerator / denom, 0.0, 1.0)
-            t = (b * s + f) / e
-            if t < 0.0:
-                t = 0.0
-                s = np.clip(-c / a, 0.0, 1.0)
-            elif t > 1.0:
-                t = 1.0
-                s = np.clip((b - c) / a, 0.0, 1.0)
-    closest_1 = p1 + d1 * s
-    closest_2 = p2 + d2 * t
-    return float(np.linalg.norm(closest_1 - closest_2))
 
 
 def _normalised_text(value: object) -> str:

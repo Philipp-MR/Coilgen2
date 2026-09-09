@@ -1832,29 +1832,6 @@ def _balanced_connected_region_growing(
     return labels
 
 
-def _unique_channel_seeds(occupancy: np.ndarray) -> np.ndarray:
-    channel_count = occupancy.shape[1]
-    try:
-        from scipy.optimize import linear_sum_assignment
-
-        channels, faces = linear_sum_assignment(-occupancy.T)
-        seeds = np.empty(channel_count, dtype=np.int64)
-        seeds[channels] = faces
-    except Exception:
-        seeds = np.full(channel_count, -1, dtype=np.int64)
-        used: set[int] = set()
-        channel_order = np.argsort(-np.max(occupancy, axis=0))
-        for channel in channel_order:
-            for face in np.argsort(-occupancy[:, channel]):
-                if int(face) not in used:
-                    seeds[channel] = int(face)
-                    used.add(int(face))
-                    break
-    if np.any(seeds < 0) or len(set(int(value) for value in seeds)) != channel_count:
-        raise RuntimeError("Could not identify one unique active seed face per channel.")
-    return seeds
-
-
 def _boundary_channel_seeds(
     mesh: Mesh,
     ownership: np.ndarray,

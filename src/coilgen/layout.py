@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .config import CoilGenConfig
+from .geometry_kernels import segment_distance as _segment_segment_distance_3d, segment_distances
 from .contours import build_simple_wire_paths, contour_current_alignment, contour_evaluation_points
 from .models import (
     CoilPart,
@@ -487,19 +488,6 @@ def _contour_segment_data_min_wire_segment_distance_3d(
                 best_seg_a = int(data_a.segment_indices[int(chunk[local_index, 0])])
                 best_seg_b = int(data_b.segment_indices[int(chunk[local_index, 1] - segment_offset_b)])
     return best_seg_a, best_seg_b, float(best_distance), checked_segment_pairs
-
-
-def _contour_pair_min_wire_segment_distance_3d(
-    points_a: np.ndarray,
-    points_b: np.ndarray,
-) -> tuple[int, int, float]:
-    best_seg_a, best_seg_b, best_distance, _checked = _contour_segment_data_min_wire_segment_distance_3d(
-        _contour_wire_segment_data(np.asarray(points_a, dtype=float)),
-        _contour_wire_segment_data(np.asarray(points_b, dtype=float)),
-    )
-    if not math.isfinite(best_distance):
-        return -1, -1, 0.0
-    return best_seg_a, best_seg_b, float(best_distance)
 
 
 def _axis_aligned_bounds_distance(
@@ -2126,12 +2114,6 @@ def _open_connected_group_with_3d_sphere(
     return WirePath(v=opened.v), cut_points
 
 
-def _fuse_opened_wire_paths(
-    path_a: WirePath, path_b: WirePath, geodesic_solver: SurfaceGeodesicSolver | None = None
-) -> WirePath:
-    return _fuse_opened_wire_paths_with_connector(path_a, path_b, geodesic_solver)[0]
-
-
 def _fuse_opened_wire_paths_with_connector(
     path_a: WirePath,
     path_b: WirePath,
@@ -2148,26 +2130,6 @@ def _fuse_opened_wire_paths_with_connector(
         )
     )
     return fused, connector_v
-
-
-def _fuse_opened_wire_paths_with_connector_diagnostics(
-    path_a: WirePath,
-    path_b: WirePath,
-    geodesic_solver: SurfaceGeodesicSolver | None = None,
-    *,
-    allow_direct_fallback: bool = True,
-) -> tuple[WirePath, np.ndarray, bool]:
-    """Backward-compatible primary-connector view of a two-bridge fusion."""
-
-    fused, connector_v, _closing_connector_v, used_direct_fallback = (
-        _fuse_opened_wire_paths_with_connector_pair_diagnostics(
-            path_a,
-            path_b,
-            geodesic_solver,
-            allow_direct_fallback=allow_direct_fallback,
-        )
-    )
-    return fused, connector_v, used_direct_fallback
 
 
 def _fuse_opened_wire_paths_with_connector_pair_diagnostics(
@@ -3309,12 +3271,6 @@ def _force_cut_selection_for_group(config: CoilGenConfig, group_ind: int) -> str
     if group_ind < len(values) and values[group_ind] in {"high", "low"}:
         return values[group_ind]
     return None
-
-
-def _select_loop_cut(cut_info: LoopCutShape, force_cut_selection: str) -> LoopCut:
-    if force_cut_selection == "low":
-        return cut_info.low_cut
-    return cut_info.high_cut
 
 
 def _normalize_vector(vector: np.ndarray, fallback: np.ndarray) -> np.ndarray:
@@ -4551,62 +4507,8 @@ def _wire_segment_pair_index_distances(
     directions: np.ndarray,
     pairs: np.ndarray,
 ) -> np.ndarray:
-    seg_a = pairs[:, 0]
-    seg_b = pairs[:, 1]
-    p0 = starts[seg_a]
-    q0 = starts[seg_b]
-    u = directions[seg_a]
-    v = directions[seg_b]
-    w = p0 - q0
-    a = np.einsum("ij,ij->i", u, u)
-    b = np.einsum("ij,ij->i", u, v)
-    c = np.einsum("ij,ij->i", v, v)
-    d = np.einsum("ij,ij->i", u, w)
-    e = np.einsum("ij,ij->i", v, w)
-    eps = 1e-15
-    distances = np.zeros(len(pairs), dtype=float)
-
-    point_point = (a <= eps) & (c <= eps)
-    if np.any(point_point):
-        distances[point_point] = np.linalg.norm(p0[point_point] - q0[point_point], axis=1)
-
-    point_segment_a = (a <= eps) & (c > eps)
-    if np.any(point_segment_a):
-        t = np.clip(e[point_segment_a] / c[point_segment_a], 0.0, 1.0)
-        closest_q = q0[point_segment_a] + t[:, None] * v[point_segment_a]
-        distances[point_segment_a] = np.linalg.norm(p0[point_segment_a] - closest_q, axis=1)
-
-    point_segment_b = (a > eps) & (c <= eps)
-    if np.any(point_segment_b):
-        s = np.clip(-d[point_segment_b] / a[point_segment_b], 0.0, 1.0)
-        closest_p = p0[point_segment_b] + s[:, None] * u[point_segment_b]
-        distances[point_segment_b] = np.linalg.norm(closest_p - q0[point_segment_b], axis=1)
-
-    segment_segment = (a > eps) & (c > eps)
-    if np.any(segment_segment):
-        indices = np.flatnonzero(segment_segment)
-        aa = a[indices]
-        bb = b[indices]
-        cc = c[indices]
-        dd = d[indices]
-        ee = e[indices]
-        denom = aa * cc - bb * bb
-        with np.errstate(divide="ignore", invalid="ignore"):
-            s = np.where(np.abs(denom) > eps, (bb * ee - cc * dd) / denom, 0.0)
-        s = np.clip(s, 0.0, 1.0)
-        t = (bb * s + ee) / cc
-        t_negative = t < 0.0
-        if np.any(t_negative):
-            t = np.where(t_negative, 0.0, t)
-            s = np.where(t_negative, np.clip(-dd / aa, 0.0, 1.0), s)
-        t_positive = t > 1.0
-        if np.any(t_positive):
-            t = np.where(t_positive, 1.0, t)
-            s = np.where(t_positive, np.clip((bb - dd) / aa, 0.0, 1.0), s)
-        closest_p = p0[indices] + s[:, None] * u[indices]
-        closest_q = q0[indices] + t[:, None] * v[indices]
-        distances[indices] = np.linalg.norm(closest_p - closest_q, axis=1)
-    return distances
+    first, second = pairs[:, 0], pairs[:, 1]
+    return segment_distances(starts[first], directions[first], starts[second], directions[second])
 
 
 def _wire_segment_pair_distances(
@@ -4644,36 +4546,14 @@ def _wire_segment_pair_distances(
     if not np.any(pair_mask):
         return row_indices, col_indices, np.full(pair_mask.shape, math.inf, dtype=float)
 
-    p0 = starts[row_indices]
-    q0 = starts
-    u = directions[row_indices]
-    v = directions
-    w = p0[:, None, :] - q0[None, :, :]
-    a = np.einsum("ij,ij->i", u, u)[:, None]
-    c = np.einsum("ij,ij->i", v, v)[None, :]
-    b = np.einsum("ik,jk->ij", u, v)
-    d = np.einsum("ik,ijk->ij", u, w)
-    e = np.einsum("jk,ijk->ij", v, w)
-    eps = 1e-15
-    a_safe = np.where(a > eps, a, 1.0)
-    c_safe = np.where(c > eps, c, 1.0)
-    denom = a_safe * c_safe - b * b
-    with np.errstate(divide="ignore", invalid="ignore"):
-        s = np.where(np.abs(denom) > eps, (b * e - c_safe * d) / denom, 0.0)
-    s = np.clip(s, 0.0, 1.0)
-    t = (b * s + e) / c_safe
-    t_negative = t < 0.0
-    if np.any(t_negative):
-        t = np.where(t_negative, 0.0, t)
-        s = np.where(t_negative, np.clip(-d / a_safe, 0.0, 1.0), s)
-    t_positive = t > 1.0
-    if np.any(t_positive):
-        t = np.where(t_positive, 1.0, t)
-        s = np.where(t_positive, np.clip((b - d) / a_safe, 0.0, 1.0), s)
-    closest_p = p0[:, None, :] + s[:, :, None] * u[:, None, :]
-    closest_q = q0[None, :, :] + t[:, :, None] * v[None, :, :]
-    distances = np.linalg.norm(closest_p - closest_q, axis=2)
-    distances[~pair_mask] = math.inf
+    pair_rows, pair_cols = np.nonzero(pair_mask)
+    distances = np.full(pair_mask.shape, math.inf, dtype=float)
+    distances[pair_rows, pair_cols] = segment_distances(
+        starts[row_indices[pair_rows]],
+        directions[row_indices[pair_rows]],
+        starts[pair_cols],
+        directions[pair_cols],
+    )
     return row_indices, col_indices, distances
 
 
@@ -4738,44 +4618,6 @@ def _wire_contact_threshold(config: CoilGenConfig) -> float:
 
 def _wire_local_continuation_length(clearance: float) -> float:
     return 2.0 * max(float(clearance), 0.0)
-
-
-def _segment_segment_distance_3d(
-    p0: np.ndarray,
-    p1: np.ndarray,
-    q0: np.ndarray,
-    q1: np.ndarray,
-) -> float:
-    u = p1 - p0
-    v = q1 - q0
-    w = p0 - q0
-    a = float(np.dot(u, u))
-    b = float(np.dot(u, v))
-    c = float(np.dot(v, v))
-    d = float(np.dot(u, w))
-    e = float(np.dot(v, w))
-    eps = 1e-15
-    if a <= eps and c <= eps:
-        return float(np.linalg.norm(p0 - q0))
-    if a <= eps:
-        s = 0.0
-        t = float(np.clip(e / max(c, eps), 0.0, 1.0))
-    elif c <= eps:
-        t = 0.0
-        s = float(np.clip(-d / a, 0.0, 1.0))
-    else:
-        denom = a * c - b * b
-        s = float(np.clip((b * e - c * d) / denom, 0.0, 1.0)) if abs(denom) > eps else 0.0
-        t = (b * s + e) / c
-        if t < 0.0:
-            t = 0.0
-            s = float(np.clip(-d / a, 0.0, 1.0))
-        elif t > 1.0:
-            t = 1.0
-            s = float(np.clip((b - d) / a, 0.0, 1.0))
-    closest_p = p0 + s * u
-    closest_q = q0 + t * v
-    return float(np.linalg.norm(closest_p - closest_q))
 
 
 def _point_polyline_distance_3d(point: np.ndarray, polyline: np.ndarray) -> float:
@@ -5943,10 +5785,6 @@ def _sphere_crossing(
     denom = d1 - d0
     t = 0.0 if abs(denom) < 1e-15 else np.clip((radius - d0) / denom, 0.0, 1.0)
     return p0_v + t * (p1_v - p0_v)
-
-
-def _open_loop_by_nearest_window(loop: ContourLine, near_ind: int) -> tuple[ContourLine, np.ndarray]:
-    return _open_loop_by_nearest_window_from_points(loop, loop.v, near_ind)
 
 
 def _open_loop_by_nearest_window_from_points(

@@ -2930,11 +2930,6 @@ def _rect_in_figure_fraction(
     ]
 
 
-def _gradient_slice_mosaic_figure_size(rows: int, cols: int) -> tuple[float, float]:
-    width, height = _gradient_slice_mosaic_layout(rows, cols)["figsize"]
-    return float(width), float(height)
-
-
 def _gradient_slice_pixel_extent(slice_data: Any) -> tuple[float, float, float, float]:
     x = np.asarray(slice_data.x, dtype=float).reshape(-1)
     y = np.asarray(slice_data.y, dtype=float).reshape(-1)
@@ -3027,11 +3022,6 @@ def _format_gradient_slice_colorbar_tick(value: float) -> str:
 def _gradient_slice_component_nonnegative(component: str) -> bool:
     key = str(component).strip().lower()
     return key.endswith("_mag") or "percent" in key
-
-
-def _gradient_slice_component_label(component: str, units: Mapping[str, str]) -> str:
-    unit = str(units.get(component, "")).strip()
-    return f"{component}\n[{unit}]" if unit else str(component)
 
 
 def _gradient_slice_tile_label(component: str, axis_name: str, value: float) -> str:
@@ -3285,11 +3275,6 @@ def _new_3d_figure(plt: Any, title: str, *, pyplot_managed: bool = True) -> tupl
     ax = fig.add_subplot(111, projection="3d")
     _set_axis_title(ax, title, width=58)
     return fig, ax
-
-
-def _draw_meshes_3d(ax: Any, parts: Sequence[CoilPart]) -> None:
-    for part in parts:
-        _draw_mesh_3d(ax, part)
 
 
 def _draw_reference_meshes_3d(ax: Any, parts: Sequence[CoilPart]) -> None:
@@ -3688,32 +3673,6 @@ def _finish_figure(fig: Figure, plt: Any, *, show: bool, block: bool) -> Figure:
     if show:
         plt.show(block=block)
     return fig
-
-
-def _append_optional_figure(
-    figures: list[Figure],
-    factory: Callable[[], Figure],
-    include_set: set[str],
-    key: str,
-    *,
-    timing_report: list[dict[str, float | int | str]] | None = None,
-) -> None:
-    if key not in include_set:
-        return
-    start = time.perf_counter()
-    try:
-        figure = factory()
-    except ValueError:
-        return
-    elapsed = float(time.perf_counter() - start)
-    if isinstance(figure, list):
-        figures.extend(figure)
-        figure_count = len(figure)
-    else:
-        figures.append(figure)
-        figure_count = 1
-    if timing_report is not None:
-        timing_report.append({"plot": key, "seconds": elapsed, "figures": figure_count})
 
 
 def _append_plot_spec_figures(

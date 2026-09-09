@@ -2734,11 +2734,6 @@ def _polyline_length(points: list[np.ndarray]) -> float:
     return float(np.sum(np.linalg.norm(np.diff(pts, axis=0), axis=1)))
 
 
-def _stitch_segments(segments: list[SurfaceContourSegment], level: float) -> list[ContourLine]:
-    contours, _diagnostics = _stitch_segments_with_diagnostics(segments, level)
-    return contours
-
-
 def _stitch_segments_with_diagnostics(
     segments: list[SurfaceContourSegment],
     level: float,
