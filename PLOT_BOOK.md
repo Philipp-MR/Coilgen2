@@ -4,6 +4,80 @@ The plot book is CoilGen's active Matplotlib inspection window. It collects many
 2D/3D Matplotlib figures into one navigable window so Spyder users can inspect a
 coil design without dozens of separate figure windows.
 
+Install the live Qt interface with `python -m pip install -e ".[plot-qt]"`.
+The smaller `plot` extra provides Matplotlib and the raster fallback. Building a
+project book with `show=False` preserves the current Matplotlib backend.
+
+## Numerical and display conventions
+
+The default `plot_pointcloud_max_points=2000` limits displayed samples per
+point-cloud panel. Set it to `0` for the complete cloud. Sampling is deterministic,
+retains field and coordinate extrema and represents target groups; all numerical
+diagnostics and color/coordinate limits still use the complete source data.
+The sample count is shown on the figure. This display budget does not change
+coil optimization, currents, winding paths, or computed field arrays.
+
+Related target/layout/stream panels share color limits. Signed residual maps
+use a zero-centered diverging scale, and constant fields use a range relative
+to their physical magnitude. Relative-error labels state the denominator;
+their existing arithmetic is preserved. Invalid or unidentifiable local
+gradient components remain missing instead of appearing as zero error.
+
+Project SH comparisons fit every channel with the same center, radius, and
+display unit, chosen from the first available channel. Each channel retains
+its own DSV samples and weights, so its signal RMS and term RMS contributions
+can differ even for the same physical field. Unavailable channels are reported
+on the comparison page. General and shim SH pages reuse one multi-source
+least-squares solve for their plots and coefficient tables.
+
+Diagnostic caches check source contents and request parameters, including
+in-place changes to equal-sized arrays. Custom slice-map requests do not replace
+the configured default request. Slice interpolation reuses geometry across
+fields, and finite differences evaluate only requested derivative directions.
+The concomitant maps remain the existing global affine-gradient Maxwell
+approximation; their labels make that scope explicit.
+
+## Inspecting swept conductor meshes
+
+The `swept_body` page opens an interactive mesh inspector. When geometry pages
+are requested and a swept mesh is available, the registry includes this page
+automatically. It also remains available directly through
+`plot_swept_body_3d(part)`.
+
+The inspector uses the actual, complete triangle mesh. It prefers independent
+`swept_bodies` so contour identity, turn multiplicity, fabrication paths, and
+stored manufacturing diagnostics remain available. Older results with only a
+combined `swept_body` are supported.
+
+Select one body to examine overlapping windings, then fit the view to that
+body. Switch between surfaces and mesh edges, adjust opacity, and show the
+support mesh or fabrication centroid path as needed. The default orthographic
+projection avoids perspective distortion. Plotbook orientation controls and
+the Matplotlib rotation, pan, and zoom tools remain available. Display controls
+never alter the fabrication mesh or rerun sweep/collision calculations.
+
+Stored manufacturing failure reasons appear above the mesh and follow the
+body selection. The all-bodies view counts how many bodies report each reason.
+Missing check results remain unknown. `sweep_self_intersection` reports the
+conservative capsule-envelope check; `swept_mesh_self_intersection` reports
+triangle-mesh collision. A watertight mesh can still fail manufacturing checks.
+
+**Inspect issue** cycles through stored folded-quad, profile-Jacobian, and
+frame-rotation failure locations, marking the location and fitting nearby
+actual sweep rings. Start from All bodies to visit issues across bodies, or
+select a body first to inspect only its issues. Fit selected/All bodies returns
+to the broader view. Older results without stored locations show an explicit
+message; no failure locations or collision checks are recomputed.
+
+## Inspecting field slices
+
+Use the `gradient_slice_inspector` page, or
+`from coilgen import plot_gradient_slice_inspector`, when slice maps are enabled.
+Its slice slider, component selector, engineering/SI unit selector, and
+common/individual scale toggle reuse the evaluated field arrays. Hover over
+the image to read physical coordinates and the pixel value. The full static
+mosaics remain available for reports.
+
 The implementation lives in:
 
 ```text
@@ -15,6 +89,43 @@ The CoilGen-specific plot registry lives in:
 ```text
 src/coilgen/matplotlib_visualization.py
 ```
+
+## Navigation, loading, and export
+
+Search matches page titles, channels, and study sections. Combine search with
+the plot-type and channel filters; Previous/Next navigate only matching pages.
+`Ctrl+F` focuses search, and `Alt+Left` / `Alt+Right` navigate. An empty filter
+result clears the displayed page and disables current-page export. Failed or
+unavailable pages retain their place and provide a retry action.
+
+Registration does not run page factories. Showing the book materializes the
+selected page, then the default idle mode prepares nearby matching pages.
+Preloading can be paused. Live Qt canvases are bounded to five by default;
+eviction retains figures, artists, controls, and camera state so returning to a
+page does not rerun a user factory. This bounds canvas/renderer memory, not all
+scientific arrays and artists. Factories still run on the GUI thread, so an
+individual expensive page can temporarily occupy the interface.
+
+`close()` hides a book for later `open()` / `reopen()`; `dispose()` releases its
+owned figures and controls permanently. Keep the returned book in a workspace
+variable when you want to reopen it.
+
+Both live and fallback books support report export:
+
+```python
+book.export_current_page("plots")
+book.export_filtered_pages("plots", format="pdf")
+book.export_all_pages("plots", format="png", dpi=180)
+```
+
+Exports include lazy multipart pages in source order. One unavailable or failed
+page does not prevent the others from exporting. PNG/SVG export returns one
+path per successful page; PDF returns a multipage report path. A JSON manifest
+records page identity, title, channel, section, result, and failures;
+`book.last_export_manifest` points to it. Project books also include project,
+output-directory, and channel identity. Report exports use the original figure
+size instead of the current window size. The fallback displays raster pages;
+when source figures are retained it can still export them directly.
 
 ## Class Structure
 
@@ -209,7 +320,7 @@ When subclassing, implement:
 - `show_page(index)`
 - `_export_page(index, directory)`
 
-If the subclass owns Matplotlib figures, its `close()` method must close them.
+If the subclass owns Matplotlib figures, its `dispose()` method must release them.
 If it embeds live canvases, it should hide or unregister pyplot managers so
 Spyder does not open additional empty figure windows.
 
@@ -232,12 +343,15 @@ navigation or export controls.
 
 ## Testing
 
-The bundled test runtime may not have Matplotlib/Qt installed, so active GUI
-tests can be skipped. Always run:
+Install the optional Qt runtime to exercise the real widgets. The quality CI
+runs the regression suite with Qt installed and the offscreen platform:
 
 ```powershell
-python -m compileall -q src projects tests
-python -m unittest discover -s tests -v
+$env:QT_QPA_PLATFORM = "offscreen"
+$env:MPLBACKEND = "Agg"
+python -m pytest -q
+python -m ruff check src tests projects
+python -m ruff format --check src tests projects
 ```
 
 For GUI behavior, run one Spyder example and verify:
@@ -247,4 +361,6 @@ For GUI behavior, run one Spyder example and verify:
 - the category filter hides and shows the expected pages;
 - Export Page and Export All write PNG files;
 - 3D pages rotate and zoom;
+- the swept-mesh selector isolates a body and edge/opacity controls update it;
+- slice/component/unit controls remain usable after navigating away and back;
 - the performance table page scrolls vertically when there are many rows.

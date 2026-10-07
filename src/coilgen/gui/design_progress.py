@@ -1,0 +1,406 @@
+"""Passive recorded computation progress beside the scientific plot.
+
+The controller supplies completed stage boundaries recorded after checkpoint
+storage, loaded stage snapshots or verified final results. Worker percentages
+and free-text activity cannot certify stage completion or engineering
+acceptance. This view does not start jobs or inspect artifacts.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+import math
+from numbers import Real
+
+from PySide6.QtCore import QEvent, QRectF, QSignalBlocker, QSize, Qt, Signal
+from PySide6.QtGui import QIcon, QPainter, QPen
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QProgressBar, QSizePolicy, QToolButton, QVBoxLayout, QWidget
+
+from .colors import apply_tone, tone_color
+from .icons import icon
+
+
+_STAGES = (
+    ("prepared", "Prepare", "Prepare model and target samples", "mesh"),
+    ("sheet", "Sheet", "Optimize the continuous current sheet", "stream-function"),
+    ("contours", "Contours", "Generate contour winding paths", "contours"),
+    ("routed", "Winding", "Connect and sweep conductors according to the chosen winding settings", "conductor-sweep"),
+    (
+        "evaluated",
+        "Evaluate",
+        "Evaluate the completed design and recorded engineering checks",
+        "independent-validation",
+    ),
+)
+_KEYS = tuple(item[0] for item in _STAGES)
+_ACTIVE = {"queued", "running", "cancelling"}
+_STATUS_TEXT = {
+    "complete": "Recorded stage computation completed",
+    "reusable": "Verified compatible checkpoint available for reuse",
+    "current": "Computing this stage",
+    "waiting": "Awaiting computation",
+    "skipped": "Beyond the requested study boundary",
+    "failed": "Execution stopped at this stage",
+    "stopped": "This stage was not completed before execution stopped",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class StageProgress:
+    key: str
+    label: str
+    description: str
+    icon_name: str
+    status: str
+    viewed: bool = False
+    inferred: bool = False
+
+    @property
+    def tooltip(self):
+        text = f"{self.description}. {_STATUS_TEXT[self.status]}."
+        if self.inferred:
+            text += " Next requested stage without recorded completion; the worker activity is shown below."
+        if self.viewed:
+            text += " Currently shown in the plot."
+        if self.status == "complete":
+            text += (
+                " Stage completion does not establish engineering acceptance."
+                " Optional live display availability and final result integrity are assessed separately."
+            )
+        elif self.status == "reusable":
+            text += (
+                " Cached numerical evidence matches the applied inputs, engine and dependencies."
+                " It is not a newly completed stage of this execution or an engineering acceptance certificate."
+            )
+        return text
+
+
+@dataclass(frozen=True, slots=True)
+class DesignProgressState:
+    stages: tuple[StageProgress, ...]
+    activity: str
+    tooltip: str
+    tone: str
+    percent: int | None
+    busy: bool
+    follow_available: bool
+    provenance: str
+    status: str
+
+
+def _text(value):
+    return " ".join(value.split()) if isinstance(value, str) else ""
+
+
+def _percent(value):
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return None
+    try:
+        value = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return round(value * 100) if math.isfinite(value) and 0 <= value <= 1 else None
+
+
+def build_design_progress(
+    requested_stage,
+    state=None,
+    *,
+    completed=(),
+    reusable=(),
+    preview_stage=None,
+    following=True,
+    pending=False,
+    verification=None,
+    active_stage=None,
+):
+    """Build presentation without guessing completion from worker activity.
+
+    ``completed`` must come from structured stage-boundary events emitted after
+    checkpoint storage, verified live snapshots or verified final run records.
+    ``reusable`` contains actual boundaries of a previously verified reuse plan;
+    presentation never opens archives or infers cache compatibility itself.
+    ``active_stage`` may identify the worker's current operation if structured;
+    free-text ``state['stage']`` is never parsed for it. Without that identity, a
+    running job highlights the first unrecorded stage as an explicitly inferred
+    boundary. ``progress`` is a fraction in [0, 1].
+    """
+    if requested_stage not in _KEYS:
+        raise ValueError(f"Unknown design stage: {requested_stage!r}")
+    if verification not in {None, "pending", "verified", "failed"}:
+        raise ValueError(f"Unknown evidence verification state: {verification!r}")
+    state = state if isinstance(state, Mapping) else {}
+    status = _text(state.get("status")) or "idle"
+    boundary = _KEYS.index(requested_stage)
+    recorded = (
+        frozenset(key for key in completed if isinstance(key, str) and key in _KEYS)
+        if isinstance(completed, (tuple, list, set, frozenset))
+        else frozenset()
+    )
+    recorded = recorded.intersection(_KEYS[: boundary + 1])
+    cached = (
+        frozenset(key for key in reusable if isinstance(key, str) and key in _KEYS)
+        if isinstance(reusable, (tuple, list, set, frozenset))
+        else frozenset()
+    ).intersection(_KEYS[: boundary + 1])
+    remaining = [key for key in _KEYS[: boundary + 1] if key not in recorded]
+    explicit_active = active_stage in remaining
+    current = active_stage if explicit_active else remaining[0] if remaining else None
+    # Queued jobs have not entered the numerical pipeline. Completed workers
+    # awaiting verification likewise cannot claim a current or finished stage.
+    mark_current = status in {"running", "cancelling", "failed", "cancelled", "interrupted"}
+    stages = []
+    for index, (key, label, description, icon_name) in enumerate(_STAGES):
+        stage_status = (
+            "skipped"
+            if index > boundary
+            else "complete"
+            if key in recorded
+            else "failed"
+            if mark_current and key == current and status == "failed"
+            else "stopped"
+            if mark_current and key == current and status in {"cancelled", "interrupted"}
+            else "current"
+            if mark_current and key == current
+            else "reusable"
+            if key in cached
+            else "waiting"
+        )
+        stages.append(
+            StageProgress(
+                key,
+                label,
+                description,
+                icon_name,
+                stage_status,
+                viewed=key == preview_stage and key in recorded,
+                inferred=mark_current and key == current and not explicit_active,
+            )
+        )
+    activity = _text(state.get("stage"))
+    name = _text(state.get("name"))
+    revision = state.get("project_revision")
+    provenance = name
+    if isinstance(revision, int) and not isinstance(revision, bool) and revision >= 0:
+        provenance += (" · " if provenance else "") + f"revision {revision}"
+    tone = "info" if status in _ACTIVE else "neutral"
+    if verification == "failed":
+        description, tone = "Evidence verification failed · see Messages", "error"
+    elif verification == "pending":
+        description = "Execution finished · verifying saved evidence…"
+    elif status == "queued":
+        description = "Queued · waiting for a worker"
+    elif status == "running":
+        description = "Computing · " + (activity or "worker activity unrecorded")
+    elif status == "cancelling":
+        description, tone = "Cancelling · waiting for the worker to stop", "warning"
+    elif status == "failed":
+        description, tone = "Execution failed · " + (_text(state.get("error")) or activity or "see Messages"), "error"
+    elif status in {"cancelled", "interrupted"}:
+        description, tone = status.capitalize() + " · recorded earlier stages retained", "warning"
+    elif status == "completed":
+        description = (
+            "Stage evidence available · review engineering checks"
+            if verification == "verified" and not remaining
+            else "Execution finished · stage evidence unverified"
+        )
+        tone = "info" if verification == "verified" else "warning"
+    elif status == "idle":
+        description = "Applied model · changes pending" if pending else "Current model · stages await computation"
+        if cached:
+            description = (
+                "Applied model · changes pending · verified checkpoints reusable"
+                if pending
+                else "Current model · verified checkpoints reusable"
+            )
+        tone = "warning" if pending else "neutral"
+    else:
+        description, tone = "Execution state unrecorded · review Jobs", "warning"
+    if pending and status != "idle":
+        description += " · model edits pending"
+    # Keep the operation visible even when a long design name is elided.
+    text = description + (" · " + provenance if provenance else "")
+    tooltip = (
+        text + ". Solid blue stages show recorded computation, not engineering acceptance."
+        " Dotted blue Cached stages show verified boundaries available for reuse."
+        " Optional live display availability and final result verification are separate checks."
+    )
+    if cached:
+        tooltip += (
+            " Cached stages can be reused after the worker rechecks compatibility; they are not newly computed stages."
+        )
+        if pending:
+            tooltip += " Pending drafts are not included in that compatibility check and may invalidate the cache."
+    if following and status in _ACTIVE:
+        tooltip += " The plot follows the latest loaded stage preview when available."
+    elif status in _ACTIVE:
+        tooltip += " Plot following is paused; the selected dataset is retained."
+    percent = _percent(state.get("progress"))
+    if percent is not None:
+        tooltip += f" Worker-reported work progress: {percent}%; it does not verify stage completion."
+    busy = verification == "pending" or (status in _ACTIVE and percent is None)
+    return DesignProgressState(tuple(stages), text, tooltip, tone, percent, busy, status in _ACTIVE, provenance, status)
+
+
+class _StageChip(QWidget):
+    """Painted computation indicator with no action or keyboard focus."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.stage = None
+        self.setMinimumWidth(30)
+        self.setFixedHeight(34)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_stage(self, stage):
+        self.stage = stage
+        self.setObjectName(f"design_progress_{stage.key}")
+        self.setProperty("stageStatus", stage.status)
+        self.setProperty("plottedStage", stage.viewed)
+        self.setAccessibleName(f"{stage.label}: {_STATUS_TEXT[stage.status]}")
+        self.setAccessibleDescription(stage.tooltip)
+        self.setToolTip(stage.tooltip)
+        self.update()
+
+    def sizeHint(self):
+        label = self.stage.label if self.stage else "Prepare"
+        return QSize(self.fontMetrics().horizontalAdvance(label) + 42, 34)
+
+    def paintEvent(self, event):
+        if self.stage is None:
+            return
+        stage = self.stage
+        palette = self.palette()
+        tone = (
+            "error"
+            if stage.status == "failed"
+            else "warning"
+            if stage.status in {"stopped", "current"}
+            else "info"
+            if stage.status in {"complete", "reusable"}
+            else "neutral"
+        )
+        foreground = tone_color(tone, palette)
+        muted = palette.color(palette.ColorGroup.Disabled, palette.ColorRole.WindowText)
+        if stage.status in {"waiting", "skipped"}:
+            foreground = muted
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(foreground, 1.6 if stage.status == "current" else 1)
+        if stage.status == "skipped":
+            pen.setStyle(Qt.PenStyle.DashLine)
+        elif stage.status == "reusable":
+            pen.setStyle(Qt.PenStyle.DotLine)
+        painter.setPen(pen)
+        painter.drawRoundedRect(QRectF(1, 1, self.width() - 2, self.height() - 2), 5, 5)
+        badge = {"complete": "evaluated", "current": "pending", "failed": "failed", "skipped": "skipped"}.get(
+            stage.status
+        )
+        mode = QIcon.Mode.Disabled if stage.status in {"waiting", "skipped"} else QIcon.Mode.Normal
+        painter.drawPixmap(6, 7, icon(stage.icon_name, badge=badge).pixmap(QSize(20, 20), mode))
+        rect = self.rect().adjusted(31, 0, -5, 0)
+        text = self.fontMetrics().elidedText(stage.label, Qt.TextElideMode.ElideRight, max(0, rect.width()))
+        if stage.status == "reusable":
+            text += "\n" + self.fontMetrics().elidedText("Cached", Qt.TextElideMode.ElideRight, max(0, rect.width()))
+        painter.setPen(foreground)
+        painter.drawText(rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
+        if stage.viewed:
+            painter.setPen(QPen(tone_color("info", palette), 3))
+            painter.drawLine(6, self.height() - 4, self.width() - 6, self.height() - 4)
+
+
+class _ActivityLabel(QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.full_text = ""
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def set_full_text(self, text):
+        self.full_text = text
+        self._elide()
+
+    def _elide(self):
+        self.setText(self.fontMetrics().elidedText(self.full_text, Qt.TextElideMode.ElideRight, max(0, self.width())))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._elide()
+
+
+class DesignProgress(QWidget):
+    """Compact progress summary; Follow run is its only interactive control."""
+
+    follow_requested = Signal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("design_progress")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.snapshot = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 2, 0, 2)
+        layout.setSpacing(4)
+        chip_row = QHBoxLayout()
+        chip_row.setSpacing(5)
+        self.chips = {key: _StageChip(self) for key in _KEYS}
+        for chip in self.chips.values():
+            chip_row.addWidget(chip, 1)
+        layout.addLayout(chip_row)
+        activity_row = QHBoxLayout()
+        activity_row.setSpacing(7)
+        self.activity_label = _ActivityLabel(self)
+        self.activity_label.setObjectName("design_progress_activity")
+        activity_row.addWidget(self.activity_label, 1)
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setObjectName("design_progress_percent")
+        self.progress_bar.setFixedWidth(95)
+        self.progress_bar.setMaximumHeight(18)
+        self.progress_bar.setFormat("%p%")
+        self.progress_bar.setAccessibleName("Worker-reported work progress")
+        self.progress_bar.setToolTip(
+            "Reported execution progress. A percentage does not verify a completed design stage."
+        )
+        activity_row.addWidget(self.progress_bar)
+        self.follow_button = QToolButton(self)
+        self.follow_button.setObjectName("design_progress_follow")
+        self.follow_button.setCheckable(True)
+        self.follow_button.setText("Follow run")
+        self.follow_button.setIcon(icon("visibility"))
+        self.follow_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.follow_button.setAccessibleName("Follow completed stage previews in the plot")
+        self.follow_button.setToolTip(
+            "Show completed stage previews as the design runs. Turn off to keep inspecting the selected dataset."
+        )
+        self.follow_button.toggled.connect(self.follow_requested)
+        activity_row.addWidget(self.follow_button)
+        layout.addLayout(activity_row)
+        self.set_state("evaluated")
+
+    def set_state(self, requested_stage, state=None, **options):
+        self.snapshot = build_design_progress(requested_stage, state, **options)
+        snapshot = self.snapshot
+        for stage in snapshot.stages:
+            self.chips[stage.key].set_stage(stage)
+        self.activity_label.set_full_text(snapshot.activity)
+        self.activity_label.setToolTip(snapshot.tooltip)
+        self.activity_label.setAccessibleDescription(snapshot.tooltip)
+        apply_tone(self.activity_label, snapshot.tone)
+        self.progress_bar.setVisible(snapshot.status != "idle")
+        self.progress_bar.setRange(0, 0 if snapshot.busy else 100)
+        self.progress_bar.setValue(snapshot.percent if snapshot.percent is not None else 0)
+        self.progress_bar.setFormat("%p%" if snapshot.percent is not None else "Unreported")
+        self.follow_button.setVisible(snapshot.follow_available)
+        with QSignalBlocker(self.follow_button):
+            self.follow_button.setChecked(bool(options.get("following", True)))
+        self.updateGeometry()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in {QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange, QEvent.Type.FontChange}:
+            if self.snapshot is not None:
+                apply_tone(self.activity_label, self.snapshot.tone)
+                self.activity_label._elide()
+                for chip in self.chips.values():
+                    chip.update()

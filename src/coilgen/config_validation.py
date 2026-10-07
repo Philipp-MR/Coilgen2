@@ -69,7 +69,7 @@ def validate_config(config: CoilGenConfig, *, project_root: str | Path | None = 
         messages.append(ConfigValidationMessage("warning", field, message, suggestion))
 
     _validate_mesh_settings(config, error, warning, project_root=project_root)
-    _validate_target_settings(config, error, warning)
+    _validate_target_settings(config, error, warning, project_root=project_root)
     _validate_design_context(config, error, warning)
     _validate_optimization_settings(config, error, warning)
     if config.research_physics is not None:
@@ -136,17 +136,17 @@ def _validate_mesh_settings(config: CoilGenConfig, error, warning, *, project_ro
         pass
     elif mesh_name in generated_meshes:
         _validate_generated_mesh_parameters(config, error)
-    elif not mesh_name.lower().endswith(".stl"):
+    elif not mesh_name.lower().endswith((".stl", ".npz")):
         error(
             "coil_mesh_file",
             f"Unknown mesh source {mesh_name!r}.",
-            "Use a supported generated mesh name or an STL filename.",
+            "Use a supported generated mesh name, STL filename, or SI mesh NPZ asset.",
         )
     elif project_root is not None:
         mesh_path = config.resolved_geometry_source_path(Path(project_root)) / mesh_name
         if not mesh_path.exists():
             warning(
-                "coil_mesh_file", f"STL file was not found at {mesh_path}.", "Check geometry_source_path or filename."
+                "coil_mesh_file", f"Mesh file was not found at {mesh_path}.", "Check geometry_source_path or filename."
             )
 
     if int(config.iteration_num_mesh_refinement) < 0:
@@ -506,7 +506,7 @@ def _validate_angle_span(error, field: str, start_value: Any, end_value: Any) ->
         error(field, "Angular span cannot exceed 2*pi.")
 
 
-def _validate_target_settings(config: CoilGenConfig, error, warning) -> None:
+def _validate_target_settings(config: CoilGenConfig, error, warning, *, project_root=None) -> None:
     _positive(error, "target gradient strength", "target_gradient_strength", config.target_gradient_strength)
     _enum(
         error,
@@ -520,9 +520,59 @@ def _validate_target_settings(config: CoilGenConfig, error, warning) -> None:
         getattr(config, "target_gradient_axis", "auto"),
         {"auto", "x", "y", "z", "gx", "gy", "gz", "magnitude", "norm"},
     )
-    _positive(error, "target region radius", "target_region_radius", config.target_region_radius)
-    _at_least(error, "target region resolution", "target_region_resolution", config.target_region_resolution, 1)
+    imported_map = str(config.target_field_definition_file).strip().lower() not in {"", "none"}
+    if config.target_region_geometry is None:
+        _positive(error, "target region radius", "target_region_radius", config.target_region_radius)
+        _at_least(error, "target region resolution", "target_region_resolution", config.target_region_resolution, 1)
+    elif imported_map:
+        warning(
+            "target_region_geometry",
+            "Target-region geometry is ignored because the imported map supplies authoritative coordinates and values.",
+            "Use an analytic target to generate a different sample region.",
+        )
+    else:
+        from .target_regions import TargetRegion, validate_target_region_mesh
+
+        try:
+            region = TargetRegion.from_dict(config.target_region_geometry)
+            resolution = config.target_region_resolution
+            if isinstance(resolution, bool) or not isinstance(resolution, (int, np.integer)) or resolution < 2:
+                raise ValueError("Explicit target-region resolution must be an integer >=2.")
+            if region.shape == "enclosing_mesh":
+                from .geometry import load_optional_target_mesh
+
+                mesh = load_optional_target_mesh(
+                    config.target_mesh_file, config, Path.cwd() if project_root is None else Path(project_root)
+                )
+                if mesh is None:
+                    raise ValueError("Imported target-region sampling requires target_mesh_file.")
+                # Dense containment is performed by the sampler/preview, not
+                # every synchronous configuration or readiness validation.
+                validate_target_region_mesh(mesh, sampling=region.sampling)
+        except (TypeError, ValueError, OSError, OverflowError) as exc:
+            error(
+                "target_region_geometry",
+                str(exc),
+                "Use positive SI dimensions; imported volume sampling needs a closed SI mesh.",
+            )
+        else:
+            if config.set_roi_into_mesh_center:
+                warning(
+                    "set_roi_into_mesh_center",
+                    "Explicit target-region placement takes precedence over support centering.",
+                )
+            if region.shape != "enclosing_mesh" and str(config.target_mesh_file).strip().lower() not in {"", "none"}:
+                warning(
+                    "target_mesh_file",
+                    "The explicit analytic target region takes precedence over legacy target-mesh sampling.",
+                )
     _validate_field_units(error, "target_field_units", config.target_field_units)
+    if config.gradient_slice_maps_enabled:
+        from .gradient_slice_maps import target_region_slice_map_limitation
+
+        limitation = target_region_slice_map_limitation(config, config.gradient_slice_map_domain)
+        if limitation:
+            warning("gradient_slice_map_domain", limitation)
     _validate_field_units(error, "field_display_units", config.field_display_units)
     try:
         component = normalize_field_component(config.target_field_component)
@@ -724,6 +774,15 @@ def _validate_secondary_suppression_surfaces(config: CoilGenConfig, error) -> No
 
 
 def _validate_optimization_settings(config: CoilGenConfig, error, warning) -> None:
+    _positive(error, "effective current-sheet thickness [m]", "conductor_thickness", config.conductor_thickness)
+    # The inherited field name denotes resistivity, not conductivity. Positive
+    # finite rho and thickness keep the sheet resistance model physical.
+    _positive(
+        error,
+        "conductor resistivity [ohm m]",
+        "specific_conductivity_conductor",
+        config.specific_conductivity_conductor,
+    )
     _enum(
         error,
         "regularization_selection_method",
@@ -1828,6 +1887,71 @@ def _validate_optimization_settings(config: CoilGenConfig, error, warning) -> No
 
 
 def _validate_routing_settings(config: CoilGenConfig, error, warning) -> None:
+    _enum(error, "routing_circuit_scope", config.routing_circuit_scope, {"single", "per_part"})
+    for name, label in (
+        ("routing_jump_height_tolerance_m", "jump height tolerance"),
+        ("routing_jump_sample_spacing_m", "jump sample spacing"),
+    ):
+        value = getattr(config, name)
+        if isinstance(value, (bool, np.bool_)):
+            error(name, "Jump measurement resolution must be numeric, not a boolean.")
+        else:
+            _positive(error, label, name, value)
+    if not isinstance(config.joint_group_routing, (bool, np.bool_)):
+        error("joint_group_routing", "Joint routing must be enabled or disabled with a boolean.")
+    _enum(
+        error,
+        "joint_group_routing_search_mode",
+        config.joint_group_routing_search_mode,
+        {"progressive", "thorough"},
+    )
+    if not isinstance(config.joint_group_routing_search_cuts, (bool, np.bool_)):
+        error("joint_group_routing_search_cuts", "Alternate cut search must be enabled or disabled with a boolean.")
+    _enum(
+        error,
+        "joint_group_routing_field_acceptance",
+        config.joint_group_routing_field_acceptance,
+        {"absolute", "non_regression", "budget_only"},
+    )
+    longitudinal = config.joint_group_routing_max_longitudinal_field_change_rel
+    if longitudinal is not None:
+        if isinstance(longitudinal, (bool, np.bool_)):
+            error(
+                "joint_group_routing_max_longitudinal_field_change_rel",
+                "The longitudinal routing budget must be numeric, not a boolean.",
+            )
+        else:
+            _positive(
+                error,
+                "joint routing relative longitudinal field budget",
+                "joint_group_routing_max_longitudinal_field_change_rel",
+                longitudinal,
+            )
+    clearance = config.joint_group_routing_clearance_m
+    if clearance is not None:
+        if isinstance(clearance, (bool, np.bool_)):
+            error("joint_group_routing_clearance_m", "Joint routing clearance must be numeric, not a boolean.")
+        else:
+            _positive(error, "joint routing clearance", "joint_group_routing_clearance_m", clearance)
+    if isinstance(config.joint_group_routing_b0_weight, (bool, np.bool_)):
+        error("joint_group_routing_b0_weight", "B0 routing weight must be numeric, not a boolean.")
+    _at_least_float(
+        error,
+        "B0 routing alignment weight",
+        "joint_group_routing_b0_weight",
+        config.joint_group_routing_b0_weight,
+        0.0,
+    )
+    _at_least_float(
+        error,
+        "joint routing relative field budget",
+        "joint_group_routing_max_field_change_rel",
+        config.joint_group_routing_max_field_change_rel,
+        0.0,
+    )
+    budget = config.joint_group_routing_max_candidates
+    if isinstance(budget, (bool, np.bool_)) or not isinstance(budget, (int, np.integer)) or not 1 <= budget <= 64:
+        error("joint_group_routing_max_candidates", "The joint candidate budget must be an integer in [1, 64].")
     _enum(
         error,
         "topological_grouping_method",
@@ -2013,7 +2137,12 @@ def _validate_performance_settings(config: CoilGenConfig, error, warning) -> Non
 
 
 def _validate_manufacturing_settings(config: CoilGenConfig, error, warning) -> None:
-    _enum(error, "inductance_source", config.inductance_source, {"auto", "wire_path", "unconnected_contours"})
+    _enum(
+        error,
+        "inductance_source",
+        config.inductance_source,
+        {"auto", "wire_path", "fabricated_centroid", "unconnected_contours"},
+    )
     _enum(
         error, "conductor_mounting_mode", config.conductor_mounting_mode, {"centered", "surface_outer", "surface_inner"}
     )
@@ -2057,6 +2186,18 @@ def _validate_manufacturing_settings(config: CoilGenConfig, error, warning) -> N
     if float(config.sweep_max_frame_rotation_deg) > 180.0:
         error("sweep_max_frame_rotation_deg", "sweep max frame rotation must be <= 180 degrees.")
     _at_least_float(error, "sweep minimum bend radius", "sweep_min_bend_radius", config.sweep_min_bend_radius, 0.0)
+    cluster_deviation = config.sweep_corner_cluster_max_source_deviation_m
+    _at_least_float(
+        error,
+        "sweep corner-cluster source deviation",
+        "sweep_corner_cluster_max_source_deviation_m",
+        cluster_deviation,
+        0.0,
+    )
+    if isinstance(cluster_deviation, (bool, np.bool_)):
+        error("sweep_corner_cluster_max_source_deviation_m", "Source deviation must be a distance, not a boolean.")
+    elif _finite_float(cluster_deviation) > 0.0 and str(config.sweep_bend_mode).strip().lower() != "fillet":
+        error("sweep_corner_cluster_max_source_deviation_m", "A positive source corridor requires fillet bend mode.")
     _positive(error, "sweep bend arc angle", "sweep_bend_arc_angle_deg", config.sweep_bend_arc_angle_deg)
     _positive(
         error,

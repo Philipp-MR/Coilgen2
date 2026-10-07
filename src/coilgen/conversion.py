@@ -32,7 +32,9 @@ def coil_design_problem_to_config(
     target_spec = (
         _target_with_support_suppression(problem) if include_support_suppression_meshes else problem.target_field
     )
-    target_key = register_in_memory_target_field(target_spec.to_target_field(), key=f"{problem.metadata.name}:target")
+    # Display names are not identities: distinct same-name problems must never
+    # replace each other's numerical inputs in the same process.
+    target_key = register_in_memory_target_field(target_spec.to_target_field())
 
     config = base_config if base_config is not None else CoilGenConfig()
     values = asdict(config)
@@ -156,7 +158,7 @@ def _support_geometry_config(problem: CoilDesignProblem) -> dict[str, Any]:
     coil_meshes = [support_mesh.mesh for support_mesh in _coil_support_meshes(problem)]
     if not coil_meshes:
         raise ValueError("Cannot convert problem without primary or shield support meshes.")
-    mesh_key = register_in_memory_mesh(combine_meshes(coil_meshes), key=f"{problem.metadata.name}:coil_mesh")
+    mesh_key = register_in_memory_mesh(combine_meshes(coil_meshes))
     return {
         "coil_mesh_file": mesh_key,
         "surface_is_cylinder_flag": bool(problem.support.metadata.get("surface_is_cylinder", False)),

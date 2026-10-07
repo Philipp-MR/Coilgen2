@@ -161,11 +161,7 @@ def _parallel_transport_tangent(
     if sine <= 1.0e-14:
         return tangent.copy() if cosine > 0.0 else None
     axis /= sine
-    return (
-        tangent * cosine
-        + np.cross(axis, tangent) * sine
-        + axis * np.dot(axis, tangent) * (1.0 - cosine)
-    )
+    return tangent * cosine + np.cross(axis, tangent) * sine + axis * np.dot(axis, tangent) * (1.0 - cosine)
 
 
 def _unit_in_face(vector: np.ndarray, normal: np.ndarray) -> np.ndarray | None:
@@ -177,9 +173,9 @@ def _unit_in_face(vector: np.ndarray, normal: np.ndarray) -> np.ndarray | None:
 def _closed_high_frequency_curvature(curvature: np.ndarray, segment_lengths: np.ndarray) -> np.ndarray:
     previous_distance = np.roll(segment_lengths, 1)
     next_distance = segment_lengths
-    baseline = (
-        next_distance * np.roll(curvature, 1) + previous_distance * np.roll(curvature, -1)
-    ) / (previous_distance + next_distance)
+    baseline = (next_distance * np.roll(curvature, 1) + previous_distance * np.roll(curvature, -1)) / (
+        previous_distance + next_distance
+    )
     return curvature - baseline
 
 
@@ -197,9 +193,9 @@ def _open_high_frequency_curvature(curvature: np.ndarray, arclength: np.ndarray)
         return residual
     previous_distance = arclength[1:-1] - arclength[:-2]
     next_distance = arclength[2:] - arclength[1:-1]
-    baseline = (
-        next_distance * curvature[:-2] + previous_distance * curvature[2:]
-    ) / (previous_distance + next_distance)
+    baseline = (next_distance * curvature[:-2] + previous_distance * curvature[2:]) / (
+        previous_distance + next_distance
+    )
     residual[1:-1] = curvature[1:-1] - baseline
     return residual
 

@@ -45,6 +45,7 @@ class TargetSettings:
     target_field_definition_field_name: str
     target_field_units: str
     field_display_units: str
+    target_region_geometry: dict[str, Any] | None = None
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -234,6 +235,18 @@ class OptimizationSettings:
 
 @dataclass(frozen=True, slots=True)
 class RoutingSettings:
+    routing_circuit_scope: str
+    joint_group_routing: bool
+    joint_group_routing_search_mode: str
+    joint_group_routing_field_acceptance: str
+    joint_group_routing_clearance_m: float | None
+    joint_group_routing_max_field_change_rel: float
+    joint_group_routing_max_longitudinal_field_change_rel: float | None
+    joint_group_routing_max_candidates: int
+    joint_group_routing_b0_weight: float
+    joint_group_routing_search_cuts: bool
+    routing_jump_height_tolerance_m: float
+    routing_jump_sample_spacing_m: float
     topological_grouping_method: str
     inter_group_connection_path_method: str
     inter_group_connection_candidate_count: int
@@ -283,6 +296,7 @@ class ManufacturingSettings:
     sweep_max_frame_rotation_deg: float
     sweep_bend_mode: str
     sweep_min_bend_radius: float
+    sweep_corner_cluster_max_source_deviation_m: float
     sweep_bend_arc_angle_deg: float
     sweep_corner_detection_angle_deg: float
     sweep_max_curvature_envelope_ratio: float
@@ -522,6 +536,8 @@ class CoilGenConfig:
     inter_group_cut_width: float | None = None
     target_region_radius: float = 0.15
     target_region_resolution: int = 10
+    # None preserves MATLAB-compatible legacy sphere/target-mesh sampling.
+    target_region_geometry: dict[str, Any] | None = None
     normal_shift_length: float = 0.001
     min_point_loop_number: int = 20
     min_loop_signifcance: float = 0.0
@@ -573,10 +589,37 @@ class CoilGenConfig:
     wire_trace_csv_length_unit: str = "m"
     wire_trace_csv_decimal_places: int = 9
     plot_flag: bool = False
-    plot_pointcloud_max_points: int = 0
+    # Display-only budget; zero preserves every sample. Numerical arrays are unchanged.
+    plot_pointcloud_max_points: int = 2000
     plot_pointcloud_random_seed: int = 1729
     interconnection_method: str = "regular"
     group_interconnection_method: str = "crossed"
+    # A connected layout is one series circuit; independent circuits are explicit.
+    routing_circuit_scope: str = "single"
+    # Adopt a joint return route only after an isolated physical/field preview.
+    joint_group_routing: bool = True
+    # Cheap circuit ranking followed by staged curve generation. Thorough keeps
+    # the wider eager transition search for comparison and difficult cases.
+    joint_group_routing_search_mode: str = "progressive"
+    # Absolute qualification by default. Explicit non_regression permits only
+    # inherited failures that do not worsen; budget_only allows measured scalar
+    # failures subject to the hard routing delta budgets. All failures are reported.
+    joint_group_routing_field_acceptance: str = "absolute"
+    # Route-only spacing replaces both routing spacing aliases; source contour
+    # optimization keeps its original min_wire_distance_m/min_turn_distance.
+    joint_group_routing_clearance_m: float | None = None
+    # Maximum pointwise vector change / peak active DSV target, at fixed current.
+    joint_group_routing_max_field_change_rel: float = 0.001
+    # Optional pointwise B0-component change with the same target/current scaling.
+    joint_group_routing_max_longitudinal_field_change_rel: float | None = None
+    joint_group_routing_max_candidates: int = 6
+    # Search guide only; final selection uses jumps, longitudinal field RMS, length.
+    joint_group_routing_b0_weight: float = 1.0
+    # Reopen the same directed contours on alternate, unforced cut rails.
+    joint_group_routing_search_cuts: bool = True
+    # Physical excursion counting, relative to the nominal attachment surface.
+    routing_jump_height_tolerance_m: float = 1e-6
+    routing_jump_sample_spacing_m: float = 0.001
     inter_group_connection_path_method: str = "direct_3d"
     inter_group_connection_candidate_count: int = 16
     inter_group_cut_alignment: str = "auto"
@@ -616,11 +659,17 @@ class CoilGenConfig:
     sweep_max_frame_rotation_deg: float = 10.0
     sweep_bend_mode: str = "miter"
     sweep_min_bend_radius: float = 0.0
+    # Explicit two-way source corridor for compound intrinsic corner fillets.
+    # Zero retains the existing per-corner realization without this fallback.
+    sweep_corner_cluster_max_source_deviation_m: float = 0.0
     sweep_bend_arc_angle_deg: float = 5.0
     sweep_corner_detection_angle_deg: float = 15.0
     sweep_max_curvature_envelope_ratio: float = 0.5
     sweep_frame_method: str = "surface_constrained_parallel_transport"
     sweep_surface_normal_smoothing_iterations: int = 0
+    # Signed support-normal attachment: 0 uses free RMF transport, 1 fixes
+    # attached frames, and intermediate strengths use arclength-weighted
+    # guidance over the actual profile-envelope diameter (not per-sample decay).
     sweep_surface_normal_constraint_strength: float = 0.35
     sweep_self_intersection_check: str = "capsule_fast"
     sweep_insulation_thickness: float = 0.0

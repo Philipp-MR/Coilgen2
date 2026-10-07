@@ -57,16 +57,41 @@ class ProgressReporter:
             percent_step=float(getattr(config, "progress_percent_step", 5.0)),
         )
 
-    def report(self, percent: float, message: str, *, force: bool = False) -> None:
+    def report(self, percent: float | None, message: str, *, force: bool = False) -> None:
+        """Report activity without a percentage when its total work is unknown."""
+        percent = None if percent is None else max(0.0, min(100.0, float(percent)))
+        self._report_event({"label": self.label, "percent": percent, "message": message})
+
+    def boundary(self, stage: str, *, preview: str | None = None, preview_error: str | None = None) -> None:
+        """Record a completed scientific boundary independently of task percentages."""
+        from .pipeline_stages import PipelineStage
+
+        selected = PipelineStage(stage)
+        event = {
+            "label": "CoilGen",
+            "percent": None,
+            "message": f"{selected.value} boundary completed",
+            "completed_stage": selected.value,
+            "completed_stages": [item.value for item in PipelineStage if item.index <= selected.index],
+        }
+        if preview is not None:
+            event["stage_preview"] = preview
+        if preview_error is not None:
+            event["stage_preview_error"] = str(preview_error)[:512]
+        self._report_event(event)
+
+    def _report_event(self, event: dict) -> None:
         cancel = _cancel_check.get()
         if cancel is not None and cancel():
             raise DesignCancelled("Design cancelled by the user.")
         sink = _progress_sink.get()
         if sink is not None:
-            sink({"label": self.label, "percent": max(0.0, min(100.0, float(percent))), "message": message})
+            sink(event)
         if not self.enabled:
             return
-        print(f"{self.label} {max(0.0, min(100.0, float(percent))):6.1f}% - {message}", flush=True)
+        percent, label = event["percent"], event["label"]
+        prefix = label if percent is None else f"{label} {percent:6.1f}%"
+        print(f"{prefix} - {event['message']}", flush=True)
 
     def elapsed_seconds(self) -> float:
         return time.perf_counter() - self._start_time
@@ -74,13 +99,14 @@ class ProgressReporter:
     def finish(self, message: str = "finished") -> None:
         self.report(100.0, f"{message}; execution time {format_elapsed(self.elapsed_seconds())}", force=True)
 
-    def task(self, label: str, total: int) -> "ProgressTask":
+    def task(self, label: str, total: int, *, indeterminate: bool = False) -> "ProgressTask":
         return ProgressTask(
             reporter=self,
             label=label,
             total=max(int(total), 0),
             min_interval_seconds=max(float(self.min_interval_seconds), 0.0),
             percent_step=max(float(self.percent_step), 0.0),
+            indeterminate=indeterminate,
         )
 
 
@@ -91,6 +117,7 @@ class ProgressTask:
     total: int
     min_interval_seconds: float
     percent_step: float
+    indeterminate: bool = False
     completed: int = 0
     _start_time: float = 0.0
     _last_time: float = 0.0
@@ -116,7 +143,11 @@ class ProgressTask:
         is_complete = self.completed >= self.total
         if force or enough_percent or enough_time or is_complete:
             text = message if message is not None else f"{self.completed}/{self.total}"
-            self.reporter.report(percent, f"{self.label}: {text}")
+            if self.indeterminate:
+                text = f"{self.label} {self.completed}/{self.total}" + (f": {message}" if message is not None else "")
+            else:
+                text = f"{self.label}: {text}"
+            self.reporter.report(None if self.indeterminate else percent, text)
             self._last_percent = percent
             self._last_time = now
 

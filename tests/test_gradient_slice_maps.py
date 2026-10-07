@@ -439,5 +439,98 @@ def _layout_slice_map_result(*, parallel_worker_count: int):
     )
 
 
+def test_physical_layout_slices_and_overlays_use_the_evaluated_signed_current():
+    from coilgen.physics import biot_savart_wire_path
+
+    result = _layout_slice_map_result(parallel_worker_count=1)
+    part = result.coil_parts[0]
+    physical = part.wire_path.v + [0, 0, 0.01]
+    part.fabrication_path = SimpleNamespace(wire_points_m=physical)
+    result.input_data.gradient_slice_map_current = "target"
+    result.needed_current_layout = -2.0
+    result.layout_gradient = {"achieved_gradient": 0.002}  # A fresh gradient fit would incorrectly use +5 A.
+    evaluated = evaluate_gradient_slice_maps(result)
+    assert evaluated.current_scale_A == -2
+    assert evaluated.summary["gradient_slice_map_geometry_source"] == "fabricated_centroid"
+    np.testing.assert_array_equal(gradient_slice_maps._overlay_polylines(result, "wire_path")[0], physical)
+    for section in evaluated.slices:
+        coords = section.coords[section.mask]
+        expected = biot_savart_wire_path(physical, coords, worker_count=1) * -2
+        np.testing.assert_allclose(section.maps["Bz"][section.mask], expected[:, 2], rtol=1e-12, atol=1e-18)
+        step = evaluated.gradient_step_m
+        plus = biot_savart_wire_path(physical, coords + [step, 0, 0], worker_count=1)
+        minus = biot_savart_wire_path(physical, coords - [step, 0, 0], worker_count=1)
+        expected_dx = -2 * (plus[:, 2] - minus[:, 2]) / (2 * step)
+        np.testing.assert_allclose(section.maps["dBz_dx"][section.mask], expected_dx, rtol=1e-12, atol=1e-16)
+
+
+def test_slice_cache_tracks_physical_geometry_and_source_even_when_raw_path_is_unchanged():
+    result = _layout_slice_map_result(parallel_worker_count=1)
+    first = gradient_slice_maps.gradient_slice_map_result(result)
+    assert gradient_slice_maps.gradient_slice_map_result(result) is first
+    part = result.coil_parts[0]
+    original = part.wire_path.v.copy()
+    part.fabrication_path = SimpleNamespace(wire_points_m=original.copy())
+    second = gradient_slice_maps.gradient_slice_map_result(result)
+    assert second is not first
+    assert second.summary["gradient_slice_map_geometry_source"] == "fabricated_centroid"
+    part.fabrication_path.wire_points_m += [0, 0, 0.01]
+    third = gradient_slice_maps.gradient_slice_map_result(result)
+    assert third is not second
+    assert not np.allclose(_component_values(second, "Bz"), _component_values(third, "Bz"), rtol=1e-5, atol=0)
+    np.testing.assert_array_equal(part.wire_path.v, original)
+
+
+def test_contour_only_layout_fallback_matches_final_evaluation_and_turn_multiplicity():
+    result = _layout_slice_map_result(parallel_worker_count=1)
+    part = result.coil_parts[0]
+    original = part.wire_path.v.copy()
+    part.fabrication_path = SimpleNamespace(wire_points_m=original + [0, 0, 0.01])
+    part.contour_lines = [SimpleNamespace(v=original, turn_multiplicity=2)]
+    result.input_data.skip_postprocessing = True
+    lines = gradient_slice_maps._source_polylines(result, "layout")
+    assert len(lines) == 2
+    for line in lines:
+        np.testing.assert_array_equal(line, original)
+    assert gradient_slice_maps._layout_geometry_sources(result) == ("unconnected_contours",)
+    evaluated = evaluate_gradient_slice_maps(result)
+    assert evaluated.summary["gradient_slice_map_geometry_source"] == "unconnected_contours"
+
+
+def test_slice_current_zero_negative_stream_and_legacy_gradient_fallback_are_distinct():
+    result = _layout_slice_map_result(parallel_worker_count=1)
+    result.needed_current_layout = 0.0
+    result.layout_gradient = {"achieved_gradient": 0.002}
+    assert gradient_slice_maps._current_scale_A(result, "target") == 0
+    result.potential_step = -3
+    assert gradient_slice_maps._current_scale_A(result, "stream_function") == -3
+    del result.needed_current_layout
+    assert gradient_slice_maps._current_scale_A(result, "target") == 5
+
+
+def test_sampled_field_maps_use_canonical_physical_fields_and_refresh_gradient_cache():
+    from coilgen.field_maps import field_scalar_maps, gradient_vector_maps
+    from coilgen.physics import biot_savart_wire_path
+
+    result = _layout_slice_map_result(parallel_worker_count=1)
+    part = result.coil_parts[0]
+    physical = part.wire_path.v + [0, 0, 0.01]
+    coords = result.target_field.coords
+    expected = biot_savart_wire_path(physical, coords, worker_count=1)
+    original = biot_savart_wire_path(part.wire_path.v, coords, worker_count=1)
+    result.field_layout_per1Amp = expected
+    result.field_by_layout = expected
+    result.target_field_1A = SimpleNamespace(b=original)
+    result.b_field_opt_sf_1A = original
+    result.b_field_opt_sf = original
+    np.testing.assert_allclose(field_scalar_maps(result)["layout"].values, expected[:, 2])
+    first = gradient_vector_maps(result)
+    assert gradient_vector_maps(result) is first
+    result.field_layout_per1Amp = biot_savart_wire_path(physical + [0, 0, 0.01], coords, worker_count=1)
+    second = gradient_vector_maps(result)
+    assert second is not first
+    assert not np.allclose(first["layout"].values, second["layout"].values, rtol=1e-5, atol=0, equal_nan=True)
+
+
 if __name__ == "__main__":
     unittest.main()

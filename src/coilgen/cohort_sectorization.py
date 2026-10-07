@@ -94,23 +94,17 @@ class AdaptiveSectorizationOptions:
         if not 0.0 < self.minimum_channel_field_norm_ratio <= 1.0:
             raise ValueError("minimum_channel_field_norm_ratio must lie in (0, 1].")
         if not 0.0 < self.minimum_discovery_field_projection_ratio <= 1.0:
-            raise ValueError(
-                "minimum_discovery_field_projection_ratio must lie in (0, 1]."
-            )
+            raise ValueError("minimum_discovery_field_projection_ratio must lie in (0, 1].")
         if not 0.0 < self.maximum_localized_overlap_fraction <= 1.0:
             raise ValueError("maximum_localized_overlap_fraction must lie in (0, 1].")
         if self.maximum_hardening_rms_ratio < 1.0:
             raise ValueError("maximum_hardening_rms_ratio must be at least one.")
         if self.maximum_normalized_field_condition_number < 1.0:
-            raise ValueError(
-                "maximum_normalized_field_condition_number must be at least one."
-            )
+            raise ValueError("maximum_normalized_field_condition_number must be at least one.")
         if not 0.0 < self.minimum_sector_area_fraction < 1.0:
             raise ValueError("minimum_sector_area_fraction must lie in (0, 1).")
         if not self.minimum_sector_area_fraction < self.maximum_sector_area_fraction < 1.0:
-            raise ValueError(
-                "maximum_sector_area_fraction must exceed the minimum and remain below one."
-            )
+            raise ValueError("maximum_sector_area_fraction must exceed the minimum and remain below one.")
         if self.enabled and self.hard_support_relative_tolerance <= 0.0:
             raise ValueError("Enabled sectorization requires a positive hard-support tolerance.")
 
@@ -184,9 +178,7 @@ class AdaptiveSectorizationResult:
                 raise ValueError(f"{name} must contain one value per channel.")
         if np.any(self.local_dof_counts < 1):
             raise ValueError("local_dof_counts must be positive for every channel.")
-        if np.any(self.terminal_face_indices < 0) or np.any(
-            self.terminal_face_indices >= face_count
-        ):
+        if np.any(self.terminal_face_indices < 0) or np.any(self.terminal_face_indices >= face_count):
             raise ValueError("terminal_face_indices must identify valid support-mesh faces.")
         if len(np.unique(self.terminal_face_indices)) != channel_count:
             raise ValueError("Every sector channel requires one unique boundary terminal face.")
@@ -251,12 +243,8 @@ class AdaptiveSectorizationResult:
             "guard_area_fraction": self.guard_area_fraction,
             "intersector_boundary_length_m": float(self.intersector_boundary_length_m),
             "performance_rms_ratio": float(self.performance_rms_ratio),
-            "normalized_field_condition_number": float(
-                self.normalized_field_condition_number
-            ),
-            "maximum_normalized_field_correlation": float(
-                self.maximum_normalized_field_correlation
-            ),
+            "normalized_field_condition_number": float(self.normalized_field_condition_number),
+            "maximum_normalized_field_correlation": float(self.maximum_normalized_field_correlation),
             "history": [dict(item) for item in self.history],
         }
 
@@ -398,9 +386,7 @@ def adaptively_sectorize_cohort_channels(
             active_face_masks=None,
             basis_parameterization=discovery_parameterization,
             enforce_density_constraints=options.enforce_density_during_discovery,
-            minimum_field_projection_ratio=(
-                options.minimum_discovery_field_projection_ratio
-            ),
+            minimum_field_projection_ratio=(options.minimum_discovery_field_projection_ratio),
             progress_callback=progress_callback,
         )
         candidate_fields = _channel_fields_for_surface_scenarios(scenarios, candidate)
@@ -439,21 +425,15 @@ def adaptively_sectorize_cohort_channels(
             overlap = float("inf")
             rejection_reasons.append(str(exc))
         previous_overlap = _continuous_overlap_fraction(occupancy, face_areas)
-        required_overlap = previous_overlap * (
-            1.0 - options.minimum_localization_overlap_reduction
-        )
+        required_overlap = previous_overlap * (1.0 - options.minimum_localization_overlap_reduction)
         if not np.isfinite(overlap) or overlap > required_overlap:
-            rejection_reasons.append(
-                f"overlap {overlap:.6f} did not improve below {required_overlap:.6f}"
-            )
+            rejection_reasons.append(f"overlap {overlap:.6f} did not improve below {required_overlap:.6f}")
         localization_rms_ratio = float(
-            np.median(candidate_fit.rms_after_T)
-            / max(float(np.median(initial_fit.rms_after_T)), 1.0e-30)
+            np.median(candidate_fit.rms_after_T) / max(float(np.median(initial_fit.rms_after_T)), 1.0e-30)
         )
         if localization_rms_ratio > options.maximum_localization_rms_ratio:
             rejection_reasons.append(
-                f"RMS ratio {localization_rms_ratio:.3f} > "
-                f"{options.maximum_localization_rms_ratio:.3f}"
+                f"RMS ratio {localization_rms_ratio:.3f} > {options.maximum_localization_rms_ratio:.3f}"
             )
         accepted = not rejection_reasons
         history.append(
@@ -480,8 +460,7 @@ def adaptively_sectorize_cohort_channels(
             )
         if accepted:
             damped_occupancy = (
-                options.activity_damping * damped_occupancy
-                + (1.0 - options.activity_damping) * candidate_occupancy
+                options.activity_damping * damped_occupancy + (1.0 - options.activity_damping) * candidate_occupancy
             )
             basis = candidate
             fit = candidate_fit
@@ -515,9 +494,7 @@ def adaptively_sectorize_cohort_channels(
         adjacency,
         options,
     )
-    active_face_masks = np.column_stack(
-        [(labels == channel) & ~guard for channel in range(channel_count)]
-    )
+    active_face_masks = np.column_stack([(labels == channel) & ~guard for channel in range(channel_count)])
     _validate_hardened_partition(
         labels,
         seeds,
@@ -591,22 +568,18 @@ def adaptively_sectorize_cohort_channels(
     )
     boundary_length = _intersector_boundary_length(labels, adjacency)
     performance_ratio = float(
-        np.median(hardened_fit.rms_after_T)
-        / max(float(np.median(initial_fit.rms_after_T)), 1.0e-30)
+        np.median(hardened_fit.rms_after_T) / max(float(np.median(initial_fit.rms_after_T)), 1.0e-30)
     )
-    hardened_field_rms, normalized_field_condition, maximum_field_correlation = (
-        _normalized_channel_field_diagnostics(
-            problem,
-            hardened,
-            center_frequency=fit_options.center_frequency,
-        )
+    hardened_field_rms, normalized_field_condition, maximum_field_correlation = _normalized_channel_field_diagnostics(
+        problem,
+        hardened,
+        center_frequency=fit_options.center_frequency,
     )
     hardened_field_norm_ratio = hardened_field_rms / np.maximum(anchor_field_rms, 1.0e-30)
     quality_failures: list[str] = []
     if performance_ratio > options.maximum_hardening_rms_ratio:
         quality_failures.append(
-            f"median RMS ratio {performance_ratio:.3f} exceeds "
-            f"{options.maximum_hardening_rms_ratio:.3f}"
+            f"median RMS ratio {performance_ratio:.3f} exceeds {options.maximum_hardening_rms_ratio:.3f}"
         )
     minimum_hardened_field_ratio = float(np.min(hardened_field_norm_ratio))
     if minimum_hardened_field_ratio < options.minimum_channel_field_norm_ratio:
@@ -621,9 +594,7 @@ def adaptively_sectorize_cohort_channels(
         )
     if quality_failures:
         raise RuntimeError(
-            "Adaptive sectorization failed final physical quality gates: "
-            + "; ".join(quality_failures)
-            + "."
+            "Adaptive sectorization failed final physical quality gates: " + "; ".join(quality_failures) + "."
         )
     final_overlap = _continuous_overlap_fraction(final_occupancy, face_areas)
     history.append(
@@ -704,9 +675,7 @@ def _build_discovery_parameterization(
     rank = int(np.count_nonzero(singular_values > threshold))
     retained_dimension = min(int(maximum_dimension), rank)
     if retained_dimension < initial.shape[1]:
-        raise RuntimeError(
-            f"Adaptive discovery span has rank {rank}, below the {initial.shape[1]} channels."
-        )
+        raise RuntimeError(f"Adaptive discovery span has rank {rank}, below the {initial.shape[1]} channels.")
     parameterization = left[:, :retained_dimension]
     remaining = int(maximum_dimension) - retained_dimension
     if problem is not None and remaining > 0:
@@ -773,9 +742,7 @@ def _localized_approximate_field_null_modes(
     retained = eigenvalues > cutoff
     if np.any(retained):
         response = weighted_sensitivity @ localized
-        coefficients = (
-            eigenvectors[:, retained].T @ response
-        ) / eigenvalues[retained, None]
+        coefficients = (eigenvectors[:, retained].T @ response) / eigenvalues[retained, None]
         localized -= weighted_sensitivity.T @ (eigenvectors[:, retained] @ coefficients)
     existing = np.asarray(existing_modes, dtype=float)
     if existing.size:
@@ -852,15 +819,9 @@ def _sector_local_expansion(mesh: Mesh, active_face_mask: np.ndarray) -> Any:
     active_roots = np.unique(roots[active_vertices])
     fixed_roots: set[int] = set()
     for component in np.unique(component_roots[active_vertices]):
-        candidates = [
-            int(root)
-            for root in active_roots
-            if np.any(component_roots[roots == root] == component)
-        ]
+        candidates = [int(root) for root in active_roots if np.any(component_roots[roots == root] == component)]
         if candidates:
-            fixed_roots.add(
-                max(candidates, key=lambda root: int(np.count_nonzero(roots == root)))
-            )
+            fixed_roots.add(max(candidates, key=lambda root: int(np.count_nonzero(roots == root))))
     free_roots = [int(root) for root in active_roots if int(root) not in fixed_roots]
     if not free_roots:
         raise RuntimeError("Automatic sector has no non-gauge local stream-function DOFs.")
@@ -923,16 +884,13 @@ def _solve_basis_update(
         raise ValueError("basis_parameterization must have shape (reduced DOFs, discovery DOFs).")
     discovery_dof_count = parameterization.shape[1]
     coefficient_slices = [
-        slice(channel * discovery_dof_count, (channel + 1) * discovery_dof_count)
-        for channel in range(channel_count)
+        slice(channel * discovery_dof_count, (channel + 1) * discovery_dof_count) for channel in range(channel_count)
     ]
     variable = cp.Variable(
         discovery_dof_count * channel_count,
         name="sectorized_channel_basis_coefficients_per_A",
     )
-    projected_density_operators = tuple(
-        operator @ parameterization for operator in density_operators
-    )
+    projected_density_operators = tuple(operator @ parameterization for operator in density_operators)
     constraints: list[Any] = []
     projected_sensitivities_by_problem: dict[int, np.ndarray] = {}
     currents = np.asarray(fit.current_matrix_A, dtype=float)
@@ -952,10 +910,7 @@ def _solve_basis_update(
         problem_key = id(item.problem)
         matrix = projected_sensitivities_by_problem.get(problem_key)
         if matrix is None:
-            matrix = (
-                np.asarray(item.problem.unweighted_reduced_sensitivity, dtype=float)
-                @ parameterization
-            )
+            matrix = np.asarray(item.problem.unweighted_reduced_sensitivity, dtype=float) @ parameterization
             projected_sensitivities_by_problem[problem_key] = matrix
         disturbance = np.asarray(item.scenario.disturbance_T, dtype=float) + fit_result.auxiliary_field_T
         weights = _scenario_weights(item.scenario)
@@ -971,9 +926,7 @@ def _solve_basis_update(
                 "sensitivity": matrix,
                 "weights": normalized_weights,
                 "current_second_moment": np.zeros((channel_count, channel_count), dtype=float),
-                "disturbance_rhs": [
-                    np.zeros_like(normalized_weights) for _ in range(channel_count)
-                ],
+                "disturbance_rhs": [np.zeros_like(normalized_weights) for _ in range(channel_count)],
             }
             residual_groups[group_key] = group
         group["current_second_moment"] += scale * np.outer(
@@ -981,9 +934,7 @@ def _solve_basis_update(
             scenario_currents,
         )
         for channel in range(channel_count):
-            group["disturbance_rhs"][channel] += (
-                2.0 * scale * float(scenario_currents[channel]) * metric_disturbance
-            )
+            group["disturbance_rhs"][channel] += 2.0 * scale * float(scenario_currents[channel]) * metric_disturbance
 
     for group in residual_groups.values():
         matrix = group["sensitivity"]
@@ -1013,10 +964,7 @@ def _solve_basis_update(
     projected_resistance = 0.5 * (projected_resistance + projected_resistance.T)
     mean_current_square = np.maximum(np.mean(currents**2, axis=0), 1.0e-12)
     initial_energy = float(
-        np.sum(
-            mean_current_square
-            * np.einsum("pk,pq,qk->k", current_basis, resistance, current_basis, optimize=True)
-        )
+        np.sum(mean_current_square * np.einsum("pk,pq,qk->k", current_basis, resistance, current_basis, optimize=True))
     )
     for channel in range(channel_count):
         coefficient_slice = coefficient_slices[channel]
@@ -1037,9 +985,7 @@ def _solve_basis_update(
     for channel in range(channel_count):
         coefficient_slice = coefficient_slices[channel]
         quadratic[coefficient_slice, coefficient_slice] += anchor_scale * anchor_hessian
-        linear[coefficient_slice] -= (
-            2.0 * anchor_scale * anchor_sensitivity.T @ anchor_fields[:, channel]
-        )
+        linear[coefficient_slice] -= 2.0 * anchor_scale * anchor_sensitivity.T @ anchor_fields[:, channel]
 
     if overlap_weights is not None and overlap_penalty > 0.0:
         weights_array = np.asarray(overlap_weights, dtype=float)
@@ -1067,18 +1013,13 @@ def _solve_basis_update(
             overlap_quadratic = 0.5 * (overlap_quadratic + overlap_quadratic.T)
             coefficient_slice = coefficient_slices[channel]
             quadratic[coefficient_slice, coefficient_slice] += (
-                float(overlap_penalty)
-                / max(limits.channel_count, 1)
-                / reference_energy[channel]
-                * overlap_quadratic
+                float(overlap_penalty) / max(limits.channel_count, 1) / reference_energy[channel] * overlap_quadratic
             )
 
     quadratic = 0.5 * (quadratic + quadratic.T)
     if np.any(~np.isfinite(quadratic)) or np.any(~np.isfinite(linear)):
         raise RuntimeError("Adaptive discovery produced a non-finite condensed objective.")
-    objective = cp.Minimize(
-        cp.quad_form(variable, quadratic, assume_PSD=True) + linear @ variable
-    )
+    objective = cp.Minimize(cp.quad_form(variable, quadratic, assume_PSD=True) + linear @ variable)
     scalar_constraint_count = 0
     if minimum_field_projection_ratio > 0.0:
         raw_sensitivity = np.asarray(
@@ -1111,8 +1052,7 @@ def _solve_basis_update(
             )
             projection = discovery_fields.T @ (field_weights * anchor_field) / denominator
             constraints.append(
-                projection @ variable[coefficient_slices[channel]]
-                >= float(minimum_field_projection_ratio)
+                projection @ variable[coefficient_slices[channel]] >= float(minimum_field_projection_ratio)
             )
             scalar_constraint_count += 1
     density_limit = engineering_surface_current_density_limit_A_per_m(config)
@@ -1135,11 +1075,7 @@ def _solve_basis_update(
             )
             for operator in projected_density_operators:
                 inactive_operator = _matrix_rows(operator, inactive)
-                constraints.append(
-                    (inactive_operator @ variable[coefficient_slices[channel]])
-                    / reference_scale
-                    == 0.0
-                )
+                constraints.append((inactive_operator @ variable[coefficient_slices[channel]]) / reference_scale == 0.0)
                 scalar_constraint_count += int(np.count_nonzero(inactive))
     problem = cp.Problem(objective, constraints)
     if progress_callback is not None:
@@ -1203,8 +1139,7 @@ def _solve_sector_local_basis_update(
 
     local_offsets = np.concatenate(([0], np.cumsum(local_dof_counts, dtype=np.int64)))
     local_slices = [
-        slice(int(local_offsets[channel]), int(local_offsets[channel + 1]))
-        for channel in range(limits.channel_count)
+        slice(int(local_offsets[channel]), int(local_offsets[channel + 1])) for channel in range(limits.channel_count)
     ]
     total_local_dofs = int(local_offsets[-1])
     variable = cp.Variable(total_local_dofs, name="sector_local_stream_functions")
@@ -1220,10 +1155,7 @@ def _solve_sector_local_basis_update(
                 config.target_field_component,
                 b0_direction=config.b_0_direction,
             )
-            matrices = tuple(
-                np.asarray(full_sensitivity @ expansion, dtype=float)
-                for expansion in expansions
-            )
+            matrices = tuple(np.asarray(full_sensitivity @ expansion, dtype=float) for expansion in expansions)
             local_sensitivities_by_problem[problem_key] = matrices
         return matrices
 
@@ -1252,12 +1184,8 @@ def _solve_sector_local_basis_update(
             group = {
                 "sensitivities": channel_sensitivities,
                 "weights": normalized_weights,
-                "current_second_moment": np.zeros(
-                    (limits.channel_count, limits.channel_count), dtype=float
-                ),
-                "disturbance_rhs": [
-                    np.zeros_like(normalized_weights) for _ in range(limits.channel_count)
-                ],
+                "current_second_moment": np.zeros((limits.channel_count, limits.channel_count), dtype=float),
+                "disturbance_rhs": [np.zeros_like(normalized_weights) for _ in range(limits.channel_count)],
             }
             residual_groups[group_key] = group
         group["current_second_moment"] += scale * np.outer(
@@ -1265,18 +1193,13 @@ def _solve_sector_local_basis_update(
             scenario_currents,
         )
         for channel in range(limits.channel_count):
-            group["disturbance_rhs"][channel] += (
-                2.0 * scale * float(scenario_currents[channel]) * metric_disturbance
-            )
+            group["disturbance_rhs"][channel] += 2.0 * scale * float(scenario_currents[channel]) * metric_disturbance
 
     for group in residual_groups.values():
         channel_sensitivities = group["sensitivities"]
         normalized_weights = group["weights"]
         current_second_moment = group["current_second_moment"]
-        weighted_means = [
-            channel_sensitivity.T @ normalized_weights
-            for channel_sensitivity in channel_sensitivities
-        ]
+        weighted_means = [channel_sensitivity.T @ normalized_weights for channel_sensitivity in channel_sensitivities]
         for left_channel, left_sensitivity in enumerate(channel_sensitivities):
             left_slice = local_slices[left_channel]
             linear[left_slice] += left_sensitivity.T @ group["disturbance_rhs"][left_channel]
@@ -1285,9 +1208,7 @@ def _solve_sector_local_basis_update(
                 if coefficient == 0.0:
                     continue
                 right_sensitivity = channel_sensitivities[right_channel]
-                block = left_sensitivity.T @ (
-                    normalized_weights[:, None] * right_sensitivity
-                )
+                block = left_sensitivity.T @ (normalized_weights[:, None] * right_sensitivity)
                 if fit_options.center_frequency:
                     block -= np.outer(
                         weighted_means[left_channel],
@@ -1345,15 +1266,8 @@ def _solve_sector_local_basis_update(
     for channel, channel_sensitivity in enumerate(reference_sensitivities):
         local_slice = local_slices[channel]
         weighted_channel_sensitivity = target_weights[:, None] * channel_sensitivity
-        quadratic[local_slice, local_slice] += anchor_scale * (
-            channel_sensitivity.T @ weighted_channel_sensitivity
-        )
-        linear[local_slice] -= (
-            2.0
-            * anchor_scale
-            * channel_sensitivity.T
-            @ (target_weights * anchor_fields[:, channel])
-        )
+        quadratic[local_slice, local_slice] += anchor_scale * (channel_sensitivity.T @ weighted_channel_sensitivity)
+        linear[local_slice] -= 2.0 * anchor_scale * channel_sensitivity.T @ (target_weights * anchor_fields[:, channel])
 
     full_density_operators = _full_face_current_density_operators(reference_problem)
     density_limit = engineering_surface_current_density_limit_A_per_m(config)
@@ -1364,9 +1278,7 @@ def _solve_sector_local_basis_update(
             per_amp_limit = density_limit / max(float(limits.absolute_limits_A[channel]), 1.0e-30)
             components = cp.vstack(
                 [
-                    (_matrix_rows(operator, active) @ expansion)
-                    @ variable[local_slices[channel]]
-                    / per_amp_limit
+                    (_matrix_rows(operator, active) @ expansion) @ variable[local_slices[channel]] / per_amp_limit
                     for operator in full_density_operators
                 ]
             ).T
@@ -1376,9 +1288,7 @@ def _solve_sector_local_basis_update(
     quadratic = 0.5 * (quadratic + quadratic.T)
     if np.any(~np.isfinite(quadratic)) or np.any(~np.isfinite(linear)):
         raise RuntimeError("Adaptive local hardening produced a non-finite condensed objective.")
-    objective = cp.Minimize(
-        cp.quad_form(variable, quadratic, assume_PSD=True) + linear @ variable
-    )
+    objective = cp.Minimize(cp.quad_form(variable, quadratic, assume_PSD=True) + linear @ variable)
     problem = cp.Problem(objective, constraints)
     if progress_callback is not None:
         metrics = problem.size_metrics
@@ -1424,9 +1334,7 @@ def _project_full_basis_to_reduced(problem: Any, full_basis: np.ndarray) -> np.n
     reconstructed = expansion @ reduced
     full_operators = _full_face_current_density_operators(problem)
     difference = reconstructed - full_basis
-    maximum_density_error = max(
-        float(np.max(np.abs(operator @ difference))) for operator in full_operators
-    )
+    maximum_density_error = max(float(np.max(np.abs(operator @ difference))) for operator in full_operators)
     reference_density = max(
         max(float(np.max(np.abs(operator @ full_basis))) for operator in full_operators),
         1.0e-30,
@@ -1530,10 +1438,7 @@ def _full_face_current_density_operators(problem: Any) -> tuple[Any, Any, Any]:
             density_matrix = np.asarray(current_density_mat, dtype=float)
             if density_matrix.shape != (vertex_count, len(face_array), 3):
                 raise ValueError("Surface-current-density matrix has inconsistent dimensions.")
-            component_arrays = [
-                sparse.csr_matrix(density_matrix[:, :, component].T)
-                for component in range(3)
-            ]
+            component_arrays = [sparse.csr_matrix(density_matrix[:, :, component].T) for component in range(3)]
         else:
             local = np.asarray(face_basis_currents, dtype=float)
             if local.shape != (len(face_array), 3, 3):
@@ -1554,8 +1459,7 @@ def _full_face_current_density_operators(problem: Any) -> tuple[Any, Any, Any]:
     for component_parts in part_component_operators:
         operators.append(sparse.block_diag(component_parts, format="csr"))
     if any(
-        operator.shape != (problem.combined_mesh.n_faces, problem.combined_mesh.n_vertices)
-        for operator in operators
+        operator.shape != (problem.combined_mesh.n_faces, problem.combined_mesh.n_vertices) for operator in operators
     ):
         raise ValueError("Combined face-current-density operator does not match the support mesh.")
     return operators[0], operators[1], operators[2]
@@ -1617,9 +1521,7 @@ def _normalized_channel_field_diagnostics(
         return rms, float("inf"), 1.0
     normalized_fields = np.sqrt(normalized_weights[:, None]) * fields / rms[None, :]
     singular_values = np.linalg.svd(normalized_fields, compute_uv=False)
-    condition = float(
-        singular_values[0] / max(float(singular_values[-1]), np.finfo(float).tiny)
-    )
+    condition = float(singular_values[0] / max(float(singular_values[-1]), np.finfo(float).tiny))
     correlation = normalized_fields.T @ normalized_fields
     off_diagonal = np.abs(correlation - np.eye(correlation.shape[0]))
     maximum_correlation = float(np.max(off_diagonal)) if len(correlation) > 1 else 0.0
@@ -1714,9 +1616,7 @@ def _automatic_face_partition(
         port_radius_m=max(float(options.clearance_m), 0.0),
     )
     total_area = max(float(np.sum(face_areas)), 1.0e-30)
-    fractions = np.asarray(
-        [np.sum(face_areas[labels == channel]) / total_area for channel in range(channel_count)]
-    )
+    fractions = np.asarray([np.sum(face_areas[labels == channel]) / total_area for channel in range(channel_count)])
     if np.any(fractions < options.minimum_sector_area_fraction):
         failed = (np.flatnonzero(fractions < options.minimum_sector_area_fraction) + 1).tolist()
         raise RuntimeError(f"Connected region growing produced undersized channel sector(s) {failed}.")
@@ -1767,9 +1667,7 @@ def _balanced_connected_region_growing(
         if labels[face] >= 0 or face in queued[channel]:
             return
         same_boundary = sum(
-            shared_length
-            for neighbor, shared_length, _travel in adjacency[face]
-            if labels[neighbor] == channel
+            shared_length for neighbor, shared_length, _travel in adjacency[face] if labels[neighbor] == channel
         )
         cost = float(unary[face, channel]) - float(smoothness) * same_boundary / edge_scale
         heapq.heappush(frontiers[channel], (cost, int(face)))
@@ -1799,22 +1697,12 @@ def _balanced_connected_region_growing(
         deficient = np.flatnonzero(areas < minimum_area)
         if deficient.size == 0:
             break
-        channel = int(
-            deficient[
-                np.argmax((minimum_area - areas[deficient]) / max(minimum_area, 1.0e-30))
-            ]
-        )
+        channel = int(deficient[np.argmax((minimum_area - areas[deficient]) / max(minimum_area, 1.0e-30))])
         if not grow_one(channel):
-            raise RuntimeError(
-                f"Channel {channel + 1} cannot reach its minimum port-connected area."
-            )
+            raise RuntimeError(f"Channel {channel + 1} cannot reach its minimum port-connected area.")
 
     while np.any(labels < 0):
-        eligible = [
-            channel
-            for channel in range(channel_count)
-            if areas[channel] < maximum_area and frontiers[channel]
-        ]
+        eligible = [channel for channel in range(channel_count) if areas[channel] < maximum_area and frontiers[channel]]
         if not eligible:
             eligible = [channel for channel in range(channel_count) if frontiers[channel]]
         if not eligible:
@@ -1901,10 +1789,7 @@ def _port_core_labels(
     )
     nearest = np.argmin(distances, axis=1)
     minimum = np.min(distances, axis=1)
-    forced = {
-        int(face): int(nearest[face])
-        for face in np.flatnonzero(minimum <= max(float(radius_m), 0.0))
-    }
+    forced = {int(face): int(nearest[face]) for face in np.flatnonzero(minimum <= max(float(radius_m), 0.0))}
     for channel, seed in enumerate(np.asarray(seeds, dtype=np.int64)):
         forced[int(seed)] = channel
     return forced
@@ -1933,11 +1818,7 @@ def _merge_disconnected_label_islands(
         for channel in range(channel_count):
             components = _face_components(labels == channel, adjacency)
             seed_component = next(
-                (
-                    component
-                    for component in components
-                    if int(seeds[channel]) in component
-                ),
+                (component for component in components if int(seeds[channel]) in component),
                 None,
             )
             if seed_component is None:
@@ -2025,10 +1906,7 @@ def _harden_partition_with_clearance(
             adjacency,
         )
         active_areas = np.asarray(
-            [
-                np.sum(face_areas[(balanced_labels == channel) & ~guard])
-                for channel in range(unary.shape[1])
-            ],
+            [np.sum(face_areas[(balanced_labels == channel) & ~guard]) for channel in range(unary.shape[1])],
             dtype=float,
         )
         deficits = np.maximum(minimum_area - active_areas, 0.0)
@@ -2121,9 +1999,7 @@ def _grow_connected_sectors_to_area(
             )
             continue
         channel = int(
-            deficient[
-                np.argmax((targets[deficient] - areas[deficient]) / np.maximum(targets[deficient], tolerance))
-            ]
+            deficient[np.argmax((targets[deficient] - areas[deficient]) / np.maximum(targets[deficient], tolerance))]
         )
         frontier: list[tuple[float, int]] = []
         queued: set[int] = set()
@@ -2140,11 +2016,7 @@ def _grow_connected_sectors_to_area(
                 before_boundary += shared_length * float(grown[neighbor] != donor)
                 after_boundary += shared_length * float(grown[neighbor] != channel)
             cost = float(unary[face, channel] - unary[face, donor])
-            cost += (
-                float(partition_smoothness)
-                * (after_boundary - before_boundary)
-                / edge_scale
-            )
+            cost += float(partition_smoothness) * (after_boundary - before_boundary) / edge_scale
             heapq.heappush(frontier, (cost, int(face)))
             queued.add(int(face))
 
@@ -2168,8 +2040,7 @@ def _grow_connected_sectors_to_area(
                 push_candidate(int(neighbor))
         if areas[channel] + tolerance < targets[channel]:
             raise RuntimeError(
-                f"Cannot grow channel {channel + 1} to its minimum area without violating "
-                "another channel's area floor."
+                f"Cannot grow channel {channel + 1} to its minimum area without violating another channel's area floor."
             )
     raise RuntimeError("Automatic connected sector area balancing did not converge.")
 
@@ -2202,12 +2073,7 @@ def _retain_connected_sector_cores(
                 ),
             )
         retained_faces = set(int(face) for face in retained)
-        discarded = [
-            int(face)
-            for component in components
-            for face in component
-            if int(face) not in retained_faces
-        ]
+        discarded = [int(face) for component in components for face in component if int(face) not in retained_faces]
         connected_guard[np.asarray(discarded, dtype=np.int64)] = True
     return connected_guard
 
@@ -2239,9 +2105,7 @@ def _validate_hardened_partition(
         if labels[int(seeds[channel])] != channel:
             raise RuntimeError("Automatic sector terminal ownership was lost during partition hardening.")
         if not active[int(seeds[channel])]:
-            raise RuntimeError(
-                f"Clearance erosion removed channel {channel + 1}'s boundary terminal access."
-            )
+            raise RuntimeError(f"Clearance erosion removed channel {channel + 1}'s boundary terminal access.")
     if np.any(np.sum(active_masks, axis=1) > 1):
         raise RuntimeError("Hardened sector masks overlap, which violates the single-layer contract.")
     if np.any(guard & np.any(active_masks, axis=1)):

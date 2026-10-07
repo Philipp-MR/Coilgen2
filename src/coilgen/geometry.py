@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import json
 import struct
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -294,6 +295,8 @@ def load_mesh_from_config(config: CoilGenConfig, project_root: Path) -> Mesh:
         raise ValueError("coil_mesh_file must be specified.")
     if is_in_memory_mesh_key(mesh_name):
         return normalize_mesh(get_in_memory_mesh(mesh_name))
+    if mesh_name.lower().endswith(".npz"):
+        return normalize_mesh(read_mesh_npz(config.resolved_geometry_source_path(project_root) / mesh_name))
     if mesh_name.lower().endswith(".stl"):
         mesh_path = config.resolved_geometry_source_path(project_root) / mesh_name
         mesh = read_stl(mesh_path)
@@ -424,7 +427,42 @@ def load_optional_target_mesh(file_name: str, config: CoilGenConfig, project_roo
     if file_name == "none":
         return None
     mesh_path = config.resolved_geometry_source_path(project_root) / file_name
-    return normalize_mesh(read_stl(mesh_path))
+    if is_in_memory_mesh_key(file_name):
+        return normalize_mesh(get_in_memory_mesh(file_name))
+    return normalize_mesh(read_mesh_npz(mesh_path) if mesh_path.suffix.lower() == ".npz" else read_stl(mesh_path))
+
+
+def read_mesh_npz(path: str | Path) -> Mesh:
+    """Read an owned triangular SI mesh without pickle or STL quantization.
+
+    NPZ meshes are already in metres. The STL import scale is deliberately not
+    applied to these portable numerical assets.
+    """
+    with np.load(path, allow_pickle=False) as data:
+        if str(data["schema"].item()) != "coilgen-mesh-v1":
+            raise ValueError("Unsupported CoilGen numerical mesh schema.")
+        vertices = np.array(data["vertices_m"], dtype=float, copy=True)
+        raw_faces = np.asarray(data["faces"])
+        if raw_faces.dtype.kind not in "iu":
+            raise ValueError("Mesh faces must contain integer indices.")
+        faces = np.array(raw_faces, dtype=np.int64, copy=True)
+        metadata = json.loads(str(data["metadata_json"].item())) if "metadata_json" in data else {}
+        normals = {
+            name: np.array(data[name], dtype=float, copy=True)
+            for name in ("vertex_normals", "face_normals")
+            if name in data
+        }
+    if vertices.ndim != 2 or vertices.shape[1] != 3 or not np.all(np.isfinite(vertices)):
+        raise ValueError("Mesh vertices must be finite (n, 3) coordinates in metres.")
+    if faces.ndim != 2 or faces.shape[1] != 3 or np.any(faces < 0) or np.any(faces >= len(vertices)):
+        raise ValueError("Mesh faces must be valid zero-based triangular indices.")
+    if not isinstance(metadata, dict):
+        raise ValueError("Mesh metadata must be a JSON object.")
+    for name, values in normals.items():
+        count = len(vertices) if name == "vertex_normals" else len(faces)
+        if values.shape != (count, 3) or not np.all(np.isfinite(values)):
+            raise ValueError(f"Mesh {name} must contain finite ({count}, 3) directions.")
+    return Mesh(vertices=vertices, faces=faces, metadata=metadata, **normals)
 
 
 def load_secondary_target_mesh(
@@ -1525,13 +1563,9 @@ def build_biplanar_mesh(
     normal = np.asarray([target_normal_x, target_normal_y, target_normal_z], dtype=float)
     normal_norm = np.linalg.norm(normal)
     normal = normal / normal_norm if normal_norm > 0 else np.array([0.0, 0.0, 1.0])
-    old_normal = np.array([0.0, 0.0, 1.0])
-    cross = np.cross(old_normal, normal)
-    if np.linalg.norm(cross) > 1e-15:
-        angle = math.asin(np.linalg.norm(cross) / (np.linalg.norm(old_normal) * np.linalg.norm(normal)))
-        rot = rotation_matrix_by_vector(cross, angle)
-    else:
-        rot = np.eye(3)
+    # asin(|z × n|) loses the lower hemisphere and cannot represent -z.
+    # Match the full-sphere normal convention of the circular biplanar support.
+    rot = rotation_from_z_to(normal)
     center = np.array([center_position_x, center_position_y, center_position_z], dtype=float)
     vertices1 = base.vertices + np.array([0.0, 0.0, plane_distance / 2.0])
     vertices2 = base.vertices + np.array([0.0, 0.0, -plane_distance / 2.0])

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import io
+import json
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
 from coilgen.models import CoilPart, Mesh
 from coilgen.manufacturing import mesh_manufacturing_diagnostics
@@ -71,3 +73,38 @@ def test_warn_policy_writes_rejected_stl_and_diagnostics(tmp_path: Path) -> None
     assert "not manufacturing-ready" in output.getvalue()
     assert "Writing visualization STL files" in output.getvalue()
     assert not part.manufacturing_diagnostics["manufacturing_ok"]
+    record = json.loads((tmp_path / "gx/stl/warning_fixture_swept_body_export_status.json").read_text())
+    assert record["status"] == "diagnostic_only"
+    assert record["manufacturing_ready"] is False
+    assert len(record["stl_files"]) == 2
+    assert record["reason"] and record["manufacturing_failure_reasons"]
+
+
+@pytest.mark.parametrize("failure", [ValueError("invalid mesh format"), OSError("disk full")])
+def test_warn_policy_does_not_retry_unexpected_export_errors(tmp_path, monkeypatch, failure):
+    body = _closed_tetrahedron()
+    part = CoilPart(mesh=body, swept_body=body, manufacturing_diagnostics=mesh_manufacturing_diagnostics(body))
+    run = SimpleNamespace(
+        output_dir=tmp_path,
+        files=(),
+        channel_runs=[
+            SimpleNamespace(
+                result=SimpleNamespace(coil_parts=[part]),
+                channel=SimpleNamespace(safe_name="gx", name="GX"),
+                design=SimpleNamespace(name="fixture"),
+                files=(),
+            )
+        ],
+    )
+    calls = []
+
+    def fail(*_args, **kwargs):
+        calls.append(kwargs)
+        raise failure
+
+    monkeypatch.setattr(run_script, "save_swept_bodies_as_stl", fail)
+    monkeypatch.setattr(run_script, "STL_EXPORT_REJECTION_POLICY", "warn")
+    with pytest.raises(type(failure), match=str(failure)):
+        run_script.export_project_stls(run)
+    assert len(calls) == 1
+    assert not list(tmp_path.rglob("*.stl"))

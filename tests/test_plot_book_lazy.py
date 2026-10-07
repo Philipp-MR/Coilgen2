@@ -92,6 +92,7 @@ class PlotBookLazyRegistrationTest(unittest.TestCase):
         )
         unavailable_widget = object()
         replacements = []
+        state = SimpleNamespace(status="ready", error=None)
 
         def fail_to_embed(_entry):
             raise RuntimeError("canvas embedding failed")
@@ -105,11 +106,17 @@ class PlotBookLazyRegistrationTest(unittest.TestCase):
             _replace_page_widget=lambda index, widget: replacements.append((index, widget)),
             _replace_entry=lambda _index, _entry: None,
             add_entry=lambda _entry: None,
+            _export_item=lambda _index: (entry, state),
+            _update_row=lambda _index: None,
+            _touch=lambda _page_id: None,
+            _trim_canvas_cache=lambda: None,
         )
 
         QtMatplotlibPlotBook._ensure_page_widget(fake_book, 0)
 
         self.assertEqual(replacements, [(0, unavailable_widget)])
+        self.assertEqual(state.status, "failed")
+        self.assertIsInstance(state.error, RuntimeError)
 
     def test_plot_book_3d_rotation_buttons_cover_world_axes(self) -> None:
         from coilgen.plot_book import THREE_D_VIEW_ROTATIONS

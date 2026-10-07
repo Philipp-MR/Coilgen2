@@ -9,7 +9,13 @@ import numpy as np
 import pytest
 
 from coilgen.config import CoilGenConfig
-from coilgen.geometry_kernels import NUMBA_AVAILABLE, segment_distance, segment_distances, segment_pair_distances
+from coilgen.geometry_kernels import (
+    NUMBA_AVAILABLE,
+    segment_closest_parameters,
+    segment_distance,
+    segment_distances,
+    segment_pair_distances,
+)
 from coilgen.layout import (
     _segment_segment_distance_3d,
     _wire_segment_pair_index_distances,
@@ -79,3 +85,17 @@ assert 'numba' not in sys.modules
 assert 'coilgen.research' not in sys.modules
 """
     subprocess.run([sys.executable, "-c", code], check=True, capture_output=True, text=True)
+
+
+def test_closest_parameters_broadcast_and_reconstruct_interior_and_degenerate_contacts():
+    starts = np.array([[0.0, -1, 0], [2, -1, 0], [0.5, 0.5, 0]])
+    directions = np.array([[0.0, 2, 0], [0, 2, 0], [0, 0, 0]])
+    other_start, other_direction = np.zeros(3), np.array([1.0, 0, 0])
+    first, second = segment_closest_parameters(starts, directions, other_start, other_direction)
+    np.testing.assert_allclose(first, [0.5, 0.5, 0])
+    np.testing.assert_allclose(second, [0, 1, 0.5])
+    expected = np.array([0.0, 1, 0.5])
+    np.testing.assert_allclose(segment_distances(starts, directions, other_start, other_direction), expected)
+    np.testing.assert_allclose(
+        np.linalg.norm(starts + first[:, None] * directions - second[:, None] * other_direction, axis=1), expected
+    )

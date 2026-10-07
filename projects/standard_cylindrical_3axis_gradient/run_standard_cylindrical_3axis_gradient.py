@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import sys
 from pathlib import Path
@@ -17,6 +18,7 @@ from coilgen import (
     CylinderCoilDesign,
     GradientLinearitySpec,
     GradientSliceMapSpec,
+    manufacturing_diagnostics_rows,
     save_manufacturing_diagnostics,
     save_swept_bodies_as_stl,
 )
@@ -42,7 +44,7 @@ SHOW_PLOT_BOOK = True  # Open after solving; --headless or MPLBACKEND=Agg suppre
 NATIVE_THREADS = 1  # BLAS threads inside each CoilGen worker; increase deliberately for large serial solves.
 EXPORT_STL = True
 EXPORT_WIRE_TRACE_CSV = True
-ENABLE_SWEEP = False
+ENABLE_SWEEP = True
 
 BASE_SURFACE_DIAMETER_M = 0.130
 SURFACE_DIAMETER_STEP_M = 0.002
@@ -104,6 +106,28 @@ ENGINEERING_CONTOUR_MAX_LEVELS = 80
 CONTOUR_LEVELS = 8
 GRADIENT_HARDWARE_INFEASIBLE_POLICY = "scale_to_limit"
 
+# Allow raised returns to clear the routing spacing below.
+# Channel-to-channel assembly needs its own clearance audit.
+RETURN_LIFT_LIMIT_M = 0.006
+# Contour generation keeps 5 mm spacing. Diagonal turn splices use a separate
+# routing target, still above the independent 1.4 mm conductor-body minimum.
+ROUTING_CLEARANCE_M = 0.003
+# Keep fixed-current changes bounded while repairing the inherited layout.
+# Passing field limits remain hard; inherited failures may only improve.
+ROUTING_MAX_FIELD_CHANGE_REL = 0.02
+ROUTING_FIELD_ACCEPTANCE = "non_regression"
+# Y's combined returns need a larger transverse-field allowance. Keep an
+# independent B0-component bound; original gradient failures stay reported.
+GY_ROUTING_MAX_FIELD_CHANGE_REL = 0.30
+GY_ROUTING_MAX_LONGITUDINAL_FIELD_CHANGE_REL = 0.05
+GY_ROUTING_FIELD_ACCEPTANCE = "budget_only"
+# Realize inherited Y contour-tip kinks at finite radius without changing the
+# saved nominal contours or current. The source corridor is measured on the
+# declared analytic cylinder; full conductor and field checks remain hard.
+GY_CORNER_CLUSTER_SOURCE_DEVIATION_M = 0.001
+# Combine returns at the original contour openings used in this example.
+ROUTING_SEARCH_CUTS = False
+
 GRADIENT_TEMPLATE = CylinderCoilDesign(
     name=f"{PROJECT_NAME}_template",
     design_context="mr_gradient",
@@ -153,6 +177,11 @@ GRADIENT_TEMPLATE = CylinderCoilDesign(
     progress=True,
     advanced_parameters={
         "cross_sectional_points": ROUND_WIRE_CROSS_SECTION_POINTS,
+        "normal_shift_length": RETURN_LIFT_LIMIT_M,
+        "joint_group_routing_clearance_m": ROUTING_CLEARANCE_M,
+        "joint_group_routing_max_field_change_rel": ROUTING_MAX_FIELD_CHANGE_REL,
+        "joint_group_routing_field_acceptance": ROUTING_FIELD_ACCEPTANCE,
+        "joint_group_routing_search_cuts": ROUTING_SEARCH_CUTS,
     },
 )
 
@@ -227,6 +256,14 @@ PROJECT.gradient_channel(
     design_overrides={
         "name": f"{PROJECT_NAME}_gy",
         "radius_m": SURFACE_DIAMETERS_M["y"] / 2.0,
+        "advanced_parameters": {
+            **GRADIENT_TEMPLATE.advanced_parameters,
+            "sweep_bend_mode": "fillet",
+            "sweep_corner_cluster_max_source_deviation_m": GY_CORNER_CLUSTER_SOURCE_DEVIATION_M,
+            "joint_group_routing_max_field_change_rel": GY_ROUTING_MAX_FIELD_CHANGE_REL,
+            "joint_group_routing_max_longitudinal_field_change_rel": GY_ROUTING_MAX_LONGITUDINAL_FIELD_CHANGE_REL,
+            "joint_group_routing_field_acceptance": GY_ROUTING_FIELD_ACCEPTANCE,
+        },
     },
     label="GY",
     color="tab:green",
@@ -257,22 +294,62 @@ PROJECT.gradient_channel(
 
 
 def export_project_stls(project_run) -> tuple[Path, ...]:
+    """Save available swept meshes and report manufacturing readiness separately."""
     if not EXPORT_STL:
         return ()
     saved_files: list[Path] = []
+    export_report = []
     for channel_run in project_run.channel_runs:
+        entry = {"channel": channel_run.channel.name, "status": "unavailable", "files": []}
+        export_report.append(entry)
         result = channel_run.result
         if result is None:
+            entry["reason"] = "No solved result is available."
             continue
         output_dir = project_run.output_dir / channel_run.channel.safe_name / "stl"
         prefix = f"{getattr(channel_run.design, 'name', channel_run.channel.safe_name)}_swept_body"
-        files = [
-            *save_swept_bodies_as_stl(result, output_dir, prefix=prefix),
-            *save_manufacturing_diagnostics(result, output_dir, prefix=prefix),
-        ]
-        channel_run.files = tuple([*channel_run.files, *files])
+        files = list(save_manufacturing_diagnostics(result, output_dir, prefix=prefix))
+        rows = manufacturing_diagnostics_rows(result)
+        stl_files = save_swept_bodies_as_stl(result, output_dir, prefix=prefix, fail_on_violations=False)
+        files.extend(stl_files)
+        if stl_files:
+            entry["status"] = "exported"
+            missing_parts = {
+                part_index
+                for part_index, part in enumerate(result.coil_parts, start=1)
+                if not getattr(part, "swept_bodies", ()) and part.swept_body is None
+            }
+            warnings = [
+                {
+                    "part_index": row["part_index"],
+                    "body_index": row.get("body_index"),
+                    "reasons": (
+                        "no_swept_body"
+                        if row["part_index"] in missing_parts
+                        else str(row.get("manufacturing_failure_reasons", "")).strip() or "unspecified"
+                    ),
+                }
+                for row in rows
+                if row["part_index"] in missing_parts or not row.get("manufacturing_ok", False)
+            ]
+            entry["manufacturing_ready"] = not warnings
+            if warnings:
+                entry["manufacturing_warnings"] = warnings
+                print(
+                    f"STL exported for {channel_run.channel.name} with manufacturing warnings; "
+                    f"inspect diagnostics in {output_dir}"
+                )
+        else:
+            entry["reason"] = "No swept bodies are available. Enable sweeping to create them."
+        entry["files"] = [path.relative_to(project_run.output_dir).as_posix() for path in files]
+        channel_run.files = tuple(dict.fromkeys([*channel_run.files, *files]))
         saved_files.extend(files)
-    project_run.files = tuple([*project_run.files, *saved_files])
+    project_run.output_dir.mkdir(parents=True, exist_ok=True)
+    report_path = project_run.output_dir / "stl_export_report.json"
+    report_path.write_text(json.dumps(export_report, indent=2) + "\n", encoding="utf-8")
+    saved_files.append(report_path)
+    project_run.files = tuple(dict.fromkeys([*project_run.files, *saved_files]))
+    print(f"STL export report: {report_path}")
     return tuple(saved_files)
 
 

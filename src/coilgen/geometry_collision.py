@@ -6,6 +6,8 @@ adjacency exclusions, reporting limits and contact tolerances remain explicit.
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import numpy as np
 
 from .geometry_kernels import triangle_pair_distances
@@ -33,17 +35,16 @@ class _SegmentBvhNode:
         return self.left is None
 
 
-def _segment_bvh_candidate_pairs(
-    starts: np.ndarray,
-    ends: np.ndarray,
-    distance: float,
-    *,
-    leaf_size: int = 12,
-) -> np.ndarray:
-    """Return segment pairs whose AABBs are within ``distance`` using a BVH."""
+@lru_cache(maxsize=128)
+def _leaf_positions(first: int, second: int, same: bool):
+    positions = np.triu_indices(first, 1) if same else tuple(np.indices((first, second)).reshape(2, -1))
+    for value in positions:
+        value.flags.writeable = False
+    return positions
 
-    if len(starts) < 2:
-        return np.zeros((0, 2), dtype=np.int64)
+
+def _build_segment_bvh(starts: np.ndarray, ends: np.ndarray, leaf_size: int = 12) -> _SegmentBvhNode:
+    """Build a deterministic AABB hierarchy over a nonempty segment array."""
     segment_minima = np.minimum(starts, ends)
     segment_maxima = np.maximum(starts, ends)
     centroids = 0.5 * (segment_minima + segment_maxima)
@@ -53,46 +54,73 @@ def _segment_bvh_candidate_pairs(
         maximum = np.max(segment_maxima[indices], axis=0)
         if len(indices) <= leaf_size:
             return _SegmentBvhNode(indices, minimum, maximum)
-        spread = np.ptp(centroids[indices], axis=0)
-        axis = int(np.argmax(spread))
+        axis = int(np.argmax(np.ptp(centroids[indices], axis=0)))
         order = indices[np.argsort(centroids[indices, axis], kind="stable")]
         middle = len(order) // 2
         return _SegmentBvhNode(
-            np.zeros(0, dtype=np.int64),
-            minimum,
-            maximum,
-            build(order[:middle]),
-            build(order[middle:]),
+            np.zeros(0, dtype=np.int64), minimum, maximum, build(order[:middle]), build(order[middle:])
         )
+
+    return build(np.arange(len(starts), dtype=np.int64))
+
+
+def _segment_bvh_candidate_pairs(
+    starts: np.ndarray,
+    ends: np.ndarray,
+    distance: float,
+    *,
+    leaf_size: int = 12,
+    max_pairs: int | None = None,
+) -> np.ndarray | None:
+    """Return conservative BVH pairs, or ``None`` if the optional budget is exceeded.
+
+    Leaf pairs still need individual AABB filtering. The budget limits raw
+    leaf pairs before allocation; callers can fall back to a bounded search.
+    Existing callers without a budget retain their complete candidate set.
+    """
+
+    if len(starts) < 2:
+        return np.zeros((0, 2), dtype=np.int64)
 
     def boxes_within_distance(first: _SegmentBvhNode, second: _SegmentBvhNode) -> bool:
         separation = np.maximum(0.0, np.maximum(first.minimum - second.maximum, second.minimum - first.maximum))
         return bool(np.dot(separation, separation) <= distance * distance)
 
-    pairs: list[tuple[int, int]] = []
+    pairs: list[np.ndarray] = []
+    pair_count = 0
+    exceeded_budget = False
+
+    def reserve(count: int) -> bool:
+        nonlocal exceeded_budget
+        if max_pairs is not None and pair_count + count > max_pairs:
+            exceeded_budget = True
+            return False
+        return True
 
     def collect(first: _SegmentBvhNode, second: _SegmentBvhNode) -> None:
-        if not boxes_within_distance(first, second):
+        nonlocal pair_count
+        if exceeded_budget or not boxes_within_distance(first, second):
             return
         if first is second:
             if first.leaf:
-                for local_i in range(len(first.indices)):
-                    for local_j in range(local_i + 1, len(first.indices)):
-                        i = int(first.indices[local_i])
-                        j = int(first.indices[local_j])
-                        pairs.append((min(i, j), max(i, j)))
+                if not reserve(len(first.indices) * (len(first.indices) - 1) // 2):
+                    return
+                local_i, local_j = _leaf_positions(len(first.indices), len(first.indices), True)
+                i, j = first.indices[local_i], first.indices[local_j]
+                pairs.append(np.column_stack((np.minimum(i, j), np.maximum(i, j))))
+                pair_count += len(i)
                 return
             collect(first.left, first.left)
             collect(first.left, first.right)
             collect(first.right, first.right)
             return
         if first.leaf and second.leaf:
-            for i in first.indices:
-                for j in second.indices:
-                    start = int(min(i, j))
-                    end = int(max(i, j))
-                    if start != end:
-                        pairs.append((start, end))
+            if not reserve(len(first.indices) * len(second.indices)):
+                return
+            local_i, local_j = _leaf_positions(len(first.indices), len(second.indices), False)
+            i, j = first.indices[local_i], second.indices[local_j]
+            pairs.append(np.column_stack((np.minimum(i, j), np.maximum(i, j))))
+            pair_count += len(i)
             return
         first_size = (
             len(first.indices) if first.leaf else np.dot(first.maximum - first.minimum, first.maximum - first.minimum)
@@ -109,11 +137,19 @@ def _segment_bvh_candidate_pairs(
             collect(first, second.left)
             collect(first, second.right)
 
-    root = build(np.arange(len(starts), dtype=np.int64))
+    root = _build_segment_bvh(starts, ends, leaf_size)
     collect(root, root)
+    if exceeded_budget:
+        return None
     if not pairs:
         return np.zeros((0, 2), dtype=np.int64)
-    return np.unique(np.asarray(pairs, dtype=np.int64), axis=0)
+    raw = np.concatenate(pairs, axis=0)
+    if not len(raw):
+        return np.zeros((0, 2), dtype=np.int64)
+    order = np.lexsort((raw[:, 1], raw[:, 0]))
+    ordered = raw[order]
+    keep = np.r_[True, np.any(ordered[1:] != ordered[:-1], axis=1)]
+    return ordered[keep]
 
 
 def accelerated_mesh_collision_diagnostics(mesh, *, backend="auto", maximum_reported_intersections=100):

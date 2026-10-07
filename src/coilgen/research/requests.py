@@ -28,6 +28,12 @@ class ResearchRequest:
     kernel_backend: str = "auto"
     validation_resolution: int = 12
     design_margin: float = 1.0
+    pipeline_stage: str = "evaluated"
+    resume_checkpoint: str | None = None
+    project_fingerprint: str = ""
+    project_model_fingerprint: str = ""
+    project_id: str = ""
+    project_revision: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip() or len(self.name) > 120:
@@ -56,6 +62,24 @@ class ResearchRequest:
         ):
             raise ValueError("design_margin must lie in (0, 1].")
         object.__setattr__(self, "config", deepcopy(dict(self.config)))
+        if self.pipeline_stage not in {"prepared", "sheet", "contours", "routed", "evaluated"}:
+            raise ValueError("pipeline_stage must be prepared, sheet, contours, routed, or evaluated.")
+        if self.resume_checkpoint is not None and not isinstance(self.resume_checkpoint, str):
+            raise ValueError("resume_checkpoint must be a path string or null.")
+        if not isinstance(self.project_fingerprint, str):
+            raise ValueError("project_fingerprint must be a string.")
+        if not isinstance(self.project_model_fingerprint, str):
+            raise ValueError("project_model_fingerprint must be a string.")
+        if not isinstance(self.project_id, str):
+            raise ValueError("project_id must be a string.")
+        if self.project_revision is not None and (
+            isinstance(self.project_revision, bool)
+            or not isinstance(self.project_revision, int)
+            or self.project_revision < 1
+        ):
+            raise ValueError("project_revision must be a positive integer or null.")
+        if self.fabricate and self.pipeline_stage != "evaluated":
+            raise ValueError("Fabrication review requires an evaluated pipeline result.")
 
     @classmethod
     def from_config(cls, config: CoilGenConfig, *, name: str = "Research design", **controls) -> ResearchRequest:
@@ -95,12 +119,18 @@ class ResearchRequest:
         paths = {}
         for key in ("coil_mesh_file", "target_mesh_file", "secondary_target_mesh_file"):
             value = getattr(config, key)
-            if str(value).lower().endswith(".stl"):
+            if str(value).lower().endswith((".stl", ".npz")):
                 paths[key] = str((geometry_root / Path(value).expanduser()).resolve())
         if config.target_field_definition_file != "none":
             paths["target_field_definition_file"] = str(
                 Path(config.target_field_definition_file).expanduser().resolve()
             )
+        for key in ("preoptimized_stream_function_file", "sf_source_file"):
+            value = str(getattr(config, key)).strip()
+            if value.lower() not in {"", "none"}:
+                from ..preoptimization import _resolve_preoptimized_path
+
+                paths[key] = str(_resolve_preoptimized_path(value, Path.cwd()).resolve())
         config = replace(
             config,
             **paths,

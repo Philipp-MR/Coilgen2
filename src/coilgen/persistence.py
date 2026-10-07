@@ -78,7 +78,7 @@ def file_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
-def source_digest(package_root: Path) -> str:
+def source_digest(package_root: Path, *, exclude: tuple[str, ...] = ()) -> str:
     """Hash relative names and contents of all Python modules, including subpackages.
 
     The digest does not depend on checkout location, timestamps or generated
@@ -91,8 +91,43 @@ def source_digest(package_root: Path) -> str:
     digest = sha256()
     for path in sorted(package_root.rglob("*.py"), key=lambda p: p.relative_to(package_root).as_posix()):
         if path.is_file():
-            name = path.relative_to(package_root).as_posix().encode("utf-8")
+            relative = path.relative_to(package_root).as_posix()
+            if any(relative == entry or relative.startswith(entry.rstrip("/") + "/") for entry in exclude):
+                continue
+            name = relative.encode("utf-8")
             digest.update(len(name).to_bytes(8, "big"))
             digest.update(name)
             digest.update(bytes.fromhex(file_digest(path)))
     return digest.hexdigest()
+
+
+def numerical_source_digest(package_root: Path) -> str:
+    """Conservative engine identity independent of presentation and adapters.
+
+    New numerical modules remain included automatically. The small exclusion
+    list contains only entry points, GUI/project editing, plotting and job
+    adapters; the numerical pipeline, config, kernels and validation stay hashed.
+    Full-source provenance is still retained separately in run manifests.
+    """
+    return source_digest(
+        package_root,
+        exclude=(
+            "gui",
+            "application",
+            "cli.py",
+            "__main__.py",
+            "__init__.py",
+            "visualization.py",
+            "matplotlib_visualization.py",
+            "plot_book.py",
+            "swept_mesh_inspector.py",
+            "gradient_slice_inspector.py",
+            "project.py",
+            "research/application.py",
+            "research/jobs.py",
+            "research/requests.py",
+            "research/storage.py",
+            "research/studies.py",
+            "research/presets.py",
+        ),
+    )

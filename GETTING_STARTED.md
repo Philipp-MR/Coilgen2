@@ -20,6 +20,11 @@ engineering work unless a project script explicitly adds those checks.
 
 ## Recommended Spyder Workflow
 
+The optional [native workbench](NATIVE_WORKBENCH.md) uses the same engine with
+an editable project tree, geometry inspection, isolated stage jobs and saved
+validation evidence. Start it with `python -m coilgen.gui` after installing the
+`gui` extra. The script workflow below remains supported.
+
 1. Open `projects/general_examples/scripts/conventional_cylindrical_mri_gradient.py`.
 2. Edit only the `PARAMETERS["design"]` values.
 3. Run the file.
@@ -39,7 +44,7 @@ from coilgen import CylinderCoilDesign
 
 design = CylinderCoilDesign(
     target_bz_expression="y",
-    target_scale=1.0,          # T/(A m) for x/y/z gradients
+    target_scale=1.0,          # Requested T/m for x/y/z gradients
     radius_m=0.25,
     length_m=0.5,
     contour_levels=8,

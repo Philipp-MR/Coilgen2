@@ -5,6 +5,8 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from .diagnostic_cache import diagnostic_fingerprint
+from .evaluation import layout_field_geometry
 from .engineering_metrics import ConcomitantFieldReport
 from .metrics import dsv_target_mask, suppression_target_mask
 from .parallel import chunk_ranges, resolve_worker_count
@@ -166,14 +168,61 @@ def gradient_slice_maps_enabled(config: Any) -> bool:
 
 def gradient_slice_map_result(result: Any, spec: GradientSliceMapSpec | None = None) -> GradientSliceMapResult:
     cache = getattr(result, "diagnostic_cache", None)
-    if spec is None and isinstance(cache, dict) and GRADIENT_SLICE_MAP_CACHE_KEY in cache:
-        cached = cache[GRADIENT_SLICE_MAP_CACHE_KEY]
+    # Precomputed, display-only artifacts can lack the source result entirely.
+    # They remain viewable; mutable results with source data are always checked.
+    if spec is None and isinstance(cache, dict) and getattr(result, "target_field", None) is None:
+        cached = cache.get(GRADIENT_SLICE_MAP_CACHE_KEY)
         if isinstance(cached, GradientSliceMapResult):
             return cached
-    evaluated = evaluate_gradient_slice_maps(result, spec=spec)
-    if isinstance(cache, dict):
+    resolved_spec = spec or gradient_slice_map_spec_from_config(getattr(result, "input_data", None))
+    spec_key = diagnostic_fingerprint(resolved_spec.to_dict())
+    signature = _slice_map_source_signature(result, resolved_spec)
+    entries = cache.setdefault("gradient_slice_maps:entries", {}) if isinstance(cache, dict) else {}
+    entry = entries.get(spec_key)
+    if entry is not None and entry[0] == signature:
+        evaluated = entry[1]
+    else:
+        evaluated = evaluate_gradient_slice_maps(result, spec=resolved_spec)
+        entries[spec_key] = (signature, evaluated)
+        # Interactive parameter changes should not retain unlimited pixel grids.
+        while len(entries) > 8:
+            entries.pop(next(iter(entries)))
+    if spec is None and isinstance(cache, dict):
         cache[GRADIENT_SLICE_MAP_CACHE_KEY] = evaluated
     return evaluated
+
+
+def _slice_map_source_signature(result: Any, spec: GradientSliceMapSpec) -> str:
+    target = getattr(result, "target_field", None)
+    config = getattr(result, "input_data", None)
+    parameters = {
+        name: getattr(config, name, None)
+        for name in (
+            "target_region_radius",
+            "target_region_geometry",
+            "target_field_definition_file",
+            "linearity_reference_radius_m",
+            "linearity_fit_offset",
+            "target_gradient_strength",
+            "target_gradient_axis",
+            "field_shape_function",
+            "b_0_strength_T",
+            "b_0_direction",
+        )
+    }
+    paths = _source_polylines(result, spec.source) if spec.source != "target" else ()
+    geometry_sources = _layout_geometry_sources(result) if spec.source == "layout" else ()
+    return diagnostic_fingerprint(
+        getattr(target, "coords", None),
+        getattr(target, "b", None),
+        getattr(target, "suppressed", None),
+        paths,
+        geometry_sources,
+        parameters,
+        getattr(result, "needed_current_layout", None),
+        getattr(result, "potential_step", None),
+        getattr(result, "layout_gradient", None),
+    )
 
 
 def evaluate_gradient_slice_maps(result: Any, spec: GradientSliceMapSpec | None = None) -> GradientSliceMapResult:
@@ -181,6 +230,9 @@ def evaluate_gradient_slice_maps(result: Any, spec: GradientSliceMapSpec | None 
     resolved_spec = spec or gradient_slice_map_spec_from_config(config)
     if not resolved_spec.enabled:
         raise ValueError("Gradient slice maps are disabled.")
+    limitation = target_region_slice_map_limitation(config, resolved_spec.domain)
+    if limitation:
+        raise ValueError(limitation)
     if resolved_spec.gradient_method != "finite_difference":
         raise ValueError("Only gradient_method='finite_difference' is implemented.")
 
@@ -223,6 +275,7 @@ def evaluate_gradient_slice_maps(result: Any, spec: GradientSliceMapSpec | None 
         polylines=polylines,
         config=config,
     )
+    derivative_axes = _requested_gradient_axes(resolved_spec.gradient_components)
     derivative_all = (
         _finite_difference_field_gradient_batched(
             result,
@@ -233,8 +286,9 @@ def evaluate_gradient_slice_maps(result: Any, spec: GradientSliceMapSpec | None 
             current_scale_A=current_scale,
             polylines=polylines,
             config=config,
+            axes=derivative_axes,
         )
-        if resolved_spec.gradient_components
+        if derivative_axes
         else None
     )
 
@@ -329,6 +383,14 @@ def evaluate_gradient_slice_maps(result: Any, spec: GradientSliceMapSpec | None 
         reference_scale=reference_scale,
         concomitant=concomitant_all,
     )
+    sources = _layout_geometry_sources(result) if source == "layout" else (source,)
+    summary["gradient_slice_map_geometry_source"] = (
+        sources[0] if sources and len(set(sources)) == 1 else "mixed" if sources else "unavailable"
+    )
+    summary["gradient_slice_map_part_geometry_sources"] = ";".join(sources)
+    summary["gradient_slice_map_sampling_scope"] = (
+        "spherical_dsv_diagnostic" if region.spherical else "saved_target_sample_bounding_box_diagnostic"
+    )
     return GradientSliceMapResult(
         spec=resolved_spec,
         axis=axis,
@@ -342,6 +404,22 @@ def evaluate_gradient_slice_maps(result: Any, spec: GradientSliceMapSpec | None 
         component_units=component_units,
         summary=summary,
     )
+
+
+def target_region_slice_map_limitation(config: Any, domain: Any) -> str:
+    """Prevent legacy spherical diagnostics from claiming shaped-region coverage."""
+    imported = str(getattr(config, "target_field_definition_file", "none")).strip().lower() not in {"", "none"}
+    if (
+        getattr(config, "target_region_geometry", None) is not None
+        and not imported
+        and _normalise_domain(domain) == "dsv"
+    ):
+        return (
+            "Spherical DSV/ROI slice diagnostics do not support explicit target-region geometry. "
+            "Use gradient_slice_map_domain='all' for a bounding-box diagnostic; "
+            "shaped-region field validation uses the saved region sample points."
+        )
+    return ""
 
 
 def gradient_slice_map_summary_dict(result: Any) -> dict[str, Any]:
@@ -668,15 +746,16 @@ def _finite_difference_field_gradient_batched(
     current_scale_A: float,
     polylines: Sequence[np.ndarray],
     config: Any,
+    axes: Sequence[int] = (0, 1, 2),
 ) -> np.ndarray:
     points = np.asarray(points, dtype=float)
     if len(points) == 0:
         return np.zeros((0, 3, 3), dtype=float)
-    derivative = np.zeros((len(points), 3, 3), dtype=float)
+    derivative = np.full((len(points), 3, 3), np.nan, dtype=float)
     sample_batch_size = max(_field_sample_batch_size(config) // 2, 1)
     for start, stop in chunk_ranges(len(points), sample_batch_size):
         chunk = points[start:stop]
-        for dim in range(3):
+        for dim in axes:
             offset = np.zeros(3, dtype=float)
             offset[dim] = float(step_m)
             paired_points = np.vstack((chunk + offset, chunk - offset))
@@ -692,6 +771,19 @@ def _finite_difference_field_gradient_batched(
             midpoint = len(chunk)
             derivative[start:stop, :, dim] = (paired_field[:midpoint] - paired_field[midpoint:]) / (2.0 * float(step_m))
     return derivative
+
+
+def _requested_gradient_axes(components: Sequence[str]) -> tuple[int, ...]:
+    axes: set[int] = set()
+    for component in components:
+        key = _normalise_component_key(component)
+        if key == "gradbz_mag":
+            axes.update((0, 1, 2))
+        else:
+            parsed = _parse_gradient_component(key)
+            if parsed is not None:
+                axes.add(parsed[1])
+    return tuple(sorted(axes))
 
 
 def _finite_difference_field_gradient(
@@ -852,17 +944,24 @@ def _source_polylines(
     lines: list[np.ndarray] = []
     for part in getattr(result, "coil_parts", ()) or ():
         if source == "layout":
-            wire = getattr(part, "wire_path", None)
-            points = np.asarray(getattr(wire, "v", np.zeros((0, 3))), dtype=float)
-            if points.ndim == 2 and points.shape[1] == 3 and len(points) >= 2:
+            points, _geometry_source = layout_field_geometry(part, getattr(result, "input_data", None))
+            if points is not None:
                 lines.append(points)
-        elif source in {"contours", "stream"}:
+                continue
+        if source in {"layout", "contours", "stream"}:
             for contour in getattr(part, "contour_lines", ()) or ():
                 points = np.asarray(getattr(contour, "v", np.zeros((0, 3))), dtype=float)
                 if points.ndim == 2 and points.shape[1] == 3 and len(points) >= 2:
                     repetitions = int(getattr(contour, "turn_multiplicity", 1)) if expand_turn_multiplicity else 1
                     lines.extend([points] * max(repetitions, 1))
     return tuple(lines)
+
+
+def _layout_geometry_sources(result: Any) -> tuple[str, ...]:
+    return tuple(
+        layout_field_geometry(part, getattr(result, "input_data", None))[1]
+        for part in getattr(result, "coil_parts", ()) or ()
+    )
 
 
 def _overlay_polylines(result: Any, source: str) -> tuple[np.ndarray, ...]:
@@ -879,13 +978,18 @@ def _current_scale_A(result: Any, current: str) -> float:
     if key == "per_amp":
         return 1.0
     if key == "stream_function":
-        value = _positive_float(getattr(result, "potential_step", np.nan))
-        return value if value > 0.0 else 1.0
+        value = _finite_float(getattr(result, "potential_step", np.nan))
+        return value if np.isfinite(value) and value != 0 else 1.0
     value = _target_current_A(result)
-    return value if np.isfinite(value) and abs(value) > 1.0e-30 else 1.0
+    return value if np.isfinite(value) else 1.0
 
 
 def _target_current_A(result: Any) -> float:
+    # The final evaluator owns the operating-current policy. A gradient fit is
+    # only a fallback for older/partial results that have no evaluated current.
+    evaluated = _finite_float(getattr(result, "needed_current_layout", np.nan))
+    if np.isfinite(evaluated):
+        return evaluated
     layout_gradient = getattr(result, "layout_gradient", None)
     config = getattr(result, "input_data", None)
     if isinstance(layout_gradient, Mapping):
@@ -893,7 +997,7 @@ def _target_current_A(result: Any) -> float:
         requested = _finite_float(getattr(config, "target_gradient_strength", np.nan))
         if np.isfinite(achieved) and abs(achieved) > 1.0e-30 and np.isfinite(requested):
             return float(requested / achieved)
-    return _finite_float(getattr(result, "needed_current_layout", np.nan))
+    return float("nan")
 
 
 def _fit_affine_bz(coords: np.ndarray, bz: np.ndarray, *, fit_offset: bool) -> np.ndarray:

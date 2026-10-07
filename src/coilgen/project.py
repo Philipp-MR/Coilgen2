@@ -1005,7 +1005,7 @@ def plot_project_run_book(
             plt.close("all")
         except Exception:
             pass
-    backend = activate_matplotlib_interactive_backend()
+    backend = activate_matplotlib_interactive_backend() if show else str(plt.get_backend())
     timing_report: list[dict[str, float | int | str]] = []
     start = time.perf_counter()
     builder = MatplotlibPlotBookBuilder(
@@ -1057,10 +1057,11 @@ def plot_project_run_book(
             ),
             short_name_factory=_project_plot_book_short_name,
         )
+    requested = project_run.project.plot_include if include is None else include
     for channel_run in project_run.channel_runs:
         if channel_run.result is None:
             continue
-        specs = build_result_plot_specs(channel_run.result, include=include, max_parts=max_parts)
+        specs = build_result_plot_specs(channel_run.result, include=requested, max_parts=max_parts)
         for spec in specs:
             builder.add_spec(
                 _channel_prefixed_plot_spec(MatplotlibPlotSpec, channel_run, spec),
@@ -1069,13 +1070,26 @@ def plot_project_run_book(
     if not builder.entries:
         return None
     book = builder.build()
+    book.export_metadata = {
+        "project": project_run.project.name,
+        "output_directory": str(getattr(project_run, "output_dir", "")),
+        "channels": [
+            {
+                "name": channel_run.channel.name,
+                "display_label": channel_run.channel.display_label,
+                "design_name": str(getattr(getattr(channel_run, "design", None), "name", "")),
+                "result_available": channel_run.result is not None,
+            }
+            for channel_run in project_run.channel_runs
+        ],
+    }
     if show:
         show_start = time.perf_counter()
         book.show(block=block)
         timing_report.append({"plot": "show", "seconds": float(time.perf_counter() - show_start), "figures": 1})
     elapsed = time.perf_counter() - start
     print(f"Matplotlib backend: {backend}")
-    print(f"Opened 1 project plot book for {len(project_run.results)} successful channel(s).")
+    print(f"{'Opened' if show else 'Built'} 1 project plot book for {len(project_run.results)} successful channel(s).")
     print(f"Project plot-book time: {elapsed:.3f} s")
     return book
 
@@ -1124,7 +1138,8 @@ def _plot_project_channel_windows(
             plt.close("all")
         except Exception:
             pass
-    activate_matplotlib_interactive_backend()
+    if show:
+        activate_matplotlib_interactive_backend()
     figures: list[Any] = []
     for channel_run in channel_runs:
         if channel_run.result is None:
@@ -1228,9 +1243,10 @@ def _channel_prefixed_plot_spec(plot_spec_class: type[Any], channel_run: CoilCha
 
     def factory() -> Any:
         figure_or_figures = spec.factory()
-        figures = figure_or_figures if isinstance(figure_or_figures, list) else [figure_or_figures]
+        figures = figure_or_figures if isinstance(figure_or_figures, (list, tuple)) else [figure_or_figures]
         for figure in figures:
-            _prefix_figure_label(figure, channel_label, spec.title)
+            if figure is not None:
+                _prefix_figure_label(figure, channel_label, spec.title)
         return figure_or_figures
 
     return plot_spec_class(
@@ -1726,9 +1742,7 @@ def _project_metric_omission_note(
     project_run: CoilProjectRun,
     omitted_metrics: Sequence[tuple[str, str, str]],
 ) -> str:
-    hardware_titles = [
-        title for key, title, _unit in omitted_metrics if key in _POSITIVE_HARDWARE_COMPARISON_METRICS
-    ]
+    hardware_titles = [title for key, title, _unit in omitted_metrics if key in _POSITIVE_HARDWARE_COMPARISON_METRICS]
     if not hardware_titles:
         return ""
     skipped = []
@@ -1741,10 +1755,56 @@ def _project_metric_omission_note(
     return f"{' and '.join(hardware_titles)} omitted: {reason}."
 
 
+def _project_channel_sh_fits(
+    project_run: CoilProjectRun, *, max_order: int = 4
+) -> tuple[list[tuple[CoilChannelRun, Any]], list[str]]:
+    """Use one physical SH basis and display unit across project channels.
+
+    Each channel retains its own DSV samples and weights. Coefficients share
+    the first available channel's center/radius; RMS contributions describe
+    each channel's own evaluation domain, which can differ between channels.
+    """
+    from .field_maps import coil_spherical_harmonic_fits
+    from .field_units import field_values_from_tesla, field_values_to_tesla
+
+    channel_fits: list[tuple[CoilChannelRun, Any]] = []
+    unavailable: list[str] = []
+    reference = None
+    for channel_run in project_run.channel_runs:
+        if channel_run.result is None:
+            continue
+        try:
+            fit = coil_spherical_harmonic_fits(
+                channel_run.result,
+                domain="dsv",
+                max_order=max_order,
+                sources=("layout",),
+                center=None if reference is None else reference.center,
+                radius=None if reference is None else reference.radius,
+            )["layout"]
+        except ValueError as exc:
+            unavailable.append(f"{channel_run.channel.display_label}: {exc}")
+            continue
+        if reference is None:
+            reference = fit
+        elif fit.unit != reference.unit:
+            factor = float(field_values_from_tesla(field_values_to_tesla(1.0, fit.unit), reference.unit))
+            fit = replace(
+                fit,
+                unit=reference.unit,
+                coefficients=fit.coefficients * factor,
+                fitted_values=fit.fitted_values * factor,
+                residual_values=fit.residual_values * factor,
+                field_rms=fit.field_rms * abs(factor),
+                residual_rms=fit.residual_rms * abs(factor),
+            )
+        channel_fits.append((channel_run, fit))
+    return channel_fits, unavailable
+
+
 def _plot_project_channel_spherical_harmonics(project_run: CoilProjectRun) -> Any:
     import matplotlib.pyplot as plt
 
-    from .field_maps import coil_spherical_harmonic_fits
     from .matplotlib_visualization import (
         _draw_sh_order_strip,
         _draw_sh_term_label_column,
@@ -1757,20 +1817,7 @@ def _plot_project_channel_spherical_harmonics(project_run: CoilProjectRun) -> An
     )
 
     max_order = 4
-    channel_fits: list[tuple[CoilChannelRun, Any]] = []
-    for channel_run in project_run.channel_runs:
-        if channel_run.result is None:
-            continue
-        try:
-            fits = coil_spherical_harmonic_fits(
-                channel_run.result,
-                domain="dsv",
-                max_order=max_order,
-                sources=("layout",),
-            )
-        except ValueError:
-            continue
-        channel_fits.append((channel_run, fits["layout"]))
+    channel_fits, unavailable = _project_channel_sh_fits(project_run, max_order=max_order)
     if not channel_fits:
         raise ValueError("No project channel SH fits were available.")
 
@@ -1841,7 +1888,7 @@ def _plot_project_channel_spherical_harmonics(project_run: CoilProjectRun) -> An
     title_ax.text(
         0.0,
         0.70,
-        f"{project_run.project.name}: connected-layout SH coefficients by channel",
+        f"{project_run.project.name}: final-layout SH coefficients by channel",
         ha="left",
         va="center",
         fontsize=14,
@@ -1851,11 +1898,12 @@ def _plot_project_channel_spherical_harmonics(project_run: CoilProjectRun) -> An
         0.0,
         0.38,
         (
-            f"DSV domain, SH order <= {max_order}; "
-            f"n={reference.sample_count}, center=({reference.center[0]:.4g}, {reference.center[1]:.4g}, {reference.center[2]:.4g}) m, "
+            f"Shared SH basis, order <= {max_order}; "
+            f"center=({reference.center[0]:.4g}, {reference.center[1]:.4g}, {reference.center[2]:.4g}) m, "
             f"radius={reference.radius:.4g} m; "
             + "; ".join(
-                f"{channel_run.channel.display_label} RMS {_format_performance_table_value(fit.field_rms)}"
+                f"{channel_run.channel.display_label}: n={fit.sample_count}, signal RMS "
+                f"{_format_performance_table_value(fit.field_rms)}"
                 for channel_run, fit in channel_fits
             )
             + unit_suffix
@@ -1868,7 +1916,7 @@ def _plot_project_channel_spherical_harmonics(project_run: CoilProjectRun) -> An
     title_ax.text(
         0.0,
         0.10,
-        "Each bar is the connected routed-wire Bz field decomposed into the same normalized real solid-SH basis.",
+        "Final-current Bz; common center, radius and units. RMS contributions use each channel's own DSV samples.",
         ha="left",
         va="center",
         fontsize=9,
@@ -1901,10 +1949,12 @@ def _plot_project_channel_spherical_harmonics(project_run: CoilProjectRun) -> An
     coefficient_ax.grid(True, axis="x", alpha=0.22)
 
     _prepare_sh_data_axis(contribution_ax, rows)
-    contribution_ax.set_xlabel(f"RMS contribution{unit_suffix}")
-    _set_axis_title(contribution_ax, "RMS contribution\non DSV target cloud", width=30)
+    contribution_ax.set_xlabel(f"RMS contribution on each channel's DSV{unit_suffix}")
+    _set_axis_title(contribution_ax, "RMS contribution\non each channel's DSV", width=30)
     contribution_ax.grid(True, axis="x", alpha=0.22)
     contribution_ax.legend(loc="best", fontsize=8.4, frameon=True)
+    if unavailable:
+        fig.text(0.035, 0.02, "Unavailable: " + "; ".join(unavailable), fontsize=8, wrap=True)
     return fig
 
 
@@ -2204,20 +2254,21 @@ def _project_metric_descriptive_label(row: Mapping[str, Any]) -> str:
 
 
 def _channel_color(project_run: CoilProjectRun, channel_name: str) -> str:
-    for channel_run in project_run.channel_runs:
-        if channel_run.channel.name == channel_name and channel_run.channel.color:
-            return channel_run.channel.color
-    return "#3b82f6"
+    colors = ("#0072b2", "#d55e00", "#009e73", "#cc79a7", "#e69f00", "#56b4e9", "#000000")
+    for index, channel_run in enumerate(project_run.channel_runs):
+        if channel_run.channel.name == channel_name:
+            return channel_run.channel.color or colors[index % len(colors)]
+    return colors[0]
 
 
 def _project_plot_book_short_name(spec: Any, title: str, index: int, total: int) -> str:
-    text = str(getattr(spec, "title", "") or title or getattr(spec, "key", "")).strip()
-    if ":" in text:
-        channel, rest = text.split(":", 1)
-        text = f"{channel.strip()} {str(getattr(spec, 'key', rest)).replace('_', ' ')}"
-    if total > 1:
+    text = str(title or getattr(spec, "title", "") or getattr(spec, "key", "")).strip()
+    channel = str(getattr(spec, "channel", "") or "").strip()
+    if channel and text.startswith(f"{channel}:"):
+        text = text[len(channel) + 1 :].strip()
+    if total > 1 and not text.endswith(f"({index}/{total})"):
         text = f"{text} {index}/{total}"
-    return " ".join(text.split())[:32] or "plot"
+    return " ".join(text.split()) or "plot"
 
 
 def _summary_markdown(project_name: str, rows: Sequence[Mapping[str, Any]]) -> str:

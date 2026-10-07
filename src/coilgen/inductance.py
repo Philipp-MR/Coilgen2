@@ -5,6 +5,7 @@ import math
 import numpy as np
 
 from .config import CoilGenConfig
+from .conductor_geometry import conductor_trace
 from .models import CoilPart
 from .parallel import chunk_ranges, memory_limited_chunk_size, parallel_map, resolve_worker_count, should_parallelize
 from .progress import ProgressReporter
@@ -108,11 +109,11 @@ def calculate_inductance_by_coil_layout(
     return parts, inductance_matrix, resistance, lengths, cross_sections
 
 
-def _wire_segments(part: CoilPart) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    if part.wire_path is None or len(part.wire_path.v) < 2:
+def _wire_segments(part: CoilPart, *, source: str = "auto") -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    points, _kind = conductor_trace(part, source=source)
+    if points is None:
         empty = np.zeros((0, 3), dtype=float)
         return empty, empty, empty, empty
-    points = np.asarray(part.wire_path.v, dtype=float)
     starts = points[:-1]
     ends = points[1:]
     dl = ends - starts
@@ -128,7 +129,7 @@ def _wire_segments(part: CoilPart) -> tuple[np.ndarray, np.ndarray, np.ndarray, 
 def _part_segments(part: CoilPart, *, source: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if source == "unconnected_contours":
         return _contour_segments(part)
-    return _wire_segments(part)
+    return _wire_segments(part, source=source)
 
 
 def _contour_segments(part: CoilPart) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -167,10 +168,10 @@ def _closed_contour_points(points: np.ndarray) -> np.ndarray:
 def _resolve_inductance_source(config: CoilGenConfig) -> str:
     source = str(getattr(config, "inductance_source", "auto")).strip().lower()
     if source == "auto":
-        return "unconnected_contours" if bool(config.skip_postprocessing) else "wire_path"
-    if source in {"wire_path", "unconnected_contours"}:
+        return "unconnected_contours" if bool(config.skip_postprocessing) else "auto"
+    if source in {"wire_path", "unconnected_contours", "fabricated_centroid"}:
         return source
-    return "wire_path"
+    raise ValueError(f"Unknown inductance_source {source!r}.")
 
 
 def _self_inductance(

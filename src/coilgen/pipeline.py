@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 import time
 
@@ -22,7 +23,12 @@ from .contours import (
     regularize_contour_paths,
 )
 from .design_context import EvaluationFeature, normalize_design_context
-from .evaluation import calculate_layout_gradient, evaluate_field_errors, layout_target_residual_diagnostics
+from .evaluation import (
+    calculate_layout_gradient,
+    evaluate_field_errors,
+    final_field_diagnostics,
+    layout_target_residual_diagnostics,
+)
 from .geometry import (
     load_mesh_from_config,
     load_optional_target_mesh,
@@ -31,7 +37,7 @@ from .geometry import (
     refine_mesh,
     split_disconnected_mesh,
 )
-from .gradient_slice_maps import evaluate_gradient_slice_maps, gradient_slice_maps_enabled
+from .gradient_slice_maps import gradient_slice_map_result, gradient_slice_maps_enabled
 from .models import CoilGenResult, CoilPart, Mesh
 from .routing import (
     calculate_unconnected_contour_wire_distances,
@@ -44,7 +50,10 @@ from .routing import (
     topological_loop_grouping,
 )
 from .inductance import calculate_inductance_by_coil_layout
-from .manufacturing import create_swept_coil_meshes
+from .manufacturing import create_swept_coil_meshes, realize_coil_paths
+from .joint_group_adoption import improve_group_routes, refresh_retained_route_diagnostics
+from .routing_assembly import assemble_routing_parts
+from .routing_jumps import fabricated_jump_metrics
 from .pcb import generate_cylindrical_pcb_print
 from .optimization import (
     enforce_stream_function_current_density_limit,
@@ -54,48 +63,108 @@ from .optimization import (
 from .physics import calculate_resistance_matrix, calculate_sensitivity_matrix
 from .preoptimization import apply_preoptimized_stream_function, has_preoptimized_stream_function
 from .progress import ProgressReporter
+from .pipeline_stages import PipelineCheckpoint, PipelineStage, PipelineState, stage_fingerprints
 from .symmetry import mirror_symmetric_mesh_from_half
 from .surface_topology import mesh_quality_report
 from .target import define_target_field
 
 
-class CoilGenPipeline:
-    """Orchestrates the Python CoilGen workflow."""
+class _ExecutionContext:
+    """Per-execution reporting; checkpoint times never masquerade as rerun work."""
 
-    def __init__(self, config: CoilGenConfig, project_root: Path | None = None):
-        self.config = config
-        self.project_root = Path(project_root) if project_root is not None else Path.cwd()
-
-    def run(self) -> CoilGenResult:
-        validate_config(self.config, project_root=self.project_root).raise_for_errors()
-        progress = ProgressReporter.from_config(self.config)
-        stage_index = 0
-        stage_count = 22
-        start_time = time.perf_counter()
-        last_stage_time = start_time
-        timing_summary: list[dict[str, float | str]] = [
+    def __init__(self, config: CoilGenConfig):
+        self.progress = ProgressReporter.from_config(config)
+        self.realize_for_routing = (
+            config.joint_group_routing and not config.skip_postprocessing and not config.make_cylndrical_pcb
+        )
+        self.start_time = time.perf_counter()
+        self.last_stage_time = self.start_time
+        self.timing_summary: list[dict[str, float | str]] = [
             {"stage": "start", "stage_seconds": 0.0, "elapsed_seconds": 0.0}
         ]
 
-        def record_timing(message: str) -> None:
-            nonlocal last_stage_time
-            now = time.perf_counter()
-            timing_summary.append(
-                {
-                    "stage": message,
-                    "stage_seconds": float(now - last_stage_time),
-                    "elapsed_seconds": float(now - start_time),
-                }
-            )
-            last_stage_time = now
+    def record_timing(self, message: str) -> None:
+        now = time.perf_counter()
+        self.timing_summary.append(
+            {
+                "stage": message,
+                "stage_seconds": float(now - self.last_stage_time),
+                "elapsed_seconds": float(now - self.start_time),
+            }
+        )
+        self.last_stage_time = now
 
-        def stage(message: str) -> None:
-            nonlocal stage_index
-            stage_index += 1
-            record_timing(message)
-            progress.report(100.0 * stage_index / stage_count, message, force=True)
+    def stage(self, message: str) -> None:
+        self.record_timing(message)
+        # The stages have very different and data-dependent costs. Completion
+        # counts are not an elapsed-work percentage, especially after resume.
+        self.progress.report(None, message, force=True)
 
-        progress.report(0.0, "start", force=True)
+
+class CoilGenPipeline:
+    """One numerical workflow for legacy scripts and restartable applications.
+
+    Configuration is owned by this instance; changes to a caller's config never
+    change an in-progress run. Stage execution copies its checkpoint before any
+    mutable numerical operations, so one solved sheet can feed multiple studies.
+    """
+
+    def __init__(self, config: CoilGenConfig, project_root: Path | None = None):
+        self.config = deepcopy(config)
+        self.project_root = (Path(project_root) if project_root is not None else Path.cwd()).resolve()
+
+    def run(self) -> CoilGenResult:
+        state, _ = self._execute(PipelineStage.EVALUATED)
+        assert state.result is not None
+        return state.result
+
+    def run_stage(
+        self, stage: PipelineStage | str, checkpoint: PipelineCheckpoint | None = None, *, checkpoint_callback=None
+    ) -> PipelineCheckpoint:
+        """Execute through a selected boundary, optionally reusing completed work.
+
+        A checkpoint cannot be rewound or reused after upstream settings, asset
+        contents or numerical source change. Recompute those stages explicitly.
+        """
+        selected = PipelineStage(stage)
+        fingerprints = stage_fingerprints(self.config, self.project_root)
+
+        def completed(boundary, state):
+            if checkpoint_callback is not None:
+                checkpoint_callback(
+                    PipelineCheckpoint(boundary, state, self.config, self.project_root, fingerprints=fingerprints)
+                )
+
+        state, _ = self._execute(selected, checkpoint, completed if checkpoint_callback is not None else None)
+        return PipelineCheckpoint(selected, state, self.config, self.project_root, fingerprints=fingerprints)
+
+    def _execute(self, selected: PipelineStage, checkpoint: PipelineCheckpoint | None = None, completed=None):
+        validate_config(self.config, project_root=self.project_root).raise_for_errors()
+        context = _ExecutionContext(self.config)
+        state = PipelineState()
+        first_stage = 0
+        if checkpoint is not None:
+            if not isinstance(checkpoint, PipelineCheckpoint):
+                raise TypeError("checkpoint must be a PipelineCheckpoint.")
+            if selected.index < checkpoint.stage.index:
+                raise ValueError("A checkpoint cannot be rewound; provide an earlier stage artifact.")
+            checkpoint.assert_compatible(self.config, self.project_root)
+            state = deepcopy(checkpoint._state)
+            first_stage = checkpoint.stage.index + 1
+            context.progress.report(0.0, f"reusing {checkpoint.stage.value} checkpoint", force=True)
+        else:
+            context.progress.report(0.0, "start", force=True)
+        methods = (self._prepare, self._solve_sheet, self._extract_contours, self._route_and_realize, self._evaluate)
+        for index in range(first_stage, selected.index + 1):
+            methods[index](state, context)
+            if completed is not None:
+                completed(tuple(PipelineStage)[index], state)
+        if selected is not PipelineStage.EVALUATED:
+            context.progress.finish(f"{selected.value} stage completed")
+        return state, context
+
+    def _prepare(self, state: PipelineState, context: _ExecutionContext) -> None:
+        stage = context.stage
         coil_mesh = load_mesh_from_config(self.config, self.project_root)
         coil_mesh, symmetry_mesh_diagnostics = _prepare_half_mesh_symmetry_if_requested(coil_mesh, self.config)
         target_mesh = load_optional_target_mesh(self.config.target_mesh_file, self.config, self.project_root)
@@ -136,6 +205,22 @@ class CoilGenPipeline:
         parts = calculate_sensitivity_matrix(parts, target_field, self.config)
         sensitivity_diagnostics = _sensitivity_matrix_diagnostics(parts, target_field)
         stage("calculated sensitivity matrix")
+        state.parts = parts
+        state.target_field = target_field
+        state.prepared_diagnostics = {
+            **sensitivity_diagnostics,
+            **suppression_surface_diagnostics,
+            **symmetry_mesh_diagnostics,
+        }
+
+    def _solve_sheet(self, state: PipelineState, context: _ExecutionContext) -> None:
+        parts = state.parts
+        target_field = state.target_field
+        combined_mesh = state.combined_mesh
+        sf_b_field = state.sf_b_field
+        regularization_diagnostics = state.regularization_diagnostics
+        primary_surface_ind = state.primary_surface_index
+        stage = context.stage
         if has_preoptimized_stream_function(self.config):
             parts, combined_mesh, sf_b_field, regularization_diagnostics = apply_preoptimized_stream_function(
                 parts,
@@ -161,9 +246,22 @@ class CoilGenPipeline:
         regularization_diagnostics.update(stream_function_current_density_diagnostics(parts, self.config))
         regularization_diagnostics.update(dict(getattr(target_field, "target_diagnostics", {})))
         _update_gradient_hardware_target_diagnostics(regularization_diagnostics)
-        regularization_diagnostics.update(sensitivity_diagnostics)
-        regularization_diagnostics.update(suppression_surface_diagnostics)
-        regularization_diagnostics.update(symmetry_mesh_diagnostics)
+        regularization_diagnostics.update(state.prepared_diagnostics)
+        state.parts = parts
+        state.target_field = target_field
+        state.combined_mesh = combined_mesh
+        state.sf_b_field = sf_b_field
+        state.regularization_diagnostics = regularization_diagnostics
+        state.primary_surface_index = primary_surface_ind
+
+    def _extract_contours(self, state: PipelineState, context: _ExecutionContext) -> None:
+        parts = state.parts
+        target_field = state.target_field
+        combined_mesh = state.combined_mesh
+        sf_b_field = state.sf_b_field
+        regularization_diagnostics = state.regularization_diagnostics
+        primary_surface_ind = state.primary_surface_index
+        stage = context.stage
         parts, primary_surface_ind = calc_potential_levels(parts, combined_mesh, self.config)
         if 0 <= primary_surface_ind < len(parts):
             regularization_diagnostics.update(dict(parts[primary_surface_ind].contour_level_diagnostics))
@@ -237,6 +335,22 @@ class CoilGenPipeline:
                     measured_min_distance >= min_turn_distance
                 )
         stage("calculated contour distances")
+        state.parts = parts
+        state.target_field = target_field
+        state.combined_mesh = combined_mesh
+        state.sf_b_field = sf_b_field
+        state.regularization_diagnostics = regularization_diagnostics
+        state.primary_surface_index = primary_surface_ind
+
+    def _route_and_realize(self, state: PipelineState, context: _ExecutionContext) -> None:
+        parts = state.parts
+        target_field = state.target_field
+        combined_mesh = state.combined_mesh
+        sf_b_field = state.sf_b_field
+        regularization_diagnostics = state.regularization_diagnostics
+        primary_surface_ind = state.primary_surface_index
+        stage = context.stage
+        realize_for_routing = context.realize_for_routing
         skip_postprocessing = self.config.skip_postprocessing or self.config.contour_only_sweep_mode
         if skip_postprocessing:
             for part in parts:
@@ -252,6 +366,12 @@ class CoilGenPipeline:
             )
             stage("grouped contour topology")
             parts = calculate_group_centers(parts)
+            regularization_diagnostics["routing_circuit_scope"] = self.config.routing_circuit_scope
+            regularization_diagnostics["routing_source_part_count"] = len(parts)
+            if self.config.routing_circuit_scope == "single" and len(parts) > 1:
+                parts = assemble_routing_parts(parts, primary_surface_index=primary_surface_ind)
+                primary_surface_ind = 0
+                regularization_diagnostics["routing_parts_assembled"] = True
             parts = interconnect_within_groups(
                 parts,
                 self.config,
@@ -272,9 +392,40 @@ class CoilGenPipeline:
             progress=ProgressReporter.from_config(self.config, label="Route cleanup"),
         )
         stage("cleaned wire paths")
+        if realize_for_routing:
+            parts = realize_coil_paths(parts, self.config)
+            stage("realized fabrication centerlines")
+        parts = improve_group_routes(parts, self.config, target_field)
+        stage("selected joint group routes")
+        # Parts arrive without a mesh. A body returned by route
+        # selection belongs to an independently validated candidate; retain its
+        # exact geometry, including any routing-specific clearance contract.
+        unswept_parts = [part for part in parts if part.swept_body is None]
+        if unswept_parts:
+            create_swept_coil_meshes(unswept_parts, self.config)
+        refresh_retained_route_diagnostics(parts)
+        stage("finalized swept conductor meshes")
+        if not skip_postprocessing:
+            from .routing_assembly import validate_routing_assembly
+
+            validate_routing_assembly(parts, self.config)
         parts = generate_cylindrical_pcb_print(parts, self.config)
-        parts = create_swept_coil_meshes(parts, self.config)
-        stage("generated swept visualization meshes")
+        state.parts = parts
+        state.target_field = target_field
+        state.combined_mesh = combined_mesh
+        state.sf_b_field = sf_b_field
+        state.regularization_diagnostics = regularization_diagnostics
+        state.primary_surface_index = primary_surface_ind
+
+    def _evaluate(self, state: PipelineState, context: _ExecutionContext) -> None:
+        parts = state.parts
+        target_field = state.target_field
+        combined_mesh = state.combined_mesh
+        sf_b_field = state.sf_b_field
+        regularization_diagnostics = state.regularization_diagnostics
+        primary_surface_ind = state.primary_surface_index
+        stage = context.stage
+        skip_postprocessing = self.config.skip_postprocessing or self.config.contour_only_sweep_mode
         parts, inductance_matrix, resistance, coil_lengths, coil_cross_sections = calculate_inductance_by_coil_layout(
             parts, self.config
         )
@@ -290,9 +441,48 @@ class CoilGenPipeline:
             sf_b_field_1a,
             target_field_1a,
         ) = evaluate_field_errors(parts, self.config, target_field, sf_b_field)
+        if any("routing_assembly" in part.topology_diagnostics for part in parts):
+            from .group_route_fields import assess_group_route_field
+
+            assembly_field = assess_group_route_field(
+                field_layout_per_amp,
+                field_layout_per_amp,
+                target_field,
+                self.config,
+                parts[0].contour_step,
+                0.0,
+            )
+            regularization_diagnostics["routing_assembly_fixed_current_field"] = assembly_field.metrics
+            if not assembly_field.accepted:
+                raise ValueError(
+                    "Single-circuit assembly violates fixed-current field constraints: "
+                    + "; ".join(assembly_field.reasons)
+                )
+            for part in parts:
+                certificate = part.route_diagnostics["routing_assembly_validation"]
+                certificate["field_acceptance_checked"] = True
+                certificate["final_fixed_current_field"] = assembly_field.metrics
         regularization_diagnostics.update(
             layout_target_residual_diagnostics(field_by_layout, target_field, self.config)
         )
+        regularization_diagnostics.update(
+            final_field_diagnostics(
+                parts, self.config, target_field, field_layout_per_amp, field_loops_per_amp, opt_current_layout
+            )
+        )
+        if not skip_postprocessing and all(part.fabrication_path is not None for part in parts):
+            try:
+                jump_metrics = [fabricated_jump_metrics(part, self.config) for part in parts]
+                regularization_diagnostics.update(
+                    routing_jump_count=sum(values["jump_count"] for values in jump_metrics),
+                    routing_jump_metrics_by_circuit=jump_metrics,
+                    routing_jump_count_checked=True,
+                    routing_closed_circuit_count=len(parts),
+                )
+            except ValueError as error:
+                regularization_diagnostics.update(
+                    routing_jump_count_checked=False, routing_jump_count_reason=str(error)
+                )
         design_context = normalize_design_context(getattr(self.config, "design_context", "mr_gradient"))
         layout_gradient = (
             calculate_layout_gradient(field_layout_per_amp, target_field)
@@ -300,9 +490,9 @@ class CoilGenPipeline:
             else None
         )
         _apply_result_memory_policy(parts, self.config)
-        record_timing("evaluated field errors")
-        progress.report(100.0, "evaluated field errors", force=True)
-        progress.finish()
+        context.record_timing("evaluated field errors")
+        context.progress.report(100.0, "evaluated field errors", force=True)
+        context.progress.finish()
 
         potential_step = parts[primary_surface_ind].contour_step or np.nan
         result = CoilGenResult(
@@ -323,28 +513,27 @@ class CoilGenPipeline:
             regularization_diagnostics=regularization_diagnostics,
             target_field_1A=target_field_1a,
             error_vals=error_vals,
-            input_data=self.config,
+            input_data=deepcopy(self.config),
             layout_gradient=layout_gradient,
             combined_mesh=combined_mesh,
             inductance_matrix=inductance_matrix,
             resistance=resistance,
             coil_lengths=coil_lengths,
             coil_cross_sections=coil_cross_sections,
-            timing_summary=timing_summary,
+            timing_summary=context.timing_summary,
         )
         if gradient_slice_maps_enabled(self.config):
             slice_start = time.perf_counter()
-            slice_maps = evaluate_gradient_slice_maps(result)
-            result.diagnostic_cache["gradient_slice_maps"] = slice_maps
+            slice_maps = gradient_slice_map_result(result)
             result.regularization_diagnostics.update(dict(slice_maps.summary))
             result.timing_summary.append(
                 {
                     "stage": "evaluated gradient slice maps",
                     "stage_seconds": float(time.perf_counter() - slice_start),
-                    "elapsed_seconds": float(time.perf_counter() - start_time),
+                    "elapsed_seconds": float(time.perf_counter() - context.start_time),
                 }
             )
-        return result
+        state.result = result
 
 
 def _restore_refined_single_mesh_symmetry(

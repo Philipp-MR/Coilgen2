@@ -1405,8 +1405,7 @@ def _single_mesh_contour_report(
         expected_potential = sign * float(contour.potential) + offset
         candidate_errors = np.abs(potentials - expected_potential)
         eligible = np.flatnonzero(
-            (candidate_errors <= potential_tolerance)
-            & (multiplicities == int(contour.turn_multiplicity))
+            (candidate_errors <= potential_tolerance) & (multiplicities == int(contour.turn_multiplicity))
         )
         if eligible.size:
             centroid_distances = np.linalg.norm(centroids[eligible] - reflected_centroids[contour_ind][None, :], axis=1)
@@ -1979,8 +1978,7 @@ def _single_mesh_contour_pruning_groups(
         expected = sign * float(contour.potential) + offset
         potential_errors = np.abs(potentials - expected)
         eligible = np.flatnonzero(
-            (potential_errors <= potential_tolerance)
-            & (multiplicities == int(contour.turn_multiplicity))
+            (potential_errors <= potential_tolerance) & (multiplicities == int(contour.turn_multiplicity))
         )
         if eligible.size:
             centroid_distances = np.linalg.norm(

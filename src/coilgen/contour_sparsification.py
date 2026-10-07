@@ -310,9 +310,7 @@ def prune_sparsified_contours(
         config,
         preserve_symmetry=preserve_symmetry,
     )
-    symmetry_validation_mode = str(
-        getattr(config, "contour_symmetry_validation", "auto")
-    ).strip().lower()
+    symmetry_validation_mode = str(getattr(config, "contour_symmetry_validation", "auto")).strip().lower()
     if preserve_symmetry and symmetry_validation_mode == "strict" and not symmetry_complete:
         raise ValueError(
             "Strict contour symmetry validation failed before post-sparsification pruning: "
@@ -377,8 +375,7 @@ def prune_sparsified_contours(
     )
     if preserve_symmetry and not subset_validation["ok"]:
         raise ValueError(
-            "Post-sparsification pruning selected an incomplete symmetry orbit: "
-            + str(subset_validation["violations"])
+            "Post-sparsification pruning selected an incomplete symmetry orbit: " + str(subset_validation["violations"])
         )
 
     final_total_rms, final_total_peak = _relative_field_error_percent(
@@ -453,9 +450,7 @@ def consolidate_pruned_contours(
     (when enabled) swept-body manufacturing constraints.
     """
 
-    mode = _normalise_post_pruning_merge_mode(
-        getattr(config, "contour_sparsification_post_pruning_merge_mode", "off")
-    )
+    mode = _normalise_post_pruning_merge_mode(getattr(config, "contour_sparsification_post_pruning_merge_mode", "off"))
     sparsified_part_indices = [
         part_index for part_index, part in enumerate(parts) if part.contour_sparsification is not None
     ]
@@ -471,9 +466,7 @@ def consolidate_pruned_contours(
             source_members.append([(index,) for index in range(len(part.contour_lines))])
             continue
         if len(provenance.final_source_contour_indices) != len(part.contour_lines):
-            raise ValueError(
-                "Sparsification provenance must align with retained contours before post-pruning merging."
-            )
+            raise ValueError("Sparsification provenance must align with retained contours before post-pruning merging.")
         source_snapshots.append(provenance.source_contours)
         source_members.append(list(provenance.final_source_contour_indices))
 
@@ -561,9 +554,7 @@ def consolidate_pruned_contours(
             break
         completed_passes = pass_index
         representative_options = [options[0] for options in option_sets]
-        options_by_representative_id = {
-            id(options[0]): options for options in option_sets
-        }
+        options_by_representative_id = {id(options[0]): options for options in option_sets}
         selected_this_pass: list[_MergeProposal] = []
         accepted_this_pass = 0
 
@@ -572,25 +563,16 @@ def consolidate_pruned_contours(
                 for proposal in representative_bundle:
                     proposal.rejection_reason = "incomplete_symmetry_orbit"
                 audit_proposals.extend(representative_bundle)
-                audit_rows.extend(
-                    _post_pruning_audit_rows(representative_bundle, accepted=False)
-                )
+                audit_rows.extend(_post_pruning_audit_rows(representative_bundle, accepted=False))
                 continue
-            if (
-                max_merges > 0
-                and prior_accepted_count + accepted_count + len(representative_bundle) > max_merges
-            ):
+            if max_merges > 0 and prior_accepted_count + accepted_count + len(representative_bundle) > max_merges:
                 for proposal in representative_bundle:
                     proposal.rejection_reason = "maximum_merge_count"
                 audit_proposals.extend(representative_bundle)
-                audit_rows.extend(
-                    _post_pruning_audit_rows(representative_bundle, accepted=False)
-                )
+                audit_rows.extend(_post_pruning_audit_rows(representative_bundle, accepted=False))
                 continue
 
-            bundle_option_sets = [
-                options_by_representative_id[id(proposal)] for proposal in representative_bundle
-            ]
+            bundle_option_sets = [options_by_representative_id[id(proposal)] for proposal in representative_bundle]
             candidate_evaluations: list[tuple[tuple[Any, ...], list[_MergeProposal], dict[str, Any]]] = []
             rejection_reasons: list[str] = []
             for option_index in range(min(len(options) for options in bundle_option_sets)):
@@ -623,9 +605,7 @@ def consolidate_pruned_contours(
                 for proposal in representative_bundle:
                     proposal.rejection_reason = reason
                 audit_proposals.extend(representative_bundle)
-                audit_rows.extend(
-                    _post_pruning_audit_rows(representative_bundle, accepted=False)
-                )
+                audit_rows.extend(_post_pruning_audit_rows(representative_bundle, accepted=False))
                 continue
 
             _score, selected_bundle, evaluation = min(candidate_evaluations, key=lambda item: item[0])
@@ -677,71 +657,38 @@ def consolidate_pruned_contours(
         provenance.final_source_contour_indices = list(source_members[part_index])
         accepted_part_count = sum(record.accepted for record in part_records)
         proposed_part_count = len(part_records)
-        existing_accepted = int(
-            provenance.diagnostics.get("contour_sparsification_accepted_merge_count", 0)
-        )
-        existing_proposed = int(
-            provenance.diagnostics.get("contour_sparsification_proposed_merge_count", 0)
-        )
+        existing_accepted = int(provenance.diagnostics.get("contour_sparsification_accepted_merge_count", 0))
+        existing_proposed = int(provenance.diagnostics.get("contour_sparsification_proposed_merge_count", 0))
         provenance.diagnostics.update(
             {
                 "contour_sparsification_post_pruning_merge_mode": mode,
                 "contour_sparsification_post_pruning_requested_pass_count": int(max_passes),
                 "contour_sparsification_post_pruning_completed_pass_count": int(completed_passes),
-                "contour_sparsification_post_pruning_accepted_merges_by_pass": tuple(
-                    accepted_merges_by_pass
-                ),
+                "contour_sparsification_post_pruning_accepted_merges_by_pass": tuple(accepted_merges_by_pass),
                 "contour_sparsification_post_pruning_proposed_merge_count": int(proposed_part_count),
-                "contour_sparsification_post_pruning_accepted_merge_count": int(
-                    accepted_part_count
-                ),
+                "contour_sparsification_post_pruning_accepted_merge_count": int(accepted_part_count),
                 "contour_sparsification_post_pruning_rejected_merge_count": int(
                     proposed_part_count - accepted_part_count
                 ),
-                "contour_sparsification_post_pruning_pre_geometry_count": int(
-                    before_geometry_counts[part_index]
-                ),
-                "contour_sparsification_post_pruning_final_geometry_count": int(
-                    len(part.contour_lines)
-                ),
-                "contour_sparsification_post_pruning_pre_turn_count": int(
-                    before_turn_counts[part_index]
-                ),
-                "contour_sparsification_post_pruning_final_turn_count": int(
-                    part.physical_turn_count
-                ),
-                "contour_sparsification_post_pruning_baseline_metric_T": float(
-                    baseline_metric
-                ),
+                "contour_sparsification_post_pruning_pre_geometry_count": int(before_geometry_counts[part_index]),
+                "contour_sparsification_post_pruning_final_geometry_count": int(len(part.contour_lines)),
+                "contour_sparsification_post_pruning_pre_turn_count": int(before_turn_counts[part_index]),
+                "contour_sparsification_post_pruning_final_turn_count": int(part.physical_turn_count),
+                "contour_sparsification_post_pruning_baseline_metric_T": float(baseline_metric),
                 "contour_sparsification_post_pruning_selected_metric_T": float(final_metric),
-                "contour_sparsification_post_pruning_metric_change_T": float(
-                    final_metric - baseline_metric
-                ),
+                "contour_sparsification_post_pruning_metric_change_T": float(final_metric - baseline_metric),
                 "contour_sparsification_post_pruning_allowed_metric_T": float(allowed_metric),
-                "contour_sparsification_post_pruning_baseline_current_A": float(
-                    baseline_current
-                ),
+                "contour_sparsification_post_pruning_baseline_current_A": float(baseline_current),
                 "contour_sparsification_post_pruning_selected_current_A": float(final_current),
-                "contour_sparsification_post_pruning_total_rms_field_error_percent": float(
-                    final_rms
-                ),
-                "contour_sparsification_post_pruning_total_peak_field_error_percent": float(
-                    final_peak
-                ),
+                "contour_sparsification_post_pruning_total_rms_field_error_percent": float(final_rms),
+                "contour_sparsification_post_pruning_total_peak_field_error_percent": float(final_peak),
                 "contour_sparsification_post_pruning_merge_records": [
                     row for row in audit_rows if int(row["part_index"]) == part_index
                 ],
-                "contour_sparsification_proposed_merge_count": int(
-                    existing_proposed + proposed_part_count
-                ),
-                "contour_sparsification_accepted_merge_count": int(
-                    existing_accepted + accepted_part_count
-                ),
+                "contour_sparsification_proposed_merge_count": int(existing_proposed + proposed_part_count),
+                "contour_sparsification_accepted_merge_count": int(existing_accepted + accepted_part_count),
                 "contour_sparsification_rejected_merge_count": int(
-                    existing_proposed
-                    + proposed_part_count
-                    - existing_accepted
-                    - accepted_part_count
+                    existing_proposed + proposed_part_count - existing_accepted - accepted_part_count
                 ),
                 "contour_sparsification_global_rms_field_error_percent": float(final_rms),
                 "contour_sparsification_global_peak_field_error_percent": float(final_peak),
@@ -901,8 +848,7 @@ def _evaluate_post_pruning_bundle(
             return {"ok": False, "reason": "minimum_spacing"}
 
     manufacturing_checked = bool(
-        getattr(config, "contour_only_sweep_mode", False)
-        and not bool(getattr(config, "skip_sweep", True))
+        getattr(config, "contour_only_sweep_mode", False) and not bool(getattr(config, "skip_sweep", True))
     )
     manufacturing_rows: list[dict[str, Any]] = []
     if manufacturing_checked:
@@ -925,15 +871,11 @@ def _evaluate_post_pruning_bundle(
                 "max_curvature_envelope_ratio": float(
                     body.diagnostics.get("sweep_max_curvature_envelope_ratio", np.nan)
                 ),
-                "curvature_envelope_limit": float(
-                    body.diagnostics.get("sweep_curvature_envelope_limit", np.nan)
-                ),
+                "curvature_envelope_limit": float(body.diagnostics.get("sweep_curvature_envelope_limit", np.nan)),
                 "capsule_self_intersection_count": int(
                     body.diagnostics.get("sweep_capsule_self_intersection_count", 0)
                 ),
-                "mesh_self_intersection_count": int(
-                    body.diagnostics.get("sweep_mesh_self_intersection_count", 0)
-                ),
+                "mesh_self_intersection_count": int(body.diagnostics.get("sweep_mesh_self_intersection_count", 0)),
             }
             manufacturing_rows.append(row)
             if not row["manufacturing_ok"]:
@@ -1001,14 +943,8 @@ def _parts_with_merge_proposals(
     tentative = deepcopy(parts)
     for part_index, part in enumerate(tentative):
         part_proposals = [proposal for proposal in proposals if proposal.part_index == part_index]
-        candidate_by_first = {
-            min(proposal.source_indices): proposal.candidate for proposal in part_proposals
-        }
-        consumed = {
-            contour_index
-            for proposal in part_proposals
-            for contour_index in proposal.source_indices
-        }
+        candidate_by_first = {min(proposal.source_indices): proposal.candidate for proposal in part_proposals}
+        consumed = {contour_index for proposal in part_proposals for contour_index in proposal.source_indices}
         part.contour_lines = [
             deepcopy(candidate_by_first[index]) if index in candidate_by_first else contour
             for index, contour in enumerate(part.contour_lines)
@@ -1035,32 +971,22 @@ def _post_pruning_audit_rows(
                 "pass_index": int(proposal.pass_index),
                 "source_representative_indices": [int(index) for index in proposal.source_indices],
                 "source_contour_indices": [int(index) for index in proposal.source_original_indices],
-                "source_turn_multiplicities": [
-                    int(value) for value in proposal.source_turn_multiplicities
-                ],
+                "source_turn_multiplicities": [int(value) for value in proposal.source_turn_multiplicities],
                 "selected_potential_A": float(proposal.candidate.potential),
                 "turn_multiplicity": int(proposal.candidate.turn_multiplicity),
                 "accepted": bool(accepted),
                 "rejection_reason": "" if accepted else str(proposal.rejection_reason),
                 "pair_rms_field_error_T": float(proposal.pair_rms_error),
                 "pair_peak_field_error_T": float(proposal.pair_peak_error),
-                "total_rms_field_error_percent": float(
-                    evaluation.get("total_rms_error_percent", np.nan)
-                ),
-                "total_peak_field_error_percent": float(
-                    evaluation.get("total_peak_error_percent", np.nan)
-                ),
+                "total_rms_field_error_percent": float(evaluation.get("total_rms_error_percent", np.nan)),
+                "total_peak_field_error_percent": float(evaluation.get("total_peak_error_percent", np.nan)),
                 "residual_metric_T": float(evaluation.get("residual_metric_T", np.nan)),
                 "minimum_spacing_m": float(evaluation.get("minimum_spacing_m", np.nan)),
                 "required_spacing_m": float(evaluation.get("required_spacing_m", np.nan)),
                 "manufacturing_checked": bool(evaluation.get("manufacturing_checked", False)),
                 "manufacturing_ok": bool(manufacturing_row.get("manufacturing_ok", False)),
-                "max_curvature_envelope_ratio": float(
-                    manufacturing_row.get("max_curvature_envelope_ratio", np.nan)
-                ),
-                "curvature_envelope_limit": float(
-                    manufacturing_row.get("curvature_envelope_limit", np.nan)
-                ),
+                "max_curvature_envelope_ratio": float(manufacturing_row.get("max_curvature_envelope_ratio", np.nan)),
+                "curvature_envelope_limit": float(manufacturing_row.get("curvature_envelope_limit", np.nan)),
             }
         )
     return rows
@@ -1154,9 +1080,7 @@ def _select_sparsification_pruning_subset(
     """
 
     minimum_geometry_count = max(target_geometry_count, 1)
-    removable_groups = [
-        group for group in pruning_groups if not (set(group.keys) & protected_keys)
-    ]
+    removable_groups = [group for group in pruning_groups if not (set(group.keys) & protected_keys)]
     group_by_index = {group.group_index: group for group in pruning_groups}
     exact_max_orbits = max(
         int(getattr(config, "contour_sparsification_pruning_exact_max_orbits", 16)),
@@ -1166,15 +1090,14 @@ def _select_sparsification_pruning_subset(
         int(getattr(config, "contour_sparsification_pruning_beam_width", 128)),
         1,
     )
-    requested_mode = str(
-        getattr(config, "contour_sparsification_pruning_search_mode", "auto")
-    ).strip().lower().replace("-", "_")
+    requested_mode = (
+        str(getattr(config, "contour_sparsification_pruning_search_mode", "auto")).strip().lower().replace("-", "_")
+    )
     if requested_mode not in {"auto", "exact", "beam"}:
         requested_mode = "auto"
     search_mode = (
         "exact"
-        if requested_mode == "exact"
-        or (requested_mode == "auto" and len(removable_groups) <= exact_max_orbits)
+        if requested_mode == "exact" or (requested_mode == "auto" and len(removable_groups) <= exact_max_orbits)
         else "beam"
     )
 
@@ -1196,9 +1119,7 @@ def _select_sparsification_pruning_subset(
         incremental_peak_error_percent=0.0,
         retained_geometry_count=int(len(prunable_keys)),
         retained_nonmanufacturable_geometry_count=int(len(prunable_keys & nonmanufacturable_keys)),
-        retained_nominal_length_m=float(
-            sum(group.nominal_length_m for group in pruning_groups)
-        ),
+        retained_nominal_length_m=float(sum(group.nominal_length_m for group in pruning_groups)),
     )
 
     if not removable_groups:
@@ -1209,9 +1130,7 @@ def _select_sparsification_pruning_subset(
             "evaluated_subset_count": 1,
             "feasible_subset_count": 1,
             "optimality_proven": True,
-            "target_count_feasible": bool(
-                target_geometry_count == 0 or len(prunable_keys) == target_geometry_count
-            ),
+            "target_count_feasible": bool(target_geometry_count == 0 or len(prunable_keys) == target_geometry_count),
             "best_metric_T": float(baseline_metric),
         }
 
@@ -1258,14 +1177,10 @@ def _select_sparsification_pruning_subset(
             incremental_rms_error_percent=float(incremental_rms),
             incremental_peak_error_percent=float(incremental_peak),
             retained_geometry_count=int(retained_geometry_count),
-            retained_nonmanufacturable_geometry_count=int(
-                len(keep_keys & prunable_keys & nonmanufacturable_keys)
-            ),
+            retained_nonmanufacturable_geometry_count=int(len(keep_keys & prunable_keys & nonmanufacturable_keys)),
             retained_nominal_length_m=float(
                 sum(
-                    group.nominal_length_m
-                    for group in pruning_groups
-                    if group.group_index not in removed_group_indices
+                    group.nominal_length_m for group in pruning_groups if group.group_index not in removed_group_indices
                 )
             ),
         )
@@ -1301,9 +1216,7 @@ def _select_sparsification_pruning_subset(
         task = reporter.task("exact symmetry-orbit subset search", max(subset_count - 1, 0))
         for mask in range(1, subset_count):
             removed = tuple(
-                removable_groups[index].group_index
-                for index in range(len(removable_groups))
-                if mask & (1 << index)
+                removable_groups[index].group_index for index in range(len(removable_groups)) if mask & (1 << index)
             )
             candidate = evaluate(removed)
             evaluated_count += 1
@@ -1733,9 +1646,7 @@ def _proposal_options_for_pair(
         candidates.append((rms_error, peak_error, candidate, candidate_field))
     if not candidates:
         return []
-    candidates.sort(
-        key=lambda item: (item[0], item[1], abs(item[2].potential - weighted_level))
-    )
+    candidates.sort(key=lambda item: (item[0], item[1], abs(item[2].potential - weighted_level)))
     return [
         _MergeProposal(
             part_index=part_index,
@@ -1989,33 +1900,17 @@ def _apply_sparsified_pruning_result(
         "contour_sparsification_pruning_symmetry_grouping_complete": bool(symmetry_complete),
         "contour_sparsification_pruning_protected_geometry_count": int(protected_key_count),
         "contour_sparsification_pruning_search_mode": str(search_diagnostics["search_mode"]),
-        "contour_sparsification_pruning_requested_search_mode": str(
-            search_diagnostics["requested_search_mode"]
-        ),
-        "contour_sparsification_pruning_removable_orbit_count": int(
-            search_diagnostics["removable_orbit_count"]
-        ),
-        "contour_sparsification_pruning_evaluated_subset_count": int(
-            search_diagnostics["evaluated_subset_count"]
-        ),
-        "contour_sparsification_pruning_feasible_subset_count": int(
-            search_diagnostics["feasible_subset_count"]
-        ),
-        "contour_sparsification_pruning_optimality_proven": bool(
-            search_diagnostics["optimality_proven"]
-        ),
-        "contour_sparsification_pruning_target_count_feasible": bool(
-            search_diagnostics["target_count_feasible"]
-        ),
+        "contour_sparsification_pruning_requested_search_mode": str(search_diagnostics["requested_search_mode"]),
+        "contour_sparsification_pruning_removable_orbit_count": int(search_diagnostics["removable_orbit_count"]),
+        "contour_sparsification_pruning_evaluated_subset_count": int(search_diagnostics["evaluated_subset_count"]),
+        "contour_sparsification_pruning_feasible_subset_count": int(search_diagnostics["feasible_subset_count"]),
+        "contour_sparsification_pruning_optimality_proven": bool(search_diagnostics["optimality_proven"]),
+        "contour_sparsification_pruning_target_count_feasible": bool(search_diagnostics["target_count_feasible"]),
         "contour_sparsification_pruning_selected_removed_orbit_indices": list(
             search_diagnostics.get("selected_removed_orbit_indices", ())
         ),
-        "contour_sparsification_pruning_final_symmetry_validation": dict(
-            subset_symmetry_validation
-        ),
-        "contour_sparsification_pruning_final_symmetry_ok": bool(
-            subset_symmetry_validation["ok"]
-        ),
+        "contour_sparsification_pruning_final_symmetry_validation": dict(subset_symmetry_validation),
+        "contour_sparsification_pruning_final_symmetry_ok": bool(subset_symmetry_validation["ok"]),
         "contour_sparsification_pruning_total_rms_field_error_percent": float(final_total_rms),
         "contour_sparsification_pruning_total_peak_field_error_percent": float(final_total_peak),
         "contour_sparsification_pruning_incremental_rms_field_error_percent": float(final_incremental_rms),

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 
@@ -129,12 +129,41 @@ def fit_spherical_harmonics(
 ) -> SphericalHarmonicFit:
     """Fit scalar samples with real solid spherical harmonics."""
 
+    return fit_spherical_harmonics_many(
+        coords,
+        {"field": values},
+        max_order=max_order,
+        weights=weights,
+        center=center,
+        radius=radius,
+        rcond=rcond,
+        unit=unit,
+    )["field"]
+
+
+def fit_spherical_harmonics_many(
+    coords: np.ndarray,
+    values_by_source: Mapping[str, np.ndarray],
+    *,
+    max_order: int = 4,
+    weights: np.ndarray | None = None,
+    center: np.ndarray | None = None,
+    radius: float | None = None,
+    rcond: float | None = None,
+    unit: str = "",
+) -> dict[str, SphericalHarmonicFit]:
+    """Fit fields on one common support with a single basis/factorization."""
+
+    if not values_by_source:
+        return {}
     coords = _as_coordinate_array(coords)
-    values = np.asarray(values, dtype=float).reshape(-1)
-    if len(values) != len(coords):
+    source_keys = tuple(values_by_source)
+    columns = [np.asarray(values_by_source[key], dtype=float).reshape(-1) for key in source_keys]
+    if any(len(column) != len(coords) for column in columns):
         raise ValueError("values must match coordinate count.")
+    values = np.column_stack(columns)
     fit_weights = _validated_weights(weights, len(coords))
-    finite = np.isfinite(values) & np.all(np.isfinite(coords), axis=1)
+    finite = np.all(np.isfinite(values), axis=1) & np.all(np.isfinite(coords), axis=1)
     if fit_weights is not None:
         finite &= np.isfinite(fit_weights) & (fit_weights > 0.0)
     if not np.any(finite):
@@ -156,30 +185,32 @@ def fit_spherical_harmonics(
     else:
         root_weights = np.sqrt(fit_weights).reshape(-1, 1)
         weighted_basis = basis * root_weights
-        weighted_values = fit_values * root_weights[:, 0]
+        weighted_values = fit_values * root_weights
 
     coefficients, _, rank, _ = np.linalg.lstsq(weighted_basis, weighted_values, rcond=rcond)
     fitted = basis @ coefficients
     residual = fit_values - fitted
     basis_rms = _weighted_rms_columns(basis, fit_weights)
-    field_rms = _weighted_rms(fit_values, fit_weights)
-    residual_rms = _weighted_rms(residual, fit_weights)
-    explained = 1.0 - residual_rms / max(field_rms, 1.0e-30)
-    return SphericalHarmonicFit(
-        terms=terms,
-        coefficients=np.asarray(coefficients, dtype=float),
-        fitted_values=np.asarray(fitted, dtype=float),
-        residual_values=np.asarray(residual, dtype=float),
-        center=np.asarray(center_arr, dtype=float),
-        radius=float(radius_value),
-        sample_count=int(len(fit_values)),
-        unit=str(unit),
-        basis_rms=np.asarray(basis_rms, dtype=float),
-        field_rms=float(field_rms),
-        residual_rms=float(residual_rms),
-        explained_rms_fraction=float(explained),
-        rank=int(rank),
-    )
+    fits = {}
+    for index, source in enumerate(source_keys):
+        field_rms = _weighted_rms(fit_values[:, index], fit_weights)
+        residual_rms = _weighted_rms(residual[:, index], fit_weights)
+        fits[source] = SphericalHarmonicFit(
+            terms=terms,
+            coefficients=np.asarray(coefficients[:, index], dtype=float),
+            fitted_values=np.asarray(fitted[:, index], dtype=float),
+            residual_values=np.asarray(residual[:, index], dtype=float),
+            center=np.asarray(center_arr, dtype=float),
+            radius=float(radius_value),
+            sample_count=int(len(fit_values)),
+            unit=str(unit),
+            basis_rms=np.asarray(basis_rms, dtype=float),
+            field_rms=float(field_rms),
+            residual_rms=float(residual_rms),
+            explained_rms_fraction=float(1.0 - residual_rms / max(field_rms, 1.0e-30)),
+            rank=int(rank),
+        )
+    return fits
 
 
 def spherical_harmonic_coefficient_rows(

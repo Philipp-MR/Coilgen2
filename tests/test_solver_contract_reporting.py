@@ -103,3 +103,58 @@ def test_failed_contract_is_reported_and_excluded_from_default_study_ranking(
     table = DesignStudyTable.from_results([normal_row, diagnostic_row])
     assert table.best_by("regularization_factor", maximize=False) is normal_row
     assert table.best_by("regularization_factor", maximize=False, allowed_statuses=None) is diagnostic_row
+
+
+def test_accepted_nonregression_route_never_hides_inherited_fixed_current_field_failure(legacy_result):
+    result = deepcopy(legacy_result)
+    result.input_data.field_evaluation_current_source = "target_fit"
+    result.coil_parts[0].joint_route_diagnostics = {
+        "status": "accepted",
+        "field_acceptance_policy": "non_regression",
+        "selected_absolute_field_contract_met": False,
+        "selected_absolute_field_contract_reasons": {
+            "route": "gradient_strength_contract",
+            "physical": "gradient_strength_contract",
+        },
+    }
+    quality = result_quality_status(result)
+    assert quality.status == "FAIL"
+    assert any(
+        "unchanged series current" in failure and "gradient_strength_contract" in failure
+        for failure in quality.failures
+    )
+    summary = result_summary_dict(result)
+    assert summary["routing_field_acceptance_policies"] == "non_regression"
+    assert summary["routing_absolute_field_contract_status"] == "FAIL"
+    assert summary["routing_absolute_field_contract_failed_part_count"] == 1
+    assert summary["routing_absolute_field_contract_failure_reasons"] == "part 1: gradient_strength_contract"
+    row = study_result_from_coilgen_result("inherited", {}, result)
+    assert row.status == "FAIL"
+
+
+def test_accepted_absolute_contract_and_legacy_routes_do_not_create_quality_failures(legacy_result):
+    result = deepcopy(legacy_result)
+    quality = result_quality_status(result)
+    for flag in (None, True):
+        result.coil_parts[0].joint_route_diagnostics = {
+            "status": "accepted",
+            "selected_absolute_field_contract_met": flag,
+        }
+        assert result_quality_status(result) == quality
+    assert result_summary_dict(result)["routing_absolute_field_contract_status"] == "PASS"
+
+
+def test_report_distinguishes_route_clearance_from_source_contour_spacing(legacy_result):
+    result = deepcopy(legacy_result)
+    result.coil_parts[0].joint_route_diagnostics = {
+        "status": "accepted",
+        "source_contour_clearance_m": 0.005,
+        "routing_clearance_target_m": 0.0035,
+        "selected_physical_minimum_centerline_distance_m": 0.0036,
+        "selected_physical_clearance_lower_bound_m": 0.0035,
+    }
+    summary = result_summary_dict(result)
+    assert summary["routing_source_contour_clearance_m"] == 0.005
+    assert summary["routing_clearance_target_m"] == 0.0035
+    assert summary["routing_physical_minimum_centerline_distance_m"] == 0.0036
+    assert summary["routing_physical_clearance_lower_bound_m"] == 0.0035

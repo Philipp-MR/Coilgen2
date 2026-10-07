@@ -9,7 +9,11 @@ permissions:
 
 env:
   MPLBACKEND: Agg
+  QT_QPA_PLATFORM: offscreen
   MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
+  OPENBLAS_NUM_THREADS: "1"
+  MKL_NUM_THREADS: "1"
+  OMP_NUM_THREADS: "1"
 
 concurrency:
   group: quality-${{ github.ref }}
@@ -35,7 +39,7 @@ jobs:
       - name: Install CoilGen and development dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
+          python -m pip install -e ".[dev,gui,plot-qt]"
       - name: Check source quality
         run: python -m ruff check src tests projects
       - name: Check source formatting

@@ -1,0 +1,82 @@
+[
+  {
+    "case": "01_nested_flat",
+    "retained_arcs": 7,
+    "connections": 6,
+    "source_arc_orientation_checks": 7,
+    "max_endpoint_gap_mm": 0.0,
+    "status": "finite coordinates, source/arc circulation and ordered C0 continuity verified; fabrication and fields not certified"
+  },
+  {
+    "case": "02_nested_curved",
+    "retained_arcs": 7,
+    "connections": 6,
+    "source_arc_orientation_checks": 7,
+    "max_endpoint_gap_mm": 0.0,
+    "status": "finite coordinates, source/arc circulation and ordered C0 continuity verified; fabrication and fields not certified"
+  },
+  {
+    "case": "03_lobes",
+    "retained_arcs": 6,
+    "connections": 5,
+    "source_arc_orientation_checks": 6,
+    "max_endpoint_gap_mm": 0.0,
+    "status": "finite coordinates, source/arc circulation and ordered C0 continuity verified; fabrication and fields not certified"
+  },
+  {
+    "case": "04_lobes",
+    "retained_arcs": 6,
+    "connections": 5,
+    "source_arc_orientation_checks": 6,
+    "max_endpoint_gap_mm": 0.0,
+    "status": "finite coordinates, source/arc circulation and ordered C0 continuity verified; fabrication and fields not certified"
+  },
+  {
+    "case": "05_branching",
+    "retained_arcs": 6,
+    "connections": 5,
+    "source_arc_orientation_checks": 6,
+    "max_endpoint_gap_mm": 0.0,
+    "status": "finite coordinates, source/arc circulation and ordered C0 continuity verified; fabrication and fields not certified"
+  },
+  {
+    "case": "06_hole",
+    "retained_arcs": 7,
+    "connections": 6,
+    "source_arc_orientation_checks": 7,
+    "max_endpoint_gap_mm": 0.0,
+    "status": "finite coordinates, source/arc circulation and ordered C0 continuity verified; fabrication and fields not certified"
+  },
+  {
+    "case": "07_cylinder",
+    "retained_arcs": 7,
+    "connections": 6,
+    "source_arc_orientation_checks": 7,
+    "max_endpoint_gap_mm": 1.1546319456101628e-14,
+    "status": "finite coordinates, source/arc circulation and ordered C0 continuity verified; fabrication and fields not certified"
+  },
+  {
+    "case": "08_torus",
+    "retained_arcs": 6,
+    "connections": 5,
+    "source_arc_orientation_checks": 6,
+    "max_endpoint_gap_mm": 1.9539925233402755e-14,
+    "status": "finite coordinates, source/arc circulation and ordered C0 continuity verified; fabrication and fields not certified"
+  },
+  {
+    "case": "09_boundary_arcs",
+    "retained_arcs": 5,
+    "connections": 4,
+    "source_arc_orientation_checks": 0,
+    "max_endpoint_gap_mm": 0.0,
+    "status": "finite coordinates, source/arc circulation and ordered C0 continuity verified; fabrication and fields not certified"
+  },
+  {
+    "case": "10_disconnected",
+    "retained_arcs": 6,
+    "connections": 5,
+    "source_arc_orientation_checks": 6,
+    "max_endpoint_gap_mm": 3.2994715218560867e-31,
+    "status": "finite coordinates, source/arc circulation and ordered C0 continuity verified; fabrication and fields not certified"
+  }
+]

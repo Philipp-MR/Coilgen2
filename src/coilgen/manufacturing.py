@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import CoilGenConfig
+from .conductor_geometry import conductor_trace, trace_segment_geometry
 from .geometry_collision import (
     _SegmentBvhNode,
     _segment_bvh_candidate_pairs,
@@ -21,6 +22,40 @@ from .wire_provenance import nearest_source_segment_indices, transfer_segment_ge
 
 _DEFAULT_MESH_AREA_TOLERANCE_M2 = 1e-12
 _WIRE_TRACE_STEP_MIN_SEGMENT_LENGTH_M = 1e-12
+
+
+class SweptBodyExportError(ValueError):
+    """A swept body failed manufacturing readiness checks for export."""
+
+
+def realize_coil_paths(parts: list[CoilPart], config: CoilGenConfig) -> list[CoilPart]:
+    """Realize mounted conductor centroids and frames without mesh tessellation.
+
+    This uses the same projection, fillets, sampling and profile-ring repair as
+    the full sweep. Temporary profile samples preserve its physical centerline;
+    no triangular conductor boundary or mesh manufacturing certificate is made.
+    A subsequent full sweep supplies the final mesh and export readiness checks.
+    """
+
+    cross_section = (
+        None if config.skip_sweep or config.contour_only_sweep_mode else conductor_cross_section_points(config)
+    )
+    for part in parts:
+        part.swept_body = None
+        part.swept_bodies = []
+        part.fabrication_path = None
+        diagnostics = {"fabrication_path_created": False, "swept_body_created": False}
+        if cross_section is not None and part.wire_path is not None and len(part.wire_path.v) >= 2:
+            realized, diagnostics = _realize_wire_path(part, cross_section, config)
+            diagnostics.update(
+                {
+                    "fabrication_path_created": realized is not None,
+                    "swept_body_created": False,
+                    "sweep_geometry_role": "physical_centerline",
+                }
+            )
+        part.manufacturing_diagnostics = diagnostics
+    return parts
 
 
 def create_swept_coil_meshes(parts: list[CoilPart], config: CoilGenConfig) -> list[CoilPart]:
@@ -327,7 +362,7 @@ def save_manufacturing_diagnostics(
     *,
     prefix: str = "coil_body",
 ) -> list[Path]:
-    """Save swept-body manufacturing diagnostics as JSON and CSV."""
+    """Save manufacturing checks, routing decisions and lift provenance."""
 
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -336,19 +371,57 @@ def save_manufacturing_diagnostics(
     csv_path = output / f"{prefix}_manufacturing_diagnostics.csv"
     json_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
     _write_rows_csv(csv_path, rows)
-    return [json_path, csv_path]
+    files = [json_path, csv_path]
+    for part_index, part in enumerate(result.coil_parts, 1):
+        joint_routing = getattr(part, "joint_route_diagnostics", {})
+        if joint_routing:
+            path = output / f"{prefix}_part{part_index:03d}_joint_routing.json"
+            path.write_text(
+                json.dumps(
+                    {"schema_version": 1, "part_index": part_index, "diagnostics": joint_routing},
+                    indent=2,
+                    default=_provenance_json_value,
+                ),
+                encoding="utf-8",
+            )
+            files.append(path)
+        provenance = getattr(part, "normal_shift_provenance", {})
+        if not provenance:
+            continue
+        arrays = {key: value for key, value in provenance.items() if isinstance(value, np.ndarray)}
+        metadata = {
+            "schema_version": 1,
+            "part_index": part_index,
+            "length_unit": "m",
+            "diagnostics": part.normal_shift_diagnostics,
+            **{key: value for key, value in provenance.items() if key not in arrays},
+        }
+        # Numeric arrays plus JSON metadata load with allow_pickle=False. Keep
+        # the pre-cleanup point indices independent of the final wire CSV.
+        arrays["metadata_json"] = np.asarray(json.dumps(metadata, default=_provenance_json_value))
+        path = output / f"{prefix}_part{part_index:03d}_normal_shift_provenance.npz"
+        np.savez_compressed(path, **arrays)
+        files.append(path)
+    return files
 
 
-def wire_trace_rows(result: CoilGenResult) -> list[dict[str, int | float | str]]:
-    """Return routed wire centerline points and interval geometry in SI units."""
+def _provenance_json_value(value):
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    raise TypeError(f"Unsupported normal-shift provenance value: {type(value).__name__}")
+
+
+def wire_trace_rows(result: CoilGenResult, *, source: str = "auto") -> list[dict[str, int | float | str]]:
+    """Return final physical centroid points and interval geometry in SI units."""
 
     rows: list[dict[str, int | float | str]] = []
     for part_ind, part in enumerate(result.coil_parts, start=1):
-        if part.wire_path is None:
+        points, kind = conductor_trace(part, source=source)
+        if points is None:
             continue
-        points = np.asarray(part.wire_path.v, dtype=float)
-        if points.ndim != 2 or points.shape[1] != 3 or len(points) == 0:
-            continue
+        geometry = trace_segment_geometry(part, kind)
         segment_lengths = np.zeros(len(points), dtype=float)
         if len(points) > 1:
             segment_lengths[1:] = np.linalg.norm(np.diff(points, axis=0), axis=1)
@@ -356,11 +429,7 @@ def wire_trace_rows(result: CoilGenResult) -> list[dict[str, int | float | str]]
         for point_ind, (point, segment_length, cumulative_length) in enumerate(
             zip(points, segment_lengths, cumulative_lengths),
         ):
-            segment_geometry = (
-                part.wire_path.segment_geometry[point_ind - 1].value
-                if point_ind > 0 and point_ind - 1 < len(part.wire_path.segment_geometry)
-                else ""
-            )
+            segment_geometry = geometry[point_ind - 1].value if point_ind > 0 and point_ind - 1 < len(geometry) else ""
             rows.append(
                 {
                     "part_index": int(part_ind),
@@ -381,6 +450,7 @@ def save_wire_trace_as_csv(
     output_dir: str | Path,
     *,
     prefix: str = "coil",
+    source: str = "auto",
 ) -> list[Path]:
     """Save routed wire centerlines using the configured CSV schema."""
 
@@ -389,7 +459,7 @@ def save_wire_trace_as_csv(
     config = getattr(result, "input_data", None)
     csv_format = str(getattr(config, "wire_trace_csv_format", "detailed")).strip().lower()
     if csv_format == "xyz_no_header":
-        return _save_wire_paths_as_xyz_csv(result, output, prefix=prefix)
+        return _save_wire_paths_as_xyz_csv(result, output, prefix=prefix, source=source)
 
     path = output / f"{prefix}_wire_trace.csv"
     fieldnames = [
@@ -405,7 +475,7 @@ def save_wire_trace_as_csv(
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(wire_trace_rows(result))
+        writer.writerows(wire_trace_rows(result, source=source))
     return [path]
 
 
@@ -414,13 +484,14 @@ def save_wire_trace_artifacts(
     output_dir: str | Path,
     *,
     prefix: str = "coil",
+    source: str = "auto",
 ) -> list[Path]:
     """Save contour STEP wires plus routed-path CSV/STEP geometry when available."""
 
     return [
-        *save_wire_trace_as_csv(result, output_dir, prefix=prefix),
+        *save_wire_trace_as_csv(result, output_dir, prefix=prefix, source=source),
         *save_contour_traces_as_step(result, output_dir, prefix=prefix),
-        *save_wire_trace_as_step(result, output_dir, prefix=prefix),
+        *save_wire_trace_as_step(result, output_dir, prefix=prefix, source=source),
     ]
 
 
@@ -467,6 +538,7 @@ def save_wire_trace_as_step(
     output_dir: str | Path,
     *,
     prefix: str = "coil",
+    source: str = "auto",
 ) -> list[Path]:
     """Save each routed XYZ centerline as a piecewise-linear STEP curve path.
 
@@ -477,7 +549,7 @@ def save_wire_trace_as_step(
 
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    routed_parts = _routed_wire_parts(result)
+    routed_parts = _routed_wire_parts(result, source=source)
     multiple = len(routed_parts) > 1
     files: list[Path] = []
     for part_index, points in routed_parts:
@@ -488,10 +560,12 @@ def save_wire_trace_as_step(
     return files
 
 
-def _save_wire_paths_as_xyz_csv(result: CoilGenResult, output: Path, *, prefix: str) -> list[Path]:
+def _save_wire_paths_as_xyz_csv(
+    result: CoilGenResult, output: Path, *, prefix: str, source: str = "auto"
+) -> list[Path]:
     """Write one headerless ordered X,Y,Z file per connected routed part."""
 
-    routed_parts = _routed_wire_parts(result)
+    routed_parts = _routed_wire_parts(result, source=source)
 
     config = getattr(result, "input_data", None)
     unit = str(getattr(config, "wire_trace_csv_length_unit", "m")).strip().lower()
@@ -517,13 +591,11 @@ def _save_wire_paths_as_xyz_csv(result: CoilGenResult, output: Path, *, prefix: 
     return files
 
 
-def _routed_wire_parts(result: CoilGenResult) -> list[tuple[int, np.ndarray]]:
+def _routed_wire_parts(result: CoilGenResult, *, source: str = "auto") -> list[tuple[int, np.ndarray]]:
     routed_parts: list[tuple[int, np.ndarray]] = []
     for part_index, part in enumerate(result.coil_parts, start=1):
-        if part.wire_path is None:
-            continue
-        points = np.asarray(part.wire_path.v, dtype=float)
-        if points.ndim != 2 or points.shape[1] != 3 or len(points) == 0:
+        points, _kind = conductor_trace(part, source=source)
+        if points is None:
             continue
         if not np.all(np.isfinite(points)):
             raise ValueError(f"Wire path for coil part {part_index} contains non-finite coordinates.")
@@ -623,9 +695,13 @@ def _finalize_manufacturing_diagnostics(part: CoilPart) -> None:
         diagnostics.get("sweep_final_min_bend_radius_violation", False)
     ):
         reasons.append("minimum_bend_radius_violation")
-    if bool(diagnostics.get("sweep_curvature_envelope_violation", False)) or bool(
-        diagnostics.get("sweep_final_curvature_envelope_violation", False)
-    ):
+    # Ring repair can remove near-redundant samples. The mounted centroid is
+    # the manufactured path; retain the precursor flag for diagnostics only.
+    curvature_violation = diagnostics.get(
+        "sweep_final_curvature_envelope_violation",
+        diagnostics.get("sweep_curvature_envelope_violation", False),
+    )
+    if bool(curvature_violation):
         reasons.append("curvature_envelope_violation")
     if bool(diagnostics.get("sweep_final_collinear_reversal", False)):
         reasons.append("collinear_path_reversal")
@@ -635,6 +711,10 @@ def _finalize_manufacturing_diagnostics(part: CoilPart) -> None:
         reasons.append("minimum_segment_length_violation")
     if bool(diagnostics.get("sweep_local_fold_violation", False)):
         reasons.append("folded_sweep_quad")
+    if bool(diagnostics.get("sweep_profile_jacobian_violation", False)):
+        reasons.append("local_profile_inversion")
+    if bool(diagnostics.get("sweep_final_frame_rotation_violation", False)):
+        reasons.append("unresolved_frame_sampling")
     if bool(diagnostics.get("sweep_triangle_quality_violation", False)):
         reasons.append("poor_sweep_triangle_quality")
     if int(diagnostics.get("sweep_adaptive_depth_limit_count", 0)) > 0:
@@ -773,11 +853,21 @@ def sweep_wire_path(part: CoilPart, cross_section: np.ndarray, config: CoilGenCo
     return mesh
 
 
-def _sweep_wire_path_with_diagnostics(
+@dataclass(frozen=True)
+class _RealizedWirePath:
+    fabrication_path: FabricationPath
+    support_points: np.ndarray
+    ring_vertices: np.ndarray
+    mounting_offset: float
+
+
+def _realize_wire_path(
     part: CoilPart,
     cross_section: np.ndarray,
     config: CoilGenConfig,
-) -> tuple[Mesh, dict[str, float | int | bool | str]]:
+) -> tuple[_RealizedWirePath | None, dict[str, float | int | bool | str]]:
+    """Prepare the authoritative physical path shared by routing and sweeping."""
+
     source_points = np.asarray(part.wire_path.v, dtype=float)
     raw_points = _dedupe_path(source_points)
     closed_path = _is_closed_path(raw_points)
@@ -805,9 +895,11 @@ def _sweep_wire_path_with_diagnostics(
     path_diagnostics["manufacturing_route_precheck_failure_reasons"] = ";".join(route_precheck_reasons)
     minimum_point_count = 3 if closed_path else 2
     if len(points) < minimum_point_count:
-        return Mesh(vertices=np.zeros((0, 3), dtype=float), faces=np.zeros((0, 3), dtype=np.int64)), path_diagnostics
+        return None, path_diagnostics
 
     mounting_offset = _mounting_centerline_offset(config, cross_section)
+    prepared_points = points
+    prepared_geometry = segment_geometry
     points, tangents, normals, binormals, vertices, ring_repair_diagnostics = _build_sweep_rings(
         part,
         points,
@@ -817,11 +909,90 @@ def _sweep_wire_path_with_diagnostics(
         closed=closed_path,
         mounting_offset=mounting_offset,
     )
+    final_segment_geometry = _transfer_path_segment_geometry(
+        prepared_points,
+        prepared_geometry,
+        points,
+        source_closed=closed_path,
+        target_closed=closed_path,
+    )
     path_diagnostics.update(ring_repair_diagnostics)
+    path_diagnostics.update(
+        _final_frame_and_profile_diagnostics(
+            points,
+            tangents,
+            normals,
+            binormals,
+            cross_section,
+            config,
+            closed=closed_path,
+            mounting_offset=mounting_offset,
+        )
+    )
     path_diagnostics["sweep_output_point_count"] = int(len(points))
+    diagnostics = {
+        **path_diagnostics,
+        "sweep_ring_count": int(len(points)),
+        "sweep_closed_path": bool(closed_path),
+        "sweep_section_point_count": int(len(cross_section)),
+        "sweep_cross_section_axis_0": "surface_transverse",
+        "sweep_cross_section_axis_1": "surface_normal",
+        "conductor_mounting_mode": _normalised_text(config.conductor_mounting_mode),
+        "sweep_centerline_offset_m": float(mounting_offset),
+        "sweep_frame_method_requested": _normalised_text(config.sweep_frame_method),
+        "sweep_frame_method": _effective_sweep_frame_method(config, segment_geometry),
+    }
+    diagnostics.update(
+        _physical_clearance_diagnostics(
+            part,
+            points + mounting_offset * normals,
+            cross_section,
+            config,
+            closed=closed_path,
+        )
+    )
+    diagnostics["sweep_capsule_centerline_reference"] = "mounted_profile_origin"
+    centroid = _polygon_centroid(cross_section)
+    mounted_points = points + (mounting_offset + centroid[1]) * normals + centroid[0] * binormals
+    physical_points = np.vstack((mounted_points, mounted_points[0])) if closed_path else mounted_points
+    final_support_points = np.vstack((points, points[0])) if closed_path else points
+    source_indices = nearest_source_segment_indices(source_points, final_support_points)
+    part.fabrication_path = FabricationPath(
+        points_m=mounted_points,
+        tangents=tangents,
+        normals=normals,
+        transverse=binormals,
+        cross_section_m=cross_section,
+        source_points_m=source_points,
+        closed=closed_path,
+        segment_owners=tuple(part.wire_path.segment_owners[index] for index in source_indices)
+        if part.wire_path.segment_owners
+        else (),
+        segment_geometry=tuple(final_segment_geometry),
+    )
+    diagnostics.update(_final_path_bend_diagnostics(mounted_points, cross_section, config, closed=closed_path))
+    diagnostics.update(_source_path_displacement_diagnostics(source_points, physical_points, source_indices))
+    diagnostics["sweep_surface_realization"] = getattr(config, "sweep_surface_realization", "analytic")
+    diagnostics["sweep_physics_geometry"] = "mounted_profile_centroid"
+    return _RealizedWirePath(part.fabrication_path, points, vertices, mounting_offset), diagnostics
+
+
+def _sweep_wire_path_with_diagnostics(
+    part: CoilPart,
+    cross_section: np.ndarray,
+    config: CoilGenConfig,
+) -> tuple[Mesh, dict[str, float | int | bool | str]]:
+    realized, diagnostics = _realize_wire_path(part, cross_section, config)
+    if realized is None:
+        return Mesh(vertices=np.zeros((0, 3), dtype=float), faces=np.zeros((0, 3), dtype=np.int64)), diagnostics
+
+    fabrication_path = realized.fabrication_path
+    points = realized.support_points
+    vertices = realized.ring_vertices
+    cross_section = fabrication_path.cross_section_m
+    closed_path = fabrication_path.closed
     ring_count = len(points)
     section_count = len(cross_section)
-
     faces, loft_diagnostics = _triangulate_sweep_laterals(
         vertices,
         ring_count,
@@ -846,75 +1017,94 @@ def _sweep_wire_path_with_diagnostics(
             faces.append([end_center, end_base + section_next, end_base + section_ind])
 
     mesh = Mesh(vertices=vertices, faces=np.asarray(faces, dtype=np.int64))
-    diagnostics = {
-        **path_diagnostics,
-        "sweep_ring_count": int(ring_count),
-        "sweep_closed_path": bool(closed_path),
-        "sweep_end_cap_count": 0 if closed_path else 2,
-        "sweep_section_point_count": int(section_count),
-        "sweep_cross_section_axis_0": "surface_transverse",
-        "sweep_cross_section_axis_1": "surface_normal",
-        "conductor_mounting_mode": _normalised_text(config.conductor_mounting_mode),
-        "sweep_centerline_offset_m": float(mounting_offset),
-        "sweep_frame_method_requested": _normalised_text(config.sweep_frame_method),
-        "sweep_frame_method": _effective_sweep_frame_method(config, segment_geometry),
-    }
+    diagnostics["sweep_end_cap_count"] = 0 if closed_path else 2
     diagnostics.update(loft_diagnostics)
     diagnostics.update(_swept_mesh_quality_diagnostics(mesh, config))
     diagnostics.update(
         _sweep_section_conservation_diagnostics(
             mesh,
-            vertices[: ring_count * section_count],
+            realized.ring_vertices,
             points,
-            normals,
-            binormals,
+            fabrication_path.normals,
+            fabrication_path.transverse,
             cross_section,
-            mounting_offset,
+            realized.mounting_offset,
             closed=closed_path,
         )
     )
-    diagnostics.update(
-        _support_conformity_diagnostics(
-            part,
-            mesh,
-            points,
-            config,
-        )
-    )
-    diagnostics.update(
-        _physical_clearance_diagnostics(
-            part,
-            points + mounting_offset * normals,
-            cross_section,
-            config,
-            closed=closed_path,
-        )
-    )
-    diagnostics["sweep_capsule_centerline_reference"] = "mounted_profile_origin"
+    diagnostics.update(_support_conformity_diagnostics(part, mesh, points, config))
     diagnostics.update(_final_mesh_collision_diagnostics(part, mesh, diagnostics))
-    centroid = _polygon_centroid(cross_section)
-    mounted_points = points + (mounting_offset + centroid[1]) * normals + centroid[0] * binormals
-    physical_points = np.vstack((mounted_points, mounted_points[0])) if closed_path else mounted_points
-    final_support_points = np.vstack((points, points[0])) if closed_path else points
-    source_indices = nearest_source_segment_indices(source_points, final_support_points)
-    part.fabrication_path = FabricationPath(
-        points_m=mounted_points,
-        tangents=tangents,
-        normals=normals,
-        transverse=binormals,
-        cross_section_m=cross_section,
-        source_points_m=source_points,
-        closed=closed_path,
-        segment_owners=tuple(part.wire_path.segment_owners[index] for index in source_indices)
-        if part.wire_path.segment_owners
-        else (),
-        segment_geometry=tuple(part.wire_path.segment_geometry[index] for index in source_indices),
-    )
-    diagnostics.update(_final_path_bend_diagnostics(mounted_points, cross_section, config, closed=closed_path))
-    diagnostics.update(_source_path_displacement_diagnostics(source_points, physical_points, source_indices))
-    diagnostics["sweep_surface_realization"] = getattr(config, "sweep_surface_realization", "analytic")
-    diagnostics["sweep_physics_geometry"] = "mounted_profile_centroid"
     return mesh, diagnostics
+
+
+def _final_frame_and_profile_diagnostics(
+    points,
+    tangents,
+    normals,
+    binormals,
+    cross_section,
+    config,
+    *,
+    closed,
+    mounting_offset,
+):
+    """Audit the actual output frames and sampled finite-profile regularity.
+
+    The sweep Jacobian is J = 1 - kappa dot r, where r includes the mounting
+    offset. Its minimum over a polygon occurs at a vertex. This local sampled
+    screen complements, and cannot replace, remote intersection checks.
+    """
+    angles = _frame_rotation_angles_deg(tangents, normals, binormals, closed=closed)
+    limit = float(config.sweep_max_frame_rotation_deg)
+    bad_frames = np.flatnonzero(angles > limit + 1e-6) if limit > 0.0 else np.empty(0, dtype=int)
+    diagnostics = {
+        "sweep_adaptive_max_frame_rotation_deg": float(np.max(angles, initial=0.0)),
+        "sweep_final_max_frame_rotation_deg": float(np.max(angles, initial=0.0)),
+        "sweep_final_frame_rotation_violation": bool(len(bad_frames)),
+        "sweep_final_frame_rotation_violation_count": int(len(bad_frames)),
+        "sweep_final_frame_rotation_worst_interval": int(np.argmax(angles)) if len(angles) else -1,
+        "sweep_profile_jacobian_method": "sampled_arclength_derivative",
+        "sweep_profile_jacobian_violation": False,
+        "sweep_profile_jacobian_violation_count": 0,
+        "sweep_profile_min_jacobian": 1.0,
+        "sweep_profile_jacobian_worst_ring": -1,
+        "sweep_profile_jacobian_worst_section": -1,
+    }
+    if len(points) < 3:
+        return diagnostics
+    lengths = np.maximum(_centerline_segment_lengths(points, closed=closed), 1e-15)
+    if closed:
+        forward = (np.roll(tangents, -1, axis=0) - tangents) / lengths[:, None]
+        backward = np.roll(forward, 1, axis=0)
+        before = np.roll(lengths, 1)
+        curvature = (lengths[:, None] * backward + before[:, None] * forward) / (before + lengths)[:, None]
+    else:
+        secants = np.diff(tangents, axis=0) / lengths[:, None]
+        curvature = np.empty_like(tangents)
+        curvature[0], curvature[-1] = secants[0], secants[-1]
+        curvature[1:-1] = (lengths[1:, None] * secants[:-1] + lengths[:-1, None] * secants[1:]) / (
+            lengths[:-1] + lengths[1:]
+        )[:, None]
+    curvature -= np.einsum("ij,ij->i", curvature, tangents)[:, None] * tangents
+    transverse_curvature = np.einsum("ij,ij->i", curvature, binormals)
+    normal_curvature = np.einsum("ij,ij->i", curvature, normals)
+    jacobian = (
+        1.0
+        - transverse_curvature[:, None] * cross_section[None, :, 0]
+        - normal_curvature[:, None] * (cross_section[None, :, 1] + mounting_offset)
+    )
+    worst_ring, worst_section = np.unravel_index(np.argmin(jacobian), jacobian.shape)
+    minimum = np.min(jacobian, axis=1)
+    diagnostics.update(
+        {
+            "sweep_profile_jacobian_violation": bool(np.any(minimum <= 0.0)),
+            "sweep_profile_jacobian_violation_count": int(np.count_nonzero(minimum <= 0.0)),
+            "sweep_profile_min_jacobian": float(minimum[worst_ring]),
+            "sweep_profile_jacobian_worst_ring": int(worst_ring),
+            "sweep_profile_jacobian_worst_section": int(worst_section),
+        }
+    )
+    return diagnostics
 
 
 def _final_path_bend_diagnostics(points, cross_section, config, *, closed):
@@ -1084,6 +1274,33 @@ def _triangulate_sweep_laterals(
 ) -> tuple[list[list[int]], dict[str, int | float | bool]]:
     """Triangulate loft quads with vectorized fold/aspect optimization."""
 
+    corner_indices, use_alternate, selected_folds, _aspects, selected_dots = _sweep_lateral_quad_metrics(
+        vertices, ring_count, section_count, closed=closed, optimize_diagonals=optimize_diagonals
+    )
+    a, b, c, d = corner_indices
+    primary = np.stack((np.column_stack((a, c, d)), np.column_stack((a, d, b))), axis=1)
+    if optimize_diagonals:
+        alternate = np.stack((np.column_stack((a, c, b)), np.column_stack((b, c, d))), axis=1)
+        selected = np.where(use_alternate[:, None, None], alternate, primary)
+    else:
+        selected = primary
+    folded_quad_count = int(np.count_nonzero(selected_folds))
+    worst_quad_normal_dot = float(np.min(selected_dots)) if len(selected_dots) else 1.0
+    worst_quad = int(np.argmin(selected_dots)) if len(selected_dots) else -1
+    return selected.reshape((-1, 3)).tolist(), {
+        "sweep_alternate_quad_diagonal_count": int(np.count_nonzero(use_alternate)),
+        "sweep_folded_quad_count": int(folded_quad_count),
+        "sweep_worst_quad_normal_dot": float(worst_quad_normal_dot),
+        "sweep_worst_quad_ring": int(a[worst_quad] // section_count) if worst_quad >= 0 else -1,
+        "sweep_worst_quad_section": int(a[worst_quad] % section_count) if worst_quad >= 0 else -1,
+        "sweep_local_fold_violation": bool(folded_quad_count > 0),
+        "sweep_diagonal_optimization_skipped": bool(not optimize_diagonals),
+    }
+
+
+def _sweep_lateral_quad_metrics(vertices, ring_count, section_count, *, closed, optimize_diagonals=True):
+    """Evaluate profile-ring regularity without building conductor mesh faces."""
+
     segment_count = ring_count if closed else ring_count - 1
     ring_indices = np.repeat(np.arange(segment_count, dtype=np.int64), section_count)
     section_indices = np.tile(np.arange(section_count, dtype=np.int64), segment_count)
@@ -1093,43 +1310,34 @@ def _triangulate_sweep_laterals(
     b = ring_indices * section_count + following_sections
     c = following_rings * section_count + section_indices
     d = following_rings * section_count + following_sections
-    primary = np.stack(
+    primary_coordinates = np.stack(
         (
-            np.column_stack((a, c, d)),
-            np.column_stack((a, d, b)),
+            np.stack((vertices[a], vertices[c], vertices[d]), axis=1),
+            np.stack((vertices[a], vertices[d], vertices[b]), axis=1),
         ),
         axis=1,
     )
-    primary_folds, primary_aspects, primary_dots = _quad_triangulation_metrics(vertices, primary)
-    alternate_count = 0
-    selected = primary
+    primary_folds, primary_aspects, primary_dots = _quad_coordinate_metrics(primary_coordinates)
+    use_alternate = np.zeros(len(a), dtype=bool)
     selected_folds = primary_folds
+    selected_aspects = primary_aspects
     selected_dots = primary_dots
     if optimize_diagonals:
-        alternate = np.stack(
+        alternate_coordinates = np.stack(
             (
-                np.column_stack((a, c, b)),
-                np.column_stack((b, c, d)),
+                np.stack((vertices[a], vertices[c], vertices[b]), axis=1),
+                np.stack((vertices[b], vertices[c], vertices[d]), axis=1),
             ),
             axis=1,
         )
-        alternate_folds, alternate_aspects, alternate_dots = _quad_triangulation_metrics(vertices, alternate)
+        alternate_folds, alternate_aspects, alternate_dots = _quad_coordinate_metrics(alternate_coordinates)
         use_alternate = (alternate_folds < primary_folds) | (
             (alternate_folds == primary_folds) & (alternate_aspects < primary_aspects)
         )
-        selected = np.where(use_alternate[:, None, None], alternate, primary)
         selected_folds = np.where(use_alternate, alternate_folds, primary_folds)
+        selected_aspects = np.where(use_alternate, alternate_aspects, primary_aspects)
         selected_dots = np.where(use_alternate, alternate_dots, primary_dots)
-        alternate_count = int(np.count_nonzero(use_alternate))
-    folded_quad_count = int(np.count_nonzero(selected_folds))
-    worst_quad_normal_dot = float(np.min(selected_dots)) if len(selected_dots) else 1.0
-    return selected.reshape((-1, 3)).tolist(), {
-        "sweep_alternate_quad_diagonal_count": alternate_count,
-        "sweep_folded_quad_count": int(folded_quad_count),
-        "sweep_worst_quad_normal_dot": float(worst_quad_normal_dot),
-        "sweep_local_fold_violation": bool(folded_quad_count > 0),
-        "sweep_diagonal_optimization_skipped": bool(not optimize_diagonals),
-    }
+    return (a, b, c, d), use_alternate, selected_folds, selected_aspects, selected_dots
 
 
 def _quad_triangulation_metrics(
@@ -1139,6 +1347,10 @@ def _quad_triangulation_metrics(
     """Return fold flags, worst altitude aspects, and normal dots per quad."""
 
     coordinates = vertices[np.asarray(triangles, dtype=np.int64)]
+    return _quad_coordinate_metrics(coordinates)
+
+
+def _quad_coordinate_metrics(coordinates):
     normals = np.cross(
         coordinates[:, :, 1] - coordinates[:, :, 0],
         coordinates[:, :, 2] - coordinates[:, :, 0],
@@ -1774,7 +1986,15 @@ def _build_sweep_rings(
             not current_bends[key] and trial_bends[key]
             for key in ("sweep_final_min_bend_radius_violation", "sweep_final_curvature_envelope_violation")
         )
-        improves_quality = improves_quality and not worsens_valid_bend
+        frame_limit = float(config.sweep_max_frame_rotation_deg)
+        preserves_frames = frame_limit <= 0.0 or _coarsening_preserves_frame_bound(
+            _frame_rotation_angles_deg(tangents, normals, binormals, closed=closed),
+            _frame_rotation_angles_deg(trial_tangents, trial_normals, trial_binormals, closed=closed),
+            np.flatnonzero(keep),
+            frame_limit,
+            closed=closed,
+        )
+        improves_quality = improves_quality and not worsens_valid_bend and preserves_frames
         if not improves_quality:
             return (
                 points,
@@ -1795,6 +2015,36 @@ def _build_sweep_rings(
         quality_coarsening_removed_count += len(quality_removals)
 
     raise RuntimeError("Unreachable sweep-ring repair state.")
+
+
+def _coarsening_preserves_frame_bound(
+    current_angles: np.ndarray,
+    trial_angles: np.ndarray,
+    kept_indices: np.ndarray,
+    limit_deg: float,
+    *,
+    closed: bool,
+) -> bool:
+    """Do not sacrifice a valid local frame interval for triangle quality.
+
+    A large pre-existing crease elsewhere cannot excuse a new violation. The
+    baseline for a merged interval is the worst old step along that interval,
+    including the seam when the first retained vertex is not vertex zero.
+    """
+    if not len(trial_angles):
+        return True
+    if closed:
+        first = int(kept_indices[0])
+        ordered_angles = np.concatenate((current_angles[first:], current_angles[:first]))
+        prior = np.maximum.reduceat(ordered_angles, kept_indices - first)
+    else:
+        prior = np.maximum.reduceat(current_angles, kept_indices[:-1])
+    # Existing bad creases can change by a few 1e-5 degrees when almost
+    # collinear samples are removed and the global guide solve is repeated.
+    # Permit that negligible comparison noise only on already-bad intervals;
+    # a previously valid interval must still satisfy the actual final cap.
+    permitted = np.where(prior > limit_deg + 1e-6, prior + 1e-4, limit_deg + 1e-6)
+    return bool(np.all(trial_angles <= permitted))
 
 
 def _sweep_ring_repair_diagnostics(
@@ -1828,18 +2078,16 @@ def _sweep_fold_and_quality_segments(
     *,
     closed: bool,
 ) -> tuple[int, np.ndarray, int, np.ndarray]:
-    faces, diagnostics = _triangulate_sweep_laterals(
+    _corners, _diagonals, folded, aspects, _dots = _sweep_lateral_quad_metrics(
         vertices,
         ring_count,
         section_count,
         closed=closed,
         optimize_diagonals=True,
     )
-    triangle_pairs = np.asarray(faces, dtype=np.int64).reshape((-1, 2, 3))
-    folded, aspects, _dots = _quad_triangulation_metrics(vertices, triangle_pairs)
     poor = (~np.isfinite(aspects)) | (aspects > max(float(maximum_altitude_aspect), 0.0))
     return (
-        int(diagnostics["sweep_folded_quad_count"]),
+        int(np.count_nonzero(folded)),
         np.unique(np.flatnonzero(folded) // section_count),
         int(np.count_nonzero(poor)),
         np.unique(np.flatnonzero(poor) // section_count),
@@ -1898,7 +2146,12 @@ def _safe_fold_coarsening_removals(
                 )
             )
             deviation = float(np.linalg.norm(points[candidate] - (points[previous] + projection * replacement)))
-            if deviation <= tolerance:
+            local_tolerance = (
+                tolerance
+                if incoming_geometry == outgoing_geometry == WirePathGeometry.SURFACE
+                else min(tolerance, max(float(config.sweep_collinearity_tolerance), 0.0), 1e-8)
+            )
+            if deviation <= local_tolerance:
                 scored.append((deviation, candidate))
 
     removals: set[int] = set()
@@ -1997,6 +2250,275 @@ def _safe_short_ring_point_removals(
     return removals
 
 
+@dataclass
+class _SweepSourceFrameState:
+    """Local, certified source sequence and reusable physical bend analysis."""
+
+    eligible: bool = False
+    source_points: np.ndarray | None = None
+    source_geometry: list[WirePathGeometry] | None = None
+    owner_keys: list[tuple] | None = None
+    analysis_points: np.ndarray | None = None
+    analysis_geometry: list[WirePathGeometry] | None = None
+    surface: _AnalyticCylinderSurface | None = None
+    required_radius: float = 0.0
+    work: object | None = None
+    diagnostics: dict = field(default_factory=dict)
+    forced_points: set[bytes] = field(default_factory=set)
+
+
+def _retain_owned_surface_curve_samples(
+    source_points,
+    source_geometry,
+    analysis_points,
+    analysis_geometry,
+    owner_keys,
+    config,
+    *,
+    closed,
+):
+    """Retain ordered original connector samples needed by the frame bound.
+
+    Ownership is supplied only after the entire projected source sequence and
+    its SURFACE/FREE contracts match the part. Protected contour RDP intervals
+    are unchanged. No interpolated point, refit, or nominal change is made.
+    """
+    frame_limit = float(config.sweep_max_frame_rotation_deg)
+    if not 0 < frame_limit < 180 or len(owner_keys) != len(source_geometry):
+        return analysis_points, analysis_geometry, 0
+    mutable = np.asarray(
+        [
+            owner[0] != "contour_loop"
+            and owner[-1] in {"joint_spiral_join", "joint_return"}
+            and WirePathGeometry(source_geometry[index]) == WirePathGeometry.SURFACE
+            for index, owner in enumerate(owner_keys)
+        ],
+        dtype=bool,
+    )
+    if not np.any(mutable):
+        return analysis_points, analysis_geometry, 0
+    lookup = {}
+    for index, point in enumerate(source_points):
+        lookup.setdefault(point.tobytes(), []).append(index)
+    if any(len(indices) != 1 for indices in lookup.values()):
+        return analysis_points, analysis_geometry, 0
+    keep = {lookup[point.tobytes()][0] for point in analysis_points}
+    for index in np.flatnonzero(mutable):
+        if not (mutable[(index - 1) % len(mutable)] if closed or index > 0 else False):
+            keep.add(int(index))
+        if not (mutable[(index + 1) % len(mutable)] if closed or index + 1 < len(mutable) else False):
+            keep.add((int(index) + 1) % len(source_points))
+    for _ in range(16):
+        indices = sorted(keep)
+        reduced = source_points[indices]
+        tangents = _path_tangents(reduced, closed=closed)
+        first, second = (tangents, np.roll(tangents, -1, axis=0)) if closed else (tangents[:-1], tangents[1:])
+        steps = np.degrees(np.arccos(np.clip(np.einsum("ij,ij->i", first, second), -1, 1)))
+        native = _polyline_turn_angles_deg(reduced, closed=closed)
+        # The open-path helper omits endpoints, while edge indexing needs them.
+        if not closed:
+            native = np.r_[0.0, native, 0.0]
+        violating = steps > 0.7 * frame_limit
+        violating |= native[: len(steps)] > 0.7 * frame_limit
+        violating |= np.roll(native, -1)[: len(steps)] > 0.7 * frame_limit
+        additions = set()
+        for edge in np.flatnonzero(violating):
+            start, stop = indices[edge], indices[(edge + 1) % len(indices)]
+            count = (stop - start) % len(source_points) if closed else stop - start
+            if count > 1 and all(mutable[(start + offset) % len(mutable)] for offset in range(count)):
+                additions.add((start + count // 2) % len(source_points))
+        if not additions:
+            break
+        keep.update(additions)
+    retained = source_points[sorted(keep)]
+    retained_geometry = _transfer_path_segment_geometry(
+        source_points, source_geometry, retained, source_closed=closed, target_closed=closed
+    )
+    return retained, retained_geometry, int(np.count_nonzero(mutable))
+
+
+def _merge_source_cluster_details(diagnostics, details):
+    """Keep applied certificates and cumulative work honest across passes."""
+    previous_count = int(diagnostics.get("sweep_corner_cluster_resolved_count", 0))
+    previous_certificates = diagnostics.get("sweep_corner_cluster_certificates", [])
+    initial_conflicts = diagnostics.get("sweep_corner_cluster_initial_conflict_count")
+    initial_candidates = diagnostics.get("sweep_corner_cluster_initial_candidate_count")
+    exhausted = diagnostics.get("sweep_corner_cluster_budget_exhausted", False)
+    diagnostics.update(details)
+    diagnostics["sweep_corner_cluster_resolved_count"] += previous_count
+    diagnostics["sweep_corner_cluster_certificates"] = (
+        previous_certificates + details["sweep_corner_cluster_certificates"]
+    )
+    diagnostics["sweep_corner_cluster_budget_exhausted"] |= exhausted
+    if initial_conflicts is not None:
+        diagnostics["sweep_corner_cluster_initial_conflict_count"] = initial_conflicts
+        diagnostics["sweep_corner_cluster_initial_candidate_count"] = initial_candidates
+
+
+def _plan_source_frame_corners(points, geometry, radius, config, surface, forced_points=None):
+    candidates = _sweep_corner_candidates(
+        points,
+        geometry,
+        radius,
+        config,
+        closed=False,
+        analytic_surface=surface,
+        frame_sampling=True,
+        forced_frame_points=forced_points,
+    )
+    trim = [
+        _candidate_with_analytic_surface_tangents(points, candidate, radius, surface)
+        if candidate.blend_geometry == WirePathGeometry.SURFACE
+        else candidate
+        for candidate in candidates
+    ]
+    plans, conflicts, details = _plan_open_sweep_corner_intervals(
+        points, geometry, trim, radius, config, analytic_surface=surface
+    )
+    return trim, plans, conflicts, details
+
+
+def _repair_source_frame_sampling(part, points, geometry, section, config, state, *, closed):
+    """Resolve actual tangent-frame jumps at unique original source vertices.
+
+    Reuse the realized private analysis and one global cluster work budget.
+    Midpoint chord subdivision cannot round a genuine source corner. Unmapped
+    or ambiguous failures remain unresolved for the unchanged frame gate.
+    """
+    from .sweep_corner_clusters import resolve_source_corner_clusters
+
+    source_lookup = {}
+    for index, point in enumerate(state.source_points):
+        source_lookup.setdefault(point.tobytes(), []).append(index)
+    completed_passes = 0
+    unresolved_keys = 0
+    for repair_pass in range(2):
+        tangents = _path_tangents(points, closed=closed)
+        normal, transverse = _path_frames(part, points, tangents, geometry, config, closed=closed)
+        angles = _frame_rotation_angles_deg(tangents, normal, transverse, closed=closed)
+        bad = np.flatnonzero(angles > float(config.sweep_max_frame_rotation_deg))
+        if not len(bad):
+            break
+        analysis = state.analysis_points
+        lookup = {}
+        for index, point in enumerate(analysis):
+            lookup.setdefault(point.tobytes(), []).append(index)
+        forced = set()
+        for edge in bad:
+            available = []
+            for index in (int(edge), (int(edge) + 1) % len(points)):
+                key = points[index].tobytes()
+                source_indices, analysis_indices = source_lookup.get(key, []), lookup.get(key, [])
+                if len(source_indices) != 1 or len(analysis_indices) != 1:
+                    continue
+                source_index, analysis_index = source_indices[0], analysis_indices[0]
+                if (
+                    not 0 < analysis_index < len(analysis) - 1
+                    or state.source_geometry[(source_index - 1) % len(state.source_geometry)]
+                    != WirePathGeometry.SURFACE
+                    or state.source_geometry[source_index % len(state.source_geometry)] != WirePathGeometry.SURFACE
+                ):
+                    continue
+                turn = _analytic_surface_turn_angle_deg(
+                    *analysis[analysis_index - 1 : analysis_index + 2], state.surface
+                )
+                available.append((turn, -analysis_index, key))
+            if not available:
+                unresolved_keys += 1
+            else:
+                forced.add(max(available)[2])
+        if unresolved_keys:
+            break
+        state.forced_points.update(forced)
+        trim, plans, conflicts, details = _plan_source_frame_corners(
+            analysis, state.analysis_geometry, state.required_radius, config, state.surface, state.forced_points
+        )
+        if conflicts:
+            analysis, labels, extra = resolve_source_corner_clusters(
+                part,
+                analysis,
+                state.analysis_geometry,
+                state.source_points,
+                state.source_geometry,
+                state.surface,
+                trim,
+                conflicts,
+                state.required_radius,
+                config,
+                work=state.work,
+                maximum_clusters=max(16 - state.work.clusters, 0),
+            )
+            _merge_source_cluster_details(state.diagnostics, extra)
+            state.analysis_points, state.analysis_geometry = analysis, labels
+            trim, plans, conflicts, details = _plan_source_frame_corners(
+                analysis, labels, state.required_radius, config, state.surface, state.forced_points
+            )
+        state.diagnostics.update(details)
+        state.diagnostics["sweep_corner_cluster_remaining_conflict_count"] = len(conflicts)
+        if conflicts:
+            state.diagnostics["sweep_bend_trim_conflict_count"] = len(conflicts)
+            state.diagnostics["sweep_bend_infeasible_count"] = len(conflicts)
+            break
+        resolved = {corner.index: plans[corner.index].candidate for corner in trim if corner.index in plans}
+        build = _build_radius_controlled_fillet_path(
+            part,
+            analysis,
+            state.analysis_geometry,
+            resolved,
+            state.required_radius,
+            config,
+            closed=False,
+            corner_plans=plans,
+        )
+        if build.failed_indices:
+            state.diagnostics["sweep_bend_infeasible_count"] = len(build.failed_indices)
+            break
+        bent = build.points
+        if closed and np.linalg.norm(bent[-1] - bent[0]) <= 1e-10:
+            bent = bent[:-1]
+        proposed, proposed_geometry, sampling = _surface_adaptive_resample(
+            part, bent, build.segment_geometry, section, config, closed=closed
+        )
+        radii = _polyline_circumradii(proposed, closed=closed, minimum_turn_angle_deg=1e-7)
+        envelope = _cross_section_envelope_radius(section)
+        if len(radii) and (
+            float(radii.min()) < float(config.sweep_min_bend_radius)
+            or envelope / float(radii.min()) >= float(config.sweep_max_curvature_envelope_ratio)
+        ):
+            state.diagnostics["sweep_source_frame_repair_curvature_rejected"] = True
+            break
+        points, geometry = proposed, proposed_geometry
+        state.diagnostics.update(sampling)
+        state.diagnostics.update(
+            sweep_bend_points_inserted=build.inserted_count,
+            sweep_corner_resolved_count=len(build.resolved_indices),
+            sweep_surface_corner_resolved_count=build.surface_resolved_count,
+            sweep_surface_corner_validation_failure_count=build.surface_validation_failure_count,
+            sweep_surface_bend_projection_max_m=build.maximum_projection_m,
+            sweep_surface_fillet_radius_inflation_max=build.maximum_radius_inflation,
+            sweep_corner_candidate_count=len(trim),
+            sweep_corner_angle_candidate_count=sum("angle" in corner.detection_reasons for corner in trim),
+            sweep_corner_radius_candidate_count=sum("minimum_radius" in corner.detection_reasons for corner in trim),
+            sweep_corner_window_candidate_count=sum("window_radius" in corner.detection_reasons for corner in trim),
+        )
+        completed_passes = repair_pass + 1
+    state.diagnostics.update(
+        sweep_source_frame_repair_pass_count=completed_passes,
+        sweep_source_frame_repair_pass_limit=2,
+        sweep_source_frame_promoted_source_vertex_count=len(state.forced_points),
+        sweep_source_frame_unmapped_failure_count=unresolved_keys,
+        sweep_source_frame_promoted_source_vertices=[
+            {
+                "original_source_index": source_lookup[key][0],
+                "incoming_source_owner": state.owner_keys[(source_lookup[key][0] - 1) % len(state.owner_keys)],
+                "outgoing_source_owner": state.owner_keys[source_lookup[key][0] % len(state.owner_keys)],
+            }
+            for key in sorted(state.forced_points)
+        ],
+    )
+    return points, geometry, state.diagnostics
+
+
 def _prepare_sweep_centerline(
     part: CoilPart,
     points: np.ndarray,
@@ -2050,6 +2572,13 @@ def _prepare_sweep_centerline(
             target_closed=closed,
         )
     diagnostics["sweep_points_removed"] = int(len(points) - len(simplified))
+    source_frame_state = None
+    if (
+        _normalised_text(config.sweep_bend_mode) == "fillet"
+        and float(getattr(config, "sweep_corner_cluster_max_source_deviation_m", 0.0)) > 0
+    ):
+        source_frame_state = _SweepSourceFrameState()
+    resolver_options = {} if source_frame_state is None else {"source_frame_state": source_frame_state}
     bent, bent_geometry, bend_diagnostics = _resolve_sweep_centerline_bends(
         part,
         simplified,
@@ -2057,6 +2586,7 @@ def _prepare_sweep_centerline(
         cross_section,
         config,
         closed=closed,
+        **resolver_options,
     )
     diagnostics.update(bend_diagnostics)
     resampled, resampled_geometry, sampling_diagnostics = _surface_adaptive_resample(
@@ -2068,6 +2598,17 @@ def _prepare_sweep_centerline(
         closed=closed,
     )
     diagnostics.update(sampling_diagnostics)
+    if source_frame_state is not None and source_frame_state.eligible:
+        resampled, resampled_geometry, source_sampling_details = _repair_source_frame_sampling(
+            part,
+            resampled,
+            resampled_geometry,
+            cross_section,
+            config,
+            source_frame_state,
+            closed=closed,
+        )
+        diagnostics.update(source_sampling_details)
     diagnostics["sweep_adaptive_sampling_skipped_due_route_precheck_failure"] = False
     resampled_radii = _polyline_circumradii(
         resampled,
@@ -2144,7 +2685,8 @@ def _surface_adaptive_resample(
             float(np.max(original_lengths)) if len(original_lengths) else 0.0
         ),
         "sweep_adaptive_max_chord_correction_m": 0.0,
-        "sweep_adaptive_max_frame_rotation_deg": 0.0,
+        "sweep_adaptive_max_support_normal_rotation_deg": 0.0,
+        "sweep_adaptive_max_trial_support_normal_rotation_deg": 0.0,
         "sweep_adaptive_depth_limit_count": 0,
         "sweep_adaptive_unresolved_count": 0,
         "sweep_surface_projection_domain_fallback_count": 0,
@@ -2205,6 +2747,7 @@ def _surface_adaptive_resample(
     maximum_depth = 14
     max_correction_seen = 0.0
     max_rotation_seen = 0.0
+    max_output_rotation = 0.0
     depth_limit_count = 0
     unresolved_count = 0
     domain_fallback_count = 0
@@ -2219,6 +2762,7 @@ def _surface_adaptive_resample(
     ) -> None:
         nonlocal max_correction_seen
         nonlocal max_rotation_seen
+        nonlocal max_output_rotation
         nonlocal depth_limit_count
         nonlocal unresolved_count
         nonlocal domain_fallback_count
@@ -2277,21 +2821,27 @@ def _surface_adaptive_resample(
             and frame_refinement_is_resolving
         )
         needs_refinement = length_needs_refinement or chord_needs_refinement or frame_needs_refinement
-        if (
-            needs_refinement
-            and not length_needs_refinement
-            and (segment_length <= minimum_refinement_length or len(output) >= maximum_output_points)
+        if needs_refinement and (
+            (not length_needs_refinement and segment_length <= minimum_refinement_length)
+            or len(output) >= maximum_output_points
         ):
             unresolved_count += 1
+            max_output_rotation = max(max_output_rotation, frame_rotation)
             output.append(end.copy())
             output_geometry.append(geometry)
             return
         if not needs_refinement:
+            if follows_support and max_frame_rotation > 0.0 and frame_rotation > max_frame_rotation:
+                # Linear subdivision cannot resolve a discontinuous support
+                # normal. Report the unmet bound instead of silently accepting it.
+                unresolved_count += 1
+            max_output_rotation = max(max_output_rotation, frame_rotation)
             output.append(end.copy())
             output_geometry.append(geometry)
             return
         if depth >= maximum_depth:
             depth_limit_count += 1
+            max_output_rotation = max(max_output_rotation, frame_rotation)
             output.append(end.copy())
             output_geometry.append(geometry)
             return
@@ -2329,7 +2879,8 @@ def _surface_adaptive_resample(
                 float(np.max(output_lengths)) if len(output_lengths) else 0.0
             ),
             "sweep_adaptive_max_chord_correction_m": float(max_correction_seen),
-            "sweep_adaptive_max_frame_rotation_deg": float(max_rotation_seen),
+            "sweep_adaptive_max_support_normal_rotation_deg": float(max_output_rotation),
+            "sweep_adaptive_max_trial_support_normal_rotation_deg": float(max_rotation_seen),
             "sweep_adaptive_depth_limit_count": int(depth_limit_count),
             "sweep_adaptive_unresolved_count": int(unresolved_count),
             "sweep_surface_projection_domain_fallback_count": int(domain_fallback_count),
@@ -2419,6 +2970,8 @@ class _SweepFilletBuildResult:
     surface_resolved_count: int
     surface_validation_failure_count: int
     maximum_radius_inflation: float
+    offset_surface_fillet_count: int = 0
+    maximum_offset_surface_gap_m: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -2437,6 +2990,7 @@ def _resolve_sweep_centerline_bends(
     config: CoilGenConfig,
     *,
     closed: bool,
+    source_frame_state: _SweepSourceFrameState | None = None,
 ) -> tuple[np.ndarray, list[WirePathGeometry], dict[str, float | int | bool | str]]:
     """Resolve scale-relevant polyline corners before constructing sweep rings.
 
@@ -2490,6 +3044,8 @@ def _resolve_sweep_centerline_bends(
         "sweep_undersized_sampled_curve_count": 0,
         "sweep_bend_analysis_points_removed": 0,
         "sweep_surface_bend_projection_max_m": 0.0,
+        "sweep_offset_surface_fillet_count": 0,
+        "sweep_offset_surface_fillet_max_gap_bound_m": 0.0,
         "sweep_surface_fillet_backend": ("analytic_cylinder" if analytic_surface is not None else "triangular_mesh"),
         "sweep_analytic_surface_retraction_point_count": 0,
         "sweep_analytic_surface_retraction_max_m": 0.0,
@@ -2524,6 +3080,14 @@ def _resolve_sweep_centerline_bends(
         part.mesh,
         max(float(config.sweep_max_chord_error), float(config.sweep_collinearity_tolerance), 1e-9),
     )
+    cluster_bound = float(getattr(config, "sweep_corner_cluster_max_source_deviation_m", 0.0))
+    cluster_work = None
+    owner_keys = None
+    if cluster_bound > 0 and bend_mode == "fillet" and analytic_surface is not None:
+        from .sweep_corner_clusters import _ClusterWork, _source_owner_keys
+
+        cluster_work = _ClusterWork()
+        owner_keys = _source_owner_keys(part, source_points, source_geometry, analytic_surface)
     analysis_points, analysis_geometry = _bend_analysis_skeleton(
         source_points,
         source_geometry,
@@ -2531,6 +3095,25 @@ def _resolve_sweep_centerline_bends(
         closed=closed,
         simplify_surface=bool(planar_support or analytic_surface is not None or part.mesh.n_faces > 0),
     )
+    if source_frame_state is not None and owner_keys is not None:
+        analysis_points, analysis_geometry, owned_curve_count = _retain_owned_surface_curve_samples(
+            source_points,
+            source_geometry,
+            analysis_points,
+            analysis_geometry,
+            owner_keys,
+            config,
+            closed=closed,
+        )
+        source_frame_state.eligible = owned_curve_count > 0
+        if source_frame_state.eligible:
+            source_frame_state.source_points = source_points
+            source_frame_state.source_geometry = source_geometry
+            source_frame_state.owner_keys = owner_keys
+            source_frame_state.surface = analytic_surface
+            source_frame_state.required_radius = required_radius
+            source_frame_state.work = cluster_work
+            diagnostics["sweep_owned_surface_curve_interval_count"] = owned_curve_count
     diagnostics["sweep_bend_analysis_points_removed"] = int(len(source_points) - len(analysis_points))
     analysis_closed = closed
     if closed:
@@ -2541,6 +3124,12 @@ def _resolve_sweep_centerline_bends(
             analytic_surface=analytic_surface,
         )
         analysis_closed = False
+    if source_frame_state is not None and source_frame_state.eligible:
+        # Initialize before early returns too. Sampling-only joins need a
+        # valid reusable analysis even when the corner detector finds none.
+        source_frame_state.analysis_points = analysis_points
+        source_frame_state.analysis_geometry = analysis_geometry
+        source_frame_state.diagnostics = diagnostics
     candidates = _sweep_corner_candidates(
         analysis_points,
         analysis_geometry,
@@ -2638,6 +3227,132 @@ def _resolve_sweep_centerline_bends(
         analytic_surface=analytic_surface,
     )
     diagnostics.update(support_diagnostics)
+    # Explicit opt-in only: default/miter and zero-budget fillet paths are exact.
+    if cluster_bound > 0 and conflicts and analytic_surface is not None:
+        from .sweep_corner_clusters import resolve_source_corner_clusters
+
+        analysis_points, analysis_geometry, cluster_diagnostics = resolve_source_corner_clusters(
+            part,
+            analysis_points,
+            analysis_geometry,
+            source_points,
+            source_geometry,
+            analytic_surface,
+            trim_candidates,
+            conflicts,
+            required_radius,
+            config,
+            work=cluster_work,
+        )
+        diagnostics.update(cluster_diagnostics)
+        if cluster_diagnostics["sweep_corner_cluster_resolved_count"]:
+            # Reevaluate every neighboring corner and trim against the realized
+            # analysis path. Source contour/current records remain untouched.
+            candidates = _sweep_corner_candidates(
+                analysis_points,
+                analysis_geometry,
+                required_radius,
+                config,
+                closed=False,
+                analytic_surface=analytic_surface,
+                frame_sampling=bool(source_frame_state is not None and source_frame_state.eligible),
+            )
+            trim_candidates = [
+                _candidate_with_analytic_surface_tangents(analysis_points, candidate, required_radius, analytic_surface)
+                if candidate.blend_geometry == WirePathGeometry.SURFACE
+                else candidate
+                for candidate in candidates
+            ]
+            corner_plans, conflicts, support_diagnostics = _plan_open_sweep_corner_intervals(
+                analysis_points,
+                analysis_geometry,
+                trim_candidates,
+                required_radius,
+                config,
+                analytic_surface=analytic_surface,
+            )
+            diagnostics.update(support_diagnostics)
+            diagnostics.update(
+                sweep_corner_candidate_count=len(candidates),
+                sweep_corner_angle_candidate_count=sum(
+                    "angle" in candidate.detection_reasons for candidate in candidates
+                ),
+                sweep_corner_radius_candidate_count=sum(
+                    "minimum_radius" in candidate.detection_reasons for candidate in candidates
+                ),
+                sweep_corner_window_candidate_count=sum(
+                    "window_radius" in candidate.detection_reasons for candidate in candidates
+                ),
+                sweep_corner_geometry_transition_count=sum(
+                    candidate.incoming_geometry != candidate.outgoing_geometry for candidate in candidates
+                ),
+                sweep_surface_corner_eligible_count=sum(
+                    candidate.blend_geometry == WirePathGeometry.SURFACE for candidate in candidates
+                ),
+                sweep_corner_cluster_remaining_conflict_count=len(conflicts),
+            )
+            diagnostics["sweep_corner_max_angle_deg"] = float(
+                max((np.degrees(candidate.turn_angle_rad) for candidate in candidates), default=0.0)
+            )
+            finite_radii = [
+                candidate.discrete_radius_m
+                for candidate in candidates
+                if np.isfinite(candidate.discrete_radius_m) and candidate.discrete_radius_m > 0
+            ]
+            diagnostics["sweep_corner_min_discrete_radius_m"] = float(min(finite_radii, default=0.0))
+            diagnostics["sweep_corner_max_discrete_curvature_envelope_ratio"] = (
+                float(envelope_radius / min(finite_radii)) if finite_radii else 0.0
+            )
+            finite_window_radii = [
+                candidate.window_radius_m
+                for candidate in candidates
+                if np.isfinite(candidate.window_radius_m) and candidate.window_radius_m > 0
+            ]
+            diagnostics["sweep_corner_min_window_radius_m"] = float(min(finite_window_radii, default=0.0))
+            final_radii = _polyline_circumradii(
+                analysis_points,
+                closed=False,
+                minimum_turn_angle_deg=max(float(config.sweep_tangent_angle_tolerance_deg), 1e-6),
+            )
+            diagnostics["sweep_undersized_sampled_curve_count"] = int(
+                np.count_nonzero(final_radii < 0.99 * required_radius)
+            )
+    if (
+        source_frame_state is not None
+        and source_frame_state.eligible
+        and conflicts
+        and diagnostics.get("sweep_corner_cluster_resolved_count", 0)
+        and any("frame_sampling" in candidate.detection_reasons for candidate in trim_candidates)
+    ):
+        analysis_points, analysis_geometry, extra_cluster_details = resolve_source_corner_clusters(
+            part,
+            analysis_points,
+            analysis_geometry,
+            source_points,
+            source_geometry,
+            analytic_surface,
+            trim_candidates,
+            conflicts,
+            required_radius,
+            config,
+            work=cluster_work,
+            maximum_clusters=max(16 - cluster_work.clusters, 0),
+        )
+        _merge_source_cluster_details(diagnostics, extra_cluster_details)
+        if extra_cluster_details["sweep_corner_cluster_resolved_count"]:
+            trim_candidates, corner_plans, conflicts, support_details = _plan_source_frame_corners(
+                analysis_points,
+                analysis_geometry,
+                required_radius,
+                config,
+                analytic_surface,
+            )
+            diagnostics.update(support_details)
+        diagnostics["sweep_corner_cluster_remaining_conflict_count"] = len(conflicts)
+    if source_frame_state is not None and source_frame_state.eligible:
+        source_frame_state.analysis_points = analysis_points
+        source_frame_state.analysis_geometry = analysis_geometry
+        source_frame_state.diagnostics = diagnostics
     trim_candidates = [
         corner_plans[candidate.index].candidate if candidate.index in corner_plans else candidate
         for candidate in trim_candidates
@@ -2696,6 +3411,8 @@ def _resolve_sweep_centerline_bends(
     diagnostics["sweep_bend_infeasible_count"] = int(len(final_infeasible_indices))
     diagnostics["sweep_min_bend_radius_violation"] = bool(configured_radius > 0.0 and final_infeasible_indices)
     diagnostics["sweep_surface_bend_projection_max_m"] = float(build.maximum_projection_m)
+    diagnostics["sweep_offset_surface_fillet_count"] = int(build.offset_surface_fillet_count)
+    diagnostics["sweep_offset_surface_fillet_max_gap_bound_m"] = float(build.maximum_offset_surface_gap_m)
     diagnostics["sweep_surface_corner_resolved_count"] = int(build.surface_resolved_count)
     diagnostics["sweep_surface_corner_validation_failure_count"] = int(build.surface_validation_failure_count)
     diagnostics["sweep_surface_corner_requires_intrinsic_reroute_count"] = int(
@@ -2747,9 +3464,12 @@ def _bend_analysis_skeleton(
 ) -> tuple[np.ndarray, list[WirePathGeometry]]:
     """Build a scale-aware polyline for bend decisions.
 
-    Ramer-Douglas-Peucker reduction is bounded by the configured support-chord
-    error and never crosses a geometry-contract transition. The downstream
-    adaptive sampler restores longitudinal resolution after bend construction.
+    Surface reduction is bounded by the configured support-chord error and
+    never crosses a geometry-contract transition. A free or offset curve has
+    no support surface that can restore its shape after reduction: subsequent
+    subdivision only splits straight chords. Preserve its curvature samples,
+    removing only numerically collinear points, even when another corner's
+    fillet causes this analysis spine to become the output path.
     """
 
     if len(points) < 3:
@@ -2783,7 +3503,12 @@ def _bend_analysis_skeleton(
                 keep.update(sequence)
                 continue
             local_points = np.asarray(points, dtype=float)[sequence]
-            local_keep = _rdp_path_indices(local_points, 0, len(local_points) - 1, tolerance)
+            local_tolerance = (
+                tolerance
+                if geometry[start % len(geometry)] == WirePathGeometry.SURFACE
+                else min(tolerance, max(float(config.sweep_collinearity_tolerance), 0.0), 1e-8)
+            )
+            local_keep = _rdp_path_indices(local_points, 0, len(local_points) - 1, local_tolerance)
             keep.update(sequence[index] for index in local_keep)
         if len(keep) < 3:
             keep.update({len(points) // 3, 2 * len(points) // 3})
@@ -2795,7 +3520,12 @@ def _bend_analysis_skeleton(
             if geometry[start] == WirePathGeometry.SURFACE and not simplify_surface:
                 keep.update(range(start, stop + 1))
                 continue
-            keep.update(_rdp_path_indices(points, start, stop, tolerance))
+            local_tolerance = (
+                tolerance
+                if geometry[start] == WirePathGeometry.SURFACE
+                else min(tolerance, max(float(config.sweep_collinearity_tolerance), 0.0), 1e-8)
+            )
+            keep.update(_rdp_path_indices(points, start, stop, local_tolerance))
     indices = np.asarray(sorted(keep), dtype=np.int64)
     skeleton = np.asarray(points, dtype=float)[indices]
     skeleton_geometry = _transfer_path_segment_geometry(
@@ -2923,6 +3653,8 @@ def _sweep_corner_candidates(
     *,
     closed: bool,
     analytic_surface: _AnalyticCylinderSurface | None = None,
+    frame_sampling: bool = False,
+    forced_frame_points: set[bytes] | None = None,
 ) -> list[_SweepCornerCandidate]:
     """Return every scale-relevant bend represented by the polyline.
 
@@ -3035,6 +3767,43 @@ def _sweep_corner_candidates(
                         previous_support,
                         following_support,
                     )
+
+    # Explicit source realization must also resolve genuine tangent jumps
+    # which exceed the sampled triad bound but miss the strong-angle detector.
+    frame_limit = float(config.sweep_max_frame_rotation_deg)
+    if (
+        frame_sampling
+        and analytic_surface is not None
+        and _normalised_text(config.sweep_bend_mode) == "fillet"
+        and float(getattr(config, "sweep_corner_cluster_max_source_deviation_m", 0.0)) > 0.0
+        and 0.0 < frame_limit < 180.0
+    ):
+        sample_tangents = _path_tangents(points, closed=closed)
+        first_tangents = sample_tangents if closed else sample_tangents[:-1]
+        last_tangents = np.roll(sample_tangents, -1, axis=0) if closed else sample_tangents[1:]
+        tangent_steps = np.degrees(np.arccos(np.clip(np.einsum("ij,ij->i", first_tangents, last_tangents), -1.0, 1.0)))
+        for edge in np.flatnonzero(tangent_steps > 0.8 * frame_limit):
+            available = [
+                index
+                for index in (int(edge), (int(edge) + 1) % len(points))
+                if index in turn_angles
+                and turn_angles[index] > tangent_tolerance
+                and segment_geometry[(index - 1) % len(segment_geometry)] == WirePathGeometry.SURFACE
+                and segment_geometry[index % len(segment_geometry)] == WirePathGeometry.SURFACE
+            ]
+            if available:
+                index = max(available, key=lambda value: (turn_angles[value], -value))
+                reasons_by_index.setdefault(index, set()).add("frame_sampling")
+
+    if forced_frame_points:
+        for index in indices:
+            if (
+                points[index].tobytes() in forced_frame_points
+                and turn_angles[index] > tangent_tolerance
+                and segment_geometry[(index - 1) % len(segment_geometry)] == WirePathGeometry.SURFACE
+                and segment_geometry[index % len(segment_geometry)] == WirePathGeometry.SURFACE
+            ):
+                reasons_by_index.setdefault(index, set()).add("frame_sampling")
 
     candidates: list[_SweepCornerCandidate] = []
     for index in sorted(reasons_by_index):
@@ -3656,7 +4425,7 @@ def _build_radius_controlled_fillet_path(
             surface_validation_failure_count=0,
             maximum_radius_inflation=1.0,
         )
-    arc_step = np.deg2rad(max(float(config.sweep_bend_arc_angle_deg), 0.25))
+    arc_step = _sweep_arc_step(config, radius)
     analytic_surface = _analytic_cylinder_surface_constraint(part, config)
     projector = _SurfaceProjector(part.mesh) if analytic_surface is None and part.mesh.n_faces > 0 else None
     arcs: dict[int, tuple[np.ndarray, np.ndarray, list[np.ndarray], WirePathGeometry]] = {}
@@ -3666,6 +4435,8 @@ def _build_radius_controlled_fillet_path(
     failed_indices: set[int] = set()
     surface_resolved_count = 0
     surface_validation_failure_count = 0
+    offset_surface_fillet_count = 0
+    maximum_offset_surface_gap = 0.0
     for index, candidate in resolved.items():
         plan = corner_plans.get(index) if corner_plans is not None else None
         previous_index = plan.previous_support_index if plan is not None else (index - 1) % len(points)
@@ -3707,16 +4478,24 @@ def _build_radius_controlled_fillet_path(
                 radius,
                 projector,
                 arc_step,
+                max_support_gap_m=min(
+                    max(float(config.sweep_max_chord_error), 0.0),
+                    max(float(config.sweep_manufacturing_tolerance), 0.0),
+                ),
             )
             if validated is None:
                 failed_indices.add(index)
                 surface_validation_failure_count += 1
                 continue
-            start, end, arc, projection, radius_inflation = validated
+            start, end, arc, projection, radius_inflation, offset_from_surface = validated
             maximum_projection = max(maximum_projection, projection)
             maximum_radius_inflation = max(maximum_radius_inflation, radius_inflation)
             surface_resolved_count += 1
-            arcs[index] = (start, end, arc, candidate.blend_geometry)
+            blend_geometry = WirePathGeometry.OFFSET_SURFACE if offset_from_surface else candidate.blend_geometry
+            if offset_from_surface:
+                offset_surface_fillet_count += 1
+                maximum_offset_surface_gap = max(maximum_offset_surface_gap, projection)
+            arcs[index] = (start, end, arc, blend_geometry)
             inserted_count += max(len(arc) - 2, 0)
             continue
         tangent_distance = candidate.tangent_distance_m
@@ -3742,6 +4521,8 @@ def _build_radius_controlled_fillet_path(
             surface_resolved_count=0,
             surface_validation_failure_count=surface_validation_failure_count,
             maximum_radius_inflation=maximum_radius_inflation,
+            offset_surface_fillet_count=offset_surface_fillet_count,
+            maximum_offset_surface_gap_m=maximum_offset_surface_gap,
         )
     if not closed and corner_plans is not None:
         output_points, output_geometry = _assemble_open_planned_fillet_path(
@@ -3761,6 +4542,8 @@ def _build_radius_controlled_fillet_path(
             surface_resolved_count=surface_resolved_count,
             surface_validation_failure_count=surface_validation_failure_count,
             maximum_radius_inflation=maximum_radius_inflation,
+            offset_surface_fillet_count=offset_surface_fillet_count,
+            maximum_offset_surface_gap_m=maximum_offset_surface_gap,
         )
     first_point = arcs[0][1] if closed and 0 in arcs else points[0]
     output_points: list[np.ndarray] = [np.asarray(first_point, dtype=float)]
@@ -3797,7 +4580,24 @@ def _build_radius_controlled_fillet_path(
         surface_resolved_count=surface_resolved_count,
         surface_validation_failure_count=surface_validation_failure_count,
         maximum_radius_inflation=maximum_radius_inflation,
+        offset_surface_fillet_count=offset_surface_fillet_count,
+        maximum_offset_surface_gap_m=maximum_offset_surface_gap,
     )
+
+
+def _sweep_arc_step(config: CoilGenConfig, radius: float) -> float:
+    """Sample curved fillets using the frame and outer-profile chord bounds."""
+    step = np.deg2rad(max(float(config.sweep_bend_arc_angle_deg), 0.25))
+    frame_limit = float(config.sweep_max_frame_rotation_deg)
+    if frame_limit > 0.0:
+        step = min(step, 0.8 * np.deg2rad(frame_limit))
+    error = float(config.sweep_max_chord_error)
+    if error > 0.0:
+        section = conductor_cross_section_points(config)
+        envelope = float(np.max(np.linalg.norm(section, axis=1))) + abs(_mounting_centerline_offset(config, section))
+        outer_radius = max(radius + envelope, 1e-15)
+        step = min(step, 2.0 * np.arccos(np.clip(1.0 - error / outer_radius, -1.0, 1.0)))
+    return max(step, np.deg2rad(0.01))
 
 
 def _validated_mesh_surface_fillet(
@@ -3808,8 +4608,19 @@ def _validated_mesh_surface_fillet(
     required_radius: float,
     projector: "_SurfaceProjector",
     arc_step: float,
-) -> tuple[np.ndarray, np.ndarray, list[np.ndarray], float, float] | None:
-    """Construct a projected surface fillet whose final 3-D radius is certified."""
+    *,
+    max_support_gap_m: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray, list[np.ndarray], float, float, bool] | None:
+    """Screen projected fillets independently of output tessellation density.
+
+    Closest-point projection can introduce a cusp across a physical mesh crease.
+    A coarse circumcircle must never be used as evidence that this cusp meets
+    the bend radius. Dense validation includes short incoming/outgoing probes.
+    If projection creates such a cusp, an analytic circular arc is admissible
+    only when its entire span stays within the configured support tolerance.
+    The caller labels that span OFFSET_SURFACE so resampling cannot project the
+    cusp back into the manufactured centerline.
+    """
 
     incoming = corner - previous
     outgoing = following - corner
@@ -3825,6 +4636,7 @@ def _validated_mesh_surface_fillet(
     if center_norm <= 1e-15 or half_angle_cosine <= 1e-15:
         return None
 
+    fallback = None
     for inflation in (1.0, 1.05, 1.1, 1.2, 1.35, 1.5, 1.75, 2.0):
         trial_radius = required_radius * inflation
         tangent_distance = trial_radius * np.tan(candidate.turn_angle_rad / 2.0)
@@ -3833,7 +4645,8 @@ def _validated_mesh_surface_fillet(
         start = corner - incoming_unit * tangent_distance
         end = corner + outgoing_unit * tangent_distance
         center = corner + center_direction / center_norm * (trial_radius / half_angle_cosine)
-        arc = _circular_arc_points(start, end, center, arc_step)
+        analytic_arc = np.asarray(_circular_arc_points(start, end, center, arc_step / np.sqrt(inflation)))
+        arc = analytic_arc.copy()
         maximum_projection = 0.0
         if len(arc) > 2:
             interior = np.asarray(arc[1:-1], dtype=float)
@@ -3841,16 +4654,43 @@ def _validated_mesh_surface_fillet(
             if not np.all(np.isfinite(projected)):
                 continue
             maximum_projection = float(np.max(np.linalg.norm(projected - interior, axis=1)))
-            arc[1:-1] = [point for point in projected]
+            arc[1:-1] = projected
         validation_points = np.vstack((previous, np.asarray(arc, dtype=float), following))
         radii = _polyline_circumradii(
             validation_points,
             closed=False,
             minimum_turn_angle_deg=1e-7,
         )
-        if len(radii) and float(np.min(radii)) >= 0.99 * required_radius:
-            return start, end, arc, maximum_projection, float(inflation)
-    return None
+        coarse_valid = bool(len(radii) and float(np.min(radii)) >= 0.99 * required_radius)
+        validation_arc = np.asarray(_circular_arc_points(start, end, center, min(arc_step, np.deg2rad(0.25))))
+        projected, _normals = projector.project(validation_arc)
+        if not np.all(np.isfinite(projected)):
+            continue
+        projection = np.linalg.norm(projected - validation_arc, axis=1)
+        # Endpoints must remain on the prescribed source legs; moving them by
+        # projection would break both join tangency and the source contract.
+        if coarse_valid and max(projection[0], projection[-1]) <= max(required_radius * 1e-6, 1e-10):
+            probe_length = min(
+                np.linalg.norm(projected[1] - projected[0]), np.linalg.norm(projected[-1] - projected[-2])
+            )
+            validation_points = np.vstack(
+                (
+                    start - incoming_unit * probe_length,
+                    projected,
+                    end + outgoing_unit * probe_length,
+                )
+            )
+            dense_radii = _polyline_circumradii(validation_points, closed=False, minimum_turn_angle_deg=1e-7)
+            if len(dense_radii) and float(np.min(dense_radii)) >= 0.99 * required_radius:
+                return start, end, arc, max(maximum_projection, float(np.max(projection))), float(inflation), False
+        # The distance to a closed triangle mesh is 1-Lipschitz. Half the
+        # largest validation chord bounds the unsampled support gap between
+        # adjacent arc samples, including across a facet edge.
+        maximum_step = float(np.max(np.linalg.norm(np.diff(validation_arc, axis=0), axis=1)))
+        support_gap_bound = float(np.max(projection)) + 0.5 * maximum_step
+        if fallback is None and max_support_gap_m > 0.0 and support_gap_bound <= max_support_gap_m:
+            fallback = (start, end, analytic_arc, support_gap_bound, float(inflation), True)
+    return fallback
 
 
 def _assemble_open_planned_fillet_path(
@@ -3924,7 +4764,7 @@ def _validated_analytic_cylinder_fillet(
     if center_norm <= 1e-15 or half_angle_cosine <= 1e-15:
         return None
 
-    output_step = np.deg2rad(max(float(config.sweep_bend_arc_angle_deg), 0.25))
+    output_step = _sweep_arc_step(config, required_radius)
     validation_step = min(output_step, np.deg2rad(0.25))
     tangency_tolerance_deg = max(float(config.sweep_tangent_angle_tolerance_deg), 0.75)
     projection_limit = max(
@@ -4002,7 +4842,7 @@ def _validated_analytic_cylinder_fillet(
                 np.append(start_local, 0.0),
                 np.append(end_local, 0.0),
                 np.append(center_local, 0.0),
-                output_step,
+                output_step / np.sqrt(inflation),
             ),
             dtype=float,
         )[:, :2]
@@ -4160,16 +5000,15 @@ def save_mesh_as_stl(mesh: Mesh, path: str | Path, *, solid_name: str = "coil_bo
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     normals = compute_face_normals(mesh) if len(mesh.faces) else np.zeros((0, 3), dtype=float)
-    lines = [f"solid {solid_name}"]
-    for normal, face in zip(normals, mesh.faces):
-        lines.append(f"  facet normal {normal[0]:.9e} {normal[1]:.9e} {normal[2]:.9e}")
-        lines.append("    outer loop")
-        for vertex in mesh.vertices[face]:
-            lines.append(f"      vertex {vertex[0]:.9e} {vertex[1]:.9e} {vertex[2]:.9e}")
-        lines.append("    endloop")
-        lines.append("  endfacet")
-    lines.append(f"endsolid {solid_name}")
-    path.write_text("\n".join(lines), encoding="ascii")
+    with path.open("w", encoding="ascii") as output:
+        output.write(f"solid {solid_name}\n")
+        for normal, face in zip(normals, mesh.faces):
+            output.write(f"  facet normal {normal[0]:.9e} {normal[1]:.9e} {normal[2]:.9e}\n")
+            output.write("    outer loop\n")
+            for vertex in mesh.vertices[face]:
+                output.write(f"      vertex {vertex[0]:.9e} {vertex[1]:.9e} {vertex[2]:.9e}\n")
+            output.write("    endloop\n  endfacet\n")
+        output.write(f"endsolid {solid_name}")
     return path
 
 
@@ -4295,14 +5134,15 @@ def save_swept_bodies_as_stl(
     *,
     prefix: str = "coil_body",
     min_clearance: float | None = None,
-    fail_on_violations: bool = True,
+    fail_on_violations: bool = False,
 ) -> list[Path]:
     """Export each swept conductor mesh and its current-carrying surface.
 
     STL carries only triangulated boundaries, not analytic volume semantics.
     Each contour-mode body is written separately.  The current-carrying support
-    surface is written once per coil part.  Strict export readiness is enabled
-    by default; bypass it only for visualization/debugging.
+    surface is written once per coil part. Manufacturing diagnostics do not
+    prevent STL serialization by default. Pass ``fail_on_violations=True`` to
+    explicitly require manufacturing readiness before writing any STL.
     """
 
     output = Path(output_dir)
@@ -4585,7 +5425,7 @@ def _check_swept_body_export_readiness(
         return
     reasons = str(diagnostics.get("manufacturing_failure_reasons", "")).strip() or "unspecified"
     contour_label = "" if body.contour_index is None else f" contour {body.contour_index}"
-    raise ValueError(
+    raise SweptBodyExportError(
         f"Part {part_ind}{contour_label} is not ready for {format_name} export: "
         f"manufacturing_ok={diagnostics.get('manufacturing_ok', False)}, "
         f"failure_reasons={reasons}, "
@@ -4790,12 +5630,26 @@ def _centerline_segment_lengths(points: np.ndarray, *, closed: bool) -> np.ndarr
 
 def _path_tangents(points: np.ndarray, *, closed: bool) -> np.ndarray:
     tangents = np.zeros_like(points)
+    if len(points) < 2:
+        return np.tile(np.array([1.0, 0.0, 0.0]), (len(points), 1))
     if closed:
-        tangents = np.roll(points, -1, axis=0) - np.roll(points, 1, axis=0)
+        incoming = points - np.roll(points, 1, axis=0)
+        outgoing = np.roll(points, -1, axis=0) - points
+        interior = slice(None)
     else:
         tangents[0] = points[1] - points[0]
         tangents[-1] = points[-1] - points[-2]
-        tangents[1:-1] = points[2:] - points[:-2]
+        incoming = points[1:-1] - points[:-2]
+        outgoing = points[2:] - points[1:-1]
+        interior = slice(1, -1)
+    previous_length = np.linalg.norm(incoming, axis=1)
+    following_length = np.linalg.norm(outgoing, axis=1)
+    # Nonuniform three-point derivative: opposite-interval weights remove the
+    # orientation bias of an unweighted chord across unequally sampled bends.
+    tangents[interior] = (
+        incoming * (following_length / np.maximum(previous_length, 1e-15))[:, None]
+        + outgoing * (previous_length / np.maximum(following_length, 1e-15))[:, None]
+    )
     lengths = np.linalg.norm(tangents, axis=1)
     for ind in np.flatnonzero(lengths <= 1e-15):
         following = points[(ind + 1) % len(points)] - points[ind]
@@ -4827,9 +5681,18 @@ def _path_frames(
             config,
             closed=closed,
         )
-    if closed:
-        normals, binormals = _enforce_periodic_path_frames(points, tangents, normals)
     return normals, binormals
+
+
+def _frame_rotation_angles_deg(
+    tangents: np.ndarray, normals: np.ndarray, binormals: np.ndarray, *, closed: bool
+) -> np.ndarray:
+    """Actual adjacent triad rotations, including tangent turning and roll."""
+    frames = np.stack((tangents, normals, binormals), axis=-1)
+    first = frames if closed else frames[:-1]
+    last = np.roll(frames, -1, axis=0) if closed else frames[1:]
+    relative_trace = np.einsum("nij,nij->n", first, last)
+    return np.degrees(np.arccos(np.clip((relative_trace - 1.0) / 2.0, -1.0, 1.0)))
 
 
 def _effective_sweep_frame_method(
@@ -4849,29 +5712,11 @@ def _surface_normal_path_frames(
     tangents: np.ndarray,
     config: CoilGenConfig,
 ) -> tuple[np.ndarray, np.ndarray]:
-    mesh_normals = _nearest_surface_normals(part, points, config)
-    normals = np.zeros_like(points)
-    binormals = np.zeros_like(points)
-    previous_normal: np.ndarray | None = None
+    from .sweep_frames import transverse_guide
 
-    for ind, tangent in enumerate(tangents):
-        normal = mesh_normals[ind] - tangent * np.dot(mesh_normals[ind], tangent)
-        if np.linalg.norm(normal) < 1e-10:
-            normal = _fallback_normal(tangent, previous_normal)
-        normal = normal / max(np.linalg.norm(normal), 1e-15)
-        if previous_normal is not None and np.dot(normal, previous_normal) < 0:
-            normal *= -1.0
-        binormal = np.cross(tangent, normal)
-        if np.linalg.norm(binormal) < 1e-10:
-            normal = _fallback_normal(tangent, previous_normal)
-            binormal = np.cross(tangent, normal)
-        binormal = binormal / max(np.linalg.norm(binormal), 1e-15)
-        normal = np.cross(binormal, tangent)
-        normal = normal / max(np.linalg.norm(normal), 1e-15)
-        normals[ind] = normal
-        binormals[ind] = binormal
-        previous_normal = normal
-    return normals, binormals
+    mesh_normals = _nearest_surface_normals(part, points, config)
+    normals = np.asarray([transverse_guide(tangent, guide) for tangent, guide in zip(tangents, mesh_normals)])
+    return normals, np.cross(tangents, normals)
 
 
 def _parallel_transport_path_frames(
@@ -4883,40 +5728,19 @@ def _parallel_transport_path_frames(
     *,
     closed: bool,
 ) -> tuple[np.ndarray, np.ndarray]:
+    from .sweep_frames import constrained_frames
+
     mesh_normals = _smooth_path_normals(
         _nearest_surface_normals(part, points, config),
         max(int(config.sweep_surface_normal_smoothing_iterations), 0),
         closed=closed,
     )
     strength = float(np.clip(config.sweep_surface_normal_constraint_strength, 0.0, 1.0))
-    guide_weights = _surface_guide_weights(segment_geometry, len(points), closed=closed)
-    normals = np.zeros_like(points)
-    binormals = np.zeros_like(points)
-    normal = mesh_normals[0] - tangents[0] * np.dot(mesh_normals[0], tangents[0])
-    if np.linalg.norm(normal) < 1e-10:
-        normal = _fallback_normal(tangents[0], None)
-    normal = normal / max(np.linalg.norm(normal), 1e-15)
-    normals[0] = normal
-    binormals[0] = _normalised_cross(tangents[0], normal)
-
-    for ind in range(1, len(points)):
-        transported = _rotate_between_vectors(normals[ind - 1], tangents[ind - 1], tangents[ind])
-        surface = mesh_normals[ind] - tangents[ind] * np.dot(mesh_normals[ind], tangents[ind])
-        if np.linalg.norm(surface) < 1e-10:
-            surface = transported
-        surface = surface / max(np.linalg.norm(surface), 1e-15)
-        if np.dot(surface, transported) < 0.0:
-            surface *= -1.0
-        local_strength = strength * guide_weights[ind]
-        normal = (1.0 - local_strength) * transported + local_strength * surface
-        if np.linalg.norm(normal) < 1e-10:
-            normal = transported
-        normal = normal / max(np.linalg.norm(normal), 1e-15)
-        binormal = _normalised_cross(tangents[ind], normal)
-        normal = _normalised_cross(binormal, tangents[ind])
-        normals[ind] = normal
-        binormals[ind] = binormal
-    return normals, binormals
+    _surface_guide_weights(segment_geometry, len(points), closed=closed)  # Validate interval provenance.
+    surface = np.array([WirePathGeometry(value) == WirePathGeometry.SURFACE for value in segment_geometry], dtype=float)
+    section = conductor_cross_section_points(config)
+    length_scale = 2.0 * _cross_section_envelope_radius(section - _polygon_centroid(section))
+    return constrained_frames(points, tangents, mesh_normals, surface, strength, length_scale, closed=closed)
 
 
 def _surface_guide_weights(
@@ -5298,8 +6122,21 @@ def _enforce_periodic_path_frames(
     points: np.ndarray,
     tangents: np.ndarray,
     normals: np.ndarray,
+    *,
+    unconstrained: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Distribute closed-loop frame holonomy so the final seam is periodic."""
+    """Preserve signed attached frames; redistribute only explicit free-frame holonomy.
+
+    A periodic surface-normal field generally has nonzero transport rotation
+    across its closing interval. Forcing that rotation to zero twists otherwise
+    valid mounting frames. The guided frame solver handles cyclicity directly.
+    """
+
+    if not unconstrained:
+        from .sweep_frames import transverse_guide
+
+        attached = np.array([transverse_guide(tangent, normal) for tangent, normal in zip(tangents, normals)])
+        return attached, np.cross(tangents, attached)
 
     if len(points) < 3:
         binormals = np.asarray([_normalised_cross(tangent, normal) for tangent, normal in zip(tangents, normals)])
@@ -5312,7 +6149,7 @@ def _enforce_periodic_path_frames(
         )
     )
     cumulative = np.concatenate(([0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))))
-    denominator = float(cumulative[-1])
+    denominator = float(cumulative[-1] + np.linalg.norm(points[0] - points[-1]))
     fractions = cumulative / denominator if denominator > 1e-15 else np.zeros(len(points), dtype=float)
     corrected_normals = np.zeros_like(normals)
     corrected_binormals = np.zeros_like(normals)

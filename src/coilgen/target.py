@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import ast
 import csv
 import json
 import math
 import re
+from numbers import Integral, Real
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +15,53 @@ from .design_context import design_context_key
 from .field_units import field_values_to_tesla
 from .models import Mesh, TargetField
 from .object_registry import get_in_memory_target_field, is_in_memory_target_key
+
+
+def _solid_harmonic_parameters(degree, order, radius, center):
+    """Validate the explicit convention used by analytic harmonic targets."""
+    if isinstance(degree, bool) or not isinstance(degree, Integral) or not 0 <= degree <= 16:
+        raise ValueError("Solid harmonic degree must be an integer from 0 to 16.")
+    if isinstance(order, bool) or not isinstance(order, Integral) or not -degree <= order <= degree:
+        raise ValueError("Solid harmonic order must be an integer between -degree and degree.")
+    if isinstance(radius, bool) or not isinstance(radius, Real) or not math.isfinite(radius) or radius <= 0:
+        raise ValueError("Solid harmonic reference radius must be finite and strictly positive [m].")
+    try:
+        center = tuple(center)
+    except TypeError as exc:
+        raise ValueError("Solid harmonic center must contain three finite coordinates [m].") from exc
+    if len(center) != 3 or any(
+        isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) for value in center
+    ):
+        raise ValueError("Solid harmonic center must contain three finite coordinates [m].")
+    return int(degree), int(order), float(radius), tuple(float(value) for value in center)
+
+
+def solid_harmonic(degree, order, x, y, z, radius, center_x=0.0, center_y=0.0, center_z=0.0):
+    """Evaluate one normalized real solid harmonic with explicit SI geometry.
+
+    Uses the same real-Ylm normalization and Condon--Shortley phase as
+    ``solid_spherical_harmonic_basis``: the dimensionless term is
+    (r/radius)**degree * real_Ylm. A multiplier in tesla is an orthonormal
+    harmonic coefficient, rather than the pole amplitude. Degrees 0--16
+    are supported; degree, order, radius and center must be scalar constants.
+    """
+    from .spherical_harmonics import solid_spherical_harmonic_basis
+
+    degree, order, radius, center = _solid_harmonic_parameters(degree, order, radius, (center_x, center_y, center_z))
+    coordinates = np.broadcast_arrays(x, y, z)
+    if any(np.iscomplexobj(value) for value in coordinates):
+        raise ValueError("Solid harmonic coordinates must be finite real values [m].")
+    points = np.column_stack([np.asarray(value, dtype=float).reshape(-1) for value in coordinates])
+    if not np.all(np.isfinite(points)):
+        raise ValueError("Solid harmonic coordinates must be finite real values [m].")
+    if not len(points):
+        return np.empty(coordinates[0].shape, dtype=float)
+    with np.errstate(over="raise", invalid="raise", divide="raise"):
+        try:
+            basis, _, _, _ = solid_spherical_harmonic_basis(points, degree, center=center, radius=radius)
+        except FloatingPointError as exc:
+            raise ValueError("Solid harmonic geometry exceeds the finite numerical range.") from exc
+    return basis[:, degree * degree + degree + order].reshape(coordinates[0].shape)
 
 
 _ALLOWED_FUNCTIONS = {
@@ -27,6 +76,7 @@ _ALLOWED_FUNCTIONS = {
     "exp": np.exp,
     "log": np.log,
     "abs": np.abs,
+    "solid_harmonic": solid_harmonic,
     "pi": math.pi,
 }
 
@@ -40,7 +90,13 @@ def define_target_field(
     if config.target_field_definition_file != "none":
         return load_target_field_definition(config.target_field_definition_file, secondary_target_mesh, config)
 
-    if target_mesh is not None:
+    if config.target_region_geometry is not None:
+        from .target_regions import sample_target_region
+
+        target_points = sample_target_region(
+            config.target_region_geometry, config.target_region_resolution, mesh=target_mesh
+        )
+    elif target_mesh is not None:
         target_points = _target_points_from_mesh(target_mesh, config)
     else:
         target_points = _spherical_target_points(config)
@@ -75,7 +131,7 @@ def define_target_field(
         config,
         source="expression",
     )
-    target_b = field_values_to_tesla(target_b, config.target_field_units)
+    target_b = _finite_target_array(field_values_to_tesla(target_b, config.target_field_units), "Target b field")
     gradient = field_values_to_tesla(gradient, config.target_field_units)
     weights = np.ones(len(target_points), dtype=float)
     weights[suppressed] = config.secondary_target_weight
@@ -108,6 +164,35 @@ def load_target_field_definition(
         raise FileNotFoundError(f"Target field definition file not found: {path}")
     suffix = path.suffix.lower()
     if suffix == ".npz":
+        # Owned assets retain the already resolved SI target exactly, including
+        # optional gradients and suppression-surface data. Re-normalizing these
+        # would change the problem when freezing a process-local input.
+        with np.load(path, allow_pickle=False) as loaded:
+            if "schema" in loaded:
+                if str(loaded["schema"].item()) != "coilgen-target-v1":
+                    raise ValueError("Unsupported CoilGen target asset schema.")
+                values = {
+                    key: np.array(loaded[key], copy=True)
+                    for key in (
+                        "coords",
+                        "b",
+                        "weights",
+                        "suppressed",
+                        "target_field_group_inds",
+                        "target_gradient_dbdxyz",
+                        "suppression_normals",
+                        "suppression_area_weights",
+                    )
+                    if key in loaded
+                }
+                required = {"coords", "b", "weights", "suppressed", "target_field_group_inds"}
+                if not required.issubset(values):
+                    raise ValueError("Owned target asset lacks required numerical arrays.")
+                values.update(_validate_target_data(values))
+                values["target_diagnostics"] = json.loads(str(loaded["target_diagnostics_json"].item()))
+                if not isinstance(values["target_diagnostics"], dict):
+                    raise ValueError("Owned target diagnostics must be a JSON object.")
+                return _append_secondary_target_mesh(TargetField(**values), secondary_target_mesh, config)
         data = _load_target_npz(path)
     elif suffix == ".json":
         data = _load_target_json(path)
@@ -138,11 +223,11 @@ def load_target_field_definition(
         config,
         source="file",
     )
-    target_b = field_values_to_tesla(target_b, config.target_field_units)
+    target_b = _finite_target_array(field_values_to_tesla(target_b, config.target_field_units), "Target b field")
     if gradient is None:
         gradient = np.zeros((len(coords), 3), dtype=float)
     else:
-        gradient = field_values_to_tesla(gradient, config.target_field_units)
+        gradient = _finite_target_array(field_values_to_tesla(gradient, config.target_field_units), "Target gradient")
     return _append_secondary_target_mesh(
         TargetField(
             coords=coords,
@@ -151,6 +236,8 @@ def load_target_field_definition(
             suppressed=suppressed,
             target_field_group_inds=group_inds,
             target_gradient_dbdxyz=gradient,
+            suppression_normals=data.get("suppression_normals"),
+            suppression_area_weights=data.get("suppression_area_weights"),
             target_diagnostics=target_diagnostics,
         ),
         secondary_target_mesh,
@@ -251,11 +338,18 @@ def _mesh_vertex_area_weights(mesh: Mesh) -> np.ndarray:
 
 
 def _load_target_npz(path: Path) -> dict[str, np.ndarray]:
-    with np.load(path) as loaded:
+    with np.load(path, allow_pickle=False) as loaded:
         coords = _required_array(loaded, ("coords", "target_points", "target_coords"), 3)
         b_field = _required_array(loaded, ("b", "target_b", "target_field"), 3)
         data = {"coords": coords, "b": b_field}
-        for key in ("weights", "suppressed", "target_field_group_inds", "target_gradient_dbdxyz"):
+        for key in (
+            "weights",
+            "suppressed",
+            "target_field_group_inds",
+            "target_gradient_dbdxyz",
+            "suppression_normals",
+            "suppression_area_weights",
+        ):
             if key in loaded:
                 data[key] = np.asarray(loaded[key])
         return _validate_target_data(data)
@@ -266,7 +360,14 @@ def _load_target_json(path: Path) -> dict[str, np.ndarray]:
     coords = np.asarray(raw.get("coords", raw.get("target_points", raw.get("target_coords"))), dtype=float)
     b_field = np.asarray(raw.get("b", raw.get("target_b", raw.get("target_field"))), dtype=float)
     data = {"coords": coords, "b": b_field}
-    for key in ("weights", "suppressed", "target_field_group_inds", "target_gradient_dbdxyz"):
+    for key in (
+        "weights",
+        "suppressed",
+        "target_field_group_inds",
+        "target_gradient_dbdxyz",
+        "suppression_normals",
+        "suppression_area_weights",
+    ):
         if key in raw:
             data[key] = np.asarray(raw[key])
     return _validate_target_data(data)
@@ -449,7 +550,7 @@ def _parse_bool(value: str) -> bool:
 def _required_array(loaded, names: tuple[str, ...], shape_last: int) -> np.ndarray:
     for name in names:
         if name in loaded:
-            value = np.asarray(loaded[name], dtype=float)
+            value = _finite_target_array(loaded[name], name)
             if value.ndim != 2 or value.shape[1] != shape_last:
                 raise ValueError(f"{name} must have shape (n, {shape_last}).")
             return value
@@ -457,34 +558,80 @@ def _required_array(loaded, names: tuple[str, ...], shape_last: int) -> np.ndarr
 
 
 def _validate_target_data(data: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    coords = np.asarray(data["coords"], dtype=float)
-    b_field = np.asarray(data["b"], dtype=float)
+    """Validate real physical samples before normalization or mask coercion.
+
+    Zero weights deliberately disable samples. Zero surface metadata is valid
+    for ordinary fitting points; normals are not required to be unit vectors
+    here. Group numbers are labels, so zero/negative integer labels are valid.
+    """
+    coords = _finite_target_array(data["coords"], "Target coords")
+    b_field = _finite_target_array(data["b"], "Target b field")
     if coords.ndim != 2 or coords.shape[1] != 3:
         raise ValueError("Target coords must have shape (n, 3).")
     if b_field.ndim != 2 or b_field.shape[1] != 3 or len(b_field) != len(coords):
         raise ValueError("Target b field must have shape (n, 3) and match coords.")
     normalized: dict[str, np.ndarray] = {"coords": coords, "b": b_field}
     if "weights" in data:
-        weights = np.asarray(data["weights"], dtype=float).reshape(-1)
+        weights = _finite_target_array(data["weights"], "Target weights").reshape(-1)
         if len(weights) != len(coords):
             raise ValueError("Target weights must match coords length.")
+        if np.any(weights < 0.0):
+            raise ValueError("Target weights must be nonnegative; use zero to disable a sample.")
         normalized["weights"] = weights
     if "suppressed" in data:
-        suppressed = np.asarray(data["suppressed"], dtype=bool).reshape(-1)
+        flags = _finite_target_array(data["suppressed"], "Target suppressed flags").reshape(-1)
+        if np.any((flags != 0.0) & (flags != 1.0)):
+            raise ValueError("Target suppressed flags must be booleans or numeric 0/1 values.")
+        suppressed = flags.astype(bool)
         if len(suppressed) != len(coords):
             raise ValueError("Target suppressed flags must match coords length.")
         normalized["suppressed"] = suppressed
     if "target_field_group_inds" in data:
-        group_inds = np.asarray(data["target_field_group_inds"], dtype=np.int64).reshape(-1)
+        raw_groups = np.asarray(data["target_field_group_inds"]).reshape(-1)
+        if raw_groups.dtype.kind in "biu":
+            if raw_groups.dtype.kind == "u" and np.any(raw_groups >= np.uint64(2**63)):
+                raise ValueError("Target group indices must fit in signed 64-bit integers.")
+            group_inds = raw_groups.astype(np.int64)
+        else:
+            groups = _finite_target_array(raw_groups, "Target group indices")
+            if np.any(groups != np.floor(groups)):
+                raise ValueError("Target group indices must be integer labels.")
+            if np.any(groups >= float(2**63)) or np.any(groups < float(-(2**63))):
+                raise ValueError("Target group indices must fit in signed 64-bit integers.")
+            group_inds = groups.astype(np.int64)
         if len(group_inds) != len(coords):
             raise ValueError("Target group indices must match coords length.")
         normalized["target_field_group_inds"] = group_inds
     if "target_gradient_dbdxyz" in data:
-        gradient = np.asarray(data["target_gradient_dbdxyz"], dtype=float)
+        gradient = _finite_target_array(data["target_gradient_dbdxyz"], "Target gradient")
         if gradient.shape != coords.shape:
             raise ValueError("Target gradient must have shape (n, 3).")
         normalized["target_gradient_dbdxyz"] = gradient
+    if "suppression_normals" in data:
+        normals = _finite_target_array(data["suppression_normals"], "Suppression normals")
+        if normals.shape != coords.shape:
+            raise ValueError("Suppression normals must have shape (n, 3).")
+        normalized["suppression_normals"] = normals
+    if "suppression_area_weights" in data:
+        areas = _finite_target_array(data["suppression_area_weights"], "Suppression area weights").reshape(-1)
+        if len(areas) != len(coords):
+            raise ValueError("Suppression area weights must match coords length.")
+        if np.any(areas < 0.0):
+            raise ValueError("Suppression area weights must be nonnegative.")
+        normalized["suppression_area_weights"] = areas
     return normalized
+
+
+def _finite_target_array(value, label: str) -> np.ndarray:
+    if np.iscomplexobj(value):
+        raise ValueError(f"{label} must contain real values.")
+    try:
+        array = np.asarray(value, dtype=float)
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise ValueError(f"{label} must contain real finite numerical values.") from exc
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{label} must contain finite values.")
+    return array
 
 
 def _target_points_from_mesh(mesh: Mesh, config: CoilGenConfig) -> np.ndarray:
@@ -526,6 +673,52 @@ def evaluate_field_expression(expression: str, points: np.ndarray) -> np.ndarray
     local_scope = dict(_ALLOWED_FUNCTIONS)
     local_scope.update({"x": points[:, 0], "y": points[:, 1], "z": points[:, 2]})
     try:
+        if "solid_harmonic" in expression:
+            # Python callables expose module globals through attributes. Keep
+            # this new expression facility numerical without changing the
+            # evaluation semantics of existing expression targets.
+            allowed_nodes = (
+                ast.Expression,
+                ast.BinOp,
+                ast.UnaryOp,
+                ast.Call,
+                ast.Name,
+                ast.Load,
+                ast.Constant,
+                ast.Add,
+                ast.Sub,
+                ast.Mult,
+                ast.Div,
+                ast.Pow,
+                ast.Mod,
+                ast.FloorDiv,
+                ast.UAdd,
+                ast.USub,
+                ast.Compare,
+                ast.Eq,
+                ast.NotEq,
+                ast.Lt,
+                ast.LtE,
+                ast.Gt,
+                ast.GtE,
+                ast.BitAnd,
+                ast.BitOr,
+                ast.BitXor,
+                ast.Invert,
+            )
+            for node in ast.walk(ast.parse(expression, mode="eval")):
+                if (
+                    not isinstance(node, allowed_nodes)
+                    or isinstance(node, ast.Name)
+                    and node.id not in local_scope
+                    or isinstance(node, ast.Call)
+                    and (not isinstance(node.func, ast.Name) or node.func.id not in _ALLOWED_FUNCTIONS)
+                    or isinstance(node, ast.Constant)
+                    and (not isinstance(node.value, Real) or not math.isfinite(node.value))
+                ):
+                    raise ValueError(
+                        "Solid harmonic expressions support finite numerical functions and arithmetic only."
+                    )
         values = eval(expression, {"__builtins__": {}}, local_scope)
     except Exception as exc:
         raise ValueError(f"Could not evaluate field_shape_function {expression!r}.") from exc

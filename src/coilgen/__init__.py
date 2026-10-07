@@ -495,6 +495,7 @@ from .validation import (
 )
 from .matplotlib_backend import activate_matplotlib_interactive_backend
 from .matplotlib_visualization import (
+    plot_gradient_slice_inspector,
     build_result_plot_specs,
     close_matplotlib_plot_books,
     MatplotlibPlotSpec,
@@ -532,6 +533,7 @@ from .matplotlib_visualization import (
 )
 
 __all__ = [
+    "plot_gradient_slice_inspector",
     "CoilGenConfig",
     "CoilApplication",
     "CoilDesignContext",

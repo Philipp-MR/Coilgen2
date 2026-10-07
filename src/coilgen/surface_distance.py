@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import heapq
 import math
+from collections import OrderedDict
 from dataclasses import dataclass
 
 import numpy as np
@@ -38,26 +39,51 @@ class _DijkstraResult:
 
 
 _SAMPLE_CACHE_MAX_ENTRIES = 256
+_PATH_CACHE_MAX_ENTRIES = 512
+_PATH_CACHE_MAX_BYTES = 16 * 1024 * 1024
 
 
 class SurfaceGeodesicSolver:
-    """Approximate geodesic distances and paths over a mesh vertex graph."""
+    """Approximate geodesics over a construction-time mesh geometry snapshot.
+
+    Construct a new solver after changing mesh vertices or faces. Keeping the
+    geometry snapshot with its graph prevents cached paths, support samples and
+    edge weights from referring to different mesh revisions. Ordered queries
+    are reused exactly; reversing endpoints still performs its own search so
+    that Dijkstra's directed tie choices are preserved.
+    """
 
     def __init__(self, mesh: Mesh):
-        self.mesh = mesh
-        self.adjacency = _build_vertex_adjacency(mesh)
-        self.vertex_faces = _build_vertex_faces(mesh)
+        self.mesh = Mesh(vertices=mesh.vertices.copy(), faces=mesh.faces.copy())
+        self.mesh.vertices.flags.writeable = False
+        self.mesh.faces.flags.writeable = False
+        self.adjacency = _build_vertex_adjacency(self.mesh)
+        self.vertex_faces = _build_vertex_faces(self.mesh)
         self.last_dijkstra_settled_count = 0
         self.sample_cache_hits = 0
         self.sample_cache_misses = 0
         self._point_sample_cache: dict[tuple[object, ...], _SurfaceSamples] = {}
         self._contour_sample_cache: dict[tuple[object, ...], _SurfaceSamples] = {}
+        self.path_cache_hits = 0
+        self.path_cache_misses = 0
+        self._path_cache: OrderedDict[tuple[object, ...], tuple[GeodesicPathResult, int]] = OrderedDict()
+        self._path_cache_bytes = 0
 
     def clear_sample_cache(self) -> None:
+        """Release sampled endpoints and all paths derived from them."""
         self._point_sample_cache.clear()
         self._contour_sample_cache.clear()
         self.sample_cache_hits = 0
         self.sample_cache_misses = 0
+        self.clear_path_cache()
+
+    def clear_path_cache(self) -> None:
+        """Release path results while retaining mesh and endpoint samples."""
+        self._path_cache.clear()
+        self._path_cache_bytes = 0
+        self.path_cache_hits = 0
+        self.path_cache_misses = 0
+        self.last_dijkstra_settled_count = 0
 
     def distance_between_points(self, point_a: np.ndarray, point_b: np.ndarray) -> GeodesicPathResult:
         return self._distance_between_samples(self.samples_from_points(point_a), self.samples_from_points(point_b))
@@ -145,6 +171,7 @@ class SurfaceGeodesicSolver:
         return samples
 
     def _distance_between_samples(self, samples_a: _SurfaceSamples, samples_b: _SurfaceSamples) -> GeodesicPathResult:
+        self.last_dijkstra_settled_count = 0
         if (
             len(samples_a.points) == 0
             or len(samples_b.points) == 0
@@ -153,6 +180,45 @@ class SurfaceGeodesicSolver:
         ):
             return _empty_result()
 
+        # Include support vertices, offsets and original point ordering, rather
+        # than just geometric endpoints: contour provenance affects the graph
+        # attachments and equal-distance candidates retain their original ties.
+        arrays = (
+            samples_a.points,
+            samples_a.vertices,
+            samples_a.offsets,
+            samples_a.point_indices,
+            samples_b.points,
+            samples_b.vertices,
+            samples_b.offsets,
+            samples_b.point_indices,
+        )
+        cache_key = tuple(_array_cache_token(array) for array in arrays)
+        cached = self._path_cache.get(cache_key)
+        if cached is not None:
+            self.path_cache_hits += 1
+            self._path_cache.move_to_end(cache_key)
+            return _copy_result(cached[0])
+
+        self.path_cache_misses += 1
+        result = self._uncached_distance_between_samples(samples_a, samples_b)
+        cache_bytes = (
+            sum(array.nbytes for array in arrays) + result.point_a.nbytes + result.point_b.nbytes + result.path_v.nbytes
+        )
+        if _PATH_CACHE_MAX_ENTRIES > 0 and cache_bytes <= _PATH_CACHE_MAX_BYTES:
+            while self._path_cache and (
+                len(self._path_cache) >= _PATH_CACHE_MAX_ENTRIES
+                or self._path_cache_bytes + cache_bytes > _PATH_CACHE_MAX_BYTES
+            ):
+                _, (_, evicted_bytes) = self._path_cache.popitem(last=False)
+                self._path_cache_bytes -= evicted_bytes
+            self._path_cache[cache_key] = (_copy_result(result), cache_bytes)
+            self._path_cache_bytes += cache_bytes
+        return result
+
+    def _uncached_distance_between_samples(
+        self, samples_a: _SurfaceSamples, samples_b: _SurfaceSamples
+    ) -> GeodesicPathResult:
         direct = self._same_face_point_path(samples_a, samples_b)
         if direct is not None:
             self.last_dijkstra_settled_count = 0
@@ -495,6 +561,17 @@ def _empty_result() -> GeodesicPathResult:
         point_b=np.zeros(3, dtype=float),
         index_b=-1,
         path_v=np.zeros((0, 3), dtype=float),
+    )
+
+
+def _copy_result(result: GeodesicPathResult) -> GeodesicPathResult:
+    return GeodesicPathResult(
+        distance=result.distance,
+        point_a=result.point_a.copy(),
+        index_a=result.index_a,
+        point_b=result.point_b.copy(),
+        index_b=result.index_b,
+        path_v=result.path_v.copy(),
     )
 
 

@@ -350,11 +350,12 @@ class CurrentDensityReport:
         current_A: float,
         conductor_width_m: float,
         conductor_height_m: float,
+        conductor_area_m2: float | None = None,
     ) -> "CurrentDensityReport":
         width = float(conductor_width_m)
         height = float(conductor_height_m)
         current = float(current_A)
-        area = width * height
+        area = width * height if conductor_area_m2 is None else float(conductor_area_m2)
         if not np.isfinite(current) or not np.isfinite(area) or area <= 0.0:
             return cls.nan()
         density_m2 = abs(current) / area
@@ -373,6 +374,11 @@ class CurrentDensityReport:
             current_density_A_per_m2=float(density_m2),
             current_density_A_per_mm2=float(density_mm2),
             current_density_class=density_class,
+            assumption=(
+                "rectangular conductor cross section; no thermal duty-cycle model"
+                if conductor_area_m2 is None
+                else "configured conductor cross-section area; no thermal duty-cycle model"
+            ),
         )
 
     @classmethod
@@ -380,10 +386,18 @@ class CurrentDensityReport:
         config = getattr(result, "input_data", None)
         if config is None:
             return cls.nan()
+        area = None
+        if np.asarray(getattr(config, "cross_sectional_points", [])).size >= 6:
+            # Use the same polygon area as the resistance calculation, including
+            # trapezoids and other profiles whose bounding rectangle is larger.
+            from .inductance import conductor_cross_section_area
+
+            area = conductor_cross_section_area(config)
         return cls.from_current_and_conductor(
             current_A=float(getattr(result, "needed_current_layout", np.nan)),
             conductor_width_m=float(getattr(config, "conductor_cross_section_width", np.nan)),
             conductor_height_m=float(getattr(config, "conductor_cross_section_height", np.nan)),
+            conductor_area_m2=area,
         )
 
     def as_dict(self, prefix: str = "current_density") -> dict[str, float | str]:

@@ -3,16 +3,336 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 from pathlib import Path
 import time
+from types import SimpleNamespace
 
 import numpy as np
 
 from ..field_components import field_component_values
-from ..pipeline import run_coilgen
+from ..pipeline import CoilGenPipeline
+from ..pipeline_stages import PipelineCheckpoint, PipelineStage
 from ..progress import ProgressReporter
 from ..reporting import write_design_report
+from ..scientific_arrays import scientific_arrays as _scientific_arrays
+from ..application.stage_preview import MANIFEST_NAME as STAGE_PREVIEW_MANIFEST, publish_stage_preview
 from .requests import ResearchRequest
-from .storage import DirectoryOwner, atomic_json, file_digest, json_value, request_identity, verify_input_files
+from .storage import (
+    DirectoryOwner,
+    atomic_json,
+    file_digest,
+    json_value,
+    request_identity,
+    result_metadata_digest,
+    verify_input_files,
+)
 from .validation import validate_on_independent_grid, validate_fabricated_constraints
+
+
+def _pipeline_sweep_evidence(parts, config) -> dict:
+    """Retain recorded native sweep checks, independently of fabrication review.
+
+    The mesh enumeration matches ``_scientific_arrays``. Missing legacy checks
+    remain unknown; neither a skipped sweep nor a mesh alone proves readiness.
+    No validation, geometry conditioning or current fit is performed here.
+    """
+
+    def recorded_bool(value):
+        return bool(value) if isinstance(value, (bool, np.bool_)) else None
+
+    bodies = []
+    for part_index, part in enumerate(parts):
+        native = [
+            (body.mesh, body.contour_index, body.turn_multiplicity, body.diagnostics) for body in part.swept_bodies
+        ]
+        if not native and part.swept_body is not None:
+            native = [(part.swept_body, None, 1, part.manufacturing_diagnostics)]
+        for body_index, (_, contour_index, multiplicity, diagnostics) in enumerate(native):
+            bodies.append(
+                {
+                    "body_id": f"pipeline_part{part_index + 1:03d}_body{body_index + 1:04d}",
+                    "part_index": part_index + 1,
+                    "body_index": body_index + 1,
+                    "contour_index": contour_index,
+                    "source_kind": "contour" if contour_index is not None else "wire_path",
+                    "turn_multiplicity": multiplicity,
+                    "vertices_key": f"swept_{part_index}_{body_index}_vertices_m",
+                    "faces_key": f"swept_{part_index}_{body_index}_faces",
+                    "manufacturing_ok": recorded_bool(diagnostics.get("manufacturing_ok")),
+                    "mesh_solid_ok": recorded_bool(diagnostics.get("mesh_solid_ok")),
+                    "diagnostics": json_value(diagnostics),
+                    "route_diagnostics": json_value(part.route_diagnostics),
+                }
+            )
+    statuses = [body["manufacturing_ok"] for body in bodies]
+    return {
+        "scope": "pipeline_sweep_geometry",
+        "surface_realization": config.sweep_surface_realization,
+        "body_count": len(bodies),
+        "checked_body_count": sum(status is not None for status in statuses),
+        "checks_passed": False if False in statuses else True if statuses and all(statuses) else None,
+        "bodies": bodies,
+    }
+
+
+def _wire_field_metrics(field, target, config) -> dict:
+    """Global design-grid residuals; target zeros never create pointwise ratios."""
+    actual = np.asarray(field, dtype=float)
+    reference = np.asarray(target.b, dtype=float)
+    if actual.shape != reference.shape or actual.ndim != 2 or actual.shape[1] != 3:
+        return {"available": False, "reason": "Wire field does not match the design-grid vector target."}
+    weights = np.asarray(target.weights, dtype=float).reshape(-1)
+    suppressed = np.asarray(target.suppressed, dtype=bool).reshape(-1)
+    if len(weights) != len(reference) or len(suppressed) != len(reference):
+        return {"available": False, "reason": "Wire field weights or suppression mask do not match the grid."}
+    active = ~suppressed & np.isfinite(weights) & (weights > 0)
+    if not np.any(active):
+        return {"available": False, "reason": "No active positive-weight design samples."}
+    if not np.all(np.isfinite(actual[active])) or not np.all(np.isfinite(reference[active])):
+        return {"available": False, "reason": "Active wire fields or targets are nonfinite."}
+    component = config.target_field_component
+    actual = field_component_values(actual[active], component, b0_direction=config.b_0_direction)
+    reference = field_component_values(reference[active], component, b0_direction=config.b_0_direction)
+    point_count = int(np.count_nonzero(active))
+    actual, reference = actual.reshape(point_count, -1), reference.reshape(point_count, -1)
+    # Scale before squaring so a valid finite field/weight cannot overflow an
+    # intermediate sum. Vector metrics use magnitude RMS, scalar metrics Bz etc.
+    scale = max(float(np.max(np.abs(actual))), float(np.max(np.abs(reference))))
+    weights = weights[active] / np.max(weights[active])
+    weights /= np.sum(weights)
+    residual = (actual / scale - reference / scale) if scale else np.zeros_like(actual)
+    reference_scaled = reference / scale if scale else reference
+    error_norm = np.hypot.reduce(residual, axis=1)
+    reference_norm = np.hypot.reduce(reference_scaled, axis=1)
+    rms = float(np.sqrt(weights @ (error_norm**2)))
+    target_rms = float(np.sqrt(weights @ (reference_norm**2)))
+    absolute = scale * rms
+    peak = scale * float(np.max(error_norm))
+    if not np.all(np.isfinite([absolute, peak])):
+        return {"available": False, "reason": "Wire residual magnitude exceeds finite SI reporting range."}
+    return {
+        "available": True,
+        "component": component,
+        "sample_count": point_count,
+        "rms_error_T": absolute,
+        "peak_error_T": peak,
+        "target_rms_T": scale * target_rms,
+        "relative_rms_error": rms / target_rms if target_rms > 0 else None,
+        "rms_convention": "vector_magnitude" if actual.shape[1] == 3 else "scalar",
+    }
+
+
+def _wire_field_evidence(result) -> tuple[dict, dict]:
+    """Export evaluated wire maps without recalculation, current fits or acceptance.
+
+    The pipeline layout field can use its realized centroid, its connected
+    route, or copied contours. Only the first two qualify as routed evidence.
+    Legacy evaluations can refit the reported current; original-current maps
+    use the already computed per-amp operators when every part shares a drive.
+    """
+    from ..evaluation import field_evaluation_current_source, layout_field_geometry
+
+    config = result.input_data
+    current = float(result.needed_current_layout)
+    policy = field_evaluation_current_source(config)
+    refitted = policy.strip().lower().replace("-", "_") not in {"stream_function", "stream", "contour_step", "sf"}
+    steps = [part.contour_step for part in result.coil_parts]
+    common = bool(steps) and all(step is not None and np.isfinite(step) and step != 0 for step in steps)
+    if common:
+        common = all(np.isclose(step, steps[0], rtol=1e-12, atol=0.0) for step in steps)
+    original_current = float(steps[0]) if common else None
+    arrays, evidence = {}, {}
+    geometry = [layout_field_geometry(part, config) for part in result.coil_parts]
+    for key, field, per_amp in (
+        ("contour", result.field_by_unconnected_loops, result.field_loops_per1Amp),
+        ("routed", result.field_by_layout, result.field_layout_per1Amp),
+    ):
+        entry = {
+            "scope": "design_grid_wire_field",
+            "field_model": "thin_wire_biot_savart",
+            "independent_sampling": False,
+            "acceptance_claim": False,
+            "current_A": current if np.isfinite(current) else None,
+            "current_source": policy,
+            "current_refitted": refitted,
+            "geometry_sources": ["oriented_unconnected_contours"]
+            if key == "contour"
+            else [source for _, source in geometry],
+        }
+        if key == "routed" and (not geometry or any(points is None for points, _ in geometry)):
+            entry.update(
+                available=False, reason="A connected evaluated winding is unavailable; layout field copies contours."
+            )
+        elif not np.isfinite(current):
+            entry.update(available=False, reason="The evaluated wire current is nonfinite.")
+        else:
+            entry.update(_wire_field_metrics(field, result.target_field, config))
+            if entry["available"]:
+                arrays[f"{key}_field_T"] = np.asarray(field)
+                if key == "routed":
+                    for index, (points, _) in enumerate(geometry):
+                        arrays[f"evaluated_winding_{index}_points_m"] = points
+                if original_current is not None:
+                    original_field = np.asarray(per_amp) * original_current
+                    original = _wire_field_metrics(original_field, result.target_field, config)
+                    original.update(
+                        current_A=original_current, current_source="original_contour_step", current_refitted=False
+                    )
+                    entry["at_stream_current"] = original
+                    if original["available"]:
+                        arrays[f"{key}_field_at_stream_current_T"] = original_field
+                else:
+                    entry["at_stream_current"] = {
+                        "available": False,
+                        "reason": "A common finite nonzero original contour current is unavailable.",
+                    }
+        evidence[key] = entry
+    return arrays, evidence
+
+
+def _constraint_rows(diagnostics) -> list[dict]:
+    return [
+        {
+            "name": row["name"],
+            "value": row.get("value"),
+            "limit": row.get("limit"),
+            "effective_limit": row.get("effective_limit"),
+            "unit": row.get("unit", ""),
+            "passed": row.get("met"),
+            "scope": "continuous_sheet",
+        }
+        for row in diagnostics.get(
+            "research_constraint_diagnostics", diagnostics.get("constrained_solver_contract_constraint_diagnostics", [])
+        )
+    ]
+
+
+def _project_provenance(request: ResearchRequest) -> dict:
+    return {
+        "project_id": request.project_id,
+        "project_revision": request.project_revision,
+        "project_fingerprint": request.project_fingerprint,
+        "project_model_fingerprint": request.project_model_fingerprint,
+    }
+
+
+def _save_partial_result(request, checkpoint, directory, manifest, digest, started, stage_artifacts=()) -> dict:
+    """Incomplete workflows remain inspectable without claiming winding acceptance."""
+    state = checkpoint.state
+    diagnostics = checkpoint.diagnostics
+    arrays = _scientific_arrays(state.parts, state.target_field, state.combined_mesh, state.sf_b_field)
+    pipeline_sweeps = _pipeline_sweep_evidence(state.parts, checkpoint.config)
+    validation = {
+        "available": False,
+        "verified": False,
+        "passed": None,
+        "reason": "The continuous sheet has not been solved.",
+    }
+    constraints = _constraint_rows(diagnostics)
+    relative = None
+    if checkpoint.stage.index >= PipelineStage.SHEET.index:
+        sheet_view = SimpleNamespace(
+            input_data=checkpoint.config,
+            target_field=state.target_field,
+            combined_mesh=state.combined_mesh,
+            coil_parts=state.parts,
+            regularization_diagnostics=diagnostics,
+        )
+        validation = validate_on_independent_grid(
+            sheet_view, resolution=request.validation_resolution, design_margin=request.design_margin
+        )
+        relative = _relative_field_error(
+            state.sf_b_field,
+            state.target_field.b,
+            ~np.asarray(state.target_field.suppressed, bool),
+            checkpoint.config.target_field_component,
+            checkpoint.config.b_0_direction,
+        )
+        constraints.append(
+            {
+                "name": "Independent grid field error",
+                "value": validation.get("value"),
+                "limit": validation.get("limit"),
+                "effective_limit": validation.get("effective_limit"),
+                "unit": validation.get("unit", "T"),
+                "passed": validation.get("passed"),
+                "scope": "continuous_sheet",
+            }
+        )
+        if validation["available"]:
+            arrays.update(
+                validation_points_m=validation["points_m"],
+                validation_field_T=validation["field_T"],
+                validation_target_T=validation["target_T"],
+            )
+    sheet_passed = (
+        bool(diagnostics.get("constrained_solver_contract_met", False))
+        and validation.get("passed") is True
+        and all(row["passed"] is True for row in constraints)
+    )
+    values = diagnostics.get("research_physical_values", diagnostics)
+    scope = {
+        PipelineStage.PREPARED: "prepared_geometry",
+        PipelineStage.SHEET: "continuous_sheet",
+        PipelineStage.CONTOURS: "unconnected_contours",
+        PipelineStage.ROUTED: "realized_winding",
+    }[checkpoint.stage]
+    summary = {
+        "accepted": checkpoint.stage is PipelineStage.SHEET and sheet_passed,
+        "sheet_accepted": sheet_passed,
+        "pipeline_sweep_checks_passed": pipeline_sweeps["checks_passed"],
+        "fabrication_review_performed": False,
+        "scope": scope,
+        "construction_released": False,
+        "pipeline_stage": checkpoint.stage.value,
+        "objective": diagnostics.get("research_objective"),
+        "relative_field_error": relative,
+        "validated_relative_field_error": validation.get("relative_field_error"),
+        "field_source": validation.get("source", "unsolved"),
+        "power_w": values.get("sheet_power_W"),
+        "energy_j": values.get("energy_J"),
+        "max_current_density_a_per_m": values.get(
+            "max_surface_current_density_A_per_m", diagnostics.get("surface_current_density_max_A_per_m")
+        ),
+        "vertices": len(arrays["vertices_m"]),
+        "triangles": len(arrays["faces"]),
+        "contour_components": sum(len(part.contour_lines) for part in state.parts),
+        "elapsed_seconds": time.perf_counter() - started,
+    }
+    np.savez_compressed(directory / "scientific_result.npz", **arrays)
+    atomic_json(directory / "solver_diagnostics.json", diagnostics)
+    artifacts = [
+        {"name": name, "kind": kind}
+        for name, kind in (
+            ("request.json", "request"),
+            ("manifest.json", "provenance"),
+            ("pipeline_checkpoint.cgstage", "checkpoint"),
+            ("scientific_result.npz", "npz"),
+            ("solver_diagnostics.json", "diagnostics"),
+        )
+    ]
+    artifacts.extend(stage_artifacts)
+    verify_input_files(manifest)
+    for artifact in artifacts:
+        artifact["sha256"] = file_digest(directory / artifact["name"])
+    payload = {
+        "name": request.name,
+        "config": request.to_dict()["config"],
+        "summary": summary,
+        "constraints": constraints,
+        "artifacts": artifacts,
+        "warnings": [
+            "Stage checkpoint; final winding fields, electrical properties and manufacturing acceptance remain unverified."
+        ],
+        "validation": {
+            key: value for key, value in validation.items() if key not in {"points_m", "field_T", "target_T"}
+        },
+        "pipeline_sweeps": pipeline_sweeps,
+        "request_sha256": digest,
+        "pipeline_stage": checkpoint.stage.value,
+        "checkpoint": "pipeline_checkpoint.cgstage",
+        **_project_provenance(request),
+    }
+    atomic_json(directory / "result.json", payload)
+    return json_value(payload)
 
 
 def _relative_field_error(actual, target, mask, component, direction):
@@ -52,8 +372,67 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
     atomic_json(directory / "manifest.json", manifest)
     progress = ProgressReporter(label="Research")
     started = time.perf_counter()
+    stage_artifacts = []
+    stage_evidence = []
+
+    def retain_stage(completed):
+        # Retain actual completed boundaries; an evaluated state cannot be rewound.
+        name = f"checkpoints/{completed.stage.value}.cgstage"
+        completed.save(directory / name)
+        stage_artifacts.append({"name": name, "kind": "stage_checkpoint", "stage": completed.stage.value})
+        try:
+            stage_evidence.append({**stage_artifacts[-1], "sha256": file_digest(directory / name)})
+            atomic_json(
+                directory / "checkpoints/evidence.json",
+                {
+                    "schema": "coilgen.checkpoint-evidence/1",
+                    "request_sha256": digest,
+                    **{
+                        key: getattr(request, key)
+                        for key in (
+                            "project_id",
+                            "project_revision",
+                            "project_fingerprint",
+                            "project_model_fingerprint",
+                        )
+                    },
+                    "artifacts": stage_evidence,
+                },
+            )
+        except OSError as exc:
+            # Recovery metadata is optional. The last atomic evidence record
+            # remains usable; computation and its final result are preserved.
+            progress.report(
+                None,
+                f"Checkpoint recovery metadata unavailable for {completed.stage.value}; "
+                f"only earlier committed boundaries can be resumed: {exc}",
+            )
+        publish_preview(completed)
+
+    def publish_preview(completed):
+        preview, error = None, None
+        try:
+            publish_stage_preview(directory, completed, request, digest)
+            preview = STAGE_PREVIEW_MANIFEST
+        except Exception as exc:
+            # Display data are optional. Preserve the numerical result and its
+            # completed checkpoint if visualization storage is unavailable.
+            error = f"{type(exc).__name__}: {exc}"
+        progress.boundary(completed.stage.value, preview=preview, preview_error=error)
+
     with geometry_acceleration(request.kernel_backend):
-        result = run_coilgen(config, project_root=directory)
+        resumed = PipelineCheckpoint.load(request.resume_checkpoint) if request.resume_checkpoint else None
+        checkpoint = CoilGenPipeline(config, project_root=directory).run_stage(
+            request.pipeline_stage, resumed, checkpoint_callback=retain_stage
+        )
+        if resumed is not None and checkpoint.stage is resumed.stage:
+            # run_stage has now checked compatibility; no new callback ran.
+            publish_preview(checkpoint)
+        checkpoint.save(directory / "pipeline_checkpoint.cgstage")
+    if checkpoint.stage is not PipelineStage.EVALUATED:
+        return _save_partial_result(request, checkpoint, directory, manifest, digest, started, stage_artifacts)
+    result = checkpoint.result
+    pipeline_sweeps = _pipeline_sweep_evidence(result.coil_parts, config)
     diagnostics = result.regularization_diagnostics
     progress.report(86, "Checking an independent field grid")
     validation = validate_on_independent_grid(
@@ -63,19 +442,7 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
     relative = _relative_field_error(
         result.b_field_opt_sf, result.target_field.b, mask, config.target_field_component, config.b_0_direction
     )
-    constraints = [
-        {
-            "name": r["name"],
-            "value": r.get("value"),
-            "limit": r.get("limit"),
-            "effective_limit": r.get("effective_limit"),
-            "unit": r.get("unit", ""),
-            "passed": r.get("met"),
-        }
-        for r in diagnostics.get(
-            "research_constraint_diagnostics", diagnostics.get("constrained_solver_contract_constraint_diagnostics", [])
-        )
-    ]
+    constraints = _constraint_rows(diagnostics)
     validation_passed = validation.get("passed")
     constraints.append(
         {
@@ -85,7 +452,11 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
             "effective_limit": validation.get("effective_limit"),
             "unit": validation.get("unit", "T"),
             "passed": validation_passed,
+            "scope": "continuous_sheet",
         }
+    )
+    sheet_accepted = bool(diagnostics.get("constrained_solver_contract_met", False)) and all(
+        row["passed"] is True for row in constraints
     )
     warnings = [
         "Magnetostatic sheet model; RF loading, SAR, transient eddy currents and thermal cooling are not modeled."
@@ -98,7 +469,12 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         )
     fabrication = None
     fabricated_physics = None
-    artifacts = [{"name": "request.json", "kind": "request"}, {"name": "manifest.json", "kind": "provenance"}]
+    artifacts = [
+        {"name": "request.json", "kind": "request"},
+        {"name": "manifest.json", "kind": "provenance"},
+        {"name": "pipeline_checkpoint.cgstage", "kind": "checkpoint"},
+    ]
+    artifacts.extend(stage_artifacts)
     if request.fabricate:
         progress.report(90, "Conditioning and checking the fabrication assembly")
         fabrication = compile_fabrication(
@@ -137,6 +513,10 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
     values = diagnostics.get("research_physical_values", diagnostics)
     summary = {
         "accepted": accepted,
+        "sheet_accepted": sheet_accepted,
+        "pipeline_sweep_checks_passed": pipeline_sweeps["checks_passed"],
+        "fabrication_review_performed": fabrication is not None,
+        "pipeline_stage": "evaluated",
         "scope": "fabrication_review" if fabrication else "continuous_sheet",
         "construction_released": False,
         "objective": diagnostics.get("research_objective"),
@@ -172,14 +552,9 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         "elapsed_seconds": time.perf_counter() - started,
     }
     array_file = directory / "scientific_result.npz"
-    arrays = {
-        "vertices_m": result.combined_mesh.vertices,
-        "faces": result.combined_mesh.faces,
-        "stream_function_A": result.combined_mesh.stream_function,
-        "target_points_m": result.target_field.coords,
-        "target_field_T": result.target_field.b,
-        "sheet_field_T": result.b_field_opt_sf,
-    }
+    arrays = _scientific_arrays(result.coil_parts, result.target_field, result.combined_mesh, result.b_field_opt_sf)
+    wire_arrays, wire_evidence = _wire_field_evidence(result)
+    arrays.update(wire_arrays)
     if validation["available"]:
         arrays.update(
             validation_points_m=validation["points_m"],
@@ -188,6 +563,17 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         )
     if fabricated_physics and fabricated_physics.get("field_T") is not None:
         arrays["fabricated_field_T"] = fabricated_physics["field_T"]
+        # Wire-field validation uses the design samples, not the independent
+        # sheet grid. Carry its own coordinates instead of implying a grid.
+        arrays["fabricated_points_m"] = result.target_field.coords
+    if fabrication is not None:
+        # Review can intentionally re-realize on the FEM mesh while the native
+        # pipeline uses an analytic surface. Keep both physical datasets.
+        for index, record in enumerate(fabrication.paths):
+            arrays[f"review_conductor_{index}_points_m"] = record.points_m
+        for index, plan in enumerate(fabrication.winding_steps):
+            if plan.get("electrical_points_m") is not None:
+                arrays[f"review_electrical_{index}_points_m"] = np.asarray(plan["electrical_points_m"], dtype=float)
     np.savez_compressed(array_file, **arrays)
     artifacts.append({"name": array_file.name, "kind": "npz"})
     atomic_json(directory / "solver_diagnostics.json", diagnostics)
@@ -207,11 +593,16 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         "artifacts": artifacts,
         "warnings": warnings,
         "validation": validation_summary,
+        "wire_fields": wire_evidence,
+        "pipeline_sweeps": pipeline_sweeps,
         "fabrication": fabrication.summary() if fabrication else None,
         "fabricated_physics": {k: v for k, v in fabricated_physics.items() if k != "field_T"}
         if fabricated_physics
         else None,
         "request_sha256": digest,
+        "pipeline_stage": "evaluated",
+        "checkpoint": "pipeline_checkpoint.cgstage",
+        **_project_provenance(request),
         "timing": result.timing_summary,
     }
     atomic_json(directory / "result.json", payload)
@@ -219,14 +610,25 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
     return json_value(payload)
 
 
-def run_design(request: ResearchRequest | dict, output_dir: str | Path, *, threads=1) -> dict:
-    """Run a bounded local research design and retain all validation evidence."""
+def execute_owned_design(request: ResearchRequest | dict, output_dir: str | Path, *, threads=1) -> dict:
+    """Execute after the calling application has acquired ``DirectoryOwner``.
+
+    This lets the application check/reuse immutable completed evidence under
+    the same exclusive lock as execution. Ordinary callers use ``run_design``.
+    """
     from threadpoolctl import threadpool_info, threadpool_limits
     from .jobs import RuntimePolicy
 
     RuntimePolicy(threads_per_worker=threads)
-    with DirectoryOwner(output_dir), threadpool_limits(limits=threads):
+    with threadpool_limits(limits=threads):
         result = _run_design(request, output_dir, threads=threads)
         result["runtime"] = {"native_threads_requested": threads, "threadpools": threadpool_info()}
+        result["metadata_sha256"] = result_metadata_digest(result)
         atomic_json(Path(output_dir) / "result.json", result)
         return result
+
+
+def run_design(request: ResearchRequest | dict, output_dir: str | Path, *, threads=1) -> dict:
+    """Run a bounded local research design and retain all validation evidence."""
+    with DirectoryOwner(output_dir):
+        return execute_owned_design(request, output_dir, threads=threads)

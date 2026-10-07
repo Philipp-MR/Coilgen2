@@ -6,7 +6,12 @@ from dataclasses import dataclass
 import numpy as np
 
 from .config import CoilGenConfig
-from .geometry_kernels import segment_distance as _segment_segment_distance_3d, segment_distances
+from .contour_clearance import ContourClearanceIndex
+from .geometry_kernels import (
+    segment_distance as _segment_segment_distance_3d,
+    segment_distances,
+    segment_closest_parameters,
+)
 from .contours import build_simple_wire_paths, contour_current_alignment, contour_evaluation_points
 from .models import (
     CoilPart,
@@ -27,7 +32,7 @@ from .surface_topology import (
     classify_loop_topology_signatures,
     validate_intrinsic_topology_inputs,
 )
-from .wire_provenance import transfer_segment_geometry, transfer_segment_owners
+from .wire_provenance import transfer_segment_geometry, transfer_segment_owners, transfer_segment_provenance
 
 
 @dataclass
@@ -116,6 +121,7 @@ class InterGroupCutAlignmentState:
     distance_rel_tol: float
     candidate_factor: int
     return_corridor_aligned: bool = False
+    axial_ring_alignment: bool = False
 
 
 @dataclass
@@ -600,8 +606,15 @@ def generate_group_cutshapes(
     b_0_direction,
     cut_plane_definition: str = "nearest",
     cut_height_ratio: float = 0.5,
+    *,
+    align_axial_rings: bool = True,
 ) -> list[LoopCutShape]:
-    """Generate high/low rectangular opening cuts for all loops in a group."""
+    """Generate opening cuts, sharing a seam for axial cylinder ring groups.
+
+    A ring has no unique nearest azimuth. Use the support axis and one radial
+    convention instead of letting sampling density or the closure vertex pick
+    a different seam for each group. Local saddle loops retain their own cuts.
+    """
 
     if not loop_group.loops:
         return []
@@ -614,10 +627,16 @@ def generate_group_cutshapes(
         np.asarray(b_0_direction, dtype=float),
         cut_plane_definition,
     )
+    frame = _axial_ring_cut_frame(loop_group, mesh, b_0_direction) if align_axial_rings else None
+    cut_direction: np.ndarray | None = None
+    if frame is not None:
+        group_center, cut_plane_direction, radial = frame
+        # _assign_high_low_cuts names the minimum projection "high".
+        # The same physical side must retain that name across opposite winding.
+        cut_direction = -radial
 
     shapes: list[LoopCutShape] = []
     first_pair_center: np.ndarray | None = None
-    cut_direction: np.ndarray | None = None
     for loop_ind, loop in enumerate(loop_group.loops):
         cut_points = _loop_plane_cut_points(loop, cut_plane_direction, group_center)
         if len(cut_points) < 2:
@@ -630,8 +649,8 @@ def generate_group_cutshapes(
 
         if loop_ind == 0:
             pair = _select_cut_pair_by_center(cut_points, group_center)
-            cut_direction = pair[1].v - pair[0].v
-            cut_direction = _normalize_vector(cut_direction, fallback=np.array([1.0, 0.0, 0.0]))
+            if cut_direction is None:
+                cut_direction = _normalize_vector(pair[1].v - pair[0].v, fallback=np.array([1.0, 0.0, 0.0]))
             high_cut, low_cut = _assign_high_low_cuts(pair, cut_direction)
             first_pair_center = (high_cut.v + low_cut.v) / 2.0
         else:
@@ -650,6 +669,40 @@ def generate_group_cutshapes(
             )
         )
     return shapes
+
+
+def _axial_ring_cut_frame(loop_group, mesh, b_0_direction):
+    """Return an axis-containing seam only for closed, once-encircling rings."""
+    axis_result = _mesh_boundary_axis(mesh)
+    if axis_result is None or not loop_group.loops:
+        return None
+    origin, axis = axis_result
+    b0 = _normalize_vector(np.asarray(b_0_direction, dtype=float), fallback=np.array([0.0, 0.0, 1.0]))
+    if np.linalg.norm(np.cross(axis, b0)) >= 0.01:
+        return None
+    for loop in loop_group.loops:
+        points = np.asarray(loop.v, dtype=float)
+        if len(points) < 4 or not np.all(np.isfinite(points)) or np.linalg.norm(points[0] - points[-1]) > 1e-10:
+            return None
+        centered = points - points[0]
+        normal = np.sum(np.cross(centered[:-1], centered[1:]), axis=0)
+        normal_length = float(np.linalg.norm(normal))
+        if normal_length <= 1e-24 or np.linalg.norm(np.cross(axis, normal / normal_length)) >= 0.01:
+            return None
+        relative = points - origin
+        radial = relative - np.outer(relative @ axis, axis)
+        lengths = np.linalg.norm(radial, axis=1)
+        if np.any(lengths <= 1e-12):
+            return None
+        radial = radial / lengths[:, None]
+        turns = np.arctan2(
+            np.cross(radial[:-1], radial[1:]) @ axis,
+            np.einsum("ij,ij->i", radial[:-1], radial[1:]),
+        )
+        if abs(abs(float(np.sum(turns))) - 2.0 * np.pi) > 1e-6:
+            return None
+    preferred = _preferred_cylindrical_cut_radial(axis)
+    return origin, np.cross(axis, preferred), preferred
 
 
 def calc_mean_loop_normal(loop_group: LoopGroup) -> np.ndarray:
@@ -851,10 +904,79 @@ def calculate_group_centers(parts: list[CoilPart]) -> list[CoilPart]:
     return parts
 
 
+def _coherent_axial_ring_group_indices(part, config) -> tuple[int, ...]:
+    """Automatic ring cuts share a corridor; explicit side requests still win."""
+    if _inter_group_cut_alignment_state(part, config) is None:
+        return ()
+    return tuple(
+        index
+        for index, group in enumerate(part.groups)
+        if len(group.loops) > 1 and _axial_ring_cut_frame(group, part.mesh, config.b_0_direction) is not None
+    )
+
+
+def _coherent_axial_ring_rails(part, config, geodesic_solver, *, allow_direct_fallback):
+    """Select one feasible automatic side using all eligible groups' rail costs.
+
+    Independent near-tied scores can put mirror groups on opposite cylinder
+    sides. Evaluate each high/low rail once and reuse it during assembly.
+    """
+    indices = _coherent_axial_ring_group_indices(part, config)
+    if not indices:
+        return {}
+    cuts, candidates = {}, {}
+    forced = {index: _force_cut_selection_for_group(config, index) for index in indices}
+    for index in indices:
+        group = part.groups[index]
+        cuts[index] = generate_group_cutshapes(
+            group, np.zeros(3), part.mesh, _within_group_cut_width(config), config.b_0_direction
+        )
+        candidates[index] = {
+            side: _build_within_group_cut_rail(
+                group,
+                cuts[index],
+                side,
+                config,
+                geodesic_solver=geodesic_solver,
+                allow_direct_fallback=allow_direct_fallback,
+            )
+            for side in ("high", "low")
+        }
+    automatic = [index for index in indices if forced[index] is None]
+    totals = {side: sum(candidates[index][side].score for index in automatic) for side in ("high", "low")}
+    feasible = [side for side, score in totals.items() if math.isfinite(score)]
+    if not feasible:
+        raise ValueError("No common feasible return side for the axial ring groups; routing was not completed.")
+    pinned = {side for side in forced.values() if side is not None}
+    if len(pinned) == 1:
+        common_side = next(iter(pinned))
+        if common_side not in feasible:
+            raise ValueError("The requested common return side is not feasible for all axial ring groups.")
+    else:
+        common_side = min(feasible, key=totals.__getitem__)
+        if "high" in feasible and _within_group_rail_scores_are_tied(totals["high"], totals[common_side]):
+            common_side = "high"
+    selected = {}
+    for index in indices:
+        pair = candidates[index]
+        rail = pair[forced[index] or common_side]
+        scores = {
+            "high": pair["high"].score,
+            "low": pair["low"].score,
+            "high_candidate_count": float(pair["high"].candidate_count),
+            "low_candidate_count": float(pair["low"].candidate_count),
+        }
+        rail.metrics = {**(rail.metrics or {}), "coherent_axial_ring_group_count": float(len(indices))}
+        selected[index] = (cuts[index], rail, scores)
+    return selected
+
+
 def interconnect_within_groups(
     parts: list[CoilPart],
     config: CoilGenConfig,
     progress: ProgressReporter | None = None,
+    *,
+    open_singletons: bool = False,
 ) -> list[CoilPart]:
     use_geodesic_connections = _use_geodesic_inter_group_paths(config)
     require_surface_connections = _strict_geodesic_inter_group_paths(config)
@@ -863,9 +985,13 @@ def interconnect_within_groups(
     completed_groups = 0
     for part_ind, part in enumerate(parts):
         part.connected_groups = []
+        align_axial_rings = _inter_group_cut_alignment_state(part, config) is not None
         geodesic_solver = SurfaceGeodesicSolver(part.mesh) if use_geodesic_connections else None
         if not part.groups:
             continue
+        coherent_rails = _coherent_axial_ring_rails(
+            part, config, geodesic_solver, allow_direct_fallback=not require_surface_connections
+        )
         for group_ind, group in enumerate(part.groups):
             loop_count = len(group.loops)
             if task is not None:
@@ -877,7 +1003,7 @@ def interconnect_within_groups(
                     ),
                     force=completed_groups == 0,
                 )
-            if len(group.loops) == 1:
+            if len(group.loops) == 1 and not open_singletons:
                 loop = group.loops[0]
                 connected = _connected_group_from_single_loop(loop)
                 connected.outer_loop_indices = tuple(group.outer_loop_indices)
@@ -897,14 +1023,19 @@ def interconnect_within_groups(
                 else np.vstack([loop.v for loop in group.loops]).mean(axis=0)
             )
             try:
-                rectangle_cuts = generate_group_cutshapes(
-                    group,
-                    group_center_v,
-                    part.mesh,
-                    _within_group_cut_width(config),
-                    config.b_0_direction,
-                    cut_plane_definition="nearest",
-                    cut_height_ratio=0.5,
+                rectangle_cuts = (
+                    coherent_rails[group_ind][0]
+                    if group_ind in coherent_rails
+                    else generate_group_cutshapes(
+                        group,
+                        group_center_v,
+                        part.mesh,
+                        _within_group_cut_width(config),
+                        config.b_0_direction,
+                        cut_plane_definition="nearest",
+                        cut_height_ratio=0.5,
+                        align_axial_rings=align_axial_rings,
+                    )
                 )
             except ValueError:
                 for loop in group.loops:
@@ -940,13 +1071,17 @@ def interconnect_within_groups(
                         message=f"group {group_ind + 1}/{len(part.groups)} used fallback cut generation",
                     )
                 continue
-            rail = _select_within_group_cut_rail(
-                group,
-                rectangle_cuts,
-                config,
-                group_ind,
-                geodesic_solver=geodesic_solver,
-                allow_direct_fallback=not require_surface_connections,
+            rail = (
+                coherent_rails[group_ind][1]
+                if group_ind in coherent_rails
+                else _select_within_group_cut_rail(
+                    group,
+                    rectangle_cuts,
+                    config,
+                    group_ind,
+                    geodesic_solver=geodesic_solver,
+                    allow_direct_fallback=not require_surface_connections,
+                )
             )
             if require_surface_connections and (not math.isfinite(rail.score) or len(rail.connected_group.v) < 2):
                 raise ValueError(
@@ -957,12 +1092,16 @@ def interconnect_within_groups(
             group.opening_cuts_v = rail.opening_cuts
             group.within_group_cut_side = rail.side
             group.within_group_cut_score = rail.score
-            group.within_group_cut_scores = _within_group_cut_rail_scores(
-                group,
-                rectangle_cuts,
-                config,
-                geodesic_solver=geodesic_solver,
-                allow_direct_fallback=not require_surface_connections,
+            group.within_group_cut_scores = (
+                coherent_rails[group_ind][2]
+                if group_ind in coherent_rails
+                else _within_group_cut_rail_scores(
+                    group,
+                    rectangle_cuts,
+                    config,
+                    geodesic_solver=geodesic_solver,
+                    allow_direct_fallback=not require_surface_connections,
+                )
             )
             group.within_group_cut_pair_indices = rail.pair_indices
             group.within_group_cut_metrics = dict(rail.metrics or {})
@@ -1452,6 +1591,8 @@ def _inter_group_cut_alignment_state(
         distance_rel_tol=max(float(getattr(config, "inter_group_cut_alignment_distance_rel_tol", 0.0)), 0.0),
         candidate_factor=max(int(getattr(config, "inter_group_cut_alignment_candidate_factor", 1)), 1),
         return_corridor_aligned=return_corridor_aligned,
+        axial_ring_alignment=bool(part.groups)
+        and all(_axial_ring_cut_frame(group, part.mesh, config.b_0_direction) is not None for group in part.groups),
     )
 
 
@@ -1656,6 +1797,11 @@ def _select_group_connection(
     candidates: list[GroupConnectionCandidate] = []
     base_candidate_count = _inter_group_candidate_count(config)
     candidate_count = _inter_group_alignment_candidate_count(base_candidate_count, alignment_state)
+    clearance_index = (
+        ContourClearanceIndex([contour.v for contour in part.contour_lines])
+        if _connector_clearance_threshold(config) > 0.0
+        else None
+    )
     if geodesic_solver is not None and alignment_state is None:
         for candidate in _group_connection_direct_shortlist(search_groups, candidate_count):
             if _group_connection_candidate_is_valid(
@@ -1665,6 +1811,7 @@ def _select_group_connection(
                 candidate,
                 config,
                 geodesic_solver,
+                clearance_index=clearance_index,
             ):
                 return candidate
 
@@ -1685,7 +1832,24 @@ def _select_group_connection(
                     alignment_state,
                 )
             )
+    aligned_candidates = []
+    if alignment_state is not None and alignment_state.axial_ring_alignment:
+        aligned_candidates = _axially_aligned_group_candidates(
+            part, search_groups, candidates, alignment_state, geodesic_solver
+        )
     candidates = _sort_group_connection_candidates(candidates, alignment_state)
+    fallback = candidates[0] if candidates else None
+    if aligned_candidates:
+        best_distance = min(candidate.selection_distance for candidate in [*candidates, *aligned_candidates])
+        # Prefer corresponding azimuths where a feasible connection exists,
+        # within the same near-shortest distance allowance as vertex proposals.
+        # Sampling phase then cannot force a diagonal between ring groups.
+        aligned_candidates = [
+            candidate
+            for candidate in aligned_candidates
+            if _aligned_group_connection_sort_key(candidate, alignment_state, best_distance)[0] == 0.0
+        ]
+        candidates = _sort_group_connection_candidates(aligned_candidates, alignment_state) + candidates
     for candidate in candidates:
         if _group_connection_candidate_is_valid(
             part,
@@ -1694,15 +1858,88 @@ def _select_group_connection(
             candidate,
             config,
             geodesic_solver,
+            clearance_index=clearance_index,
         ):
             return candidate
     if _strict_geodesic_inter_group_paths(config):
         return None
-    if candidates:
-        fallback = candidates[0]
+    if fallback is not None:
+        # New interpolated proposals require validation. Preserve the existing
+        # vertex-only diagnostic fallback when no candidate passes.
         fallback.used_clearance_fallback = True
         return fallback
     return None
+
+
+def _axially_aligned_group_candidates(part, search_groups, candidates, alignment_state, geodesic_solver):
+    """Match azimuths on retained contour segments, not only sampled vertices.
+
+    Both segment endpoints must be in the existing admissible search path.
+    This preserves the exclusions around returns and never bridges a removed
+    interval. Interpolated cuts are still subject to ordinary route validation.
+    """
+    retained = {}
+    for local_index, search in enumerate(search_groups):
+        for loop_index in np.unique(search.loop_indices):
+            loop_index = int(loop_index)
+            loop = part.contour_lines[loop_index]
+            reference = search.v[search.loop_indices == loop_index]
+            distance, _ = _nearest_reference_points(loop.v, reference)
+            present = distance <= 1e-10
+            retained[(local_index, loop_index)] = present[:-1] & present[1:]
+    aligned, seen = [], set()
+    axis, origin = alignment_state.axis_v, alignment_state.origin_v
+    for candidate in candidates:
+        for move_first in (False, True):
+            fixed = candidate.point_b_v if move_first else candidate.point_a_v
+            local_index = candidate.local_a if move_first else candidate.local_b
+            loop_index = candidate.loop_a_index if move_first else candidate.loop_b_index
+            radial = fixed - origin
+            radial = radial - axis * float(radial @ axis)
+            if np.linalg.norm(radial) <= 1e-12:
+                continue
+            plane_normal = np.cross(axis, radial / np.linalg.norm(radial))
+            loop = part.contour_lines[loop_index]
+            for cut in _loop_plane_cut_points(loop, plane_normal, origin):
+                if not retained[(local_index, loop_index)][cut.segment_index] or float((cut.v - origin) @ radial) <= 0:
+                    continue
+                first = cut.v if move_first else candidate.point_a_v
+                second = candidate.point_b_v if move_first else cut.v
+                key = (
+                    candidate.local_a,
+                    candidate.local_b,
+                    candidate.loop_a_index,
+                    candidate.loop_b_index,
+                    first.tobytes(),
+                    second.tobytes(),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                direct_distance = float(np.linalg.norm(second - first))
+                if not math.isfinite(direct_distance) or direct_distance <= 1e-12:
+                    continue
+                geodesic_distance = (
+                    float(geodesic_solver.distance_between_points(first, second).distance)
+                    if geodesic_solver is not None
+                    else math.inf
+                )
+                use_geodesic = math.isfinite(geodesic_distance)
+                aligned.append(
+                    GroupConnectionCandidate(
+                        local_a=candidate.local_a,
+                        local_b=candidate.local_b,
+                        point_a_v=first.copy(),
+                        point_b_v=second.copy(),
+                        direct_distance=direct_distance,
+                        geodesic_distance=geodesic_distance,
+                        selection_distance=geodesic_distance if use_geodesic else direct_distance,
+                        used_geodesic_selection=use_geodesic,
+                        loop_a_index=candidate.loop_a_index,
+                        loop_b_index=candidate.loop_b_index,
+                    )
+                )
+    return aligned
 
 
 def _group_connection_direct_shortlist(
@@ -1901,32 +2138,44 @@ def _aligned_group_connection_sort_key(
     candidate: GroupConnectionCandidate,
     alignment_state: InterGroupCutAlignmentState,
     best_distance: float,
-) -> tuple[float, float, float, int, int]:
+) -> tuple[float, float, float, float, int, int]:
     distance = float(candidate.selection_distance)
     if not math.isfinite(distance):
-        return (2.0, math.inf, math.inf, int(candidate.local_a), int(candidate.local_b))
+        return (2.0, math.inf, math.inf, math.inf, int(candidate.local_a), int(candidate.local_b))
     tolerance = max(float(alignment_state.distance_rel_tol) * max(abs(best_distance), 1e-12), 1e-12)
     if alignment_state.return_corridor_aligned:
         tolerance = max(tolerance, 0.25 * max(abs(best_distance), 1e-12))
     alignment_error = _group_connection_alignment_error(candidate, alignment_state)
     if distance <= best_distance + tolerance:
-        return (0.0, alignment_error, distance, int(candidate.local_a), int(candidate.local_b))
-    return (1.0, distance, alignment_error, int(candidate.local_a), int(candidate.local_b))
+        axial_error = 0.0
+        if alignment_state.axial_ring_alignment:
+            delta = np.asarray(candidate.point_b_v) - np.asarray(candidate.point_a_v)
+            transverse = delta - alignment_state.axis_v * float(delta @ alignment_state.axis_v)
+            axial_error = float(transverse @ transverse) / max(float(delta @ delta), 1e-24)
+            # Numerical ties must not turn mirror-equivalent axial connections
+            # into different choices merely because of floating-point noise.
+            axial_error = round(axial_error, 12)
+        # Balance axiality with corridor proximity: a negligible endpoint
+        # mismatch must not move the bridge to the opposite cylinder side.
+        return (
+            0.0,
+            alignment_error + axial_error,
+            axial_error,
+            distance,
+            int(candidate.local_a),
+            int(candidate.local_b),
+        )
+    return (1.0, distance, alignment_error, 0.0, int(candidate.local_a), int(candidate.local_b))
 
 
 def _group_connection_alignment_error(
     candidate: GroupConnectionCandidate,
     alignment_state: InterGroupCutAlignmentState,
 ) -> float:
-    midpoint_v = (np.asarray(candidate.point_a_v, dtype=float) + np.asarray(candidate.point_b_v, dtype=float)) / 2.0
-    radial_v = midpoint_v - alignment_state.origin_v
-    radial_v = radial_v - alignment_state.axis_v * float(np.dot(radial_v, alignment_state.axis_v))
-    radial_norm = float(np.linalg.norm(radial_v))
-    if radial_norm <= 1e-12:
-        return math.inf
-    radial_v = radial_v / radial_norm
-    dot = float(np.clip(np.dot(radial_v, alignment_state.preferred_radial_v), -1.0, 1.0))
-    return 1.0 - dot
+    # Scoring the normalized midpoint lets opposite azimuth errors cancel,
+    # falsely treating a diagonal bridge as perfectly on the return seam.
+    errors = _point_alignment_errors(np.asarray([candidate.point_a_v, candidate.point_b_v]), alignment_state)
+    return float(np.mean(errors))
 
 
 def _group_connection_candidate_is_valid(
@@ -1936,6 +2185,8 @@ def _group_connection_candidate_is_valid(
     candidate: GroupConnectionCandidate,
     config: CoilGenConfig,
     geodesic_solver: SurfaceGeodesicSolver | None,
+    *,
+    clearance_index: ContourClearanceIndex | None = None,
 ) -> bool:
     group_a_index = groups_to_connect[candidate.local_a]
     group_b_index = groups_to_connect[candidate.local_b]
@@ -1944,6 +2195,7 @@ def _group_connection_candidate_is_valid(
     if candidate.loop_a_index not in outer_a or candidate.loop_b_index not in outer_b:
         return False
     endpoint_loop_indices = {int(candidate.loop_a_index), int(candidate.loop_b_index)}
+    clearance_threshold = _connector_clearance_threshold(config)
     allow_direct_fallback = not _strict_geodesic_inter_group_paths(config)
     reject_suspicious_length = allow_direct_fallback
     point_connector = _inter_group_connector_result(
@@ -1959,11 +2211,13 @@ def _group_connection_candidate_is_valid(
         point_connector_distance, candidate.direct_distance, candidate.geodesic_distance
     ) > _suspicious_connector_ratio(config):
         return False
-    if _connector_path_clearance_to_unrelated_contours(
-        part,
-        point_connector.path_v,
-        endpoint_loop_indices,
-    ) < _connector_clearance_threshold(config):
+    if (
+        clearance_threshold > 0.0
+        and _connector_path_clearance_to_unrelated_contours(
+            part, point_connector.path_v, endpoint_loop_indices, clearance_index=clearance_index
+        )
+        < clearance_threshold
+    ):
         return False
 
     opened_a, cut_a = _open_connected_group_with_3d_sphere(
@@ -1994,7 +2248,6 @@ def _group_connection_candidate_is_valid(
     )
     if min(len(connection_path_v), len(closing_connection_path_v)) < 2:
         return False
-    clearance_threshold = _connector_clearance_threshold(config)
     for connector_path_v in (connection_path_v, closing_connection_path_v):
         connector_distance = _path_length(connector_path_v)
         if reject_suspicious_length and _connector_ratio(
@@ -2002,10 +2255,12 @@ def _group_connection_candidate_is_valid(
         ) > _suspicious_connector_ratio(config):
             return False
         if (
-            _connector_path_clearance_to_unrelated_contours(
+            clearance_threshold > 0.0
+            and _connector_path_clearance_to_unrelated_contours(
                 part,
                 connector_path_v,
                 endpoint_loop_indices,
+                clearance_index=clearance_index,
             )
             < clearance_threshold
         ):
@@ -3315,42 +3570,56 @@ def shift_return_paths(parts: list[CoilPart], config: CoilGenConfig) -> list[Coi
     """
 
     for part in parts:
+        part.normal_shift_diagnostics = {}
+        part.normal_shift_provenance = {}
         if part.wire_path is None:
             continue
         n_points = len(part.wire_path.v)
         if config.skip_normal_shift or n_points == 0:
             part.shift_array = np.zeros(n_points, dtype=float)
             part.points_to_shift = np.zeros(n_points, dtype=bool)
+            part.normal_shift_diagnostics = {"normal_shift_status": "skipped"}
             continue
 
         base_shift_levels = np.zeros(n_points, dtype=float)
         overpass_points = np.zeros(n_points, dtype=bool)
         underpass_points = np.zeros(n_points, dtype=bool)
         unshifted_wire_v = part.wire_path.v.copy()
-        contact_threshold = _wire_contact_threshold(config)
+        physical_clearance = _normal_shift_physical_clearance(config)
+        contact_threshold = max(_wire_contact_threshold(config), physical_clearance)
         transition_length = abs(float(config.normal_shift_length)) * max(
             float(config.normal_sweep_smooth_factor),
             0.0,
         )
-        _mark_within_group_return_levels(part, base_shift_levels)
+        source_path = part.wire_path
         routes_by_segment = _normal_shift_routes_by_segment(part)
-        routes_by_segment = _extend_normal_shift_routes_by_arclength(
-            routes_by_segment,
-            unshifted_wire_v,
-            contact_threshold,
-        )
+        if source_path.segment_owners:
+            for index, routes in enumerate(routes_by_segment):
+                if any(route.priority == 2 for route in routes):
+                    base_shift_levels[index : index + 2] = 1.0
+        else:
+            _mark_within_group_return_levels(part, base_shift_levels)
+            routes_by_segment = _extend_normal_shift_routes_by_arclength(
+                routes_by_segment, unshifted_wire_v, contact_threshold
+            )
+        allowed_points = _normal_shift_allowed_points(source_path, routes_by_segment)
         contacts = find_wire_segment_contacts_3d(unshifted_wire_v, contact_threshold, config=config)
+        # A design-spacing warning must not flatten a necessary overpass.
+        # Routing roles concern physical conductor proximity; the larger
+        # requested spacing remains an independent final diagnostic.
+        lift_contacts = [contact for contact in contacts if contact[2] < physical_clearance + 1e-8]
         crossing_events = _crossing_event_segment_selections(
-            contacts,
+            lift_contacts,
             routes_by_segment,
             unshifted_wire_v,
             max(contact_threshold, transition_length),
         )
-        for event_overpasses, event_underpasses in crossing_events:
-            for segment_index in event_overpasses:
-                _mark_segment_points(overpass_points, segment_index)
-            for segment_index in event_underpasses:
-                _mark_segment_points(underpass_points, segment_index)
+        crossing_anchors = _crossing_lift_anchors(crossing_events, lift_contacts, unshifted_wire_v)
+        anchor_contacts = [(anchor[0], anchor[1], anchor[4]) for anchor in crossing_anchors]
+        bridge_spans = _owned_crossing_bridge_spans(source_path, crossing_events, anchor_contacts)
+        for over, under, over_position, under_position, _distance in crossing_anchors:
+            _mark_crossing_anchor(overpass_points, over, over_position, unshifted_wire_v)
+            _mark_crossing_anchor(underpass_points, under, under_position, unshifted_wire_v)
 
         shift_array = _crossing_shift_profile(
             base_shift_levels,
@@ -3359,13 +3628,37 @@ def shift_return_paths(parts: list[CoilPart], config: CoilGenConfig) -> list[Coi
             unshifted_wire_v,
             transition_length,
             config.normal_shift_smooth_factors,
+            allowed_points=allowed_points,
         )
-        normals = _smooth_wire_path_normals(
-            wire_path_normals(part),
-            max(int(config.sweep_surface_normal_smoothing_iterations), 0),
-        )
+        normals, normal_faces, normal_barycentric, normal_valid = _wire_path_normal_samples(part)
         shift_length = float(config.normal_shift_length)
+        invalid_normal_count = int(np.count_nonzero((shift_array > 0) & ~normal_valid))
+        shift_array[~normal_valid] = 0.0
         shifted_wire_v = unshifted_wire_v + normals * (shift_array[:, None] * shift_length)
+        bridge_spans = _bridge_spans_requiring_reconstruction(source_path, bridge_spans, shifted_wire_v, config)
+        unresolved_return_spans = []
+        return_spans = _return_crossing_ramp_spans(
+            source_path,
+            routes_by_segment,
+            crossing_anchors,
+            shifted_wire_v,
+            shift_array,
+            config,
+            unresolved_spans=unresolved_return_spans,
+        )
+        # Reconstruct only deficient ramps. Unsupported curved connectors with
+        # ample bend space retain their existing normal shift.
+        for start, end, _under in bridge_spans:
+            shift_array[start : end + 1] = 0.0
+            shifted_wire_v[start : end + 1] = unshifted_wire_v[start : end + 1]
+        bridge_spans = sorted(bridge_spans + return_spans)
+        bridge_segments = {index for start, end, _under in bridge_spans for index in range(start, end)}
+        overpass_points[:] = False
+        for over, _under, over_position, _under_position, _distance in crossing_anchors:
+            if over not in bridge_segments:
+                _mark_crossing_anchor(overpass_points, over, over_position, unshifted_wire_v)
+        before_repair = shifted_wire_v.copy()
+        repair_events: list[dict] = []
         part.wire_self_contacts = contacts
         if np.any(shift_array > 0):
             shifted_geometry = [
@@ -3376,39 +3669,803 @@ def shift_return_paths(parts: list[CoilPart], config: CoilGenConfig) -> list[Coi
                     if max(abs(float(shift_array[index])), abs(float(shift_array[index + 1]))) > 1e-12
                     else WirePathGeometry.SURFACE
                 )
-                for index, geometry in enumerate(part.wire_path.segment_geometry)
+                for index, geometry in enumerate(source_path.segment_geometry)
             ]
-            shifted_path = WirePath(
-                v=shifted_wire_v,
-                segment_owners=list(part.wire_path.segment_owners),
-                segment_geometry=shifted_geometry,
-            )
-            part.wire_path = shifted_path
-            _update_inter_group_paths_after_shift(part, unshifted_wire_v, shifted_wire_v)
-            shifted_wire_v, shift_array = _repair_shifted_wire_reversal_spurs(
-                shifted_wire_v,
-                shift_array,
-                config,
-            )
-            repaired_owners = transfer_segment_owners(
-                shifted_path.v,
-                shifted_path.segment_owners,
-                shifted_wire_v,
-            )
-            repaired_geometry = transfer_segment_geometry(
-                shifted_path.v,
-                shifted_path.segment_geometry,
-                shifted_wire_v,
-            )
             part.wire_path = WirePath(
                 v=shifted_wire_v,
-                segment_owners=repaired_owners,
-                segment_geometry=repaired_geometry,
+                segment_owners=list(source_path.segment_owners),
+                segment_geometry=shifted_geometry,
             )
+            shifted_wire_v, repair_events = _repair_owned_offset_backtracks(part, config)
+            part.wire_path.v = shifted_wire_v
+        vertex_lift_factors = shift_array.copy()
+        source_positions = np.arange(n_points, dtype=float)
+        bridge_events: list[dict] = []
+        if bridge_spans:
+            shifted_wire_v, shift_array, source_positions, bridge_events = _build_owned_crossing_bridges(
+                part,
+                source_path,
+                bridge_spans,
+                shift_array,
+                config,
+                protected_underpass_positions=[anchor[3] for anchor in crossing_anchors],
+                return_ramp_spans={(start, end) for start, end, _under in return_spans},
+            )
+        bridge_events.extend(unresolved_return_spans)
+        if np.any(shift_array > 0) or bridge_events:
+            _update_inter_group_paths_after_shift(part, unshifted_wire_v, shifted_wire_v, source_positions)
         points_to_shift = shift_array > 0.0
         part.shift_array = shift_array
         part.points_to_shift = points_to_shift
+        target_clearance = _wire_clearance_failure_threshold(config)
+        screening_clearance = max(target_clearance, _wire_clearance_warning_threshold(config), physical_clearance)
+        final_contacts = (
+            find_wire_segment_contacts_3d(shifted_wire_v, max(screening_clearance, 1e-9), config=config)
+            if np.any(points_to_shift) or bridge_events
+            else contacts
+        )
+        unresolved_contacts = [(a, b, d) for a, b, d in final_contacts if d + 1e-9 < target_clearance]
+        physical_candidates = sum(d + 1e-9 < physical_clearance for _a, _b, d in final_contacts)
+        centerline_crossings = sum(d <= 1e-9 for _a, _b, d in final_contacts)
+        backtracks = _wire_backtrack_indices(shifted_wire_v)
+        existing_backtracks = _wire_backtrack_indices(unshifted_wire_v)
+        mapped_backtracks = source_positions[backtracks]
+        inherited = np.isin(np.rint(mapped_backtracks).astype(int), existing_backtracks) & (
+            abs(mapped_backtracks - np.rint(mapped_backtracks)) <= 1e-10
+        )
+        introduced_backtracks = backtracks[~inherited]
+        output_allowed = np.interp(source_positions, np.arange(n_points), allowed_points.astype(float)) > 0
+        affected_backtracks = backtracks[output_allowed[backtracks] & points_to_shift[backtracks]]
+        ownership_conflicts = int(np.count_nonzero(overpass_points & (underpass_points | ~allowed_points)))
+        failures = []
+        if unresolved_contacts:
+            failures.append("clearance_target")
+        if centerline_crossings:
+            failures.append("centerline_intersection")
+        if len(introduced_backtracks) or len(affected_backtracks):
+            failures.append("centerline_backtrack")
+        if ownership_conflicts:
+            failures.append("crossing_ownership_conflict")
+        if invalid_normal_count:
+            failures.append("undefined_lift_normal")
+        rejected_bridges = sum(not event["accepted"] for event in bridge_events)
+        if rejected_bridges:
+            failures.append("connector_bridge_unresolved")
+        part.normal_shift_diagnostics = {
+            "normal_shift_status": "unresolved" if failures else "complete",
+            "normal_shift_failure_reasons": ";".join(failures),
+            "normal_shift_unresolved": bool(failures),
+            "normal_shift_quality_failure": bool(
+                unresolved_contacts
+                or centerline_crossings
+                or invalid_normal_count
+                or len(introduced_backtracks)
+                or rejected_bridges
+                or (ownership_conflicts and target_clearance > 0)
+            ),
+            "normal_shift_contact_count_before": len(contacts),
+            "normal_shift_unresolved_contact_count": len(unresolved_contacts),
+            "normal_shift_ownership_conflict_count": ownership_conflicts,
+            "normal_shift_invalid_normal_count": invalid_normal_count,
+            "normal_shift_backtrack_count": len(backtracks),
+            "normal_shift_introduced_backtrack_count": len(introduced_backtracks),
+            "normal_shift_repaired_backtrack_count": len(repair_events),
+            "normal_shift_bridge_count": len(bridge_events) - rejected_bridges,
+            "normal_shift_return_ramp_count": sum(
+                event["accepted"] and event.get("kind") == "return_approach" for event in bridge_events
+            ),
+            "normal_shift_rejected_bridge_count": rejected_bridges,
+            "normal_shift_maximum_lift_m": abs(shift_length),
+            "normal_shift_target_clearance_m": target_clearance,
+            "normal_shift_physical_clearance_m": physical_clearance,
+            "normal_shift_physical_clearance_candidate_count": physical_candidates,
+            "normal_shift_physical_clearance_status": (
+                "requires_swept_body_check" if physical_candidates else "reference_path_screen_clear"
+            ),
+            "normal_shift_clearance_reference": "unmounted_route; final mounted conductor checked by sweep",
+            "normal_shift_centerline_intersection_count": centerline_crossings,
+            "normal_shift_screening_clearance_m": screening_clearance,
+            "normal_shift_lift_below_clearance_target": abs(shift_length) + 1e-9 < target_clearance,
+            "normal_shift_normal_method": "closest_triangle_barycentric_declared_orientation",
+        }
+        part.normal_shift_provenance = {
+            "points_before_m": unshifted_wire_v,
+            "points_after_m": shifted_wire_v.copy(),
+            "points_after_lift_before_repair_m": before_repair,
+            "normals": normals,
+            "normal_face_indices": normal_faces,
+            "normal_barycentric": normal_barycentric,
+            "normal_valid": normal_valid,
+            "lift_factors": shift_array.copy(),
+            "lift_distance_m": shift_array * shift_length,
+            "allowed_points": allowed_points,
+            "lift_routes": _normal_shift_route_provenance(routes_by_segment),
+            "lift_distance_convention": (
+                "normal displacement for vertex lifts; arch displacement from the tangent-continuous "
+                "baseline for reconstructed inter-group bridges; signed closest-support distance for "
+                "reconstructed return approaches; support bounds are in bridge validation diagnostics"
+            ),
+            "segment_owners": [dict(vars(owner)) for owner in source_path.segment_owners],
+            "segment_geometry_before": [str(value.value) for value in source_path.segment_geometry],
+            "crossing_events": [
+                {"overpass_segments": list(over), "underpass_segments": list(under)} for over, under in crossing_events
+            ],
+            "crossing_anchors": [
+                {
+                    "overpass_segment": over,
+                    "underpass_segment": under,
+                    "overpass_source_position": over_position,
+                    "underpass_source_position": under_position,
+                    "distance_m": distance,
+                }
+                for over, under, over_position, under_position, distance in crossing_anchors
+            ],
+            "contacts_before": list(contacts),
+            "contacts_after": list(final_contacts),
+            "backtrack_point_indices": backtracks,
+            "repair_events": repair_events,
+            "index_convention": "zero_based_before_cleanup",
+        }
+        if bridge_events:
+            source_segments = np.minimum(np.floor(source_positions).astype(np.int64), n_points - 2)
+            part.normal_shift_provenance.update(
+                schema_version=2,
+                output_source_segment_indices=source_segments,
+                output_source_segment_fractions=source_positions - source_segments,
+                vertex_lift_factors_before_bridge=vertex_lift_factors,
+                output_segment_owners=[dict(vars(owner)) for owner in part.wire_path.segment_owners],
+                output_segment_geometry=[value.value for value in part.wire_path.segment_geometry],
+                bridge_events=bridge_events,
+                index_convention=(
+                    "zero_based_before_cleanup; input: points_before, normals, allowed_points, "
+                    "segment_owners, contacts_before, crossing_events, repair_events, bridge source ranges; "
+                    "output: points_after, lift_factors, contacts_after, backtrack_point_indices, output_*; "
+                    "points_after_lift_before_repair is the input-sized vertex-lift stage"
+                ),
+            )
     return parts
+
+
+def _normal_shift_route_provenance(routes_by_segment):
+    """Retain actual return-route membership for reproducible pre-lift replay."""
+    records = {}
+    for segment, routes in enumerate(routes_by_segment):
+        for route in routes:
+            record = records.setdefault(
+                id(route),
+                {"key": list(route.key), "priority": route.priority, "order": route.order, "segment_indices": []},
+            )
+            record["segment_indices"].append(segment)
+    return list(records.values())
+
+
+def _owned_crossing_bridge_spans(path: WirePath, crossing_events, contacts) -> list[tuple[int, int, tuple[int, ...]]]:
+    """Select contiguous, explicitly owned free connectors, never contour samples."""
+    selected: dict[int, set[int]] = {}
+    contact_neighbors: dict[int, set[int]] = {}
+    for first, second, _distance in contacts:
+        contact_neighbors.setdefault(first, set()).add(second)
+        contact_neighbors.setdefault(second, set()).add(first)
+    for over, under in crossing_events:
+        under_set = set(under)
+        for index in over:
+            selected.setdefault(index, set()).update(contact_neighbors.get(index, set()) & under_set)
+    spans = []
+    start = 0
+    while start < len(path.segment_owners):
+        owner = path.segment_owners[start]
+        if owner.kind != "inter_group_connector" or path.segment_geometry[start] != WirePathGeometry.FREE_3D:
+            start += 1
+            continue
+        end = start + 1
+        while (
+            end < len(path.segment_owners)
+            and path.segment_owners[end] == owner
+            and path.segment_geometry[end] == WirePathGeometry.FREE_3D
+        ):
+            end += 1
+        underpasses = set().union(*(selected.get(index, set()) for index in range(start, end)))
+        if underpasses:
+            spans.append((start, end, tuple(sorted(underpasses))))
+        start = end
+    return spans
+
+
+def _normal_shift_bridge_radius(config: CoilGenConfig) -> float:
+    from .bridge_realization import minimum_bridge_radius
+
+    return minimum_bridge_radius(config)
+
+
+def _return_crossing_ramp_spans(
+    source_path, routes_by_segment, anchors, trial_points, lift_factors, config, *, unresolved_spans=None
+):
+    """Bound deficient return approaches by a fixed attachment and a lifted tail.
+
+    Route identity, rather than shared contour-group ownership, determines
+    which intervals may move. Interior return/contour crossings are untouched.
+    """
+    if not source_path.segment_owners:
+        return []
+    routes = [_preferred_normal_shift_route(routes_by_segment, i) for i in range(len(source_path.v) - 1)]
+    if (
+        unresolved_spans is not None
+        and routes
+        and routes[0] is not None
+        and routes[-1] is not None
+        and routes[0].priority == routes[-1].priority == 2
+        and routes[0].key == routes[-1].key
+        and np.linalg.norm(source_path.v[0] - source_path.v[-1]) <= 1e-10
+    ):
+        # Classify the cyclic approach on a temporary rotation only. Replacing
+        # it would require cyclic output correspondence; until that is supported,
+        # retain the exact route and report a required repair as unresolved.
+        keys = [route.key if route is not None else None for route in routes]
+        boundaries = [index for index, key in enumerate(keys) if key != keys[index - 1]]
+        if boundaries:
+            count, cut = len(routes), boundaries[0]
+            indices = (np.arange(count) + cut) % count
+            point_indices = np.r_[indices, indices[0]]
+            rotated_path = WirePath(
+                source_path.v[point_indices],
+                segment_owners=[source_path.segment_owners[index] for index in indices],
+                segment_geometry=[source_path.segment_geometry[index] for index in indices],
+            )
+            rotated_anchors = []
+            for over, under, over_position, under_position, distance in anchors:
+                rotated_over, rotated_under = (over - cut) % count, (under - cut) % count
+                rotated_anchors.append(
+                    (
+                        rotated_over,
+                        rotated_under,
+                        rotated_over + over_position - over,
+                        rotated_under + under_position - under,
+                        distance,
+                    )
+                )
+            cyclic_spans = _return_crossing_ramp_spans(
+                rotated_path,
+                [routes_by_segment[index] for index in indices],
+                rotated_anchors,
+                np.asarray(trial_points)[point_indices],
+                np.asarray(lift_factors)[point_indices],
+                config,
+            )
+            for start, end, under in cyclic_spans:
+                first, last = (start + cut) % count, (end + cut) % count
+                if first > last and last != 0:
+                    unresolved_spans.append(
+                        {
+                            "source_start_index": first,
+                            "source_end_index": last,
+                            "source_segment_ranges": [[first, count], [0, last]],
+                            "underpass_source_segments": sorted((index + cut) % count for index in under),
+                            "owner": dict(vars(source_path.segment_owners[first])),
+                            "accepted": False,
+                            "attempts": [],
+                            "kind": "return_approach",
+                            "reason": "unsupported_return_seam",
+                        }
+                    )
+    lengths = np.linalg.norm(np.diff(source_path.v, axis=0), axis=1)
+    arclength = np.r_[0.0, np.cumsum(lengths)]
+    radius = _normal_shift_bridge_radius(config)
+    clearance = _normal_shift_physical_clearance(config)
+    selected = {}
+    for over, under, position, _under_position, _distance in anchors:
+        route = routes[over]
+        if route is None or route.priority != 2:
+            continue
+        first, last = over, over + 1
+        while first and routes[first - 1] is not None and routes[first - 1].key == route.key:
+            first -= 1
+        while last < len(routes) and routes[last] is not None and routes[last].key == route.key:
+            last += 1
+        crossing = arclength[over] + (position - over) * lengths[over]
+        bounds = []
+        if lift_factors[first] <= 1e-12 and crossing - arclength[first] <= 6 * radius:
+            end = int(np.searchsorted(arclength, crossing + 2 * radius))
+            end = max(end, over + 1)
+            if first < end < last and lift_factors[end] >= 1 - 1e-8:
+                bounds.append((first, end))
+        if lift_factors[last] <= 1e-12 and arclength[last] - crossing <= 6 * radius:
+            start = int(np.searchsorted(arclength, crossing - 2 * radius, side="right")) - 1
+            start = min(start, over)
+            if first < start < last and lift_factors[start] >= 1 - 1e-8:
+                bounds.append((start, last))
+        for start, end in bounds:
+            if _bridge_underpass_gap(trial_points, start, end, (under,)) < clearance - 1e-8:
+                selected.setdefault((start, end), set()).add(under)
+    # Nested proposals at one attachment become one ramp. Opposite approaches
+    # must remain disjoint; a single local ramp cannot certify their overlap.
+    merged = []
+    for (start, end), under in sorted(selected.items()):
+        if merged and (start == merged[-1][0] or end == merged[-1][1]):
+            old_start, old_end, old_under = merged.pop()
+            merged.append((min(start, old_start), max(end, old_end), old_under | under))
+        else:
+            merged.append((start, end, under))
+    return [
+        (start, end, tuple(sorted(under)))
+        for i, (start, end, under) in enumerate(merged)
+        if (i == 0 or merged[i - 1][1] <= start) and (i + 1 == len(merged) or end <= merged[i + 1][0])
+    ]
+
+
+def _normal_shift_physical_clearance(config: CoilGenConfig) -> float:
+    from .manufacturing import _required_centerline_clearance, conductor_cross_section_points
+
+    return _required_centerline_clearance(conductor_cross_section_points(config), config)
+
+
+def _bridge_spans_requiring_reconstruction(source_path, spans, trial_points, config):
+    """Repair inadequate crossing clearance as well as deficient bend ramps.
+
+    This is a repair trigger, not a manufacturing certificate. Good spacing
+    between circular fillet trims does not certify the final support or body.
+    """
+    if not spans:
+        return []
+    radius = _normal_shift_bridge_radius(config)
+    source_overlap = _bend_trim_overlap_lengths(source_path.v, radius)
+    trial_overlap = _bend_trim_overlap_lengths(trial_points, radius)
+    worsened = trial_overlap > source_overlap + 1e-8
+    backtracks = set(_wire_backtrack_indices(trial_points)) - set(_wire_backtrack_indices(source_path.v))
+    physical_clearance = _normal_shift_physical_clearance(config)
+    return [
+        (start, end, under)
+        for start, end, under in spans
+        if np.any(worsened[start:end])
+        or any(start <= point <= end for point in backtracks)
+        or _bridge_underpass_gap(trial_points, start, end, under) < physical_clearance - 1e-8
+    ]
+
+
+def _bridge_underpass_gap(points, start, end, underpasses) -> float:
+    """Linear-memory clearance of one owned span to its selected underpasses."""
+    starts = points[start:end]
+    directions = points[start + 1 : end + 1] - starts
+    gap = math.inf
+    closed = np.linalg.norm(points[0] - points[-1]) <= 1e-10
+    for index in underpasses:
+        if start - 1 <= index <= end:
+            continue  # Shared attachments and route continuations are not crossings.
+        if closed and ((start == 0 and index == len(points) - 2) or (end == len(points) - 1 and index == 0)):
+            continue
+        gap = min(
+            gap, float(np.min(segment_distances(starts, directions, points[index], points[index + 1] - points[index])))
+        )
+    return gap
+
+
+def _prepared_return_obstacles(part, points, geometry, underpasses, source_positions, config):
+    """Realize nearby underpasses with the same support preparation as sweeping.
+
+    A long SURFACE chord can lie millimetres inside a faceted support. Checking
+    that raw chord alone is insufficient when the sweep projects it outward.
+    Arclength context provides local bend support, including across a closed
+    seam. This is obstacle-search geometry, not a final swept-solid certificate.
+    """
+    from .manufacturing import _prepare_sweep_centerline, conductor_cross_section_points
+
+    points = np.asarray(points, dtype=float)
+    if len(points) < 2 or not len(underpasses):
+        return np.empty((0, 2, 3))
+    arclength = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))]
+    padding = 4 * _normal_shift_bridge_radius(config)
+    closed = np.linalg.norm(points[0] - points[-1]) <= 1e-10
+    segment_count = len(points) - 1
+    covered = np.zeros(segment_count, dtype=bool) if closed else None
+    extended_arc = np.r_[arclength[:-1] - arclength[-1], arclength, arclength[1:] + arclength[-1]] if closed else None
+    windows = []
+    for source_index in underpasses:
+        # A reconstructed curve need not retain every original vertex. Include
+        # the current interval containing the old underpass's start position.
+        first = int(np.searchsorted(source_positions, source_index, side="right")) - 1
+        last = int(np.searchsorted(source_positions, source_index + 1, side="left"))
+        if first < 0 or first >= len(points) - 1 or last >= len(points):
+            raise ValueError("Underpass source interval is outside the current route correspondence.")
+        if closed:
+            if arclength[last] - arclength[first] + 2 * padding >= arclength[-1]:
+                covered[:] = True
+                break
+            start = int(np.searchsorted(extended_arc, arclength[first] - padding)) - segment_count - 1
+            end = int(np.searchsorted(extended_arc, arclength[last] + padding)) - segment_count
+            covered[np.arange(start, end) % segment_count] = True
+            continue
+        start = max(0, int(np.searchsorted(arclength, arclength[first] - padding)) - 1)
+        end = min(len(points) - 1, int(np.searchsorted(arclength, arclength[last] + padding)))
+        windows.append((start, end))
+    profile = conductor_cross_section_points(config)
+    if closed:
+        if np.all(covered):
+            prepared, _geometry, _diagnostics = _prepare_sweep_centerline(
+                part, points[:-1], geometry, profile, config, closed=True
+            )
+            return np.stack((prepared, np.roll(prepared, -1, axis=0)), axis=1)
+        # Cut at an uncovered interval, so seam-spanning context remains one
+        # continuous open window and overlapping windows occur only once.
+        cut = int(np.flatnonzero(~covered)[0]) + 1
+        unwrapped = covered[np.arange(cut, cut + segment_count) % segment_count]
+        transitions = np.diff(np.r_[False, unwrapped, False].astype(np.int8))
+        windows = list(zip(np.flatnonzero(transitions == 1) + cut, np.flatnonzero(transitions == -1) + cut))
+    merged = []
+    for start, end in sorted(windows):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    obstacles = []
+    for start, end in merged:
+        window_points = points[np.arange(start, end + 1) % segment_count] if closed else points[start : end + 1]
+        window_geometry = (
+            [geometry[index % segment_count] for index in range(start, end)] if closed else geometry[start:end]
+        )
+        prepared, _geometry, _diagnostics = _prepare_sweep_centerline(
+            part, window_points, window_geometry, profile, config, closed=False
+        )
+        obstacles.append(np.stack((prepared[:-1], prepared[1:]), axis=1))
+    return np.concatenate(obstacles) if obstacles else np.empty((0, 2, 3))
+
+
+def _bend_trim_overlap_lengths(points: np.ndarray, radius: float) -> np.ndarray:
+    """Unavailable arclength for neighboring circular bend trims, in metres."""
+    directions = np.diff(points, axis=0)
+    lengths = np.linalg.norm(directions, axis=1)
+    tangents = directions / np.maximum(lengths[:, None], 1e-30)
+    cosine = np.clip(np.einsum("ij,ij->i", tangents[:-1], tangents[1:]), -1, 1)
+    trims = np.zeros(len(points))
+    trims[1:-1] = radius * np.sqrt((1 - cosine) / np.maximum(1 + cosine, 1e-15))
+    if np.linalg.norm(points[0] - points[-1]) <= 1e-10:
+        seam_cosine = np.clip(tangents[0] @ tangents[-1], -1, 1)
+        trims[[0, -1]] = radius * np.sqrt((1 - seam_cosine) / max(1 + seam_cosine, 1e-15))
+    return np.maximum(trims[:-1] + trims[1:] - lengths, 0.0)
+
+
+def _build_owned_crossing_bridges(
+    part,
+    source_path,
+    spans,
+    lift_factors,
+    config,
+    *,
+    protected_underpass_segments=(),
+    protected_underpass_positions=None,
+    return_ramp_spans=(),
+):
+    """Replace bounded owned spans after checking the whole current route."""
+    from .bridge_realization import bridge_realization_check
+    from .connector_bridges import generate_connector_bridges, generate_return_ramps
+    from .connector_bridge_validation import _SpatialSupport, validate_connector_bridge
+    from .manufacturing import _SurfaceProjector
+
+    points = part.wire_path.v.copy()
+    owners, geometry = list(part.wire_path.segment_owners), list(part.wire_path.segment_geometry)
+    source_positions = np.arange(len(source_path.v), dtype=float)
+    events = []
+    projector = _SurfaceProjector(part.mesh)
+    radius = _normal_shift_bridge_radius(config)
+    height = abs(float(config.normal_shift_length))
+    closed = np.linalg.norm(points[0] - points[-1]) <= 1e-10
+    for start, end, underpasses in reversed(spans):
+        is_return_ramp = (start, end) in return_ramp_spans
+        event = {
+            "source_start_index": start,
+            "source_end_index": end,
+            "owner": dict(vars(source_path.segment_owners[start])),
+            "accepted": False,
+            "attempts": [],
+            "kind": "return_approach" if is_return_ramp else "inter_group_bridge",
+        }
+        events.append(event)
+        role_conflict = (
+            any(start < position < end for position in protected_underpass_positions)
+            if protected_underpass_positions is not None
+            else any(index in protected_underpass_segments for index in range(start, end))
+        )
+        if role_conflict:
+            event["reason"] = "conflicting_crossing_roles"
+            continue
+        if not len(projector.faces):
+            event["reason"] = "undefined_support_normal"
+            continue
+        if not closed and (start == 0 or end == len(source_path.v) - 1):
+            event["reason"] = "unsupported_seam_or_terminal_span"
+            continue
+        # Read physical face normals, not smoothed vertex normals near a crease.
+        source_span = source_path.v[start : end + 1]
+        longest = int(np.argmax(np.linalg.norm(np.diff(source_span, axis=0), axis=1)))
+        probe = (source_span[longest] + source_span[longest + 1]) / 2
+        _p, _n, face_normals, _faces, _bary = projector.project_with_details(probe[None, :])
+        normal = face_normals[0]
+        under = np.asarray([[source_path.v[index], source_path.v[index + 1]] for index in underpasses])
+        incoming = points[start] - points[start - 1 if start else -2]
+        outgoing = points[end + 1 if end + 1 < len(points) else 1] - points[end]
+        options = dict(
+            maximum_height_m=height,
+            minimum_radius_m=radius,
+            maximum_segment_length_m=float(config.sweep_max_segment_length) or 0.005,
+            chord_tolerance_m=float(config.sweep_max_chord_error) or 1e-5,
+            maximum_tangent_angle_deg=min(2.0, max(float(config.sweep_max_frame_rotation_deg) / 2, 0.1)),
+            planarity_tolerance_m=1e-7,
+        )
+        sign = 1.0 if config.normal_shift_length >= 0 else -1.0
+        if is_return_ramp:
+            under = _prepared_return_obstacles(part, points, geometry, underpasses, source_positions, config)
+            _p, _n, endpoint_normals, _f, _b = projector.project_with_details(points[[start, end]])
+            ramp_normal = endpoint_normals.sum(axis=0)
+            generation = generate_return_ramps(
+                points[start : end + 1], incoming, outgoing, ramp_normal * sign, under, **options
+            )
+            event["obstacle_reference"] = "support_prepared_underpass_centerline"
+        else:
+            generation = generate_connector_bridges(source_span, incoming, outgoing, normal * sign, under, **options)
+        event["generation_rejections"] = list(generation.rejected_reasons)
+        event["required_radius_m"] = radius
+        event["reason"] = "no_candidate_passed_validation" if generation.candidates else generation.reason
+        candidates = list(generation.candidates)
+        # Spatial baselines can cross real support facets. Their complete
+        # support-distance/side certificate is independent of this direction.
+        _p, _n, end_normals, _f, _b = projector.project_with_details(
+            np.vstack((points[start] - 0.5 * incoming, points[end] + 0.5 * outgoing))
+        )
+        spatial_normal = end_normals.sum(axis=0)
+        if not is_return_ramp and np.linalg.norm(spatial_normal) > 1e-12:
+            spatial = generate_connector_bridges(
+                source_span, incoming, outgoing, spatial_normal * sign, under, spatial_mode=True, **options
+            )
+            candidates.extend(spatial.candidates)
+            event["spatial_generation_rejections"] = list(spatial.rejected_reasons)
+        if candidates:
+            event["reason"] = "no_candidate_passed_validation"
+        physical_clearance = _normal_shift_physical_clearance(config)
+        candidates.sort(
+            key=lambda value: (-min(value.local_clearance_m, physical_clearance), value.maximum_deviation_m)
+        )
+        chosen = None
+        physical_fallback = None
+        repairs_intersection = _bridge_underpass_gap(source_path.v, start, end, underpasses) <= 1e-8
+        for candidate in candidates:
+            validation = validate_connector_bridge(
+                points,
+                start,
+                end,
+                candidate.points,
+                support_projector=projector,
+                max_lift_m=float(config.normal_shift_length),
+                support_normal=normal,
+                physical_clearance_m=physical_clearance,
+                target_clearance_m=_wire_clearance_failure_threshold(config),
+                source_fractions=candidate.source_fractions,
+                closed=closed,
+            )
+            eligible_fallback = (
+                physical_fallback is None
+                and repairs_intersection
+                and candidate.local_clearance_m > 1e-8
+                and validation.reasons == ("clearance_regression",)
+                and validation.diagnostics["physical_clearance_regression_count"] == 0
+            )
+            realized, realization_diagnostics = True, {"bridge_realization_checked": False}
+            if validation.accepted or eligible_fallback:
+                realized, realization_diagnostics = bridge_realization_check(
+                    part, points, geometry, start, end, candidate.points, config, closed
+                )
+            reasons = list(validation.reasons)
+            if not realized:
+                reasons.append(realization_diagnostics["bridge_realization_reason"])
+            event["attempts"].append({"reasons": reasons, **validation.diagnostics, **realization_diagnostics})
+            if not realized:
+                continue
+            if validation.accepted:
+                chosen = candidate
+                break
+            if eligible_fallback:
+                physical_fallback = candidate, validation
+        if chosen is None and physical_fallback is not None:
+            # Prefer every fully spacing-preserving proposal first. A larger
+            # spacing goal must not force retention of an intersection: this
+            # fallback preserves existing physical-envelope gaps and all other
+            # certificates, and reports the design-spacing loss explicitly.
+            chosen, validation = physical_fallback
+            event["design_spacing_relaxed_for_intersection_repair"] = True
+            event["design_spacing_regression_count"] = validation.diagnostics["clearance_regression_count"]
+            event["maximum_design_spacing_regression_m"] = validation.diagnostics["maximum_gap_regression_m"]
+        if chosen is None:
+            continue
+        candidate = chosen
+        source_lengths = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(source_path.v[start : end + 1], axis=0), axis=1))]
+        correspondence = np.interp(
+            candidate.source_fractions * source_lengths[-1], source_lengths, np.arange(start, end + 1)
+        )
+        points = np.vstack((points[:start], candidate.points, points[end + 1 :]))
+        source_positions = np.r_[source_positions[:start], correspondence, source_positions[end + 1 :]]
+        if is_return_ramp:
+            support = _SpatialSupport(projector, height, sign, 1e-8)
+            candidate_lift = np.array([support.sample(point)[0] for point in candidate.points]) / height
+        else:
+            candidate_lift = candidate.lift_distances_m / height
+        lift_factors = np.r_[lift_factors[:start], candidate_lift, lift_factors[end + 1 :]]
+        owners[start:end] = [source_path.segment_owners[start]] * (len(candidate.points) - 1)
+        geometry[start:end] = [WirePathGeometry.FREE_3D] * (len(candidate.points) - 1)
+        event.update(
+            accepted=True,
+            reason=(
+                "validated_physical_clearance_bridge"
+                if event.get("design_spacing_relaxed_for_intersection_repair")
+                else "validated_centerline_bridge"
+            ),
+            sample_count=len(candidate.points),
+            minimum_radius_m=candidate.minimum_radius_m,
+            peak_parameter=candidate.peak_parameter,
+            maximum_height_m=candidate.height_m,
+            local_clearance_m=candidate.local_clearance_m,
+            profile_family=candidate.profile_family,
+        )
+    part.wire_path = WirePath(points, segment_owners=owners, segment_geometry=geometry)
+    return points, lift_factors, source_positions, list(reversed(events))
+
+
+def _wire_backtrack_indices(points: np.ndarray) -> np.ndarray:
+    """Locate severe direction reversals; a diagnostic, not a curve repair."""
+    directions = np.diff(np.asarray(points, dtype=float), axis=0)
+    lengths = np.linalg.norm(directions, axis=1)
+    if len(directions) < 2:
+        return np.zeros(0, dtype=np.int64)
+    products = lengths[:-1] * lengths[1:]
+    cosine = np.divide(
+        np.einsum("ij,ij->i", directions[:-1], directions[1:]),
+        products,
+        out=np.ones_like(products),
+        where=products > 1e-24,
+    )
+    threshold = math.cos(math.radians(100.0))
+    indices = np.flatnonzero(cosine < threshold) + 1
+    if len(points) > 3 and np.linalg.norm(points[0] - points[-1]) <= 1e-10:
+        product = lengths[0] * lengths[-1]
+        if product > 1e-24 and (directions[0] @ directions[-1]) / product < threshold:
+            indices = np.concatenate(([0], indices))
+    return indices
+
+
+def _repair_owned_offset_backtracks(part: CoilPart, config: CoilGenConfig) -> tuple[np.ndarray, list[dict]]:
+    """Remove bounded connector spikes only when support and every remote gap permit.
+
+    This is a local path correction, not a finite-radius fillet. Endpoints,
+    contour samples, and unowned paths stay fixed. The sweep must still validate
+    curvature and the finite conductor. No nearest-location ownership inference
+    is used at crossings.
+    """
+    from .manufacturing import _SurfaceProjector
+
+    path = part.wire_path
+    points = path.v.copy()
+    events: list[dict] = []
+    if not path.segment_owners or not len(part.mesh.faces):
+        return points, events
+    candidates = _wire_backtrack_indices(points)
+    if not len(candidates):
+        return points, events
+    max_movement = min(
+        abs(float(config.normal_shift_length)), max(_within_group_cut_width(config), _inter_group_cut_width(config))
+    )
+    if max_movement <= 0:
+        return points, events
+    projector = _SurfaceProjector(part.mesh)
+    clearance = max(_wire_clearance_failure_threshold(config), _wire_clearance_warning_threshold(config))
+    for index in candidates[:32]:
+        index = int(index)
+        if index == 0:
+            continue  # A seam repair needs a cyclic neighborhood; keep it diagnostic.
+        first_owner, second_owner = path.segment_owners[index - 1 : index + 1]
+        if first_owner != second_owner or first_owner.kind not in {"inter_group_connector", "within_group_return"}:
+            continue
+        if any(value == WirePathGeometry.SURFACE for value in path.segment_geometry[index - 1 : index + 1]):
+            continue
+        start, old, end = points[index - 1 : index + 2]
+        chord = end - start
+        chord_sq = float(chord @ chord)
+        if chord_sq <= 1e-24:
+            continue
+        fraction = float(np.clip((old - start) @ chord / chord_sq, 0.05, 0.95))
+        candidate = start + fraction * chord
+        movement = float(np.linalg.norm(candidate - old))
+        if movement > max_movement or movement <= 1e-12:
+            continue
+        proposed_points = np.vstack((start, candidate, end))
+        projected, _normals, face_normals, faces, _barycentric = projector.project_with_details(proposed_points)
+        # Same support triangle is a deliberately conservative certificate:
+        # its projected endpoints span a convex planar domain, so the entire
+        # new chords preserve sidedness and the lift bound. Point-only tests
+        # can miss a chord cutting through a convex support corner or a hole.
+        if (
+            not np.all(faces == faces[0])
+            or not np.all(np.isfinite(projected))
+            or np.any(np.linalg.norm(face_normals, axis=1) <= 1e-12)
+        ):
+            continue
+        offsets = proposed_points - projected
+        normal_offsets = np.einsum("ij,ij->i", offsets, face_normals)
+        tangential_offsets = offsets - normal_offsets[:, None] * face_normals
+        signed_offsets = normal_offsets * (1.0 if config.normal_shift_length >= 0 else -1.0)
+        if (
+            np.any(signed_offsets < -1e-9)
+            or np.any(np.linalg.norm(offsets, axis=1) > abs(config.normal_shift_length) + 1e-9)
+            or np.any(np.linalg.norm(tangential_offsets, axis=1) > 1e-9)
+        ):
+            continue
+        if not _changed_vertex_preserves_clearance(points, index, candidate, clearance):
+            continue
+        trial = points.copy()
+        trial[index] = candidate
+        local_start, local_stop = max(index - 2, 0), min(index + 3, len(points))
+        old_count = len(_wire_backtrack_indices(points[local_start:local_stop]))
+        new_count = len(_wire_backtrack_indices(trial[local_start:local_stop]))
+        if new_count >= old_count:
+            continue
+        events.append(
+            {
+                "point_index": index,
+                "before_m": old.copy(),
+                "after_m": candidate.copy(),
+                "movement_m": movement,
+                "owner": dict(vars(first_owner)),
+            }
+        )
+        points = trial
+    return points, events
+
+
+def _changed_vertex_preserves_clearance(
+    points: np.ndarray, index: int, candidate: np.ndarray, clearance: float
+) -> bool:
+    """Check affected segment pairs in linear memory, preserving each existing gap."""
+    directions = np.diff(points, axis=0)
+    lengths = np.linalg.norm(directions, axis=1)
+    segment_indices = np.arange(len(directions))
+    closed = np.linalg.norm(points[0] - points[-1]) <= 1e-10
+    for segment in (index - 1, index):
+        mask = (abs(segment_indices - segment) > 1) & (lengths > 1e-12)
+        if closed:
+            mask &= abs(segment_indices - segment) < len(directions) - 1
+        others = segment_indices[mask]
+        if not len(others):
+            continue
+        new_start = points[segment] if segment == index - 1 else candidate
+        new_end = candidate if segment == index - 1 else points[segment + 1]
+        old_distances = segment_distances(
+            np.broadcast_to(points[segment], (len(others), 3)),
+            np.broadcast_to(directions[segment], (len(others), 3)),
+            points[others],
+            directions[others],
+        )
+        new_distances = segment_distances(
+            np.broadcast_to(new_start, (len(others), 3)),
+            np.broadcast_to(new_end - new_start, (len(others), 3)),
+            points[others],
+            directions[others],
+        )
+        if np.any(new_distances + 1e-9 < np.minimum(old_distances, clearance)) or np.any(
+            (new_distances <= 1e-10) & (old_distances > 1e-9)
+        ):
+            return False
+    return True
+
+
+def _normal_shift_allowed_points(path: WirePath, routes: list[list[_NormalShiftRoute]]) -> np.ndarray:
+    """Keep contour points and shared route endpoints fixed when ownership exists."""
+    allowed = np.ones(len(path.v), dtype=bool)
+    if not path.segment_owners:
+        return allowed
+    allowed[:] = False
+    keys = [
+        None if not values else max(values, key=lambda value: (value.priority, value.order)).key for values in routes
+    ]
+    for index in range(1, len(path.v) - 1):
+        allowed[index] = keys[index - 1] is not None and keys[index - 1] == keys[index]
+    if len(path.v) > 2 and np.linalg.norm(path.v[0] - path.v[-1]) <= 1e-10:
+        allowed[0] = allowed[-1] = keys[0] is not None and keys[0] == keys[-1]
+    return allowed
 
 
 def cleanup_wire_paths(
@@ -3444,8 +4501,9 @@ def cleanup_wire_paths(
         source_path = part.wire_path
         cleaned = _clean_path_array(source_path.v, tolerance)
         cleaned = _ensure_closed_path_array(cleaned, tolerance)
-        cleaned_owners = transfer_segment_owners(source_path.v, source_path.segment_owners, cleaned)
-        cleaned_geometry = transfer_segment_geometry(source_path.v, source_path.segment_geometry, cleaned)
+        cleaned_owners, cleaned_geometry = transfer_segment_provenance(
+            source_path.v, source_path.segment_owners, source_path.segment_geometry, cleaned
+        )
         part.wire_path = WirePath(
             v=cleaned,
             segment_owners=cleaned_owners,
@@ -3472,6 +4530,7 @@ def cleanup_wire_paths(
 def route_diagnostics(part: CoilPart, config: CoilGenConfig | None = None) -> dict[str, float | int | bool | str]:
     inter_group = _inter_group_route_diagnostics(part, config)
     route_quality = _empty_route_quality_diagnostics(config)
+    route_quality.update(part.normal_shift_diagnostics)
     opening_cuts = _opening_cut_route_diagnostics(part, config=config)
     quality = _route_quality_summary(route_quality, opening_cuts, inter_group)
     if part.wire_path is None or len(part.wire_path.v) < 2:
@@ -3497,6 +4556,7 @@ def route_diagnostics(part: CoilPart, config: CoilGenConfig | None = None) -> di
     positive_lengths = segment_lengths[segment_lengths > 1e-15]
     min_seg_a, min_seg_b, min_wire_distance = find_min_wire_segment_distance_3d(part.wire_path.v, config=config)
     route_quality = _route_quality_diagnostics(part, min_seg_a, min_seg_b, min_wire_distance, config)
+    route_quality.update(part.normal_shift_diagnostics)
     quality = _route_quality_summary(route_quality, opening_cuts, inter_group)
     return {
         "point_count": int(len(part.wire_path.v)),
@@ -3539,8 +4599,10 @@ def _route_quality_diagnostics(
     min_wire_distance: float,
     config: CoilGenConfig | None,
 ) -> dict[str, float | int]:
-    connector_distance, cut_index, loop_index = _min_connector_interior_to_contour_distance(part)
     clearance_threshold = _connector_clearance_threshold(config)
+    connector_distance, cut_index, loop_index, connector_violations = _connector_clearance_summary(
+        part, clearance_threshold
+    )
     wire_failure_threshold = _wire_clearance_failure_threshold(config)
     wire_warning_threshold = _wire_clearance_warning_threshold(config)
     valid_wire_pair = min_seg_a >= 0 and min_seg_b >= 0
@@ -3556,9 +4618,7 @@ def _route_quality_diagnostics(
         "min_inter_group_connector_to_contour_distance": float(connector_distance),
         "min_inter_group_connector_to_contour_cut_index": int(cut_index),
         "min_inter_group_connector_to_contour_loop_index": int(loop_index),
-        "inter_group_connector_clearance_violation_count": int(
-            _connector_clearance_violation_count(part, clearance_threshold)
-        ),
+        "inter_group_connector_clearance_violation_count": connector_violations,
     }
 
 
@@ -3699,39 +4759,38 @@ def _connector_ratio(connector_distance: float, direct_distance: float, geodesic
 
 
 def _min_connector_interior_to_contour_distance(part: CoilPart) -> tuple[float, int, int]:
+    return _connector_clearance_summary(part, 0.0)[:3]
+
+
+def _connector_clearance_summary(part: CoilPart, clearance_threshold: float) -> tuple[float, int, int, int]:
+    """Measure each connector once for both minimum-distance and count reports."""
     best_distance = math.inf
     best_cut = -1
     best_loop = -1
-    if not part.contour_lines:
-        return 0.0, -1, -1
+    violations = 0
+    if not part.contour_lines or not part.opening_cuts_among_groups:
+        return 0.0, -1, -1, 0
+    clearance_index = ContourClearanceIndex([contour.v for contour in part.contour_lines])
     for cut_ind, cut in enumerate(part.opening_cuts_among_groups):
         excluded = _inter_group_endpoint_loop_indices(part, cut)
         for path_v in _inter_group_connection_paths(cut):
             distance, loop_ind = _connector_path_clearance_to_unrelated_contours(
-                part, path_v, excluded, return_loop=True
+                part, path_v, excluded, return_loop=True, clearance_index=clearance_index
             )
+            violations += int(clearance_threshold > 0.0 and distance < clearance_threshold)
             if distance < best_distance:
                 best_distance = distance
                 best_cut = cut_ind
                 best_loop = loop_ind
     if not math.isfinite(best_distance):
-        return 0.0, -1, -1
-    return float(best_distance), best_cut, best_loop
+        return 0.0, -1, -1, violations
+    return float(best_distance), best_cut, best_loop, violations
 
 
 def _connector_clearance_violation_count(part: CoilPart, clearance_threshold: float) -> int:
     if clearance_threshold <= 0.0:
         return 0
-    count = 0
-    if not part.contour_lines:
-        return 0
-    for cut in part.opening_cuts_among_groups:
-        excluded = _inter_group_endpoint_loop_indices(part, cut)
-        count += sum(
-            _connector_path_clearance_to_unrelated_contours(part, path_v, excluded) < clearance_threshold
-            for path_v in _inter_group_connection_paths(cut)
-        )
-    return count
+    return _connector_clearance_summary(part, clearance_threshold)[3]
 
 
 def _inter_group_endpoint_loop_indices(part: CoilPart, cut: InterGroupCut) -> set[int]:
@@ -3764,13 +4823,17 @@ def _route_quality_summary(
     degenerate_cuts = int(opening_cuts.get("degenerate_opening_cut_count", 0))
     suspicious_connectors = int(inter_group.get("suspicious_inter_group_connector_count", 0))
     surface_connector_failures = int(inter_group.get("surface_geodesic_connector_failure_count", 0))
-    failures = clearance_violations + wire_clearance_failures + degenerate_cuts + surface_connector_failures
+    shift_failures = int(bool(route_quality.get("normal_shift_quality_failure", False)))
+    failures = (
+        clearance_violations + wire_clearance_failures + degenerate_cuts + surface_connector_failures + shift_failures
+    )
     topology_failures = degenerate_cuts + surface_connector_failures
     warnings = (
         int(route_quality.get("wire_clearance_warning_count", 0))
         + int(inter_group.get("inter_group_clearance_fallback_count", 0))
         + int(inter_group.get("inter_group_direct_fallback_count", 0))
         + suspicious_connectors
+        + int(bool(route_quality.get("normal_shift_unresolved", False)) and not shift_failures)
     )
     failure_reasons: list[str] = []
     if wire_clearance_failures:
@@ -3781,6 +4844,8 @@ def _route_quality_summary(
         failure_reasons.append("degenerate_opening_cut")
     if surface_connector_failures:
         failure_reasons.append("surface_geodesic_connector")
+    if shift_failures:
+        failure_reasons.append("normal_shift_unresolved")
     status = "fail" if failures else "warn" if warnings else "pass"
     return {
         "route_quality_ok": bool(failures == 0),
@@ -3894,21 +4959,16 @@ def _connector_path_clearance_to_unrelated_contours(
     excluded_loop_indices: set[int],
     *,
     return_loop: bool = False,
+    clearance_index: ContourClearanceIndex | None = None,
 ) -> float | tuple[float, int]:
     connector_path_v = np.asarray(connector_path_v, dtype=float)
     if len(connector_path_v) < 2:
         result: float | tuple[float, int] = (math.inf, -1) if return_loop else math.inf
         return result
 
-    best_distance = math.inf
-    best_loop = -1
-    for loop_ind, contour in enumerate(part.contour_lines):
-        if loop_ind in excluded_loop_indices or len(contour.v) < 2:
-            continue
-        distance = _polyline_polyline_distance_3d(connector_path_v, contour.v)
-        if distance < best_distance:
-            best_distance = distance
-            best_loop = loop_ind
+    if clearance_index is None:
+        clearance_index = ContourClearanceIndex([contour.v for contour in part.contour_lines])
+    best_distance, best_loop = clearance_index.distance_to_path(connector_path_v, excluded_loop_indices)
     if return_loop:
         return float(best_distance), best_loop
     return float(best_distance)
@@ -3924,17 +4984,7 @@ def _polyline_polyline_distance_3d(polyline_a: np.ndarray, polyline_b: np.ndarra
     if len(polyline_b) == 1:
         return _point_polyline_distance_3d(polyline_b[0], polyline_a)
 
-    best_distance = math.inf
-    for start_a, end_a in zip(polyline_a[:-1], polyline_a[1:]):
-        if np.linalg.norm(end_a - start_a) <= 1e-12:
-            continue
-        for start_b, end_b in zip(polyline_b[:-1], polyline_b[1:]):
-            if np.linalg.norm(end_b - start_b) <= 1e-12:
-                continue
-            distance = _segment_segment_distance_3d(start_a, end_a, start_b, end_b)
-            if distance < best_distance:
-                best_distance = distance
-    return float(best_distance)
+    return ContourClearanceIndex([polyline_b]).distance_to_path(polyline_a)[0]
 
 
 def _clean_path_array(v: np.ndarray, tolerance: float) -> np.ndarray:
@@ -4270,6 +5320,8 @@ def _wire_segment_candidate_pair_chunks(
     local_exclusion: float,
     max_candidate_fraction: float | None = None,
 ) -> list[np.ndarray] | None:
+    from .geometry_collision import _segment_bvh_candidate_pairs
+
     n_segments = len(starts)
     if n_segments < 2 or not math.isfinite(max_distance):
         max_distance = math.inf
@@ -4277,9 +5329,6 @@ def _wire_segment_candidate_pair_chunks(
     valid_indices = np.flatnonzero(valid_segments)
     if len(valid_indices) < 2:
         return []
-    span = np.ptp(maxs[valid_indices], axis=0)
-    axis = int(np.argmax(span))
-    order = valid_indices[np.argsort(mins[valid_indices, axis], kind="mergesort")]
     max_distance = max(float(max_distance), 0.0)
     max_distance_squared = max_distance * max_distance if math.isfinite(max_distance) else math.inf
     chunk_size = max(int(getattr(config, "wire_distance_chunk_size", 512)), 1)
@@ -4287,41 +5336,68 @@ def _wire_segment_candidate_pair_chunks(
     if max_candidate_fraction is not None:
         all_pair_count = max((n_segments - 1) * (n_segments - 2) // 2, 0)
         max_candidate_count = max(int(float(max_candidate_fraction) * float(all_pair_count)), chunk_size)
+    # Bound the raw leaf-pair list even for explicitly requested spatial
+    # searches. Dense configurations use the existing memory-bounded all-pairs
+    # fallback; the auto fraction also caps the final, filtered candidate set.
+    raw_pair_budget = 2_000_000
+    if max_candidate_count is not None:
+        raw_pair_budget = min(raw_pair_budget, max(65_536, 8 * max_candidate_count))
+    raw_pairs = _segment_bvh_candidate_pairs(
+        mins[valid_indices], maxs[valid_indices], max_distance, max_pairs=raw_pair_budget
+    )
+    if raw_pairs is None:
+        return None
     candidate_count = 0
     segment_length_prefix = _wire_segment_length_prefix(directions)
+    segment_lengths = np.linalg.norm(directions, axis=1)
     chunks: list[np.ndarray] = []
-    current: list[tuple[int, int]] = []
 
-    for order_pos, seg_i in enumerate(order):
-        limit = maxs[seg_i, axis] + max_distance
-        next_pos = order_pos + 1
-        while next_pos < len(order):
-            seg_j = int(order[next_pos])
-            if mins[seg_j, axis] > limit:
-                break
-            seg_a = int(min(seg_i, seg_j))
-            seg_b = int(max(seg_i, seg_j))
-            if _wire_segment_pair_allowed(
-                seg_a,
-                seg_b,
-                n_segments,
-                closed,
-                directions=directions,
-                local_exclusion=local_exclusion,
-                segment_length_prefix=segment_length_prefix,
-            ):
-                if _aabb_distance_squared(mins[seg_a], maxs[seg_a], mins[seg_b], maxs[seg_b]) <= max_distance_squared:
-                    candidate_count += 1
-                    if max_candidate_count is not None and candidate_count > max_candidate_count:
-                        return None
-                    current.append((seg_a, seg_b))
-                    if len(current) >= chunk_size:
-                        chunks.append(np.asarray(current, dtype=np.int64))
-                        current = []
-            next_pos += 1
-    if current:
-        chunks.append(np.asarray(current, dtype=np.int64))
-    return chunks
+    for start in range(0, len(raw_pairs), 65_536):
+        pairs = valid_indices[raw_pairs[start : start + 65_536]]
+        first, second = pairs.T
+        allowed = second > first + 1
+        if closed:
+            allowed &= (first != 0) | (second != n_segments - 1)
+        delta = np.maximum(np.maximum(mins[first] - maxs[second], mins[second] - maxs[first]), 0.0)
+        bounds_squared = np.einsum("ij,ij->i", delta, delta)
+        allowed &= bounds_squared <= max_distance_squared
+        if local_exclusion > 0.0:
+            gap = segment_length_prefix[second] - segment_length_prefix[first + 1]
+            if closed:
+                gap = np.minimum(
+                    gap, segment_length_prefix[-1] - (segment_length_prefix[second + 1] - segment_length_prefix[first])
+                )
+            norm_product = segment_lengths[first] * segment_lengths[second]
+            dot = np.einsum("ij,ij->i", directions[first], directions[second])
+            cosine = np.divide(dot, norm_product, out=np.zeros_like(dot), where=norm_product > 1e-30)
+            local = (gap <= local_exclusion) & (norm_product > 1e-30) & (cosine > -0.9)
+            excluded = allowed & local
+            allowed &= ~local
+            # Preserve actual nonadjacent crossings even within the metric
+            # continuation exclusion. AABB overlap alone is not sufficient.
+            possible_zeros = np.flatnonzero(excluded & (bounds_squared <= 1e-18))
+            if len(possible_zeros):
+                a, b = pairs[possible_zeros].T
+                allowed[possible_zeros] = segment_distances(starts[a], directions[a], starts[b], directions[b]) <= 1e-9
+        pairs = pairs[allowed]
+        candidate_count += len(pairs)
+        if max_candidate_count is not None and candidate_count > max_candidate_count:
+            return None
+        if len(pairs):
+            chunks.append(pairs)
+    if not chunks:
+        return []
+    pairs = np.concatenate(chunks)
+    # Retain the former sweep traversal order so tied nearest pairs and any
+    # downstream contact grouping do not change with the broad-phase backend.
+    axis = int(np.argmax(np.ptp(maxs[valid_indices], axis=0)))
+    order = valid_indices[np.argsort(mins[valid_indices, axis], kind="stable")]
+    ranks = np.empty(n_segments, dtype=np.int64)
+    ranks[order] = np.arange(len(order))
+    pair_ranks = ranks[pairs]
+    ordering = np.lexsort((np.max(pair_ranks, axis=1), np.min(pair_ranks, axis=1)))
+    pairs = pairs[ordering]
+    return [pairs[offset : offset + chunk_size] for offset in range(0, len(pairs), chunk_size)]
 
 
 def _wire_segment_pair_allowed(
@@ -4330,6 +5406,7 @@ def _wire_segment_pair_allowed(
     n_segments: int,
     closed: bool,
     *,
+    starts: np.ndarray | None = None,
     directions: np.ndarray | None = None,
     local_exclusion: float = 0.0,
     segment_length_prefix: np.ndarray | None = None,
@@ -4350,7 +5427,24 @@ def _wire_segment_pair_allowed(
             closed=closed,
         )
     ):
-        return False
+        # Metric continuation excludes ordinary neighboring bend clearance,
+        # never a real self-crossing. Rescue only overlapping segment AABBs;
+        # the exact kernel resolves skew segments whose boxes merely overlap.
+        if starts is None:
+            return False
+        first, second = starts[seg_a], starts[seg_b]
+        first_end, second_end = first + directions[seg_a], second + directions[seg_b]
+        if (
+            _aabb_distance_squared(
+                np.minimum(first, first_end),
+                np.maximum(first, first_end),
+                np.minimum(second, second_end),
+                np.maximum(second, second_end),
+            )
+            > 1e-18
+        ):
+            return False
+        return bool(segment_distances(first, directions[seg_a], second, directions[seg_b]) <= 1e-9)
     return True
 
 
@@ -4441,6 +5535,7 @@ def _initial_wire_segment_distance_bound(
                     seg_b,
                     n_segments,
                     closed,
+                    starts=starts,
                     directions=directions,
                     local_exclusion=local_exclusion,
                     segment_length_prefix=segment_length_prefix,
@@ -4461,6 +5556,7 @@ def _initial_wire_segment_distance_bound(
                 seg_b,
                 n_segments,
                 closed,
+                starts=starts,
                 directions=directions,
                 local_exclusion=local_exclusion,
                 segment_length_prefix=segment_length_prefix,
@@ -4542,7 +5638,28 @@ def _wire_segment_pair_distances(
             out=np.full_like(norm_products, -1.0),
             where=norm_products > 1e-30,
         )
-        pair_mask &= ~((gap_lengths <= local_exclusion) & (direction_cosines > -0.9))
+        local_pairs = (gap_lengths <= local_exclusion) & (direction_cosines > -0.9)
+        excluded = pair_mask & local_pairs
+        pair_mask &= ~local_pairs
+        # Keep the existing bounded row chunk. AABB filtering needs only bool
+        # matrices, and exact distances are evaluated only for overlapping
+        # excluded pairs, not for every metric continuation.
+        mins, maxs = _wire_segment_aabbs(starts, directions)
+        for axis in range(3):
+            excluded &= mins[row_indices, None, axis] <= maxs[None, :, axis] + 1e-9
+            excluded &= mins[None, :, axis] <= maxs[row_indices, None, axis] + 1e-9
+        rescue_rows, rescue_cols = np.nonzero(excluded)
+        if len(rescue_rows):
+            touching = (
+                segment_distances(
+                    starts[row_indices[rescue_rows]],
+                    directions[row_indices[rescue_rows]],
+                    starts[rescue_cols],
+                    directions[rescue_cols],
+                )
+                <= 1e-9
+            )
+            pair_mask[rescue_rows[touching], rescue_cols[touching]] = True
     if not np.any(pair_mask):
         return row_indices, col_indices, np.full(pair_mask.shape, math.inf, dtype=float)
 
@@ -4648,16 +5765,40 @@ def _normal_shift_routes_by_segment(part: CoilPart) -> list[list[_NormalShiftRou
         return []
     wire_v = part.wire_path.v
     routes_by_segment: list[list[_NormalShiftRoute]] = [[] for _ in range(max(len(wire_v) - 1, 0))]
+    owners = part.wire_path.segment_owners
+    if owners:
+        # Ownership distinguishes repeated visits to exactly the same coordinate.
+        # Geometric nearest-path matching cannot make that distinction.
+        owned_segments: dict[tuple[str, int, int], list[int]] = {}
+        role_order = {"primary": 0, "closing": 1, "bridge": 2}
+        for index, owner in enumerate(owners):
+            if owner.kind == "inter_group_connector":
+                key = (owner.kind, owner.connector_index, role_order.get(owner.connector_role, 3))
+            elif owner.kind == "within_group_return":
+                key = (owner.kind, owner.group_index, 0)
+            else:
+                continue
+            owned_segments.setdefault(key, []).append(index)
+        for order, (key, indices) in enumerate(sorted(owned_segments.items())):
+            route = _NormalShiftRoute(key, 2 if key[0] == "within_group_return" else 1, order, tuple(indices))
+            for index in indices:
+                routes_by_segment[index].append(route)
     candidates: list[tuple[tuple[str, int, int], int, np.ndarray]] = []
     for group_index, group in enumerate(part.connected_groups):
         candidates.append((("within_group_return", group_index, 0), 2, group.return_path_v))
-    for cut_index, cut in enumerate(part.opening_cuts_among_groups):
+    for cut_index, cut in enumerate(part.opening_cuts_among_groups if not owners else []):
         paths = [cut.connection_path_v, cut.closing_connection_path_v, *cut.normal_shift_paths_v]
         for role_index, path_v in enumerate(_distinct_connection_paths(paths)):
             candidates.append((("inter_group_connector", cut_index, role_index), 1, path_v))
 
     for order, (key, priority, path_v) in enumerate(candidates):
         segment_indices = _reference_path_wire_segment_indices(path_v, wire_v)
+        if owners:
+            segment_indices = tuple(
+                index
+                for index in segment_indices
+                if owners[index].kind not in {"contour_loop", "inter_group_connector"}
+            )
         if not segment_indices:
             continue
         route = _NormalShiftRoute(
@@ -4788,6 +5929,12 @@ def _crossing_event_segment_selections(
     total_length = float(np.sum(segment_lengths))
     closed = len(points) > 2 and np.linalg.norm(points[0] - points[-1]) <= 1e-10
     cluster_arclength = max(float(cluster_arclength), 0.0)
+    routes = [_preferred_normal_shift_route(routes_by_segment, index) for index in range(segment_count)]
+    route_keys = [route.key if route is not None else None for route in routes]
+    route_pairs = [
+        tuple(route_keys[index] if 0 <= index < segment_count else None for index in (a, b))
+        for a, b, _distance in contacts
+    ]
 
     parent = np.arange(len(contacts), dtype=np.int64)
 
@@ -4803,24 +5950,28 @@ def _crossing_event_segment_selections(
         if root_first != root_second:
             parent[root_second] = root_first
 
-    def arclength_distance(first_segment: int, second_segment: int) -> float:
-        distance = abs(float(midpoints[first_segment]) - float(midpoints[second_segment]))
-        if closed and total_length > 0.0:
-            distance = min(distance, total_length - distance)
-        return distance
+    from scipy.spatial import cKDTree
 
-    for first_index, (first_a, first_b, _first_distance) in enumerate(contacts):
-        if not (0 <= first_a < segment_count and 0 <= first_b < segment_count):
-            continue
-        for second_index in range(first_index + 1, len(contacts)):
-            second_a, second_b, _second_distance = contacts[second_index]
-            if not (0 <= second_a < segment_count and 0 <= second_b < segment_count):
-                continue
-            if (
-                arclength_distance(first_a, second_a) <= cluster_arclength
-                and arclength_distance(first_b, second_b) <= cluster_arclength
-            ):
-                union(first_index, second_index)
+    valid_indices = np.asarray(
+        [
+            index
+            for index, (a, b, _distance) in enumerate(contacts)
+            if 0 <= a < segment_count and 0 <= b < segment_count
+        ],
+        dtype=np.int64,
+    )
+    if len(valid_indices) > 1:
+        coordinates = np.asarray(
+            [[midpoints[contacts[index][0]], midpoints[contacts[index][1]]] for index in valid_indices]
+        )
+        period = total_length if closed and total_length > 0 else None
+        if period is not None:
+            coordinates %= period
+        tree = cKDTree(coordinates, boxsize=period)
+        for first, second in tree.query_pairs(cluster_arclength, p=np.inf, output_type="ndarray"):
+            first, second = int(valid_indices[first]), int(valid_indices[second])
+            if route_pairs[first] == route_pairs[second]:
+                union(first, second)
 
     grouped: dict[int, list[tuple[int, int, float]]] = {}
     for index, contact in enumerate(contacts):
@@ -4885,6 +6036,80 @@ def _mark_segment_points(mask: np.ndarray, segment_index: int) -> None:
         mask[segment_index + 1] = True
 
 
+def _crossing_lift_anchors(crossing_events, contacts, points):
+    """Place event constraints at closest points, not whole interval endpoints.
+
+    Each local distance minimum defines a physical crossing, including multiple
+    crossings inside one event. Endpoint candidates must also be minima along
+    incident segments; nearby spacing samples cannot widen the underpass mask.
+    Positions use source segment index plus closest-point fraction.
+    """
+    anchors = []
+    tolerance = 1e-7  # Below one micrometre; covers STL-coordinate roundoff.
+    directions = np.diff(points, axis=0)
+    lengths = np.linalg.norm(directions, axis=1)
+    closed = len(points) > 2 and np.linalg.norm(points[0] - points[-1]) <= 1e-10
+
+    def stationary_at_endpoint(segment, fraction, delta):
+        if fraction == 0.0:
+            neighbor, sign = segment - 1, -1.0
+        elif fraction == 1.0:
+            neighbor, sign = segment + 1, 1.0
+        else:
+            return True
+        if closed:
+            neighbor %= len(directions)
+        elif not 0 <= neighbor < len(directions):
+            return True
+        # The closest-point solution already checks the current interval.
+        # Also check the outward derivative on its neighboring interval.
+        return float(delta @ (sign * directions[neighbor])) >= -tolerance * lengths[neighbor]
+
+    for overpasses, underpasses in crossing_events:
+        over_set, under_set = set(overpasses), set(underpasses)
+        pairs = []
+        for first, second, distance in contacts:
+            if first in over_set and second in under_set:
+                pairs.append((first, second, distance))
+            elif second in over_set and first in under_set:
+                pairs.append((second, first, distance))
+        if not pairs:
+            continue
+        for over, under, distance in pairs:
+            fractions = segment_closest_parameters(points[over], directions[over], points[under], directions[under])
+            positions = []
+            snapped = []
+            for index, fraction in zip((over, under), fractions):
+                length = lengths[index]
+                fraction = float(fraction)
+                if fraction * length <= tolerance:
+                    fraction = 0.0
+                elif (1.0 - fraction) * length <= tolerance:
+                    fraction = 1.0
+                snapped.append(fraction)
+                positions.append(index + fraction)
+            delta = points[over] + snapped[0] * directions[over] - points[under] - snapped[1] * directions[under]
+            if not stationary_at_endpoint(over, snapped[0], delta) or not stationary_at_endpoint(
+                under, snapped[1], -delta
+            ):
+                continue
+            anchors.append((over, under, *positions, distance))
+    return anchors
+
+
+def _mark_crossing_anchor(mask, segment, source_position, points):
+    if source_position == segment:
+        mask[segment] = True
+    elif source_position == segment + 1:
+        mask[segment + 1] = True
+    else:
+        # A constant zero/one on this segment enforces the interior anchor.
+        # Sparse owned overpasses are reconstructed when this is insufficient.
+        _mark_segment_points(mask, segment)
+    if len(points) > 2 and np.linalg.norm(points[0] - points[-1]) <= 1e-10:
+        mask[0] = mask[-1] = mask[0] or mask[-1]
+
+
 def _crossing_shift_profile(
     base_shift_levels: np.ndarray,
     overpass_points: np.ndarray,
@@ -4892,6 +6117,8 @@ def _crossing_shift_profile(
     wire_path_v: np.ndarray,
     transition_length: float,
     smooth_factors,
+    *,
+    allowed_points: np.ndarray | None = None,
 ) -> np.ndarray:
     """Build a continuous one-layer crossing profile.
 
@@ -4917,9 +6144,25 @@ def _crossing_shift_profile(
 
     base_profile = smooth(base_levels)
     overpass_profile = smooth(overpass.astype(float))
-    underpass_profile = smooth(underpass.astype(float))
     lift_profile = np.maximum(base_profile, overpass_profile)
-    profile = lift_profile * (1.0 - np.clip(underpass_profile, 0.0, 1.0))
+    if allowed_points is not None:
+        allowed = np.asarray(allowed_points, dtype=bool).reshape(-1)
+        if len(allowed) != len(points):
+            raise ValueError("Allowed lift points must match the wire path.")
+        underpass = underpass | ~allowed
+    if transition_length > 0 and np.any(underpass):
+        low_distance = _nearest_active_arclength_distance(points, underpass)
+        high_distance = _nearest_active_arclength_distance(points, overpass & ~underpass)
+        # A nearby underpass must not attenuate the overpass anchor itself.
+        # Short available ramps remain explicit and are checked downstream.
+        ramp = np.minimum(transition_length, low_distance + high_distance)
+        fraction = np.divide(low_distance, ramp, out=np.zeros_like(low_distance), where=ramp > 1e-15)
+        cap = 0.5 * (1.0 - np.cos(np.pi * np.clip(fraction, 0.0, 1.0)))
+        profile = lift_profile * cap
+    else:
+        profile = lift_profile * (1.0 - np.clip(smooth(underpass.astype(float)), 0.0, 1.0))
+    profile[underpass] = 0.0
+    profile[overpass & ~underpass] = 1.0
     return np.clip(profile, 0.0, 1.0)
 
 
@@ -4940,21 +6183,33 @@ def smooth_shift_mask(points_to_shift: np.ndarray, smooth_factors) -> np.ndarray
 
 
 def wire_path_normals(part: CoilPart) -> np.ndarray:
-    mesh = part.mesh
-    if mesh.vertex_normals is None:
-        normals = np.tile(np.array([0.0, 0.0, 1.0]), (len(part.wire_path.v), 1))
-        return normals
-    vertex_normals = mesh.vertex_normals.copy()
-    center = mesh.vertices.mean(axis=0)
-    if np.mean(np.sum(vertex_normals * (mesh.vertices - center), axis=1)) < 0:
-        vertex_normals *= -1.0
-    normals = np.zeros_like(part.wire_path.v)
-    for point_ind, point in enumerate(part.wire_path.v):
-        nearest = int(np.argmin(np.linalg.norm(mesh.vertices - point, axis=1)))
-        normal = vertex_normals[nearest]
-        norm = np.linalg.norm(normal)
-        normals[point_ind] = normal / norm if norm > 1e-15 else np.array([0.0, 0.0, 1.0])
-    return normals
+    """Interpolate the declared mesh-normal field at closest surface points."""
+    return _wire_path_normal_samples(part)[0]
+
+
+def _wire_path_normal_samples(part: CoilPart) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    # Local import reuses the existing indexed projector without creating a
+    # manufacturing/layout import cycle or a second geometric implementation.
+    from .manufacturing import _SurfaceProjector
+
+    points = np.zeros((0, 3)) if part.wire_path is None else part.wire_path.v
+    count = len(points)
+    if not count or not len(part.mesh.faces):
+        return (
+            np.zeros_like(points),
+            np.full(count, -1, dtype=np.int64),
+            np.zeros((count, 3)),
+            np.zeros(count, dtype=bool),
+        )
+    projector = _SurfaceProjector(part.mesh)
+    _projected, normals, face_normals, faces, barycentric = projector.project_with_details(points)
+    valid = (
+        np.all(np.isfinite(normals), axis=1)
+        & (np.linalg.norm(face_normals, axis=1) > 1e-12)
+        & (np.einsum("ij,ij->i", normals, face_normals) > 1e-12)
+    )
+    normals[~valid] = 0.0
+    return normals, faces, barycentric, valid
 
 
 def _smooth_wire_path_normals(normals: np.ndarray, iterations: int) -> np.ndarray:
@@ -4966,9 +6221,6 @@ def _smooth_wire_path_normals(normals: np.ndarray, iterations: int) -> np.ndarra
     lengths = np.linalg.norm(out, axis=1)
     valid = lengths > 1e-15
     out[valid] /= lengths[valid, None]
-    for index in range(1, len(out)):
-        if np.dot(out[index], out[index - 1]) < 0.0:
-            out[index] *= -1.0
     closed = len(out) > 2 and np.linalg.norm(out[0] - out[-1]) <= 1e-8
     unique = out[:-1].copy() if closed else out.copy()
     for _ in range(max(int(iterations), 0)):
@@ -5050,11 +6302,7 @@ def _smooth_shift_levels_by_arclength(
             continue
         profile = np.ones(unique_count, dtype=float) if np.all(active) else np.zeros(unique_count, dtype=float)
         if not np.all(active):
-            active_positions = positions[active]
-            distances = np.abs(positions[:, None] - active_positions[None, :])
-            if closed:
-                distances = np.minimum(distances, total_length - distances)
-            nearest = np.min(distances, axis=1)
+            nearest = _nearest_sorted_arclength_distance(positions, positions[active], total_length if closed else 0.0)
             normalized = np.clip(nearest / float(transition_length), 0.0, 1.0)
             profile = 0.5 * (1.0 + np.cos(np.pi * normalized))
             profile[nearest >= transition_length] = 0.0
@@ -5066,22 +6314,43 @@ def _smooth_shift_levels_by_arclength(
     return np.concatenate((smoothed, smoothed[:1]))
 
 
+def _nearest_sorted_arclength_distance(positions: np.ndarray, active: np.ndarray, period: float = 0.0) -> np.ndarray:
+    """Nearest active coordinate using two sorted neighbors, with linear memory."""
+    if not len(active):
+        return np.full(len(positions), np.inf)
+    if period > 0:
+        active = np.concatenate(([active[-1] - period], active, [active[0] + period]))
+    insertion = np.searchsorted(active, positions)
+    left = active[np.clip(insertion - 1, 0, len(active) - 1)]
+    right = active[np.clip(insertion, 0, len(active) - 1)]
+    return np.minimum(abs(positions - left), abs(positions - right))
+
+
+def _nearest_active_arclength_distance(points: np.ndarray, active: np.ndarray) -> np.ndarray:
+    positions = np.concatenate(([0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))))
+    closed = len(points) > 2 and np.linalg.norm(points[0] - points[-1]) <= 1e-10
+    return _nearest_sorted_arclength_distance(positions, positions[active], positions[-1] if closed else 0.0)
+
+
 def _update_inter_group_paths_after_shift(
     part: CoilPart,
     unshifted_wire_v: np.ndarray,
     shifted_wire_v: np.ndarray,
+    source_positions: np.ndarray | None = None,
 ) -> None:
     """Keep stored connector geometry synchronized with the shifted final wire."""
 
     for cut in part.opening_cuts_among_groups:
         cut.connection_path_v = _map_reference_path_to_shifted_wire(
-            cut.connection_path_v, unshifted_wire_v, shifted_wire_v
+            cut.connection_path_v, unshifted_wire_v, shifted_wire_v, source_positions=source_positions
         )
         cut.closing_connection_path_v = _map_reference_path_to_shifted_wire(
-            cut.closing_connection_path_v, unshifted_wire_v, shifted_wire_v
+            cut.closing_connection_path_v, unshifted_wire_v, shifted_wire_v, source_positions=source_positions
         )
         cut.normal_shift_paths_v = [
-            _map_reference_path_to_shifted_wire(path_v, unshifted_wire_v, shifted_wire_v)
+            _map_reference_path_to_shifted_wire(
+                path_v, unshifted_wire_v, shifted_wire_v, source_positions=source_positions
+            )
             for path_v in cut.normal_shift_paths_v
         ]
 
@@ -5091,17 +6360,47 @@ def _map_reference_path_to_shifted_wire(
     unshifted_wire_v: np.ndarray,
     shifted_wire_v: np.ndarray,
     tolerance: float = 1e-8,
+    *,
+    source_positions: np.ndarray | None = None,
 ) -> np.ndarray:
     reference = np.asarray(reference_path_v, dtype=float)
     before = np.asarray(unshifted_wire_v, dtype=float)
     after = np.asarray(shifted_wire_v, dtype=float)
-    if len(reference) == 0 or len(before) != len(after) or len(before) == 0:
+    if len(reference) == 0 or len(before) == 0:
         return reference.copy()
 
     closed = len(before) > 1 and np.linalg.norm(before[0] - before[-1]) <= tolerance
     searchable = before[:-1] if closed else before
     shifted_searchable = after[:-1] if closed else after
     indices = _reference_path_wire_indices(reference, before, tolerance=tolerance)
+    if source_positions is not None and indices is not None:
+        # Correspondence is assigned during construction. Repeated positions
+        # at a crossing must not acquire the other branch's ownership.
+        positions = np.asarray(source_positions)
+        pieces = []
+        last_position = None
+        period = len(before) - 1 if closed else 0
+        for first, second in zip(indices[:-1], indices[1:]):
+            if closed and first == period - 1 and second == 0:
+                second = period
+            elif closed and second == period - 1 and first == 0:
+                first = period
+            low, high = sorted((int(first), int(second)))
+            selection = slice(np.searchsorted(positions, low), np.searchsorted(positions, high, side="right"))
+            piece, piece_positions = after[selection], positions[selection]
+            if first > second:
+                piece = piece[::-1]
+                piece_positions = piece_positions[::-1]
+            if len(piece):
+                duplicate = last_position is not None and (
+                    piece_positions[0] == last_position
+                    or (closed and abs(piece_positions[0] - last_position) == period)
+                )
+                pieces.append(piece[1:] if duplicate else piece)
+                last_position = piece_positions[-1]
+        return np.vstack(pieces) if pieces else reference.copy()
+    if len(before) != len(after):
+        return reference.copy()
     if indices is not None:
         return shifted_searchable[indices].copy()
 
@@ -6255,6 +7554,7 @@ def _loop_topology_signature_diagnostics(signatures: list[LoopTopologySignature]
                 "boundary_signature": [list(boundary_set) for boundary_set in signature.boundary_signature],
                 "component_boundary_sets": [list(boundary_set) for boundary_set in signature.component_boundary_sets],
                 "component_areas": list(signature.component_areas),
+                "component_euler_characteristics": list(signature.component_euler_characteristics),
             }
             for signature in signatures
         ],

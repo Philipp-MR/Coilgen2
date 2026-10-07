@@ -456,12 +456,15 @@ class CoilPart:
     opening_cuts_among_groups: list[InterGroupCut] = field(default_factory=list)
     wire_path: WirePath | None = None
     route_diagnostics: RouteDiagnostics = field(default_factory=dict)
+    joint_route_diagnostics: dict[str, Any] = field(default_factory=dict)
     swept_body: Mesh | None = None
     swept_bodies: list[SweptBody] = field(default_factory=list)
     manufacturing_diagnostics: ManufacturingDiagnostics = field(default_factory=dict)
     pcb_layout: PcbLayout | None = None
     shift_array: np.ndarray | None = None
     points_to_shift: np.ndarray | None = None
+    normal_shift_diagnostics: dict[str, Any] = field(default_factory=dict)
+    normal_shift_provenance: dict[str, Any] = field(default_factory=dict)
     wire_self_contacts: list[tuple[int, int, float]] = field(default_factory=list)
     coil_resistance: float = 0.0
     coil_inductance: float = 0.0

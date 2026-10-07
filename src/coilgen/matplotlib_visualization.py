@@ -38,6 +38,7 @@ from .metrics import dsv_target_mask, suppression_target_mask
 from .plot_book import (
     MatplotlibPlotBookBuilder,
     close_active_plot_books,
+    is_plot_book_rendering,
 )
 from .regularization_diagnostics import (
     normalized_linear_trace,
@@ -107,6 +108,7 @@ DEFAULT_RESULT_PLOT_KEYS = (
     "gradient_cross_sections",
     "field_slice_mosaic",
     "gradient_slice_mosaic",
+    "gradient_slice_inspector",
     "concomitant_slice_mosaic",
     "error_cross_sections",
     "error_metrics",
@@ -171,8 +173,16 @@ def pointcloud_plot_indices(
     *,
     eligible_mask: np.ndarray | None = None,
     seed_offset: int = 0,
+    coordinates: np.ndarray | None = None,
+    scalar_values: np.ndarray | None = None,
+    domain_labels: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Return a reproducible random display subset without changing source data."""
+    """Sample for display, retaining domain representatives and finite extrema.
+
+    Zero disables the budget. If the budget cannot hold all representatives,
+    domains take priority, followed by field extrema and coordinate extrema.
+    Numerical inputs, ranges and statistics are never modified.
+    """
 
     count = int(point_count)
     if count < 0:
@@ -185,7 +195,7 @@ def pointcloud_plot_indices(
             raise ValueError("Point-cloud eligibility mask must match the point count.")
         eligible = np.flatnonzero(mask)
 
-    max_points = int(getattr(config, "plot_pointcloud_max_points", 0) or 0)
+    max_points = int(getattr(config, "plot_pointcloud_max_points", 2000) or 0)
     if max_points <= 0 or len(eligible) <= max_points:
         return eligible
 
@@ -193,7 +203,71 @@ def pointcloud_plot_indices(
     if seed < 0:
         raise ValueError("Point-cloud plot random seed must be non-negative.")
     rng = np.random.default_rng((seed + int(seed_offset)) % (2**64))
-    return np.sort(rng.choice(eligible, size=max_points, replace=False))
+    required: list[int] = []
+    domain_indices = [eligible]
+    if domain_labels is not None:
+        domains = np.asarray(domain_labels)
+        if domains.shape != (count,):
+            raise ValueError("Point-cloud domain labels must match the point count.")
+        domain_indices = []
+        for domain in np.unique(domains[eligible]):
+            candidates = eligible[domains[eligible] == domain]
+            domain_indices.append(candidates)
+            required.append(int(candidates[0]))
+    for values in (scalar_values, coordinates):
+        if values is None:
+            continue
+        array = np.asarray(values, dtype=float)
+        if array.ndim == 1:
+            array = array[:, None]
+        if array.ndim != 2 or len(array) != count:
+            raise ValueError("Point-cloud sampling values must have one row per point.")
+        for column in array.T:
+            for group in domain_indices:
+                candidates = group[np.isfinite(column[group])]
+                if len(candidates):
+                    required.extend(
+                        (int(candidates[np.argmin(column[candidates])]), int(candidates[np.argmax(column[candidates])]))
+                    )
+    retained = np.asarray(list(dict.fromkeys(required))[:max_points], dtype=int)
+    available = np.setdiff1d(eligible, retained, assume_unique=True)
+    extra = rng.choice(available, size=max_points - len(retained), replace=False)
+    return np.sort(np.concatenate((retained, extra)))
+
+
+def _pointcloud_domains(result: CoilGenResult) -> np.ndarray:
+    target = result.target_field
+    raw_groups = getattr(target, "target_field_group_inds", None)
+    groups = (
+        np.ones(len(target.coords), dtype=int) if raw_groups is None else np.asarray(raw_groups, dtype=int).reshape(-1)
+    )
+    domains = np.column_stack((groups, suppression_target_mask(target)))
+    return np.unique(domains, axis=0, return_inverse=True)[1]
+
+
+def _pointcloud_sample_note(ax: Any, shown: int, total: int) -> None:
+    label = f"{shown:,} / {total:,} samples"
+    if shown < total:
+        label += " (display subset)"
+    ax.text2D(0.02, 0.01, label, transform=ax.transAxes, fontsize=8, color="#475569")
+
+
+def _scalar_map_context(fig: Figure, maps: Sequence[Any]) -> float:
+    notes = list(
+        dict.fromkeys(
+            str(value)
+            for field in ("current_convention", "normalization")
+            for scalar in maps
+            if (value := getattr(scalar, field, ""))
+        )
+    )
+    if not notes:
+        return 0.0
+    width = max(40, int(float(fig.get_size_inches()[0]) * 14))
+    text = "\n".join(textwrap.fill(note, width=width) for note in notes)
+    fig.text(0.02, 0.012, text, va="bottom", fontsize=8, color="#475569")
+    height_in = float(fig.get_size_inches()[1])
+    return 0.025 + (text.count("\n") + 1) * 0.14 / height_in
 
 
 def build_result_plot_specs(
@@ -208,6 +282,10 @@ def build_result_plot_specs(
     design_context = normalize_design_context(getattr(result.input_data, "design_context", "mr_gradient"))
     specs: list[MatplotlibPlotSpec] = []
     parts = result.coil_parts[:max_parts] if max_parts is not None else result.coil_parts
+    if include_set & CURRENT_FLOW_COMPANION_ANCHOR_KEYS and any(
+        getattr(part, "swept_bodies", ()) or getattr(part, "swept_body", None) is not None for part in parts
+    ):
+        include_set.add("swept_body")
     sparsified_layout = result_uses_sparsified_contour_layout(result)
 
     def add(
@@ -222,6 +300,9 @@ def build_result_plot_specs(
         if key in active_keys:
             specs.append(MatplotlibPlotSpec(key=key, title=title, category=category, factory=factory))
 
+    def has_wire_path(part: CoilPart) -> bool:
+        return part.wire_path is not None and len(part.wire_path.v) >= 2
+
     if len(parts) > 1:
         if sparsified_layout:
             add(
@@ -235,12 +316,24 @@ def build_result_plot_specs(
                     show=False,
                 ),
             )
-        else:
+        elif all(has_wire_path(part) for part in parts):
             add(
                 "wire",
                 "All Coil Parts: Connected Wire Paths",
                 "layout",
                 lambda: plot_wire_paths_3d(parts, title="All Coil Parts: Connected Wire Paths", show=False),
+            )
+        elif any(has_wire_path(part) or part.contour_lines for part in parts):
+            title = (
+                "All Coil Parts: Wire Paths and Independent Contours"
+                if any(has_wire_path(part) for part in parts)
+                else "All Coil Parts: Independent Contour Paths on Coil Surfaces"
+            )
+            add(
+                "wire",
+                title,
+                "layout",
+                lambda title=title: plot_layout_paths_or_contours_3d(parts, title=title, show=False),
             )
         add(
             "raw_contours",
@@ -336,7 +429,7 @@ def build_result_plot_specs(
                 ),
                 include_set_for_key=part_include_set,
             )
-        else:
+        elif has_wire_path(part):
             add(
                 "wire",
                 f"Coil Part {part_ind}: Connected Wire Path on Coil Surface",
@@ -346,17 +439,28 @@ def build_result_plot_specs(
                 ),
                 include_set_for_key=part_include_set,
             )
-        add(
-            "wire_sequence",
-            f"Coil Part {part_ind}: Final Conductor Traversal Sequence",
-            "routing",
-            lambda part=part, part_ind=part_ind: plot_wire_path_sequence_3d(
-                part,
-                title=f"Coil Part {part_ind}: Final Conductor Traversal Sequence",
-                show=False,
-            ),
-            include_set_for_key=part_include_set,
-        )
+        elif part.contour_lines:
+            add(
+                "wire",
+                f"Coil Part {part_ind}: Independent Contour Paths on Coil Surface",
+                "layout",
+                lambda part=part, part_ind=part_ind: plot_layout_paths_or_contours_3d(
+                    [part], title=f"Coil Part {part_ind}: Independent Contour Paths on Coil Surface", show=False
+                ),
+                include_set_for_key=part_include_set,
+            )
+        if has_wire_path(part):
+            add(
+                "wire_sequence",
+                f"Coil Part {part_ind}: Final Conductor Traversal Sequence",
+                "routing",
+                lambda part=part, part_ind=part_ind: plot_wire_path_sequence_3d(
+                    part,
+                    title=f"Coil Part {part_ind}: Final Conductor Traversal Sequence",
+                    show=False,
+                ),
+                include_set_for_key=part_include_set,
+            )
         add(
             "raw_contours",
             (
@@ -448,7 +552,7 @@ def build_result_plot_specs(
             f"Coil Part {part_ind}: Swept Conductor Body Mesh",
             "manufacturing",
             lambda part=part, part_ind=part_ind: plot_swept_body_3d(
-                part, title=f"Coil Part {part_ind}: Swept Conductor Body Mesh", show=False
+                part, title=f"Coil Part {part_ind}: Swept Conductor Body Mesh", part_index=part_ind, show=False
             ),
             include_set_for_key=part_include_set,
         )
@@ -530,6 +634,12 @@ def build_result_plot_specs(
             lambda: plot_gradient_cross_section_slices(result, show=False),
         )
         if gradient_slice_maps_enabled(result.input_data):
+            add(
+                "gradient_slice_inspector",
+                "MR Gradient Slice Inspector",
+                "field",
+                lambda: plot_gradient_slice_inspector(result, show=False),
+            )
             add(
                 "field_slice_mosaic",
                 "MR Gradient Pixel Slices: Field Components",
@@ -830,6 +940,27 @@ def plot_wire_paths_3d(
     return _finish_figure(fig, plt, show=show, block=block)
 
 
+def plot_layout_paths_or_contours_3d(
+    parts: Sequence[CoilPart],
+    *,
+    title: str = "Coil Paths on Current Surfaces",
+    show: bool = True,
+    block: bool = False,
+) -> Figure:
+    """Plot available routes or independent final contours on their surfaces."""
+
+    if not any((part.wire_path is not None and len(part.wire_path.v) >= 2) or part.contour_lines for part in parts):
+        raise ValueError("No coil part has a wire path or contours.")
+    plt = _import_pyplot()
+    fig, ax = _new_3d_figure(plt, title)
+    _draw_reference_meshes_3d(ax, parts)
+    all_points = [part.mesh.vertices for part in parts]
+    _draw_layout_paths_or_contours_3d(ax, parts, all_points)
+    _finish_3d_axis(ax, _stack_points(all_points), view=FACE_ISOMETRIC_VIEW)
+    _deduplicate_legend(ax)
+    return _finish_figure(fig, plt, show=show, block=block)
+
+
 def plot_layout_field_overview_3d(
     result: CoilGenResult,
     *,
@@ -867,6 +998,9 @@ def plot_layout_field_overview_3d(
         len(coords),
         eligible_mask=eligible_mask,
         seed_offset=11,
+        coordinates=coords,
+        scalar_values=layout_bz_display,
+        domain_labels=_pointcloud_domains(result),
     )
     display_mask = np.zeros(len(coords), dtype=bool)
     display_mask[display_indices] = True
@@ -919,6 +1053,7 @@ def plot_layout_field_overview_3d(
             pad=0.08,
         )
     _finish_3d_axis(ax, _stack_points(all_points), view=FACE_ISOMETRIC_VIEW)
+    _pointcloud_sample_note(ax, len(display_indices), int(np.count_nonzero(eligible_mask)))
     _deduplicate_legend(ax)
     fig.tight_layout()
     return _finish_figure(fig, plt, show=show, block=block)
@@ -993,6 +1128,9 @@ def plot_problem_setup_geometry_3d(
         len(coords),
         eligible_mask=eligible_mask,
         seed_offset=17,
+        coordinates=coords,
+        scalar_values=target_bz,
+        domain_labels=suppression_mask.astype(int),
     )
     display_mask = np.zeros(len(coords), dtype=bool)
     display_mask[display_indices] = True
@@ -1037,6 +1175,7 @@ def plot_problem_setup_geometry_3d(
     if scatter is not None:
         _add_artist_colorbar(fig, ax, scatter, colorbar_label, shrink=0.72, pad=0.08)
     _finish_3d_axis(ax, _stack_points(all_points), view=FACE_ISOMETRIC_VIEW)
+    _pointcloud_sample_note(ax, len(display_indices), int(np.count_nonzero(eligible_mask)))
     _deduplicate_legend(ax)
     fig.tight_layout()
     return _finish_figure(fig, plt, show=show, block=block)
@@ -1471,61 +1610,36 @@ def plot_interconnect_debug_all_parts_3d(
 
 
 def plot_swept_body_3d(
-    part: CoilPart, *, title: str = "Swept Conductor Body Mesh", show: bool = True, block: bool = False
+    part: CoilPart,
+    *,
+    title: str = "Swept Conductor Body Mesh",
+    part_index: int = 1,
+    show: bool = True,
+    block: bool = False,
 ) -> Figure:
-    """Plot the swept conductor body mesh if it exists."""
-
-    if part.swept_body is None:
-        raise ValueError("Part has no swept conductor body.")
-    plt = _import_pyplot()
-    fig, ax = _new_3d_figure(plt, title)
-    ax.plot_trisurf(
-        part.swept_body.vertices[:, 0],
-        part.swept_body.vertices[:, 1],
-        part.swept_body.vertices[:, 2],
-        triangles=part.swept_body.faces,
-        color="#c7d2fe",
-        edgecolor="#64748b",
-        linewidth=0.15,
-        alpha=0.75,
-        shade=False,
-    )
-    _finish_3d_axis(ax, part.swept_body.vertices)
-    return _finish_figure(fig, plt, show=show, block=block)
+    """Inspect the full swept conductor mesh and individual fabricated bodies."""
+    return plot_swept_bodies_all_parts_3d((part,), title=title, part_indices=(part_index,), show=show, block=block)
 
 
 def plot_swept_bodies_all_parts_3d(
     parts: Sequence[CoilPart],
     *,
     title: str = "Swept Conductor Body Meshes on All Coil Parts",
+    part_indices: Sequence[int] | None = None,
     show: bool = True,
     block: bool = False,
 ) -> Figure:
-    """Plot swept conductor body meshes for every coil part in one 3D view."""
+    """Inspect full-resolution swept meshes with body, edge, and view controls."""
+    from .swept_mesh_inspector import SweptMeshInspector
 
-    valid_parts = [part for part in parts if part.swept_body is not None]
-    if not valid_parts:
-        raise ValueError("No coil part has a swept conductor body.")
     plt = _import_pyplot()
-    fig, ax = _new_3d_figure(plt, title)
-    cmap = plt.get_cmap("tab10")
-    all_points: list[np.ndarray] = []
-    for part_ind, part in enumerate(valid_parts, start=1):
-        body = part.swept_body
-        color = cmap((part_ind - 1) % 10)
-        ax.plot_trisurf(
-            body.vertices[:, 0],
-            body.vertices[:, 1],
-            body.vertices[:, 2],
-            triangles=body.faces,
-            color=color,
-            edgecolor="#64748b",
-            linewidth=0.12,
-            alpha=0.65,
-            shade=False,
-        )
-        all_points.append(body.vertices)
-    _finish_3d_axis(ax, _stack_points(all_points))
+    fig = plt.figure(figsize=(12, 8))
+    fig.set_label(title)
+    try:
+        fig._coilgen_swept_mesh_inspector = SweptMeshInspector(fig, tuple(parts), part_indices=part_indices)
+    except Exception:
+        plt.close(fig)
+        raise
     return _finish_figure(fig, plt, show=show, block=block)
 
 
@@ -1570,18 +1684,22 @@ def plot_field_pointclouds_3d(result: CoilGenResult, *, show: bool = True, block
     plt = _import_pyplot()
     coords = np.asarray(result.target_field.coords, dtype=float)
     scalar_maps = list(field_scalar_maps(result).values())
+    styles = _scalar_map_styles(scalar_maps, coords)
     coordinate_finite = np.all(np.isfinite(coords), axis=1)
     display_indices = pointcloud_plot_indices(
         result.input_data,
         len(coords),
         eligible_mask=coordinate_finite,
         seed_offset=23,
+        coordinates=coords,
+        scalar_values=np.column_stack([scalar.values for scalar in scalar_maps]),
+        domain_labels=_pointcloud_domains(result),
     )
     display_mask = np.zeros(len(coords), dtype=bool)
     display_mask[display_indices] = True
     fig = plt.figure(num="Target Points: Bz Field Maps per Ampere", figsize=(11, 8))
     fig.clf()
-    for index, scalar_map in enumerate(scalar_maps, start=1):
+    for index, (scalar_map, (norm, cmap)) in enumerate(zip(scalar_maps, styles), start=1):
         ax = fig.add_subplot(2, 2, index, projection="3d")
         map_values = np.asarray(scalar_map.values, dtype=float).reshape(-1)
         finite = _finite_point_scalar_mask(coords, map_values)
@@ -1592,8 +1710,8 @@ def plot_field_pointclouds_3d(result: CoilGenResult, *, show: bool = True, block
                 coords[plotted, 1],
                 coords[plotted, 2],
                 c=map_values[plotted],
-                cmap="coolwarm",
-                norm=_linear_color_norm(map_values[finite]),
+                cmap=cmap,
+                norm=norm,
                 s=24,
                 alpha=FIELD_POINT_ALPHA,
                 depthshade=False,
@@ -1603,6 +1721,7 @@ def plot_field_pointclouds_3d(result: CoilGenResult, *, show: bool = True, block
             ax.text2D(0.08, 0.5, "No finite samples in this domain", transform=ax.transAxes, color="#64748b")
         _set_axis_title(ax, _scalar_subplot_title(scalar_map))
         _finish_3d_axis(ax, coords[coordinate_finite], view=FACE_ISOMETRIC_VIEW)
+        _pointcloud_sample_note(ax, int(np.count_nonzero(plotted)), int(np.count_nonzero(finite)))
     fig.tight_layout()
     return _finish_figure(fig, plt, show=show, block=block)
 
@@ -1681,6 +1800,9 @@ def plot_shim_pointclouds_3d(
         len(coords),
         eligible_mask=eligible_mask,
         seed_offset=29,
+        coordinates=coords,
+        scalar_values=np.column_stack([entry.values for _, entry in entries]),
+        domain_labels=_pointcloud_domains(result),
     )
     display_mask = np.zeros(len(coords), dtype=bool)
     display_mask[display_indices] = True
@@ -1695,12 +1817,7 @@ def plot_shim_pointclouds_3d(
 
     colors = _import_matplotlib_colors()
     norm = colors.Normalize(vmin=-color_limit, vmax=color_limit)
-    cmap = plt.get_cmap("RdBu_r")
-    cmap = cmap.copy() if hasattr(cmap, "copy") else cmap
-    try:
-        cmap.set_bad("#f8fafc")
-    except Exception:
-        pass
+    cmap = _copy_matplotlib_cmap_with_bad(plt.get_cmap("RdBu_r"))
 
     figure_title = "Shim Target Points: Before and After B0 Inhomogeneity"
     fig = plt.figure(num=figure_title, figsize=(12, 5.4))
@@ -1736,6 +1853,7 @@ def plot_shim_pointclouds_3d(
             subtitle = scalar_map.label_with_unit
         _set_axis_title(ax, subtitle, width=46)
         _finish_3d_axis(ax, coords[eligible_mask], view=FACE_ISOMETRIC_VIEW)
+        _pointcloud_sample_note(ax, int(np.count_nonzero(plotted)), int(np.count_nonzero(finite)))
 
     scalar_mappable = _import_scalar_mappable()(norm=norm, cmap=cmap)
     scalar_mappable.set_array([])
@@ -1838,6 +1956,7 @@ def plot_shim_spherical_harmonics(
         max_order=max_order,
         min_contribution_fraction=0.0,
         max_terms=None,
+        fits=fits,
     )
     if not rows:
         raise ValueError("No spherical harmonic coefficient rows were available.")
@@ -1864,7 +1983,7 @@ def plot_shim_spherical_harmonics(
     grid = fig.add_gridspec(
         2,
         5,
-        height_ratios=[0.25, 1.0],
+        height_ratios=[0.32, 1.0],
         width_ratios=[0.60, 2.78, 2.40, 2.30, 2.30],
         left=0.035,
         right=0.985,
@@ -1881,7 +2000,7 @@ def plot_shim_spherical_harmonics(
     after_stats = shim_homogeneity_stats(result, source=_after_shim_source(source), domain=domain)
     title_ax.text(
         0.0,
-        0.72,
+        0.82,
         f"MR shim-order decomposition of B0 inhomogeneity ({domain} domain, SH order <= {max_order})",
         ha="left",
         va="center",
@@ -1891,15 +2010,18 @@ def plot_shim_spherical_harmonics(
     title_ax.text(
         0.0,
         0.43,
-        (
-            f"Before std {_format_performance_table_value(before_stats.get('std'))}{unit_suffix}, "
-            f"after std {_format_performance_table_value(after_stats.get('std'))}{unit_suffix}; "
-            f"basis RMS before/after {_format_performance_table_value(before.field_rms)} / "
-            f"{_format_performance_table_value(after.field_rms)}{unit_suffix}; "
-            f"SH fit residuals {_format_performance_table_value(before.residual_rms)} / "
-            f"{_format_performance_table_value(after.residual_rms)}{unit_suffix}; "
-            f"n={before.sample_count}, center=({before.center[0]:.4g}, {before.center[1]:.4g}, {before.center[2]:.4g}) m, "
-            f"radius={before.radius:.4g} m"
+        textwrap.fill(
+            (
+                f"Before std {_format_performance_table_value(before_stats.get('std'))}{unit_suffix}, "
+                f"after std {_format_performance_table_value(after_stats.get('std'))}{unit_suffix}; "
+                f"signal RMS before/after {_format_performance_table_value(before.field_rms)} / "
+                f"{_format_performance_table_value(after.field_rms)}{unit_suffix}; "
+                f"SH fit residuals {_format_performance_table_value(before.residual_rms)} / "
+                f"{_format_performance_table_value(after.residual_rms)}{unit_suffix}; "
+                f"n={before.sample_count}, center=({before.center[0]:.4g}, {before.center[1]:.4g}, {before.center[2]:.4g}) m, "
+                f"radius={before.radius:.4g} m"
+            ),
+            width=175,
         ),
         ha="left",
         va="center",
@@ -1928,7 +2050,7 @@ def plot_shim_spherical_harmonics(
                 Patch(facecolor="#15803d", alpha=0.82, label="reduced"),
                 Patch(facecolor="#b91c1c", alpha=0.82, label="worse"),
             ],
-            loc="lower right",
+            loc="upper right",
             ncol=4,
             frameon=True,
             fontsize=9,
@@ -1959,7 +2081,7 @@ def plot_shim_spherical_harmonics(
     contribution_ax.barh(y + 0.18, after_contributions, height=0.34, color=after_color, alpha=0.78, label="after")
     _prepare_sh_data_axis(contribution_ax, rows)
     contribution_ax.set_xlabel(f"RMS contribution{unit_suffix}")
-    _set_axis_title(contribution_ax, "RMS contribution\non brain target cloud", width=30)
+    _set_axis_title(contribution_ax, "RMS contribution\non selected target cloud", width=30)
     contribution_ax.grid(True, axis="x", alpha=0.22)
 
     reduction_ax.barh(y, reductions, height=0.50, color=reduction_colors, alpha=0.82)
@@ -1993,6 +2115,7 @@ def plot_field_spherical_harmonics(
         sources=sources,
         min_contribution_fraction=0.0,
         max_terms=None,
+        fits=fits,
     )
     if not rows:
         raise ValueError("No coil spherical-harmonic coefficient rows were available.")
@@ -2024,7 +2147,7 @@ def plot_field_spherical_harmonics(
     grid = fig.add_gridspec(
         2,
         4,
-        height_ratios=[0.25, 1.0],
+        height_ratios=[0.32, 1.0],
         width_ratios=[0.62, 2.85, 2.75, 2.55],
         left=0.035,
         right=0.985,
@@ -2038,7 +2161,7 @@ def plot_field_spherical_harmonics(
     reference = fits[source_keys[0]]
     title_ax.text(
         0.0,
-        0.70,
+        0.82,
         f"DSV spherical-harmonic decomposition of coil fields ({domain} domain, SH order <= {max_order})",
         ha="left",
         va="center",
@@ -2047,15 +2170,20 @@ def plot_field_spherical_harmonics(
     )
     title_ax.text(
         0.0,
-        0.39,
-        (
-            f"n={reference.sample_count}, center=({reference.center[0]:.4g}, {reference.center[1]:.4g}, "
-            f"{reference.center[2]:.4g}) m, radius={reference.radius:.4g} m; "
-            + "; ".join(
-                f"{_coil_sh_source_label(source)} fit RMS {_format_performance_table_value(fits[source].field_rms)}"
-                for source in source_keys
-            )
-            + unit_suffix
+        0.43,
+        textwrap.fill(
+            (
+                f"n={reference.sample_count}, center=({reference.center[0]:.4g}, {reference.center[1]:.4g}, "
+                f"{reference.center[2]:.4g}) m, radius={reference.radius:.4g} m; "
+                + "; ".join(
+                    f"{_coil_sh_source_label(source)} signal / residual RMS "
+                    f"{_format_performance_table_value(fits[source].field_rms)} / "
+                    f"{_format_performance_table_value(fits[source].residual_rms)}"
+                    for source in source_keys
+                )
+                + unit_suffix
+            ),
+            width=170,
         ),
         ha="left",
         va="center",
@@ -2080,7 +2208,7 @@ def plot_field_spherical_harmonics(
                 Patch(facecolor=colors[source], alpha=0.78, label=_coil_sh_source_label(source))
                 for source in source_keys
             ],
-            loc="lower right",
+            loc="upper right",
             ncol=min(len(source_keys), 4),
             frameon=True,
             fontsize=8.6,
@@ -2407,6 +2535,7 @@ def plot_shim_before_after_mosaics(
     """Plot before, after, and before-minus-after shim mosaics in one figure."""
 
     plt = _import_pyplot()
+    plan_cache: dict = {}
     before = _shim_mosaic_payload(
         result,
         source="before",
@@ -2416,6 +2545,7 @@ def plot_shim_before_after_mosaics(
         grid_size=grid_size,
         min_points_per_slice=min_points_per_slice,
         slab_thickness_m=slab_thickness_m,
+        plan_cache=plan_cache,
     )
     after = _shim_mosaic_payload(
         result,
@@ -2426,6 +2556,7 @@ def plot_shim_before_after_mosaics(
         grid_size=grid_size,
         min_points_per_slice=min_points_per_slice,
         slab_thickness_m=slab_thickness_m,
+        plan_cache=plan_cache,
     )
     improvement = _shim_mosaic_payload(
         result,
@@ -2436,6 +2567,7 @@ def plot_shim_before_after_mosaics(
         grid_size=grid_size,
         min_points_per_slice=min_points_per_slice,
         slab_thickness_m=slab_thickness_m,
+        plan_cache=plan_cache,
     )
     field_limit = max(float(before["limit"]), float(after["limit"]))
     before = _shim_payload_with_color_limit(before, field_limit)
@@ -2530,10 +2662,26 @@ def plot_concomitant_slice_mosaic(result: CoilGenResult, *, show: bool = True, b
     return _plot_gradient_slice_mosaic(
         result,
         evaluated.available_components(evaluated.spec.concomitant_components),
-        figure_title="MR Gradient Pixel Slices: Concomitant Field",
+        figure_title="MR Gradient Pixel Slices: Ideal Linear-Gradient Concomitant Estimate",
         show=show,
         block=block,
     )
+
+
+def plot_gradient_slice_inspector(result: CoilGenResult, *, show: bool = True, block: bool = False) -> Figure:
+    """Inspect cached slice components with coordinate, scale, and unit controls."""
+    from .gradient_slice_inspector import GradientSliceInspector
+
+    evaluated = gradient_slice_map_result(result)
+    plt = _import_pyplot()
+    figure = plt.figure(figsize=(11.5, 7.4))
+    figure.set_label("MR Gradient Slice Inspector")
+    try:
+        figure._coilgen_slice_inspector = GradientSliceInspector(figure, evaluated)
+    except Exception:
+        plt.close(figure)
+        raise
+    return _finish_figure(figure, plt, show=show, block=block)
 
 
 def plot_error_metrics_matplotlib(result: CoilGenResult, *, show: bool = True, block: bool = False) -> Figure:
@@ -2706,22 +2854,28 @@ def _plot_scalar_pointcloud_grid(
     block: bool,
 ) -> Figure:
     plt = _import_pyplot()
-    coords = result.target_field.coords
+    coords = np.asarray(result.target_field.coords, dtype=float)
+    styles = _scalar_map_styles(maps, coords)
+    finite_masks = [_finite_point_scalar_mask(coords, scalar.values) for scalar in maps]
+    eligible = np.logical_or.reduce(finite_masks)
+    display_indices = pointcloud_plot_indices(
+        result.input_data,
+        len(coords),
+        eligible_mask=eligible,
+        seed_offset=31,
+        coordinates=coords,
+        scalar_values=np.column_stack([scalar.values for scalar in maps]),
+        domain_labels=_pointcloud_domains(result),
+    )
+    display_mask = np.zeros(len(coords), dtype=bool)
+    display_mask[display_indices] = True
     rows, cols = _subplot_grid(len(maps))
     fig = plt.figure(num=figure_title, figsize=(5.2 * cols, 4.4 * rows))
     fig.clf()
-    for index, scalar_map in enumerate(maps, start=1):
+    for index, (scalar_map, finite, (norm, cmap)) in enumerate(zip(maps, finite_masks, styles), start=1):
         ax = fig.add_subplot(rows, cols, index, projection="3d")
         values = np.asarray(scalar_map.values, dtype=float).reshape(-1)
-        finite = _finite_point_scalar_mask(coords, values)
-        display_indices = pointcloud_plot_indices(
-            result.input_data,
-            len(coords),
-            eligible_mask=finite,
-            seed_offset=31,
-        )
-        plotted = np.zeros(len(coords), dtype=bool)
-        plotted[display_indices] = True
+        plotted = finite & display_mask
         if np.any(plotted):
             plot_coords = coords[plotted]
             scatter = ax.scatter(
@@ -2729,8 +2883,8 @@ def _plot_scalar_pointcloud_grid(
                 plot_coords[:, 1],
                 plot_coords[:, 2],
                 c=values[plotted],
-                cmap="coolwarm",
-                norm=_linear_color_norm(values[finite]),
+                cmap=cmap,
+                norm=norm,
                 s=24,
                 alpha=FIELD_POINT_ALPHA,
                 depthshade=False,
@@ -2740,8 +2894,9 @@ def _plot_scalar_pointcloud_grid(
             plot_coords = coords
             ax.text2D(0.08, 0.5, "No finite samples in this domain", transform=ax.transAxes, color="#64748b")
         _set_axis_title(ax, _scalar_subplot_title(scalar_map))
-        _finish_3d_axis(ax, coords[finite] if np.any(finite) else plot_coords, view=FACE_ISOMETRIC_VIEW)
-    fig.tight_layout()
+        _finish_3d_axis(ax, coords[eligible], view=FACE_ISOMETRIC_VIEW)
+        _pointcloud_sample_note(ax, int(np.count_nonzero(plotted)), int(np.count_nonzero(finite)))
+    fig.tight_layout(rect=(0.0, _scalar_map_context(fig, maps), 1.0, 1.0))
     return _finish_figure(fig, plt, show=show, block=block)
 
 
@@ -2754,21 +2909,30 @@ def _plot_cross_section_grid(
     block: bool,
 ) -> Figure:
     plt = _import_pyplot()
-    coords = result.target_field.coords
+    coords = np.asarray(result.target_field.coords, dtype=float)
+    styles = _scalar_map_styles(maps, coords)
+    # Error/gradient maps carry NaN outside their evaluation domain. Select
+    # planes from that domain before intersecting each individual finite mask.
+    eligible = np.logical_or.reduce([_finite_point_scalar_mask(coords, scalar.values) for scalar in maps])
+    eligible_indices = np.flatnonzero(eligible)
     slice_axes = (0, 1, 2)
     rows = len(maps)
     cols = len(slice_axes)
     fig = plt.figure(num=figure_title, figsize=(4.8 * cols, max(3.2, 2.8 * rows)))
     fig.clf()
-    for row_ind, scalar_map in enumerate(maps):
+    for row_ind, (scalar_map, (norm, cmap)) in enumerate(zip(maps, styles)):
         values = np.asarray(scalar_map.values, dtype=float)
         for col_ind, axis in enumerate(slice_axes):
-            selection = central_slice_selection(coords, axis)
+            selection = central_slice_selection(coords[eligible], axis)
             ax = fig.add_subplot(rows, cols, row_ind * cols + col_ind + 1)
             plot_x, plot_y = selection.plot_axes
-            mask = selection.mask & _finite_point_scalar_mask(coords, values)
+            mask = np.zeros(len(coords), dtype=bool)
+            mask[eligible_indices[selection.mask]] = True
+            mask &= _finite_point_scalar_mask(coords, values)
             if np.any(mask):
-                scatter = ax.scatter(coords[mask, plot_x], coords[mask, plot_y], c=values[mask], cmap="coolwarm", s=28)
+                scatter = ax.scatter(
+                    coords[mask, plot_x], coords[mask, plot_y], c=values[mask], cmap=cmap, norm=norm, s=28
+                )
                 _add_artist_colorbar(fig, ax, scatter, scalar_map.label_with_unit, shrink=0.78, pad=0.03)
             else:
                 ax.text(
@@ -2783,7 +2947,7 @@ def _plot_cross_section_grid(
                 width=34,
             )
             ax.grid(True, alpha=0.18)
-    fig.tight_layout()
+    fig.tight_layout(rect=(0.0, _scalar_map_context(fig, maps), 1.0, 1.0))
     return _finish_figure(fig, plt, show=show, block=block)
 
 
@@ -2973,20 +3137,15 @@ def _gradient_slice_component_norm(colors: Any, arrays: Sequence[np.ndarray], co
     if len(values) == 0:
         return colors.Normalize(vmin=-1.0, vmax=1.0)
     if _gradient_slice_component_nonnegative(component):
-        upper = max(float(np.nanpercentile(values, 99.0)), float(np.nanmax(values)), 1.0e-30)
+        upper = max(float(np.max(values)), 1.0e-30)
         return colors.Normalize(vmin=0.0, vmax=upper)
-    limit = max(float(np.nanpercentile(np.abs(values), 99.0)), float(np.nanmax(np.abs(values))), 1.0e-30)
+    limit = max(float(np.max(np.abs(values))), 1.0e-30)
     return colors.Normalize(vmin=-limit, vmax=limit)
 
 
 def _gradient_slice_component_cmap(plt: Any, component: str) -> Any:
     cmap = plt.get_cmap("viridis" if _gradient_slice_component_nonnegative(component) else "RdBu_r")
-    cmap = cmap.copy() if hasattr(cmap, "copy") else cmap
-    try:
-        cmap.set_bad("#cbd5e1")
-    except Exception:
-        pass
-    return cmap
+    return _copy_matplotlib_cmap_with_bad(cmap, bad_color="#cbd5e1")
 
 
 def _style_gradient_slice_colorbar(colorbar: Any, vmin: float, vmax: float, *, unit_label: str = "") -> None:
@@ -3165,7 +3324,7 @@ def _plot_face_scalar_3d(
     if len(finite) == 0:
         raise ValueError("Face values contain no finite values.")
     norm = _face_scalar_display_norm(colors, finite, percentile=display_percentile, nonnegative=nonnegative)
-    cmap = plt.get_cmap("coolwarm")
+    cmap = plt.get_cmap("viridis" if nonnegative else "RdBu_r")
     polygons = part.mesh.vertices[part.mesh.faces]
     collection = collections.Poly3DCollection(
         polygons,
@@ -3208,7 +3367,7 @@ def _plot_face_scalar_all_parts_3d(
         raise ValueError("Face values contain no finite values.")
     finite = np.concatenate(finite_parts)
     norm = _face_scalar_display_norm(colors, finite, percentile=display_percentile, nonnegative=nonnegative)
-    cmap = plt.get_cmap("coolwarm")
+    cmap = plt.get_cmap("viridis" if nonnegative else "RdBu_r")
     fig, ax = _new_3d_figure(plt, title)
     all_points: list[np.ndarray] = []
     for part, values in zip(parts, checked_values):
@@ -3251,10 +3410,9 @@ def _face_scalar_display_norm(colors: Any, values: np.ndarray, *, percentile: fl
 
     if not np.isfinite(low) or not np.isfinite(high):
         raise ValueError("Face values contain no finite display range.")
-    if np.isclose(low, high, rtol=1e-12, atol=1e-15):
-        delta = max(abs(low), 1.0) * 0.05
-        low -= delta
-        high += delta
+    low, high = _padded_scalar_range(low, high)
+    if nonnegative and np.min(finite) >= 0.0:
+        low = max(0.0, low)
     return colors.Normalize(vmin=float(low), vmax=float(high), clip=True)
 
 
@@ -3318,13 +3476,13 @@ def _draw_mesh_edges_3d(
     linewidth: float = MESH_EDGE_LINEWIDTH,
     alpha: float = 0.78,
 ) -> None:
-    edges: set[tuple[int, int]] = set()
-    for face in part.mesh.faces:
-        for a, b in ((int(face[0]), int(face[1])), (int(face[1]), int(face[2])), (int(face[2]), int(face[0]))):
-            edges.add((min(a, b), max(a, b)))
-    if not edges:
+    faces = np.asarray(part.mesh.faces, dtype=int)
+    if len(faces) == 0:
         return
-    segments = np.asarray([part.mesh.vertices[[a, b]] for a, b in edges], dtype=float)
+    edges = np.concatenate((faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]))
+    edges.sort(axis=1)
+    edges = np.unique(edges, axis=0)
+    segments = np.asarray(part.mesh.vertices[edges], dtype=float)
     try:
         from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
@@ -3619,6 +3777,42 @@ def _symmetric_color_norm(values: np.ndarray) -> Any:
     return _import_matplotlib_colors().Normalize(vmin=-limit, vmax=limit)
 
 
+def _scalar_map_styles(maps: Sequence[Any], coords: np.ndarray) -> list[tuple[Any, str]]:
+    """Use one full-data scale per compatible quantity and comparison role."""
+    grouped: dict[tuple[str, str, bool], list[np.ndarray]] = {}
+    keys = []
+    for scalar in maps:
+        key = str(scalar.key).lower()
+        label = str(scalar.label).lower()
+        nonnegative = (
+            "_vs_" not in key
+            and "relative error" not in label
+            and ("|grad" in label or "magnitude" in label or key.endswith("bmag"))
+        )
+        role = "field" if key in {"target", "layout", "stream"} else "error"
+        group = (role, str(scalar.unit), nonnegative)
+        keys.append(group)
+        values = np.asarray(scalar.values, dtype=float).reshape(-1)
+        grouped.setdefault(group, []).append(values[_finite_point_scalar_mask(coords, values)])
+    styles = {}
+    for group, arrays in grouped.items():
+        values = np.concatenate(arrays)
+        if group[2]:
+            maximum = max(float(np.max(values)) if len(values) else 0.0, 1e-30)
+            styles[group] = (_import_matplotlib_colors().Normalize(0.0, maximum), "viridis")
+        else:
+            styles[group] = (_symmetric_color_norm(values), "RdBu_r")
+    return [styles[group] for group in keys]
+
+
+def _padded_scalar_range(low: float, high: float) -> tuple[float, float]:
+    scale = max(abs(low), abs(high))
+    if high - low <= scale * 1e-12:
+        delta = max(scale * 0.05, 1e-30)
+        return low - delta, high + delta
+    return low, high
+
+
 def _linear_color_norm(values: np.ndarray) -> Any:
     finite = np.asarray(values, dtype=float).reshape(-1)
     finite = finite[np.isfinite(finite)]
@@ -3626,18 +3820,22 @@ def _linear_color_norm(values: np.ndarray) -> Any:
         return _import_matplotlib_colors().Normalize(vmin=-1.0, vmax=1.0)
     low = float(np.min(finite))
     high = float(np.max(finite))
-    if np.isclose(low, high, rtol=1e-12, atol=1e-15):
-        delta = max(abs(low), 1.0) * 0.05
-        low -= delta
-        high += delta
+    low, high = _padded_scalar_range(low, high)
     return _import_matplotlib_colors().Normalize(vmin=low, vmax=high)
 
 
 def _finish_3d_axis(ax: Any, points: np.ndarray, *, view: str | None = None) -> None:
+    from matplotlib.ticker import FuncFormatter, LinearLocator
+
     points = np.asarray(points, dtype=float)
+    points = points[np.all(np.isfinite(points), axis=1)]
     ax.set_xlabel(_coordinate_axis_label(0))
     ax.set_ylabel(_coordinate_axis_label(1))
     ax.set_zlabel(_coordinate_axis_label(2))
+    for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+        axis.set_major_locator(LinearLocator(3))
+        axis.set_major_formatter(FuncFormatter(lambda value, _position: f"{value:.3g}" if abs(value) > 1e-14 else "0"))
+        axis.set_tick_params(labelsize=8, pad=1)
     _apply_3d_view(ax, view)
     if len(points) == 0:
         return
@@ -3669,7 +3867,8 @@ def _apply_3d_view(ax: Any, view: str | None) -> None:
 
 
 def _finish_figure(fig: Figure, plt: Any, *, show: bool, block: bool) -> Figure:
-    fig.canvas.draw_idle()
+    if show or not is_plot_book_rendering():
+        fig.canvas.draw_idle()
     if show:
         plt.show(block=block)
     return fig
@@ -3731,6 +3930,7 @@ def _short_plot_book_name(spec: MatplotlibPlotSpec, title: str, index: int, tota
         "gradient_cross_sections": "grad slices",
         "field_slice_mosaic": "field pixels",
         "gradient_slice_mosaic": "grad pixels",
+        "gradient_slice_inspector": "slice inspector",
         "concomitant_slice_mosaic": "concomitant",
         "error_cross_sections": "error slices",
         "error_metrics": "error bars",
@@ -3813,6 +4013,7 @@ def _shim_mosaic_payload(
     grid_size: int,
     min_points_per_slice: int,
     slab_thickness_m: float | None,
+    plan_cache: dict | None = None,
 ) -> dict[str, Any]:
     coords = np.asarray(result.target_field.coords, dtype=float)
     scalar_map = shim_field_scalar_maps(result)[_shim_source_key(source)]
@@ -3830,6 +4031,7 @@ def _shim_mosaic_payload(
         grid_size=grid_size,
         min_points=min_points_per_slice,
         slab_thickness=slab_thickness_m,
+        plan_cache=plan_cache,
     )
     if not slices:
         raise ValueError("Shim homogeneity mosaic could not interpolate any slices.")
@@ -3906,8 +4108,8 @@ def _add_shim_before_after_slice_rows(
     colors = _import_matplotlib_colors()
     field_norm = colors.Normalize(vmin=-field_limit, vmax=field_limit)
     improvement_norm = colors.Normalize(vmin=-improvement_limit, vmax=improvement_limit)
-    field_cmap = _copy_matplotlib_cmap_with_bad(plt.get_cmap("jet"))
-    improvement_cmap = _copy_matplotlib_cmap_with_bad(plt.get_cmap("RdYlGn"))
+    field_cmap = _copy_matplotlib_cmap_with_bad(plt.get_cmap("RdBu_r"))
+    improvement_cmap = _copy_matplotlib_cmap_with_bad(plt.get_cmap("BrBG"))
 
     fig.clf()
     grid = fig.add_gridspec(
@@ -4023,6 +4225,8 @@ def _add_shim_before_after_slice_rows(
 
 
 def _copy_matplotlib_cmap_with_bad(cmap: Any, bad_color: str = "#f8fafc") -> Any:
+    if hasattr(cmap, "with_extremes"):
+        return cmap.with_extremes(bad=bad_color)
     copied = cmap.copy() if hasattr(cmap, "copy") else cmap
     try:
         copied.set_bad(bad_color)
@@ -4420,7 +4624,7 @@ def _colorbar_tick_values(vmin: float, vmax: float, *, count: int = COLORBAR_TIC
         return np.zeros(0, dtype=float)
     low = float(np.min(values))
     high = float(np.max(values))
-    if np.isclose(low, high, rtol=1e-12, atol=1e-15):
+    if np.isclose(low, high, rtol=1e-12, atol=0.0):
         return np.asarray([low], dtype=float)
     return np.linspace(low, high, max(2, int(count)))
 

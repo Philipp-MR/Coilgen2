@@ -1,0 +1,145 @@
+<div id="contour-topology-atlas">
+  <style>
+    #contour-topology-atlas .atlas-plot { display:block; width:100%; touch-action:none; cursor:grab; }
+    #contour-topology-atlas .atlas-plot:active { cursor:grabbing; }
+    #contour-topology-atlas .legend { display:flex; gap:16px; flex-wrap:wrap; margin:8px 0; }
+    #contour-topology-atlas .swatch { display:inline-block; width:20px; height:3px; vertical-align:middle; margin-right:5px; }
+    #contour-topology-atlas .contour { stroke:var(--viz-series-1); }
+    #contour-topology-atlas .join { stroke:var(--viz-series-2); }
+    #contour-topology-atlas .transfer { stroke:var(--viz-series-3); }
+    #contour-topology-atlas svg text { fill:var(--foreground); }
+    #contour-topology-atlas .atlas-status { min-height:2.5em; }
+  </style>
+  <h3>Contour families and directed interconnections</h3>
+  <div class="viz-controls">
+    <label class="form-label">3D case
+      <select id="atlas-case" class="form-select" aria-label="Contour topology case"></select>
+    </label>
+    <label class="form-label">Layout
+      <select id="atlas-mode" class="form-select" aria-label="Original contours or connected candidate">
+        <option value="route">Directed connection candidate</option>
+        <option value="source">Original contours</option>
+      </select>
+    </label>
+  </div>
+  <svg id="atlas-plot" class="atlas-plot" role="img" aria-label="Rotatable three dimensional contour and wire centerline diagram"></svg>
+  <div class="legend text-small">
+    <span><i class="swatch" style="background:var(--viz-series-1)"></i>Directed turns</span>
+    <span><i class="swatch" style="background:var(--viz-series-2)"></i>Surface joins</span>
+    <span><i class="swatch" style="background:var(--viz-series-3)"></i>Lifted transfers</span>
+    <span>● A start · ■ B finish · mm</span>
+  </div>
+  <div class="viz-controls">
+    <label class="form-label">Azimuth <output id="atlas-az-value">−55°</output>
+      <input id="atlas-az" class="form-range" type="range" min="-180" max="180" value="-55" aria-label="Azimuth angle in degrees">
+    </label>
+    <label class="form-label">Elevation <output id="atlas-el-value">35°</output>
+      <input id="atlas-el" class="form-range" type="range" min="-80" max="90" value="35" aria-label="Elevation angle in degrees">
+    </label>
+    <label class="form-label">Winding sequence <output id="atlas-progress-value">100%</output>
+      <input id="atlas-progress" class="form-range" type="range" min="0" max="100" value="100" aria-label="Fraction of directed route traced">
+    </label>
+  </div>
+  <div id="atlas-status" class="atlas-status text-small" aria-live="polite"></div>
+  <div class="text-small text-muted">Open centerline candidates · return leads, clearance and fields require validation</div>
+  <script type="application/json" id="contour-atlas-data">__ATLAS_DATA__</script>
+  <script>
+  (() => {
+    const root = document.getElementById('contour-topology-atlas');
+    const cases = JSON.parse(root.querySelector('#contour-atlas-data').textContent);
+    const select = root.querySelector('#atlas-case'), mode = root.querySelector('#atlas-mode');
+    const svg = root.querySelector('#atlas-plot');
+    const az = root.querySelector('#atlas-az'), el = root.querySelector('#atlas-el');
+    const progress = root.querySelector('#atlas-progress');
+    const ns = 'http://www.w3.org/2000/svg';
+    cases.forEach((c, i) => { const o = document.createElement('option'); o.value=i; o.textContent=c.title; select.appendChild(o); });
+    function node(tag, attrs, text) {
+      const n = document.createElementNS(ns, tag);
+      for (const [k,v] of Object.entries(attrs || {})) n.setAttribute(k,v);
+      if(text !== undefined) n.textContent=text;
+      return n;
+    }
+    function save() {
+      if(window.openai?.setWidgetState) window.openai.setWidgetState({
+        modelContent:{case:cases[Number(select.value)].title, display:mode.value, windingPercent:Number(progress.value)},
+        privateContent:{caseIndex:Number(select.value), mode:mode.value, az:Number(az.value), el:Number(el.value), progress:Number(progress.value)}
+      }).catch(()=>{});
+    }
+    function restore(s) {
+      const v=s?.privateContent;
+      if(!v) return;
+      if(Number.isInteger(v.caseIndex) && cases[v.caseIndex]) select.value=v.caseIndex;
+      if(['source','route'].includes(v.mode)) mode.value=v.mode;
+      for(const [name,input] of [['az',az],['el',el],['progress',progress]]) if(Number.isFinite(v[name])) input.value=v[name];
+    }
+    function draw() {
+      const c=cases[Number(select.value)];
+      const w=Math.max(280, root.getBoundingClientRect().width), h=Math.min(450,Math.max(300,w*.57));
+      svg.setAttribute('viewBox',`0 0 ${w} ${h}`); svg.setAttribute('height',h);
+      svg.replaceChildren(node('title',{},c.title),node('desc',{},c.topology+'. '+c.strategy+' '+c.caveat));
+      const a=Number(az.value)*Math.PI/180, e=Number(el.value)*Math.PI/180;
+      const xyz=c.grid.flat().concat(c.pieces.flatMap(p=>p.p));
+      const lo=[0,1,2].map(k=>Math.min(...xyz.map(p=>p[k]))), hi=[0,1,2].map(k=>Math.max(...xyz.map(p=>p[k])));
+      const center=lo.map((l,k)=>(l+hi[k])/2);
+      function rotate(p) {
+        const [x,y,z]=p.map((v,k)=>v-center[k]);
+        const side=-Math.sin(a)*x+Math.cos(a)*y, radial=Math.cos(a)*x+Math.sin(a)*y;
+        return [side,Math.sin(e)*radial-Math.cos(e)*z,Math.cos(e)*radial+Math.sin(e)*z];
+      }
+      const rp=xyz.map(rotate), mx=Math.max(...rp.map(p=>Math.abs(p[0]))), my=Math.max(...rp.map(p=>Math.abs(p[1])));
+      const scale=Math.min((w-60)/(2*mx||1),(h-70)/(2*my||1));
+      const project=p=>{const v=rotate(p);return [w/2+scale*v[0],h/2+scale*v[1],v[2]];};
+      const d=p=>p.map((v,i)=>{const q=project(v);return `${i?'L':'M'}${q[0].toFixed(2)},${q[1].toFixed(2)}`;}).join(' ');
+      const path=(p,attrs)=>svg.appendChild(node('path',{d:d(p),fill:'none','stroke-linecap':'round','stroke-linejoin':'round',...attrs}));
+      c.grid.forEach(p=>path(p,{stroke:'var(--border)','stroke-width':.8,opacity:.55}));
+      if(mode.value==='source') {
+        c.sources.forEach(p=>path(p,{stroke:'var(--viz-series-1)','stroke-width':2}));
+      } else {
+        c.sources.forEach(p=>path(p,{stroke:'var(--muted-foreground)','stroke-width':1,'stroke-dasharray':'3 5',opacity:.4}));
+        const lengths=c.pieces.map(p=>p.p.slice(1).reduce((s,q,i)=>s+Math.hypot(...q.map((v,k)=>v-p.p[i][k])),0));
+        let remaining=lengths.reduce((a,b)=>a+b,0)*Number(progress.value)/100;
+        c.pieces.forEach((piece,index)=>{
+          let points=[piece.p[0]];
+          for(let j=1;j<piece.p.length && remaining>0;j++) {
+            const prev=piece.p[j-1], next=piece.p[j], len=Math.hypot(...next.map((v,k)=>v-prev[k]));
+            const fraction=Math.min(1,remaining/(len||1));
+            points.push(next.map((v,k)=>prev[k]+fraction*(v-prev[k])));
+            remaining-=len;
+          }
+          if(points.length>1) path(points,{class:piece.kind,'stroke-width':piece.kind==='contour'?2.6:3.2});
+          if(piece.kind==='contour' && points.length>piece.p.length*.4) {
+            const idx=Math.floor(piece.p.length*.32), p=project(piece.p[idx]), q=project(piece.p[idx+2]);
+            const dx=q[0]-p[0],dy=q[1]-p[1],n=Math.hypot(dx,dy)||1;
+            const ux=dx/n,uy=dy/n;
+            svg.appendChild(node('path',{d:`M${p[0]-ux*5-uy*3},${p[1]-uy*5+ux*3} L${p[0]+ux*4},${p[1]+uy*4} L${p[0]-ux*5+uy*3},${p[1]-uy*5-ux*3}`,fill:'none',class:'contour','stroke-width':2}));
+          }
+        });
+        const first=project(c.pieces[0].p[0]), last=project(c.pieces[c.pieces.length-1].p.at(-1));
+        svg.appendChild(node('circle',{cx:first[0],cy:first[1],r:4,fill:'var(--foreground)'}));
+        svg.appendChild(node('rect',{x:last[0]-4,y:last[1]-4,width:8,height:8,fill:'var(--foreground)'}));
+        svg.appendChild(node('text',{x:first[0]+8,y:first[1]+2},'A'));
+        svg.appendChild(node('text',{x:last[0]+8,y:last[1]+2},'B'));
+      }
+      // Physical length scale: equal world-coordinate scaling in the orthographic camera.
+      const bar=20*scale;
+      svg.appendChild(node('path',{d:`M22 ${h-25} H${22+bar}`,stroke:'var(--foreground)','stroke-width':2,fill:'none'}));
+      svg.appendChild(node('text',{x:22,y:h-33},'20 mm'));
+      root.querySelector('#atlas-az-value').textContent=az.value+'°';
+      root.querySelector('#atlas-el-value').textContent=el.value+'°';
+      root.querySelector('#atlas-progress-value').textContent=progress.value+'%';
+      root.querySelector('#atlas-status').textContent=c.strategy;
+      progress.disabled=mode.value==='source';
+    }
+    [select,mode,az,el,progress].forEach(input=>input.addEventListener('input',()=>{draw();save();}));
+    let drag=null;
+    svg.addEventListener('pointerdown',e=>{drag={x:e.clientX,y:e.clientY,a:Number(az.value),e:Number(el.value)};svg.setPointerCapture(e.pointerId);});
+    svg.addEventListener('pointermove',e=>{if(!drag)return;az.value=Math.max(-180,Math.min(180,drag.a+(e.clientX-drag.x)*.45));el.value=Math.max(-80,Math.min(90,drag.e-(e.clientY-drag.y)*.35));draw();});
+    svg.addEventListener('pointerup',()=>{if(drag)save();drag=null;});
+    svg.addEventListener('pointercancel',()=>{drag=null;});
+    window.addEventListener('openai:set_globals',e=>{if(e.detail?.globals?.widgetState){restore(e.detail.globals.widgetState);draw();}});
+    restore(window.openai?.widgetState);
+    new ResizeObserver(draw).observe(root);
+    draw();
+  })();
+  </script>
+</div>

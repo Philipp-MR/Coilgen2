@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
+from copy import deepcopy
 from datetime import datetime, timezone
 import json
 import math
@@ -8,17 +9,40 @@ import multiprocessing as mp
 import os
 from pathlib import Path
 import queue
+import shutil
 import threading
 import time
 import traceback
 import uuid
 
 from .requests import ResearchRequest
-from .storage import DirectoryOwner, atomic_json
+from .storage import DirectoryOwner, atomic_json, file_digest, request_identity, verified_result, verify_input_files
+from ..pipeline_stages import PipelineStage
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _record_completed_boundary(state: dict, event: dict) -> None:
+    """Persist monotonic completed boundaries; activity and percentages prove none."""
+    if event.get("label") != "CoilGen":
+        return
+    try:
+        stage = PipelineStage(event.get("completed_stage"))
+        limit = PipelineStage(state.get("pipeline_stage", "evaluated"))
+        previous = PipelineStage(state["completed_stage"]).index if state.get("completed_stage") else -1
+    except (ValueError, TypeError):
+        return
+    completed = [item.value for item in PipelineStage if item.index <= stage.index]
+    if event.get("completed_stages") != completed or not previous <= stage.index <= limit.index:
+        return
+    state.update(completed_stage=stage.value, completed_stages=completed)
+    if event.get("stage_preview") == "stage_preview.json":
+        state.update(stage_preview="stage_preview.json", stage_preview_stage=stage.value)
+        state.pop("stage_preview_error", None)
+    elif isinstance(event.get("stage_preview_error"), str):
+        state["stage_preview_error"] = event["stage_preview_error"][:512]
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +82,10 @@ def _worker(request: dict, directory: str, events, cancel, threads: int) -> None
             return
         last_progress = now
         try:
-            events.put_nowait({"kind": "progress", **event})
+            if event.get("completed_stage") is not None:
+                events.put({"kind": "progress", **event}, timeout=0.25)
+            else:
+                events.put_nowait({"kind": "progress", **event})
         except queue.Full:
             pass
 
@@ -118,7 +145,8 @@ class JobManager:
     def submit(self, value: ResearchRequest | dict) -> dict:
         request = ResearchRequest.from_dict(value.to_dict() if isinstance(value, ResearchRequest) else value)
         config = request.to_config(threads=self.policy.threads_per_worker)
-        request = replace(request, config=asdict(config))
+        controls = {key: item for key, item in request.to_dict().items() if key not in {"name", "config"}}
+        request = ResearchRequest.from_config(config, name=request.name, **controls)
         with self._lock:
             if self._stop.is_set():
                 raise RuntimeError("The runtime is shutting down.")
@@ -128,6 +156,39 @@ class JobManager:
             id_ = uuid.uuid4().hex
             directory = self.directory / id_
             directory.mkdir()
+            # Queue execution can start much later. A run must use the submitted
+            # mesh/target/checkpoint, not whatever happens to occupy that path
+            # when a worker starts. Files are owned by this run before queuing.
+            replacements = {}
+            input_directory = directory / "inputs"
+            for key, value in request.config.items():
+                if not key.endswith("_file") or not isinstance(value, str):
+                    continue
+                source = Path(value)
+                if not source.is_file():
+                    continue
+                input_directory.mkdir(exist_ok=True)
+                copied = input_directory / f"{key}{source.suffix}"
+                before = file_digest(source)
+                shutil.copyfile(source, copied)
+                if before != file_digest(copied) or before != file_digest(source):
+                    raise RuntimeError(f"Input {key} changed while its job snapshot was being created.")
+                replacements[key] = str(copied)
+            if request.resume_checkpoint:
+                source = Path(request.resume_checkpoint).expanduser().resolve()
+                if not source.is_file():
+                    raise ValueError(f"Resume checkpoint does not exist: {source}.")
+                input_directory.mkdir(exist_ok=True)
+                copied = input_directory / "resume.cgstage"
+                before = file_digest(source)
+                shutil.copyfile(source, copied)
+                if before != file_digest(copied) or before != file_digest(source):
+                    raise RuntimeError("Resume checkpoint changed while its job snapshot was being created.")
+                request = replace(request, resume_checkpoint=str(copied))
+            request = replace(request, config={**request.config, **replacements})
+            digest, _manifest = request_identity(
+                request.to_dict(), asdict(request.to_config(threads=self.policy.threads_per_worker))
+            )
             atomic_json(directory / "request.json", request.to_dict())
             state = {
                 "id": id_,
@@ -139,10 +200,18 @@ class JobManager:
                 "progress": 0.0,
                 "log": [],
                 "error": None,
+                "request_sha256": digest,
+                "project_id": request.project_id,
+                "project_revision": request.project_revision,
+                "project_fingerprint": request.project_fingerprint,
+                "project_model_fingerprint": request.project_model_fingerprint,
+                "pipeline_stage": request.pipeline_stage,
+                "completed_stage": None,
+                "completed_stages": [],
             }
             self._states[id_] = state
             self._save(state)
-            return dict(state)
+            return deepcopy(state)
 
     def list(self) -> list[dict]:
         with self._lock:
@@ -163,15 +232,36 @@ class JobManager:
                 self._active[id_][2].set()
                 state.update(status="cancelling", stage="Cancelling", cancel_time=time.monotonic())
             self._save(state)
-            return dict(state)
+            return deepcopy(state)
 
     def result(self, id_: str) -> dict:
         state = self.get(id_)
         if state["status"] != "completed":
             raise ValueError("This job has no completed result.")
-        result = json.loads((self.directory / id_ / "result.json").read_text(encoding="utf-8"))
+        result = self._verified_completion(id_)
+        if result is None:
+            raise ValueError("Completed result is missing or its evidence integrity check failed.")
         result.update(id=id_, name=state["name"])
         return result
+
+    def _verified_completion(self, id_: str) -> dict | None:
+        """Completion requires the submitted identity and every evidence artifact."""
+        directory = self.directory / id_
+        digest = self._states[id_].get("request_sha256")
+        try:
+            manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+            # Older durable jobs are readable, but still require consistency
+            # between their result and provenance manifest.
+            digest = digest or manifest.get("request_sha256")
+            if not isinstance(digest, str) or manifest.get("request_sha256") != digest:
+                return None
+            result = verified_result(directory, digest)
+            if result is None or not isinstance(result.get("summary"), dict):
+                return None
+            verify_input_files(manifest)
+            return result
+        except (OSError, ValueError, TypeError, AttributeError, RuntimeError):
+            return None
 
     def artifact(self, id_: str, name: str) -> Path:
         self.get(id_)
@@ -200,15 +290,35 @@ class JobManager:
                     state = self._states[id_]
                     try:
                         while True:
-                            event = events.get_nowait()
+                            if state.get("ipc_error"):
+                                break
+                            try:
+                                event = events.get_nowait()
+                            except (EOFError, OSError, ValueError) as exc:
+                                # Killing a process during its queue feeder write
+                                # can break this channel. Keep supervising the
+                                # process/result and other jobs independently.
+                                state["ipc_error"] = f"{type(exc).__name__}: {exc}"
+                                self._save(state)
+                                break
                             kind = event["kind"]
                             if kind == "progress" and state["status"] != "cancelling":
+                                _record_completed_boundary(state, event)
                                 state["stage"] = str(event["message"])
-                                if event.get("label") == "CoilGen":
+                                if event.get("label") == "CoilGen" and event.get("percent") is not None:
                                     state["progress"] = max(state["progress"], min(0.98, event["percent"] / 100))
                                 state["log"] = (state["log"] + [f"{event.get('label', '')}: {event['message']}"])[-160:]
                             elif kind == "completed":
-                                state.update(status="completed", stage="Complete", progress=1.0)
+                                if cancel.is_set():
+                                    state.update(status="cancelled", stage="Cancelled")
+                                elif self._verified_completion(id_) is not None:
+                                    state.update(status="completed", stage="Complete", progress=1.0)
+                                else:
+                                    state.update(
+                                        status="failed",
+                                        stage="Invalid completion evidence",
+                                        error="Worker result failed its submitted identity or evidence integrity check.",
+                                    )
                             elif kind in {"failed", "cancelled"}:
                                 state.update(status=kind, stage=kind.capitalize(), error=event.get("error"))
                             self._save(state)
@@ -237,17 +347,11 @@ class JobManager:
                         if state["status"] in {"running", "cancelling"}:
                             # The queue feeder can trail the atomic result. A clean
                             # exit plus a valid result is evidence; a crash is not.
-                            completed = False
-                            if process.exitcode == 0 and not cancel.is_set():
-                                try:
-                                    payload = json.loads(
-                                        (self.directory / id_ / "result.json").read_text(encoding="utf-8")
-                                    )
-                                    completed = isinstance(payload.get("summary"), dict) and bool(
-                                        payload.get("request_sha256")
-                                    )
-                                except (OSError, ValueError, AttributeError):
-                                    pass
+                            completed = (
+                                process.exitcode == 0
+                                and not cancel.is_set()
+                                and self._verified_completion(id_) is not None
+                            )
                             status = "cancelled" if cancel.is_set() else "completed" if completed else "failed"
                             state.update(
                                 status=status,

@@ -1,7 +1,7 @@
-"""Optional float64 distance kernels; no fastmath or parallel reductions.
+"""Float64 distance kernels; no fastmath or parallel reductions.
 
-The scalar reference, vectorized routing path and optional JIT use the same
-clamped segment formulation. Importing this module does not import Numba.
+The scalar reference, batched NumPy path and optional JIT use the same clamped
+geometry predicates. Importing this module does not import Numba.
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ def segment_distance(p, q, a, b) -> float:
 
 
 def segment_distances(first_start, first_direction, second_start, second_direction):
-    """Vectorized clamped distance for equally shaped ``(..., 3)`` arrays.
+    """Vectorized clamped distance for broadcastable ``(..., 3)`` arrays.
 
     Degeneracy means zero length, not an absolute length cutoff. Cross products
     avoid subtracting almost equal squared dot products for parallel lines and
@@ -76,6 +76,18 @@ def segment_distances(first_start, first_direction, second_start, second_directi
     """
     p, u, a, v = (
         np.asarray(value, dtype=np.float64) for value in (first_start, first_direction, second_start, second_direction)
+    )
+    s, t = segment_closest_parameters(p, u, a, v)
+    return np.linalg.norm(p - a + s[..., None] * u - t[..., None] * v, axis=-1)
+
+
+def segment_closest_parameters(first_start, first_direction, second_start, second_direction):
+    """Clamped closest-point parameters using the same stable distance kernel."""
+    p, u, a, v = np.broadcast_arrays(
+        *(
+            np.asarray(value, dtype=np.float64)
+            for value in (first_start, first_direction, second_start, second_direction)
+        )
     )
     r = p - a
     uu, vv = np.einsum("...i,...i->...", u, u), np.einsum("...i,...i->...", v, v)
@@ -93,8 +105,7 @@ def segment_distances(first_start, first_direction, second_start, second_directi
     s = np.where(before | (vv == 0.0), first_projection, s)
     s = np.where(after, last_projection, s)
     t = np.clip(t, 0.0, 1.0)
-    delta = r + s[..., None] * u - t[..., None] * v
-    return np.linalg.norm(delta, axis=-1)
+    return s, t
 
 
 def _point_triangle_sq(p, triangle):
@@ -175,26 +186,177 @@ def _triangles_reference(first, second):
     return values
 
 
+def _dot_rows(first, second):
+    return np.einsum("ij,ij->i", first, second)
+
+
+def _point_segment_sq_numpy(points, start, end):
+    direction, offset = end - start, points - start
+    length_sq = _dot_rows(direction, direction)
+    fraction = np.clip(
+        np.divide(_dot_rows(direction, offset), length_sq, out=np.zeros_like(length_sq), where=length_sq != 0.0),
+        0.0,
+        1.0,
+    )
+    delta = offset - fraction[:, None] * direction
+    return _dot_rows(delta, delta)
+
+
+def _point_triangle_sq_numpy(points, triangles):
+    """The scalar Voronoi-region tests, with their original branch ordering."""
+    a, b, c = triangles[:, 0], triangles[:, 1], triangles[:, 2]
+    ab, ac, ap = b - a, c - a, points - a
+    normal = np.cross(ab, ac)
+    active = _dot_rows(normal, normal) != 0.0
+    values = np.empty(len(points), dtype=np.float64)
+    fallback = ~active
+    d1, d2 = _dot_rows(ab, ap), _dot_rows(ac, ap)
+
+    mask = active & (d1 <= 0.0) & (d2 <= 0.0)
+    values[mask] = _dot_rows(ap[mask], ap[mask])
+    active &= ~mask
+    bp = points - b
+    d3, d4 = _dot_rows(ab, bp), _dot_rows(ac, bp)
+    mask = active & (d3 >= 0.0) & (d4 <= d3)
+    values[mask] = _dot_rows(bp[mask], bp[mask])
+    active &= ~mask
+
+    vc = d1 * d4 - d3 * d2
+    mask = active & (vc <= 0.0) & (d1 >= 0.0) & (d3 <= 0.0)
+    if np.any(mask):
+        delta = points[mask] - (a[mask] + (d1[mask] / (d1[mask] - d3[mask]))[:, None] * ab[mask])
+        values[mask] = _dot_rows(delta, delta)
+    active &= ~mask
+
+    cp = points - c
+    d5, d6 = _dot_rows(ab, cp), _dot_rows(ac, cp)
+    mask = active & (d6 >= 0.0) & (d5 <= d6)
+    values[mask] = _dot_rows(cp[mask], cp[mask])
+    active &= ~mask
+
+    vb = d5 * d2 - d1 * d6
+    mask = active & (vb <= 0.0) & (d2 >= 0.0) & (d6 <= 0.0)
+    if np.any(mask):
+        delta = points[mask] - (a[mask] + (d2[mask] / (d2[mask] - d6[mask]))[:, None] * ac[mask])
+        values[mask] = _dot_rows(delta, delta)
+    active &= ~mask
+
+    va = d3 * d6 - d5 * d4
+    mask = active & (va <= 0.0) & (d4 - d3 >= 0.0) & (d5 - d6 >= 0.0)
+    if np.any(mask):
+        fraction = (d4[mask] - d3[mask]) / ((d4[mask] - d3[mask]) + (d5[mask] - d6[mask]))
+        delta = points[mask] - (b[mask] + fraction[:, None] * (c[mask] - b[mask]))
+        values[mask] = _dot_rows(delta, delta)
+    active &= ~mask
+
+    denominator = va + vb + vc
+    fallback |= active & (denominator == 0.0)
+    mask = active & ~fallback
+    if np.any(mask):
+        delta = points[mask] - (
+            a[mask] + (vb[mask, None] * ab[mask] + vc[mask, None] * ac[mask]) / denominator[mask, None]
+        )
+        values[mask] = np.maximum(_dot_rows(delta, delta), 0.0)
+    if np.any(fallback):
+        p, aa, bb, cc = points[fallback], a[fallback], b[fallback], c[fallback]
+        values[fallback] = np.minimum.reduce(
+            (
+                _point_segment_sq_numpy(p, aa, bb),
+                _point_segment_sq_numpy(p, bb, cc),
+                _point_segment_sq_numpy(p, cc, aa),
+            )
+        )
+    return values
+
+
+def _segment_hits_triangle_numpy(start, end, triangles):
+    direction = end - start
+    e1, e2 = triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]
+    cross = np.cross(direction, e2)
+    determinant = _dot_rows(e1, cross)
+    scale = np.sqrt(_dot_rows(direction, direction) * _dot_rows(e1, e1) * _dot_rows(e2, e2))
+    active = np.abs(determinant) > 32.0 * np.finfo(np.float64).eps * scale
+    hits = np.zeros(len(start), dtype=bool)
+    if np.any(active):
+        offset = start[active] - triangles[active, 0]
+        other = np.cross(offset, e1[active])
+        first = _dot_rows(offset, cross[active]) / determinant[active]
+        second = _dot_rows(direction[active], other) / determinant[active]
+        fraction = _dot_rows(e2[active], other) / determinant[active]
+        hits[active] = (
+            (first >= 0.0)
+            & (first <= 1.0)
+            & (second >= 0.0)
+            & (first + second <= 1.0)
+            & (fraction >= 0.0)
+            & (fraction <= 1.0)
+        )
+    return hits
+
+
+def _segments_numpy(first, second):
+    values = np.empty(len(first), dtype=np.float64)
+    for start in range(0, len(first), 4096):
+        a, b = first[start : start + 4096], second[start : start + 4096]
+        values[start : start + len(a)] = segment_distances(
+            a[:, 0], a[:, 1] - a[:, 0], b[:, 0], b[:, 1] - b[:, 0]
+        )
+    return values
+
+
+def _triangles_numpy(first, second):
+    """All scalar primitive tests, in batches with bounded temporary storage."""
+    values = np.empty(len(first), dtype=np.float64)
+    for start in range(0, len(first), 4096):
+        a, b = first[start : start + 4096], second[start : start + 4096]
+        best = np.full(len(a), np.inf)
+        for i in range(3):
+            j = (i + 1) % 3
+            hits = _segment_hits_triangle_numpy(a[:, i], a[:, j], b) | _segment_hits_triangle_numpy(
+                b[:, i], b[:, j], a
+            )
+            best[hits] = 0.0
+            best = np.minimum(best, _point_triangle_sq_numpy(a[:, i], b))
+            best = np.minimum(best, _point_triangle_sq_numpy(b[:, i], a))
+            for k in range(3):
+                distances = segment_distances(
+                    a[:, i], a[:, j] - a[:, i], b[:, k], b[:, (k + 1) % 3] - b[:, k]
+                )
+                best = np.minimum(best, distances * distances)
+        values[start : start + len(a)] = np.sqrt(np.maximum(best, 0.0))
+    return values
+
+
 NUMBA_AVAILABLE = find_spec("numba") is not None
 _segments_compiled = _triangles_compiled = None
 _NUMBA_INITIALIZED = False
+_NUMBA_FAILURE = None
+_NUMBA_WARNING_EMITTED = False
 _COMPILE_LOCK = Lock()
 
 
 def _compiled_kernel(vertices):
-    global _NUMBA_INITIALIZED, _segments_compiled, _triangles_compiled
+    global _NUMBA_INITIALIZED, _segments_compiled, _triangles_compiled, _NUMBA_FAILURE
     if not NUMBA_AVAILABLE:
         return None
     with _COMPILE_LOCK:
+        if _NUMBA_FAILURE is not None:
+            raise RuntimeError(str(_NUMBA_FAILURE))
         if not _NUMBA_INITIALIZED:
-            from numba import njit
-            from numba.extending import register_jitable
+            try:
+                from numba import njit
+                from numba.extending import register_jitable
 
-            for helper in (_segment_sq, _point_triangle_sq, _segment_hits_triangle, _triangle_sq):
-                register_jitable(helper)
-            _segments_compiled = njit(cache=True, fastmath=False)(_segments_reference)
-            _triangles_compiled = njit(cache=True, fastmath=False)(_triangles_reference)
-            _NUMBA_INITIALIZED = True
+                for helper in (_segment_sq, _point_triangle_sq, _segment_hits_triangle, _triangle_sq):
+                    register_jitable(helper)
+                _segments_compiled = njit(cache=True, fastmath=False)(_segments_reference)
+                _triangles_compiled = njit(cache=True, fastmath=False)(_triangles_reference)
+                _NUMBA_INITIALIZED = True
+            except Exception as exc:
+                # Keep the message without retaining traceback frames and their
+                # distance-batch arrays for the lifetime of a design session.
+                _NUMBA_FAILURE = str(exc)
+                raise
     return _segments_compiled if vertices == 2 else _triangles_compiled
 
 
@@ -204,18 +366,19 @@ class DistanceResult:
     backend: str
 
 
-def _run(first, second, *, vertices, backend, reference):
+def _run(first, second, *, vertices, backend, reference, numpy_kernel):
+    global _NUMBA_FAILURE, _NUMBA_WARNING_EMITTED
     if backend not in {"auto", "reference", "numpy", "numba"}:
         raise ValueError("Distance backend must be auto, reference, numpy, or numba.")
-    if backend == "numpy":
-        backend = "reference"
     first, second = np.ascontiguousarray(first, dtype=np.float64), np.ascontiguousarray(second, dtype=np.float64)
     if first.shape != second.shape or first.ndim != 3 or first.shape[1:] != (vertices, 3):
         raise ValueError(f"Paired distance inputs require matching (n, {vertices}, 3) arrays.")
     if not np.all(np.isfinite(first)) or not np.all(np.isfinite(second)):
         raise ValueError("Distance inputs must be finite.")
-    if backend != "reference":
+    if backend not in {"reference", "numpy"}:
         try:
+            if _NUMBA_FAILURE is not None:
+                raise RuntimeError(str(_NUMBA_FAILURE))
             compiled = _compiled_kernel(vertices)
             if compiled is not None:
                 return DistanceResult(compiled(first, second), "numba_float64")
@@ -224,13 +387,24 @@ def _run(first, second, *, vertices, backend, reference):
         except Exception as exc:
             if backend == "numba":
                 raise
-            warnings.warn(f"Numba distance kernel failed; using the reference implementation: {exc}", RuntimeWarning)
-    return DistanceResult(reference(first, second), "reference_float64")
+            with _COMPILE_LOCK:
+                _NUMBA_FAILURE = str(exc)
+                warn = not _NUMBA_WARNING_EMITTED
+                _NUMBA_WARNING_EMITTED = True
+            if warn:
+                warnings.warn(
+                    f"Numba distance kernel unavailable; using the vectorized NumPy implementation: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+    if backend == "reference":
+        return DistanceResult(reference(first, second), "reference_float64")
+    return DistanceResult(numpy_kernel(first, second), "numpy_float64")
 
 
 def segment_pair_distances(first, second, *, backend="auto") -> DistanceResult:
-    return _run(first, second, vertices=2, backend=backend, reference=_segments_reference)
+    return _run(first, second, vertices=2, backend=backend, reference=_segments_reference, numpy_kernel=_segments_numpy)
 
 
 def triangle_pair_distances(first, second, *, backend="auto") -> DistanceResult:
-    return _run(first, second, vertices=3, backend=backend, reference=_triangles_reference)
+    return _run(first, second, vertices=3, backend=backend, reference=_triangles_reference, numpy_kernel=_triangles_numpy)

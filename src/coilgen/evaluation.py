@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from .config import CoilGenConfig
+from .conductor_geometry import conductor_trace
 from .contours import contour_evaluation_points
 from .engineering_metrics import fit_bz_field_quality
 from .field_components import component_sample_values, field_component_values, normalize_field_component
@@ -11,6 +12,14 @@ from .metrics import dsv_target_mask, fit_target_mode_current
 from .parallel import parallel_map, resolve_worker_count, should_parallelize
 from .physics import biot_savart_wire_path
 from .progress import ProgressReporter
+from .routing_field_objective import longitudinal_field_distortion
+
+
+def layout_field_geometry(part: CoilPart, config: CoilGenConfig | None = None):
+    """Use the finished conductor centroid whenever postprocessing produced it."""
+    if not bool(getattr(config, "skip_postprocessing", False)):
+        return conductor_trace(part)
+    return None, "unconnected_contours"
 
 
 def evaluate_field_errors(
@@ -29,16 +38,17 @@ def evaluate_field_errors(
         reporter=reporter,
     )
     for part_ind, part in enumerate(parts, start=1):
-        if not config.skip_postprocessing and part.wire_path is not None and len(part.wire_path.v) >= 2:
+        points, geometry_source = layout_field_geometry(part, config)
+        if points is not None:
             part.field_by_layout = biot_savart_wire_path(
-                part.wire_path.v,
+                points,
                 target_field.coords,
                 chunk_size=int(config.biot_savart_chunk_size),
                 worker_count=worker_count,
                 min_work_size=int(config.parallel_min_work_size),
                 max_chunk_memory_mb=float(config.parallel_max_chunk_memory_mb),
                 progress=reporter,
-                progress_label=f"part {part_ind}/{len(parts)} connected wire chunks",
+                progress_label=f"part {part_ind}/{len(parts)} {geometry_source} chunks",
             )
         else:
             part.field_by_layout = part.field_by_loops.copy()
@@ -108,6 +118,60 @@ def evaluate_field_errors(
         sf_b_field_1a,
         target_field_1a,
     )
+
+
+def final_field_diagnostics(parts, config, target_field, layout_per_amp, loops_per_amp, reported_current_a):
+    """Identify final field geometry/current and report routing error without a refit.
+
+    Historical target-current reporting remains configured independently. The
+    routing comparison always uses the common original contour-step current;
+    unavailable or inconsistent current context is reported as unchecked.
+    """
+    sources = tuple(layout_field_geometry(part, config)[1] for part in parts)
+    source = sources[0] if sources and len(set(sources)) == 1 else "mixed" if sources else "unavailable"
+    current_source = field_evaluation_current_source(config)
+    stream_aliases = {"stream_function", "stream", "contour_step", "sf"}
+    diagnostics = {
+        "field_evaluation_geometry_source": source,
+        "field_evaluation_part_geometry_sources": ";".join(sources),
+        "field_evaluation_requested_current_source": str(config.field_evaluation_current_source),
+        "field_evaluation_current_source": current_source,
+        "field_evaluation_current_a": float(reported_current_a),
+        "field_evaluation_current_refitted": current_source.strip().lower().replace("-", "_") not in stream_aliases,
+        "layout_target_source": source,
+        "routing_distortion_checked": False,
+        "routing_distortion_reference": "original_oriented_contours",
+        "routing_distortion_geometry_source": source,
+        "routing_distortion_current_refitted": False,
+    }
+    try:
+        current = float(parts[0].contour_step)
+        if (
+            not np.isfinite(current)
+            or current == 0
+            or any(
+                part.contour_step is None
+                or not np.isfinite(part.contour_step)
+                or not np.isclose(part.contour_step, current, rtol=1e-12, atol=0.0)
+                for part in parts
+            )
+        ):
+            raise ValueError("A common finite nonzero contour-step current is required.")
+        values = longitudinal_field_distortion(
+            loops_per_amp, layout_per_amp, target_field, config.b_0_direction, current
+        )
+    except (IndexError, TypeError, ValueError) as error:
+        diagnostics["routing_distortion_reason"] = str(error)
+        return diagnostics
+    diagnostics.update(
+        routing_distortion_checked=True,
+        routing_distortion_reason="",
+        routing_distortion_current_a=values["current_a"],
+        routing_distortion_longitudinal_rms_T=values["rms_T"],
+        routing_distortion_longitudinal_peak_T=values["peak_T"],
+        routing_distortion_active_sample_count=values["active_sample_count"],
+    )
+    return diagnostics
 
 
 def layout_target_residual_diagnostics(

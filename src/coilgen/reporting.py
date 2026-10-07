@@ -49,6 +49,68 @@ def result_design_context(result: CoilGenResult) -> CoilDesignContext:
     return normalize_design_context(getattr(getattr(result, "input_data", None), "design_context", "mr_gradient"))
 
 
+def _routing_field_acceptance_summary(result: CoilGenResult) -> dict[str, Any]:
+    """Retain fixed-current failures even when ordinary reporting fits a current."""
+    accepted = [
+        (index, getattr(part, "joint_route_diagnostics", {}))
+        for index, part in enumerate(result.coil_parts, start=1)
+        if getattr(part, "joint_route_diagnostics", {}).get("status") == "accepted"
+    ]
+    failed, details = [], []
+    statuses = []
+    for index, diagnostics in accepted:
+        status = diagnostics.get("selected_absolute_field_contract_met")
+        statuses.append(status)
+        if not isinstance(status, (bool, np.bool_)) or status:
+            continue
+        failed.append(index)
+        reasons = diagnostics.get("selected_absolute_field_contract_reasons", {})
+        values = reasons.values() if isinstance(reasons, dict) else (reasons,)
+        reason = "; ".join(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))
+        details.append(f"part {index}: {reason or 'absolute field contract failed'}")
+    return {
+        "routing_field_acceptance_policies": ", ".join(
+            sorted({str(diagnostics.get("field_acceptance_policy", "unknown")) for _index, diagnostics in accepted})
+        ),
+        "routing_absolute_field_contract_status": (
+            "FAIL"
+            if failed
+            else "not_checked"
+            if not accepted
+            else "PASS"
+            if all(isinstance(value, (bool, np.bool_)) and value for value in statuses)
+            else "unverified"
+        ),
+        "routing_absolute_field_contract_failed_part_count": len(failed),
+        "routing_absolute_field_contract_failure_reasons": "; ".join(details),
+    }
+
+
+def _routing_clearance_summary(result: CoilGenResult) -> dict[str, Any]:
+    diagnostics = [getattr(part, "joint_route_diagnostics", {}) for part in result.coil_parts]
+
+    def finite_values(name, *, accepted_only=False):
+        values = []
+        for item in diagnostics:
+            if accepted_only and item.get("status") != "accepted":
+                continue
+            value = item.get(name)
+            if isinstance(value, (int, float, np.number)) and np.isfinite(value) and value >= 0:
+                values.append(float(value))
+        return values
+
+    targets = finite_values("routing_clearance_target_m")
+    source = finite_values("source_contour_clearance_m")
+    physical = finite_values("selected_physical_minimum_centerline_distance_m", accepted_only=True)
+    bounds = finite_values("selected_physical_clearance_lower_bound_m", accepted_only=True)
+    return {
+        "routing_clearance_target_m": max(targets, default=float("nan")),
+        "routing_source_contour_clearance_m": max(source, default=float("nan")),
+        "routing_physical_minimum_centerline_distance_m": min(physical, default=float("nan")),
+        "routing_physical_clearance_lower_bound_m": min(bounds, default=float("nan")),
+    }
+
+
 def result_quality_status(
     result: CoilGenResult,
     *,
@@ -75,6 +137,12 @@ def result_quality_status(
         for part in result.coil_parts
     ):
         failures.append("Manufacturing diagnostics report invalid swept-body geometry.")
+    routing_fields = _routing_field_acceptance_summary(result)
+    if routing_fields["routing_absolute_field_contract_failed_part_count"]:
+        detail = routing_fields["routing_absolute_field_contract_failure_reasons"]
+        failures.append(
+            "Accepted routing retains absolute field-contract violations at the unchanged series current. " + detail
+        )
 
     mean_error = float(result.error_vals.get("mean_rel_error_layout_vs_target", np.nan))
     peak_error = float(result.error_vals.get("max_rel_error_layout_vs_target", np.nan))
@@ -316,6 +384,8 @@ def result_summary_dict(result: CoilGenResult) -> dict[str, Any]:
         "design_context_evaluation_features": ", ".join(design_context.feature_keys()),
         "target_field_component": str(getattr(config, "target_field_component", "Bz")),
         "field_evaluation_current_source": field_evaluation_current_source(config),
+        **_routing_field_acceptance_summary(result),
+        **_routing_clearance_summary(result),
         "field_source_label": (
             f"{getattr(config, 'target_field_component', 'Bz')} target, "
             f"{field_evaluation_current_source(config)} current"
@@ -1056,6 +1126,13 @@ def result_performance_table_rows(result: CoilGenResult) -> list[list[str]]:
         add("Electrical", "self inductance", "coil_inductance_H", "H")
 
     add("Routing", "route-quality statuses", "route_statuses")
+    add("Routing", "field acceptance policies", "routing_field_acceptance_policies")
+    add("Routing", "routing centerline clearance target", "routing_clearance_target_m", "m")
+    add("Routing", "source contour spacing target", "routing_source_contour_clearance_m", "m")
+    add("Routing", "measured physical centerline minimum", "routing_physical_minimum_centerline_distance_m", "m")
+    add("Routing", "certified physical centerline lower bound", "routing_physical_clearance_lower_bound_m", "m")
+    add("Routing", "fixed-current absolute field contract", "routing_absolute_field_contract_status")
+    add("Routing", "fixed-current field failures", "routing_absolute_field_contract_failure_reasons")
     add("Routing", "minimum contour spacing", "min_contour_distance_m", "m")
     add("Routing", "minimum unconnected-contour wire clearance", "unconnected_contours_min_wire_distance_m", "m")
     add("Routing", "minimum wire-wire clearance", "min_wire_wire_distance_m", "m")

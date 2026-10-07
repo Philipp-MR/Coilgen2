@@ -2,9 +2,11 @@
 
 The existing main work was committed and pushed first as `3fc94b7`.
 This integration ports the non-GUI research functionality into `src/coilgen`;
-the independent `CoilGenResearch` repository is preserved and excluded from
-main's Git/package/test discovery. No web server, GUI assets or GUI launcher
-are included.
+the independent `CoilGenResearch` numerical repository is preserved and excluded
+from main's Git/package/test discovery. Its obsolete browser server, interface
+and launchers have since been retired. The main repository now provides an
+optional [native Qt/VTK workbench](NATIVE_WORKBENCH.md) over the same engine,
+with owned project inputs, staged execution and preserved script APIs.
 
 ## Implemented behavior
 

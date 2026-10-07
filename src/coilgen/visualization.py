@@ -1744,7 +1744,12 @@ def _save_within_group_cut_choice_view(
     label_groups: bool,
     axis_labels: tuple[str, str] | None,
 ) -> Path:
-    from .layout import _build_within_group_cut_rail, _within_group_cut_width, generate_group_cutshapes
+    from .layout import (
+        _build_within_group_cut_rail,
+        _inter_group_cut_alignment_state,
+        _within_group_cut_width,
+        generate_group_cutshapes,
+    )
 
     style = style or SvgStyle()
     _require_grouped_contours(part)
@@ -1753,6 +1758,7 @@ def _save_within_group_cut_choice_view(
     contour_points = [project(_closed_for_display(loop.v)) for _, _, loop in entries]
     rail_entries = []
     rail_points: list[np.ndarray] = []
+    align_axial_rings = _inter_group_cut_alignment_state(part, config) is not None
 
     for group_ind, group in enumerate(part.groups):
         if len(group.loops) <= 1:
@@ -1771,6 +1777,7 @@ def _save_within_group_cut_choice_view(
                 config.b_0_direction,
                 cut_plane_definition="nearest",
                 cut_height_ratio=0.5,
+                align_axial_rings=align_axial_rings,
             )
             high = _build_within_group_cut_rail(group, cut_infos, "high", config)
             low = _build_within_group_cut_rail(group, cut_infos, "low", config)

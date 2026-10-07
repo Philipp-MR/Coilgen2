@@ -63,6 +63,7 @@ class LoopTopologySignature:
     boundary_associated: bool
     contractible_candidate: bool
     ambiguous: bool
+    component_euler_characteristics: tuple[int, ...] = ()
 
     @property
     def kind(self) -> str:
@@ -71,7 +72,7 @@ class LoopTopologySignature:
         if self.boundary_associated:
             return "boundary_associated"
         if self.separating:
-            return "essential_separating"
+            return "essential_separating" if self.component_euler_characteristics else "separating_unclassified"
         return "nonseparating"
 
 
@@ -512,7 +513,10 @@ def _classify_loop_topology_signature(
 ) -> LoopTopologySignature:
     cut_graph = build_virtual_cut_graph(mesh, contour, adjacency)
     labels = label_cut_components(cut_graph)
-    components = tuple(int(component) for component in np.unique(labels[labels >= 0]))
+    # Only components incident to this cut belong to its surface component.
+    # An unrelated disconnected support is not an extra side of the contour.
+    incident = [cell for cut in cut_graph.cuts.values() for cell in (cut.cell_negative, cut.cell_positive)]
+    components = tuple(int(component) for component in np.unique(labels[incident]))
     if not components:
         return LoopTopologySignature(
             loop_index=loop_ind,
@@ -541,14 +545,20 @@ def _classify_loop_topology_signature(
 
     boundary_signature = tuple(sorted(set(component_boundary_sets)))
     separating = len(components) >= 2
-    has_mesh_boundaries = bool(edge_to_boundary)
-    has_boundary_free_side = bool(
-        has_mesh_boundaries and any(len(boundary_set) == 0 for boundary_set in component_boundary_sets)
-    )
+    has_boundary_free_side = any(len(boundary_set) == 0 for boundary_set in component_boundary_sets)
     all_sides_touch_boundary = all(len(boundary_set) > 0 for boundary_set in component_boundary_sets)
     boundary_associated = bool(separating and all_sides_touch_boundary and len(boundary_signature) >= 2)
-    contractible_candidate = bool(separating and has_boundary_free_side)
     ambiguous = bool(len(components) > 2)
+    euler = (
+        _cut_component_euler_characteristics(mesh, cut_graph, labels, components)
+        if separating and not ambiguous
+        else ()
+    )
+    # On an orientable surface, a connected side with one boundary circle and
+    # chi=1 is a disk. A boundary-free side alone can instead contain handles.
+    contractible_candidate = any(
+        not boundary_set and characteristic == 1 for boundary_set, characteristic in zip(component_boundary_sets, euler)
+    )
     return LoopTopologySignature(
         loop_index=loop_ind,
         component_boundary_sets=tuple(component_boundary_sets),
@@ -560,7 +570,58 @@ def _classify_loop_topology_signature(
         boundary_associated=boundary_associated,
         contractible_candidate=contractible_candidate,
         ambiguous=ambiguous,
+        component_euler_characteristics=euler,
     )
+
+
+def _cut_component_euler_characteristics(mesh, cut_graph, labels, components) -> tuple[int, ...]:
+    """Count V-E+F of separated polygon cells using exact mesh-edge identities.
+
+    A regular supported contour has at most one passage through each triangle
+    and crosses an edge at most once. Shared crossings therefore use the global
+    edge index, avoiding floating-point coordinate deduplication. This helper
+    is used only for separating cuts; the two copies of a nonseparating cut's
+    boundary would require distinct labels even inside one connected region.
+    """
+    vertices = {component: set() for component in components}
+    edges = {component: set() for component in components}
+    faces = dict.fromkeys(components, 0)
+    crossings = {}
+    for face, cut in cut_graph.cuts.items():
+        for bary in (cut.bary_a, cut.bary_b):
+            local = np.flatnonzero(bary > 1e-10)
+            if len(local) != 2:
+                return ()
+            nodes = mesh.faces[face][local]
+            edge = tuple(sorted(map(int, nodes)))
+            fraction = float(bary[local[np.argmax(nodes)]])
+            if edge in crossings and not np.isclose(crossings[edge], fraction, rtol=0, atol=1e-8):
+                return ()
+            crossings[edge] = fraction
+    triangle = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+    for cell, component in enumerate(labels):
+        if component not in vertices:
+            continue
+        face = int(cut_graph.cell_face[cell])
+        cut = cut_graph.cuts.get(face)
+        polygon = (
+            triangle
+            if cut is None
+            else _clip_local_triangle_by_cut(triangle, cut.bary_a, cut.bary_b, int(cut_graph.cell_side[cell]))
+        )
+        keys = []
+        for x, y in polygon:
+            bary = np.array([1 - x - y, x, y])
+            support = mesh.faces[face][bary > 1e-10]
+            if len(support) not in (1, 2):
+                return ()
+            keys.append(tuple([len(support), *sorted(map(int, support))]))
+        if len(set(keys)) < 3:
+            return ()
+        vertices[component].update(keys)
+        edges[component].update(tuple(sorted((start, end))) for start, end in zip(keys, keys[1:] + keys[:1]))
+        faces[component] += 1
+    return tuple(len(vertices[c]) - len(edges[c]) + faces[c] for c in components)
 
 
 def _cut_component_boundary_sets(

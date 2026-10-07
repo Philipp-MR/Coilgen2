@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -41,6 +43,7 @@ def test_compiled_reference_parity(vertices, kernel, scale):
     "backend",
     [
         "reference",
+        "numpy",
         pytest.param(
             "numba", marks=pytest.mark.skipif(not kernels.NUMBA_AVAILABLE, reason="Optional Numba unavailable")
         ),
@@ -62,16 +65,26 @@ def test_triangle_crossing_coplanar_and_face_distance(backend):
 
 
 def test_safe_auto_fallback_and_context_reset(monkeypatch):
+    calls = []
+
     def unavailable(*args):
+        calls.append(args)
         raise RuntimeError("test compiler unavailable")
 
+    monkeypatch.setattr(geometry_kernels, "_NUMBA_FAILURE", None)
+    monkeypatch.setattr(geometry_kernels, "_NUMBA_WARNING_EMITTED", False)
     monkeypatch.setattr(geometry_kernels, "_compiled_kernel", lambda vertices: unavailable)
     points = np.zeros((1, 2, 3))
-    with pytest.warns(RuntimeWarning, match="reference"):
+    with pytest.warns(RuntimeWarning, match="vectorized NumPy"):
         result = kernels.segment_pair_distances(points, points, backend="auto")
-    assert result.backend == "reference_float64"
+    assert result.backend == "numpy_float64"
+    with warnings.catch_warnings(record=True) as repeated:
+        kernels.segment_pair_distances(points, points, backend="auto")
+    assert not repeated
+    assert len(calls) == 1
     with pytest.raises(RuntimeError, match="compiler unavailable"):
         kernels.segment_pair_distances(points, points, backend="numba")
+    assert len(calls) == 1
     assert kernels.active_geometry_backend() is None
     with pytest.raises(ValueError), kernels.geometry_acceleration("reference"):
         assert kernels.active_geometry_backend() == "reference"
@@ -84,6 +97,42 @@ def test_invalid_distance_input_rejected():
         kernels.segment_pair_distances(np.zeros((2, 3)), np.zeros((2, 3)))
     with pytest.raises(ValueError, match="finite"):
         kernels.triangle_pair_distances(np.full((1, 3, 3), np.nan), np.zeros((1, 3, 3)))
+
+
+@pytest.mark.parametrize("scale", [1e-9, 1e-6, 1.0, 1e3])
+@pytest.mark.parametrize("vertices,kernel", [(2, kernels.segment_pair_distances), (3, kernels.triangle_pair_distances)])
+def test_numpy_reference_parity_with_degenerate_and_skinny_primitives(scale, vertices, kernel):
+    rng = np.random.default_rng(571)
+    first, second = rng.normal(size=(2, 120, vertices, 3))
+    first[0] = first[0, 0]  # Point primitive.
+    second[1] = first[1]  # Coincident primitive.
+    if vertices == 3:
+        first[2, 2] = first[2, 0] + 0.5 * (first[2, 1] - first[2, 0])  # Collinear triangle.
+        first[3, 2] = first[3, 0] + 1e-10 * (first[3, 2] - first[3, 0])  # Skinny triangle.
+    first, second = first * scale, second * scale
+    measured = kernel(first, second, backend="numpy")
+    expected = kernel(first, second, backend="reference")
+    assert measured.backend == "numpy_float64"
+    np.testing.assert_allclose(measured.values_m, expected.values_m, rtol=2e-12, atol=1e-14 * scale)
+
+
+@pytest.mark.parametrize("vertices,kernel", [(2, kernels.segment_pair_distances), (3, kernels.triangle_pair_distances)])
+def test_numpy_empty_distance_batch(vertices, kernel):
+    empty = np.zeros((0, vertices, 3))
+    result = kernel(empty, empty, backend="numpy")
+    assert result.values_m.shape == (0,)
+    assert result.backend == "numpy_float64"
+
+
+@pytest.mark.parametrize("vertices,kernel", [(2, kernels.segment_pair_distances), (3, kernels.triangle_pair_distances)])
+def test_numpy_distance_batches_cross_chunk_boundary(vertices, kernel):
+    primitive = np.array([[0.0, 0, 0], [1, 0, 0], [0, 1, 0]])[:vertices]
+    first = np.repeat(primitive[None], 4101, axis=0)
+    offsets = np.linspace(0.0, 0.1, len(first))
+    second = first.copy()
+    second[:, :, 2] += offsets[:, None]
+    measured = kernel(first, second, backend="numpy")
+    np.testing.assert_allclose(measured.values_m, offsets, atol=1e-15)
 
 
 def test_accelerated_self_collision_matches_original_crossing():

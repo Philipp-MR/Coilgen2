@@ -269,9 +269,7 @@ class ContourChannelDesignResult:
             "family_to_channel": (self.family_to_channel + 1).tolist(),
             "family_polarity": self.family_polarity.tolist(),
             "channel_numerical_rank": self.diagnostics.channel_numerical_rank,
-            "channel_normalized_field_condition_number": (
-                self.diagnostics.channel_normalized_field_condition_number
-            ),
+            "channel_normalized_field_condition_number": (self.diagnostics.channel_normalized_field_condition_number),
             "channel_maximum_normalized_field_correlation": (
                 self.diagnostics.channel_maximum_normalized_field_correlation
             ),
@@ -588,11 +586,7 @@ def design_contour_dictionary_channels(
         )
 
     partitions = tuple(_canonical_surjections(dictionary.family_count, settings.channel_count))
-    polarity_count = (
-        2 ** (dictionary.family_count - settings.channel_count)
-        if settings.optimize_family_polarity
-        else 1
-    )
+    polarity_count = 2 ** (dictionary.family_count - settings.channel_count) if settings.optimize_family_polarity else 1
     asymmetric_power_channels = bool(
         settings.total_power_limit_W is not None
         and settings.channel_resistance_ohm is not None
@@ -619,11 +613,7 @@ def design_contour_dictionary_channels(
         progress_callback,
         f"Contour assignment: exact search over {len(partitions)} unlabeled partitions and "
         f"{polarity_count} relative-polarity states"
-        + (
-            f", including {len(channel_labelings)} electrical-channel labelings"
-            if len(channel_labelings) > 1
-            else ""
-        )
+        + (f", including {len(channel_labelings)} electrical-channel labelings" if len(channel_labelings) > 1 else "")
         + f" ({candidate_count} candidates).",
     )
     limits = ChannelCurrentLimits.symmetric(
@@ -691,9 +681,7 @@ def design_contour_dictionary_channels(
                         f"Contour assignment progress: {completed}/{candidate_count} candidates.",
                     )
     if best is None:
-        raise RuntimeError(
-            "No full-rank contour assignment satisfied the configured normalized field-condition limit."
-        )
+        raise RuntimeError("No full-rank contour assignment satisfied the configured normalized field-condition limit.")
     score, payload = best
     partition, polarity, channel_fields, channel_metrics, fit = payload
     diagnostics = ContourControllabilityDiagnostics(
@@ -900,9 +888,7 @@ def _field_metrics(matrix: np.ndarray) -> tuple[np.ndarray, int, float, float, n
     normalized = values / norms
     normalized_singular = np.linalg.svd(normalized, compute_uv=False)
     condition = (
-        float(normalized_singular[0] / normalized_singular[-1])
-        if normalized_singular[-1] > tolerance
-        else float("inf")
+        float(normalized_singular[0] / normalized_singular[-1]) if normalized_singular[-1] > tolerance else float("inf")
     )
     correlation = np.abs(normalized.T @ normalized)
     np.fill_diagonal(correlation, 0.0)

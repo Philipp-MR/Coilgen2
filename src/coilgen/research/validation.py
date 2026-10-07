@@ -146,26 +146,29 @@ def validate_on_independent_grid(result: Any, *, resolution: int = 12, design_ma
     """
     config = result.input_data
     reason = _unsupported_contract(result)
-    if not reason and any(
-        str(value).strip().lower() not in {"", "none"}
-        for value in (
-            config.target_field_definition_file,
-            config.target_mesh_file,
-        )
-    ):
+    imported_map = str(config.target_field_definition_file).strip().lower() not in {"", "none"}
+    legacy_mesh = config.target_region_geometry is None and str(config.target_mesh_file).strip().lower() not in {
+        "",
+        "none",
+    }
+    if not reason and (imported_map or legacy_mesh):
         reason = "Imported targets require a separately supplied independent validation dataset."
     if reason:
         return {"available": False, "verified": False, "passed": None, "reason": reason}
     if isinstance(resolution, bool) or int(resolution) != resolution or resolution < 2:
         raise ValueError("Independent-grid resolution must be an integer >=2.")
-    radius = float(config.target_region_radius)
-    axis = (np.arange(resolution) + 0.5) * 2 * radius / resolution - radius
-    points = np.array(np.meshgrid(axis, axis, axis)).reshape(3, -1).T
-    points = points[np.linalg.norm(points, axis=1) <= radius]
-    if config.set_roi_into_mesh_center:
-        # Mesh and analytic target expressions use world coordinates, as in
-        # define_target_field. Move this distinct sampling grid to the mesh.
-        points += result.combined_mesh.vertices.mean(axis=0)
+    if config.target_region_geometry is not None:
+        from ..target_regions import sample_target_region_from_config
+
+        points = sample_target_region_from_config(config, resolution=resolution, independent=True)
+    else:
+        radius = float(config.target_region_radius)
+        axis = (np.arange(resolution) + 0.5) * 2 * radius / resolution - radius
+        points = np.array(np.meshgrid(axis, axis, axis)).reshape(3, -1).T
+        points = points[np.linalg.norm(points, axis=1) <= radius]
+        if config.set_roi_into_mesh_center:
+            # Expressions remain in world coordinates, as define_target_field.
+            points += result.combined_mesh.vertices.mean(axis=0)
     raw = np.zeros((len(points), 3))
     scale = float(result.regularization_diagnostics.get("target_gradient_normalization_scale", 1.0))
     raw[:, 2] = evaluate_field_expression(config.field_shape_function, points) * scale
@@ -203,6 +206,8 @@ def validate_on_independent_grid(result: Any, *, resolution: int = 12, design_ma
         "target_T": target,
         "field_quadrature_order": config.gauss_order,
         "independent_quadrature_check": False,
+        "sampling_weights": "equal_point_weights",
+        "target_region_geometry": config.target_region_geometry,
     }
 
 

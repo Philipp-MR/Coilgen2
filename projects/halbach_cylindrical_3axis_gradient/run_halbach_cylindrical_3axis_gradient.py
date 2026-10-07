@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import json
 import sys
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from coilgen import (
     save_manufacturing_diagnostics,
     save_swept_bodies_as_stl,
 )
+from coilgen.manufacturing import SweptBodyExportError
 from projects._shared.example_utils import (
     interactive_plots_enabled,
     native_thread_budget,
@@ -38,7 +40,7 @@ OUTPUT_ROOT = halbach_output_dir()
 # All lengths are metres. A gradient strength of 0.010 means 10 mT/m.
 
 PROJECT_NAME = "halbach_cylindrical_3axis_gradient"
-SHOW_PLOT_BOOK = False
+SHOW_PLOT_BOOK = True
 NATIVE_THREADS = 1  # BLAS threads inside each CoilGen worker; increase deliberately for large serial solves.
 EXPORT_STL = True
 EXPORT_WIRE_TRACE_CSV = True
@@ -432,15 +434,42 @@ def export_project_stls(project_run) -> tuple[Path, ...]:
         output_dir = project_run.output_dir / channel_run.channel.safe_name / "stl"
         prefix = f"{getattr(channel_run.design, 'name', channel_run.channel.safe_name)}_swept_body"
         diagnostic_files = save_manufacturing_diagnostics(result, output_dir, prefix=prefix)
-        channel_run.files = tuple([*channel_run.files, *diagnostic_files])
+        channel_run.files = tuple(dict.fromkeys([*channel_run.files, *diagnostic_files]))
         saved_files.extend(diagnostic_files)
+        status_path = output_dir / f"{prefix}_export_status.json"
+
+        def save_status(status, reason, paths=()):
+            record = {
+                "channel": channel_run.channel.name,
+                "status": status,
+                "policy": rejection_policy,
+                "manufacturing_ready": status == "exported",
+                "reason": reason,
+                "stl_files": [path.name for path in paths],
+                "manufacturing_failure_reasons": [
+                    part.manufacturing_diagnostics.get("manufacturing_failure_reasons", "")
+                    for part in result.coil_parts
+                ],
+            }
+            status_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+            channel_run.files = tuple(dict.fromkeys([*channel_run.files, status_path]))
+            saved_files.append(status_path)
+
+        status, reason = "exported", ""
         try:
-            stl_files = save_swept_bodies_as_stl(result, output_dir, prefix=prefix)
-        except ValueError as exc:
+            stl_files = save_swept_bodies_as_stl(result, output_dir, prefix=prefix, fail_on_violations=True)
+        except SweptBodyExportError as exc:
+            # Readiness checks may add export-specific diagnostics. Persist the
+            # final values even when strict export raises or the mesh is skipped.
+            save_manufacturing_diagnostics(result, output_dir, prefix=prefix)
+            reason = str(exc)
             if rejection_policy == "raise":
+                save_status("blocked", reason)
+                project_run.files = tuple(dict.fromkeys([*project_run.files, *saved_files]))
                 raise
             if rejection_policy == "skip":
                 print(f"WARNING: STL export skipped for {channel_run.channel.name}: {exc}")
+                save_status("blocked", reason)
                 continue
             print(
                 f"WARNING: {channel_run.channel.name} is not manufacturing-ready: {exc} "
@@ -452,10 +481,15 @@ def export_project_stls(project_run) -> tuple[Path, ...]:
                 prefix=prefix,
                 fail_on_violations=False,
             )
-        channel_run.files = tuple([*channel_run.files, *stl_files])
+            status = "diagnostic_only"
+        if not stl_files:
+            status, reason = "unavailable", "No swept bodies were available."
+        save_manufacturing_diagnostics(result, output_dir, prefix=prefix)
+        save_status(status, reason, stl_files)
+        channel_run.files = tuple(dict.fromkeys([*channel_run.files, *stl_files]))
         saved_files.extend(stl_files)
-    project_run.files = tuple([*project_run.files, *saved_files])
-    return tuple(saved_files)
+    project_run.files = tuple(dict.fromkeys([*project_run.files, *saved_files]))
+    return tuple(dict.fromkeys(saved_files))
 
 
 ################################################################################

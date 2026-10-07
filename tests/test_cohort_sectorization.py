@@ -183,9 +183,7 @@ def test_full_basis_projection_removes_component_gauge_without_changing_current(
     density[face_indices, face_indices, 0] = 1.0
     density[-1, face_indices, 0] = -1.0
     problem = replace(problem, part_current_density_mats=(density,))
-    reduced = np.column_stack(
-        (np.linspace(-1.0, 1.0, problem.reduced_sensitivity.shape[1]), np.ones(12))
-    )
+    reduced = np.column_stack((np.linspace(-1.0, 1.0, problem.reduced_sensitivity.shape[1]), np.ones(12)))
     full_with_gauge = problem.reducer.expansion_matrix @ reduced + np.asarray([3.0, -2.0])
 
     projected = _project_full_basis_to_reduced(problem, full_with_gauge)
@@ -240,11 +238,7 @@ def test_adaptive_sectorization_enforces_disjoint_hard_current_supports() -> Non
             atol=1.0e-9,
         )
     assert [entry["stage"] for entry in audit.history] == ["initial", "localization", "hardening"]
-    accepted_updates = [
-        entry
-        for entry in audit.history
-        if entry["stage"] == "localization" and entry["accepted"]
-    ]
+    accepted_updates = [entry for entry in audit.history if entry["stage"] == "localization" and entry["accepted"]]
     for entry in accepted_updates:
         assert min(entry["field_norm_ratio"]) >= 0.75 - 1.0e-5
     assert any("Adaptive localization 1/1 complete" in message for message in progress_messages)
