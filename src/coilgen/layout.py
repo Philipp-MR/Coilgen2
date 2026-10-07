@@ -4758,10 +4758,6 @@ def _connector_ratio(connector_distance: float, direct_distance: float, geodesic
     return float(connector_distance / expected)
 
 
-def _min_connector_interior_to_contour_distance(part: CoilPart) -> tuple[float, int, int]:
-    return _connector_clearance_summary(part, 0.0)[:3]
-
-
 def _connector_clearance_summary(part: CoilPart, clearance_threshold: float) -> tuple[float, int, int, int]:
     """Measure each connector once for both minimum-distance and count reports."""
     best_distance = math.inf
@@ -4785,12 +4781,6 @@ def _connector_clearance_summary(part: CoilPart, clearance_threshold: float) -> 
     if not math.isfinite(best_distance):
         return 0.0, -1, -1, violations
     return float(best_distance), best_cut, best_loop, violations
-
-
-def _connector_clearance_violation_count(part: CoilPart, clearance_threshold: float) -> int:
-    if clearance_threshold <= 0.0:
-        return 0
-    return _connector_clearance_summary(part, clearance_threshold)[3]
 
 
 def _inter_group_endpoint_loop_indices(part: CoilPart, cut: InterGroupCut) -> set[int]:

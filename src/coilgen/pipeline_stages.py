@@ -267,10 +267,7 @@ class PipelineCheckpoint:
         arrays = scientific_arrays(state.parts, state.target_field, state.combined_mesh, state.sf_b_field)
         if max_bytes is not None and sum(np.asarray(value).nbytes for value in arrays.values()) > max_bytes:
             raise ValueError("Stage preview arrays exceed the permitted size.")
-        return {
-            key: np.array(value, copy=True)
-            for key, value in arrays.items()
-        }
+        return {key: np.array(value, copy=True) for key, value in arrays.items()}
 
     @property
     def diagnostics(self) -> dict[str, Any]:

@@ -345,9 +345,7 @@ def test_edited_invalid_regularization_stays_blocking_after_it_becomes_inactive(
 
 
 def test_graphical_study_output_changes_only_owned_study_and_is_undoable(windows, application):
-    project = ProjectDocument.from_config(preset_config()).update_study(
-        {"pipeline_stage": "sheet", "fabricate": False}
-    )
+    project = ProjectDocument.from_config(preset_config()).update_study({"pipeline_stage": "sheet", "fabricate": False})
     window = windows(project)
     window.select_node("stage:sheet")
     original = window.project

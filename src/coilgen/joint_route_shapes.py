@@ -476,7 +476,9 @@ class JointTransitionEvaluator:
             progress_callback = getattr(self, "progress_callback", None)
             if progress_callback is not None:
                 progress_callback(self.diagnostics)
-            reasons = tuple(_validate_support(self.projector, source[0], geometry, normal, self.allowed_shift, 1e-8, {}))
+            reasons = tuple(
+                _validate_support(self.projector, source[0], geometry, normal, self.allowed_shift, 1e-8, {})
+            )
             if any("budget_exceeded" in reason for reason in reasons):
                 raise RoutingEvaluationBudgetExceeded(next(reason for reason in reasons if "budget_exceeded" in reason))
             if not reasons:
@@ -524,7 +526,9 @@ class JointTransitionEvaluator:
         key = points.shape, points.tobytes()
         cache = self.__dict__.setdefault("_coupling_geometries", {})
         if key in cache:
-            self.diagnostics["coupling_geometry_cache_hits"] = self.diagnostics.get("coupling_geometry_cache_hits", 0) + 1
+            self.diagnostics["coupling_geometry_cache_hits"] = (
+                self.diagnostics.get("coupling_geometry_cache_hits", 0) + 1
+            )
             return cache[key]
         segments = np.stack((points[:-1], points[1:]), axis=1)
         segments.flags.writeable = False

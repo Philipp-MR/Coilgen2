@@ -209,7 +209,9 @@ def build_settings_sequence(window, page, form, layout):
         sequence.add("Mesh", mesh, "mesh", summary=lambda: sequence.labelled(mesh))
     elif page == "target":
         sequence.add(
-            "Choose field", ("target_mode",), "target-gradient",
+            "Choose field",
+            ("target_mode",),
+            "target-gradient",
             summary=lambda: sequence.text("target_mode") or "No target selected",
             extras=_extras(layout, "import_target"),
         )

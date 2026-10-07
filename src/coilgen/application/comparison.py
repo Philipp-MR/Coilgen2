@@ -12,6 +12,7 @@ import numpy as np
 from ..field_components import normalize_field_component, normalized_b0_direction
 from ..pipeline_stages import config_field_stage
 from .service import DesignService, RunRecord
+from .evidence import read_verified_artifact
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +46,7 @@ class RunComparison:
 def _request(record):
     if not any(item.get("name") == "request.json" and item.get("sha256") for item in record.metadata["artifacts"]):
         raise ValueError("Comparison requires an integrity-checked original request.json artifact.")
-    request = json.loads((record.directory / "request.json").read_text(encoding="utf-8"))
+    request = json.loads(read_verified_artifact(record, "request.json"))
     if not isinstance(request, dict) or not isinstance(request.get("config"), dict):
         raise ValueError("Original run request has no configuration mapping.")
     return request
@@ -128,7 +129,7 @@ def compare_runs(left: RunRecord | str | Path, right: RunRecord | str | Path) ->
         if hashes[0] != hashes[1]:
             deltas.append(ParameterDelta(f"inputs.{key}.sha256", *hashes))
     metadata = (left.metadata, right.metadata)
-    arrays = (left.arrays, right.arrays)
+    arrays = (left.select_arrays(copy=False), right.select_arrays(copy=False))
     summaries = tuple(value.get("summary", {}) for value in metadata)
     validations = tuple(value.get("validation", {}) for value in metadata)
     component = tuple(normalize_field_component(config.get("target_field_component", "Bz")) for config in configs)

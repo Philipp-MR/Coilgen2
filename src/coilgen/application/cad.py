@@ -24,7 +24,8 @@ from ..geometry import _read_ascii_stl, _read_binary_stl, read_stl
 from ..manufacturing import save_mesh_as_stl
 from ..models import Mesh
 from ..persistence import atomic_json, file_digest
-from .service import DesignService, RunRecord
+from .service import RunRecord
+from .evidence import verify_record
 
 
 _MANIFEST_NAME = "geometry_manifest.json"
@@ -74,14 +75,7 @@ def _status(value) -> str:
 def _verified_record(record: RunRecord) -> RunRecord:
     if not isinstance(record, RunRecord):
         raise TypeError("CAD operations require a verified RunRecord.")
-    verified = DesignService.load_run(record.directory)
-    # Job timestamps are execution bookkeeping. Everything else must remain
-    # identical to the scientific evidence the user selected in the viewer.
-    old = {key: value for key, value in record.metadata.items() if key != "job"}
-    current = {key: value for key, value in verified.metadata.items() if key != "job"}
-    if old != current:
-        raise ValueError("Saved run metadata changed after it was selected. Reload the run.")
-    return verified
+    return verify_record(record)
 
 
 def _artifact_path(record: RunRecord, name: str) -> Path:

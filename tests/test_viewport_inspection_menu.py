@@ -47,7 +47,10 @@ def test_one_visible_inspection_menu_replaces_shortcut_row(scientific_viewport, 
     assert viewport.inspection_task.isHidden()
     assert all(button.isHidden() for button in viewport.inspection_buttons.values())
     assert [action.text() for action in viewport.inspection_actions.values()] == [
-        "Target and ROI", "Field accuracy", "Wire fit", "Connections"
+        "Target and ROI",
+        "Field accuracy",
+        "Wire fit",
+        "Connections",
     ]
 
 
@@ -64,8 +67,11 @@ def test_menu_click_selects_saved_evidence_once_without_changing_arrays(scientif
     application.processEvents()
     assert viewport.inspection_task.currentData() is None
     action = viewport.inspection_actions["field"]
-    QTest.mouseClick(viewport.inspection_menu, Qt.MouseButton.LeftButton,
-                     pos=viewport.inspection_menu.actionGeometry(action).center())
+    QTest.mouseClick(
+        viewport.inspection_menu,
+        Qt.MouseButton.LeftButton,
+        pos=viewport.inspection_menu.actionGeometry(action).center(),
+    )
     assert viewport.inspection_menu.isHidden()
     assert viewport.dataset.currentData() == "routed_residual"
     assert viewport.inspection_task.currentData() == "field"
@@ -168,7 +174,8 @@ def test_partial_model_keeps_support_without_inventing_target(monkeypatch, tmp_p
 
     mesh = SimpleNamespace(
         vertices=np.array([[0.0, 0.0, 0.0], [0.01, 0.0, 0.0], [0.0, 0.01, 0.0]]),
-        faces=np.array([[0, 1, 2]]), metadata={"geometry_type": "cylinder"},
+        faces=np.array([[0, 1, 2]]),
+        metadata={"geometry_type": "cylinder"},
     )
     monkeypatch.setattr(geometry, "load_mesh_from_config", lambda *_args: mesh)
 

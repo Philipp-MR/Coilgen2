@@ -726,6 +726,64 @@ selected task remains visible while changing units, components, current policy,
 sample slabs or display layers; an explicit dataset or run change clears it.
 
 The project/assets/service modules under `coilgen.application` are GUI-independent.
+Scientific readiness and support parameter definitions live in `preflight` and
+`support_parameters`; the Qt modules retain presentation adapters. Preparation
+uses the same lightweight preflight for scripts and GUI requests. It checks
+configured inputs, native settings and required dependencies without assembling
+field operators or invoking a solver; readiness does not certify acceptance.
+
+`ProjectDocument.update_inputs(config_changes, study_changes)` validates both
+drafts before publishing one revision. Rejected edits publish neither half;
+exact no-ops preserve the original document and native precision. An optional
+`expected_fingerprint` rejects stale drafts. The GUI commits the same transaction
+as one undo step. Snapshot controls and provenance are checked before writing
+owned inputs.
+
+The application `evidence` module owns finite-array availability, exact stored
+current variants and source integrity. Missing arrays cannot become selectable
+plots through metadata or stage names. `SourceHealth` shares failed verification
+across canonical source paths while retaining cached snapshots for inspection;
+only an explicit successful verification clears that failure. Verification
+reports identify legacy results whose metadata lacks checksum protection.
+Original request inspection checks selected identity and artifact bytes without
+loading numerical maps.
+
+`execution_reuse` combines verified saved and stopped checkpoints, excluding
+live display snapshots. `DesignService.plan` pins owner, revision and study
+controls; `submit_plan` rejects stale plans. For `JobManager`, active reuse occurs
+under its queue lock and requires the same recorded controls and numerical
+request digest, including source, dependency, input and checkpoint contents.
+Unknown legacy control fields cannot prove a match. Ordinary `submit` keeps its
+existing independent-job behavior. `run_actions` exposes the same recovery,
+cancellation and viewing decisions to headless callers and the workbench.
+
+```python
+from coilgen.application import DesignService, execution_reuse
+
+def queue_current_project(project, jobs, records=()):
+    reuse = execution_reuse(
+        project, records, jobs.list(), jobs_directory=jobs.directory,
+        threads=jobs.policy.threads_per_worker,
+    )
+    plan = DesignService.plan(project, states=jobs.list(), reuse=reuse)
+    return DesignService.submit_plan(project, jobs, plan)
+```
+
+`RunRecord.arrays` still returns detached writable copies. `array(name)` and
+`select_arrays(names)` copy only selected arrays; `copy=False` explicitly borrows
+read-only views for inspection. `load_run(directory, array_names=...)` verifies
+all artifacts while decompressing only requested arrays. GUI display and
+comparison avoid the redundant initial full-array copy. These are in-process
+read-only contracts, not security isolation from hostile Python callers.
+
+Synchronous `DesignService.run(..., progress=callback, cancel_check=predicate)`
+delivers typed `ExecutionEvent` objects using the engine's existing progress and
+cancellation checks. Recorded boundaries remain distinct from percentages and
+activity strings. Returning a cached result emits `result_available`, not a new
+stage completion. Observer exceptions are logged without altering the numerical
+result or masking its failure. Cancellation remains cooperative and cannot
+interrupt an external solver at an arbitrary instruction.
+
 The numerical pipeline exposes five stage boundaries while `run_coilgen()` retains
 its original full-run entry point. `coilgen.research.jobs` handles process execution,
 and `coilgen.gui` contains the optional Qt controller and PyVista/VTK renderer.

@@ -67,7 +67,9 @@ def test_whole_faceted_surface_path_has_same_decision_as_adaptive_certificate(mo
 def test_lifted_faceted_chords_keep_distance_bound_and_adaptive_acceptance(monkeypatch):
     projector = _projector()
     chart = _cylinder_chart(projector)
-    developed = np.array([[0.2 * chart.lengths[0], 0, 0], [0.5 * chart.lengths[0], 0, 0], [0.8 * chart.lengths[0], 0, 0]])
+    developed = np.array(
+        [[0.2 * chart.lengths[0], 0, 0], [0.5 * chart.lengths[0], 0, 0], [0.8 * chart.lengths[0], 0, 0]]
+    )
     points = chart.map(developed)
     points[1] += 0.0029 * np.cross(chart.directions[0], chart.axis)
     accelerated, diagnostics = _check(projector, points)
@@ -83,7 +85,9 @@ def test_lifted_faceted_chords_keep_distance_bound_and_adaptive_acceptance(monke
 def test_ambiguous_or_invalid_chords_use_existing_adaptive_checks(monkeypatch, failure):
     projector = _projector()
     chart = _cylinder_chart(projector)
-    points = chart.map(np.array([[0.2 * chart.lengths[0], 0, 0], [0.5 * chart.lengths[0], 0, 0], [0.8 * chart.lengths[0], 0, 0]]))
+    points = chart.map(
+        np.array([[0.2 * chart.lengths[0], 0, 0], [0.5 * chart.lengths[0], 0, 0], [0.8 * chart.lengths[0], 0, 0]])
+    )
     lift = 0.003
     if failure == "over_lift":
         points[1] += 0.0031 * np.cross(chart.directions[0], chart.axis)
@@ -122,9 +126,11 @@ def test_near_rim_raised_path_preserves_support_domain_tolerance(monkeypatch):
     projector = _projector()
     chart = _cylinder_chart(projector)
     developed = np.array(
-        [[0.2 * chart.lengths[0], chart.upper - 1e-7, 0],
-         [0.5 * chart.lengths[0], chart.upper - 1e-7, 0],
-         [0.8 * chart.lengths[0], chart.upper - 1e-7, 0]]
+        [
+            [0.2 * chart.lengths[0], chart.upper - 1e-7, 0],
+            [0.5 * chart.lengths[0], chart.upper - 1e-7, 0],
+            [0.8 * chart.lengths[0], chart.upper - 1e-7, 0],
+        ]
     )
     points = chart.map(developed)
     points[1] += 0.0029 * np.cross(chart.directions[0], chart.axis)
@@ -177,7 +183,9 @@ def test_tangent_contamination_or_scaled_normals_disable_fast_certificates():
 def test_original_midpoint_distance_rejects_excess_lift_with_exact_negative_certificate(monkeypatch):
     projector = _projector()
     chart = _cylinder_chart(projector)
-    developed = np.array([[0.2 * chart.lengths[0], 0, 0], [0.5 * chart.lengths[0], 0, 0], [0.8 * chart.lengths[0], 0, 0]])
+    developed = np.array(
+        [[0.2 * chart.lengths[0], 0, 0], [0.5 * chart.lengths[0], 0, 0], [0.8 * chart.lengths[0], 0, 0]]
+    )
     points = chart.map(developed)
     points[1] += 0.006 * np.cross(chart.directions[0], chart.axis)
     accelerated, diagnostics = _check(projector, points)
@@ -191,9 +199,17 @@ def test_original_midpoint_distance_rejects_excess_lift_with_exact_negative_cert
 def test_exact_intersections_keep_priority_over_negative_distance_rejection():
     projector = _projector()
     chart = _cylinder_chart(projector)
-    developed = np.array([[0.2 * chart.lengths[0], 0, 0], [0.5 * chart.lengths[0], 0, 0], [0.8 * chart.lengths[0], 0, 0]])
+    developed = np.array(
+        [[0.2 * chart.lengths[0], 0, 0], [0.5 * chart.lengths[0], 0, 0], [0.8 * chart.lengths[0], 0, 0]]
+    )
     points = chart.map(developed)
-    points = np.vstack((points[0], points[1] + 0.01 * np.cross(chart.directions[0], chart.axis),
-                        points[1] - 0.01 * np.cross(chart.directions[0], chart.axis), points[2]))
+    points = np.vstack(
+        (
+            points[0],
+            points[1] + 0.01 * np.cross(chart.directions[0], chart.axis),
+            points[1] - 0.01 * np.cross(chart.directions[0], chart.axis),
+            points[2],
+        )
+    )
     reasons, _ = _check(projector, points)
     assert reasons == ["support_surface_intersection"]

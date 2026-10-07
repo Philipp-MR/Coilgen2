@@ -234,39 +234,6 @@ def test_theme_change_updates_existing_guidance_status(overview, application):
         assert _contrast(foreground, QColor("#202020")) >= 4.5
 
 
-def test_export_navigation_retains_state_and_readable_colors_after_theme_change(application, native_font):
-    from coilgen.gui.workflow import WorkflowNavigation
-
-    navigation = WorkflowNavigation()
-    navigation.setFont(native_font)
-    try:
-        navigation.set_current("export")
-        assert "solid" in navigation.buttons["export"].toolTip()
-        assert "units" in navigation.buttons["export"].toolTip()
-        before = navigation.styleSheet()
-        palette = navigation.palette()
-        for role in (QPalette.ColorRole.Window, QPalette.ColorRole.Base, QPalette.ColorRole.Button):
-            palette.setColor(role, QColor("#202020"))
-        for role in (QPalette.ColorRole.WindowText, QPalette.ColorRole.ButtonText):
-            palette.setColor(role, QColor("#eeeeee"))
-        navigation.setPalette(palette)
-        application.processEvents()
-        accent = tone_color("info", palette)
-        assert accent.name() in navigation.styleSheet() and navigation.styleSheet() != before
-        assert "#202020" in navigation.styleSheet()
-        assert _contrast(accent, QColor("#202020")) >= 4.5
-        assert navigation.current_step == "export" and navigation.buttons["export"].isChecked()
-        navigation.resize(560, 40)
-        navigation.show()
-        application.processEvents()
-        assert navigation.minimumSizeHint().width() <= 560
-        assert all(navigation.rect().contains(button.geometry()) for button in navigation.buttons.values())
-    finally:
-        navigation.close()
-        navigation.deleteLater()
-        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-
-
 def _panel_palette(panel, background, text):
     palette = panel.palette()
     for role in (QPalette.ColorRole.Window, QPalette.ColorRole.Base, QPalette.ColorRole.Button):

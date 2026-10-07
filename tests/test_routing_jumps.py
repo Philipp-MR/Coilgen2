@@ -107,9 +107,7 @@ def test_complete_curve_jump_queries_use_exact_faceted_distances(monkeypatch, he
     chart = _cylinder_chart(projector)
     points = chart.map(np.array([[0.2, 0, 0], [0.5, 0, 0], [0.8, 0, 0]]) * chart.lengths[0])
     points[1] += height * np.cross(chart.directions[0], chart.axis)
-    reference = raised_span_metrics(
-        points, SimpleNamespace(project=projector.project), maximum_sample_spacing_m=0.0001
-    )
+    reference = raised_span_metrics(points, SimpleNamespace(project=projector.project), maximum_sample_spacing_m=0.0001)
 
     def unexpected_projection(_points):
         pytest.fail("Verified facets should avoid the general projection query.")

@@ -41,7 +41,9 @@ def _scalar_gap(index, segments, cap, *, excluded=(), consume=None, maximum_pair
             indices = indices[np.einsum("ij,ij->i", gap, gap) <= (minimum + 1e-12) ** 2]
             if len(indices):
                 other = index.segments[indices]
-                distances = segment_distances(segment[0], segment[1] - segment[0], other[:, 0], other[:, 1] - other[:, 0])
+                distances = segment_distances(
+                    segment[0], segment[1] - segment[0], other[:, 0], other[:, 1] - other[:, 0]
+                )
                 minimum = min(minimum, float(np.min(distances)))
     return minimum
 

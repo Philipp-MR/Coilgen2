@@ -60,6 +60,15 @@ from ..application.acceptance import (
 )
 from ..application.targets import recognize_solid_harmonic_target, solid_harmonic_target
 from ..application.reuse import plan_reuse, plan_stopped_reuse, ReusePlan
+from ..application.evidence import SourceHealth
+from ..application.execution import (
+    STOPPED_JOB_STATES,
+    execution_reuse,
+    matches_active_request,
+    matches_project,
+    plan_execution,
+    run_actions,
+)
 from ..application.history import HistoryEntry, RunHistoryStore
 from ..application.diagnostics import run_verdicts
 from ..application.bundles import RunArchive
@@ -527,12 +536,7 @@ class CoilGenWorkbench(QMainWindow):
         self.live_preview.start(state)
 
     def _live_owner_matches(self, state):
-        return (
-            self.project is not None
-            and state.get("project_id") == self.project.id
-            and state.get("project_fingerprint") == self.project.fingerprint
-            and state.get("project_revision", self.project.revision) == self.project.revision
-        )
+        return matches_project(state, self.project, revision=True)
 
     def _show_live_preview(self, job_id, preview):
         if (
@@ -859,7 +863,7 @@ class CoilGenWorkbench(QMainWindow):
         for index in range(self.evidence.count()):
             self.evidence.setTabIcon(index, icon(evidence_icons[self.evidence.tabText(index)]))
         self._job_verification_errors = {}
-        self._run_verification_errors = {}
+        self._source_health = SourceHealth()
         self._run_verification_paths = {}
         self._loading_job_id = None
         self._feedback_job_id = None
@@ -1383,31 +1387,28 @@ class CoilGenWorkbench(QMainWindow):
             self.apply_study(changes)
 
     def apply_study(self, changes):
-        if self.project is None:
-            return False
-        try:
-            project = self.project.update_study(changes)
-        except (ValueError, TypeError) as exc:
-            self._show_draft_error(str(exc))
-            self._error(f"Study edit rejected: {exc}")
-            return False
-        if project is not self.project:
-            self._applying = True
-            try:
-                self.undo_stack.push(ProjectEdit(self, self.project, project, "Edit study controls"))
-            finally:
-                self._applying = False
-        return True
+        return self.apply_inputs(study_changes=changes, label="Edit study controls")
 
     def apply_config(self, changes, label="Edit scientific model"):
         """Atomic validated model edit, shared by native and advanced controls."""
+        return self.apply_inputs(config_changes=changes, label=label)
+
+    def apply_inputs(
+        self, config_changes=None, study_changes=None, *, label="Edit model and study", expected_fingerprint=None
+    ):
+        """Commit a complete input transaction as one undoable revision."""
         if self.project is None:
             return False
         try:
-            next_project = self.project.update_config(changes, allow_incomplete=True)
+            next_project = self.project.update_inputs(
+                config_changes,
+                study_changes,
+                allow_incomplete=True,
+                expected_fingerprint=expected_fingerprint,
+            )
         except (ValueError, TypeError, OSError, KeyError) as exc:
             self._show_draft_error(str(exc))
-            self._error(f"Model edit rejected: {exc}")
+            self._error(f"Input edit rejected: {exc}")
             return False
         if next_project.fingerprint != self.project.fingerprint:
             self._applying = True
@@ -3542,17 +3543,12 @@ class CoilGenWorkbench(QMainWindow):
             threads = getattr(getattr(self.jobs, "policy", None), "threads_per_worker", 1)
             try:
                 records = [record for record in self.runs.values() if not self._run_verification_error(record)]
-                saved = plan_reuse(self.project, records, threads=threads)
-                stopped = plan_stopped_reuse(
+                self._reuse_plan = execution_reuse(
                     self.project,
+                    records,
                     (state for id_, state in self.states.items() if not self._run_verification_error(id_)),
-                    self.jobs_directory,
+                    jobs_directory=self.jobs_directory,
                     threads=threads,
-                )
-                self._reuse_plan = ReusePlan(
-                    (*saved.available, *stopped.available),
-                    tuple(dict.fromkeys((*saved.stale, *stopped.stale))),
-                    (*saved.diagnostics, *stopped.diagnostics),
                 )
             except (OSError, ValueError, TypeError, KeyError) as exc:
                 self._reuse_plan = ReusePlan((), (), (str(exc),))
@@ -4569,8 +4565,9 @@ class CoilGenWorkbench(QMainWindow):
             if not self._check_compute_readiness(self.project):
                 return None
             self.poll_jobs()
-            existing = next((state for state in self.states.values() if self._same_active_job(state)), None)
-            if existing is not None:
+            plan = plan_execution(self.project, states=self.states.values(), **self._request_controls())
+            existing = self.states.get(plan.active_job_id)
+            if existing is not None and resume_checkpoint is None and not isinstance(self.service, DesignService):
                 self._begin_live_follow(existing)
                 self._focus_job(existing["id"], open_window=False)
                 self.statusBar().showMessage(
@@ -4582,28 +4579,34 @@ class CoilGenWorkbench(QMainWindow):
                 self._own_jobs = True
             self._snapshot_existing_jobs()
             self._refresh_stage_status()
-            if resume_checkpoint is None:
-                cached = self._reuse_plan.through(self.stage_selector.currentData())
-                if cached is not None:
-                    resume_checkpoint = str(cached.path)
-            state = self.service.submit(
+            plan = plan_execution(
                 self.project,
-                self.jobs,
-                pipeline_stage=self.stage_selector.currentData(),
-                validation_resolution=self.validation_resolution,
-                design_margin=self.design_margin,
-                fabricate=self.fabricate,
+                reuse=self._reuse_plan,
+                **self._request_controls(),
                 **({"resume_checkpoint": resume_checkpoint} if resume_checkpoint else {}),
             )
+            plan.require_current(self.project)
+            if isinstance(self.service, DesignService):
+                state = self.service.submit_plan(self.project, self.jobs, plan)
+            else:
+                state = self.service.submit(self.project, self.jobs, **plan.request_controls())
             state.setdefault("pipeline_stage", self.stage_selector.currentData())
             state.setdefault("project_id", self.project.id)
             state.setdefault("project_fingerprint", self.project.fingerprint)
-            for key in ("validation_resolution", "design_margin", "fabricate"):
-                state.setdefault(key, getattr(self, key))
+            state.setdefault("project_revision", self.project.revision)
+            for key, value in self._request_controls().items():
+                state.setdefault(key, value)
+            reused = state["id"] in self.states
             self.states[state["id"]] = state
-            self._session_job_ids.add(state["id"])
+            if not reused:
+                self._session_job_ids.add(state["id"])
             self._begin_live_follow(state)
-            self.statusBar().showMessage(f"Queued immutable revision {self.project.revision}", 5000)
+            self.statusBar().showMessage(
+                f"This revision is already {state['status']}; showing its design progress."
+                if reused
+                else f"Queued immutable revision {self.project.revision}",
+                5000,
+            )
             self.poll_jobs()
             self._focus_job(state["id"], open_window=False)
             return state
@@ -4615,16 +4618,16 @@ class CoilGenWorkbench(QMainWindow):
             self._update_execution_feedback()
 
     def _same_active_job(self, state):
-        return (
-            state.get("status") in {"queued", "running", "cancelling"}
-            and state.get("project_id") == self.project.id
-            and state.get("project_fingerprint") == self.project.fingerprint
-            and state.get("pipeline_stage") == self.stage_selector.currentData()
-            and all(
-                state.get(key, getattr(self, key)) == getattr(self, key)
-                for key in ("validation_resolution", "design_margin", "fabricate")
-            )
-        )
+        return matches_active_request(state, self.project, self._request_controls())
+
+    def _request_controls(self):
+        return {
+            "pipeline_stage": self.stage_selector.currentData(),
+            "validation_resolution": self.validation_resolution,
+            "design_margin": self.design_margin,
+            "fabricate": self.fabricate,
+            "kernel_backend": self.project.study["kernel_backend"],
+        }
 
     def _focus_job(self, id_, *, open_window=True):
         self._feedback_job_id = id_
@@ -4946,7 +4949,7 @@ class CoilGenWorkbench(QMainWindow):
         )
         if path is not None:
             self._run_verification_paths[id_] = path
-            self._run_verification_errors[path] = str(error)
+            self._source_health.mark_failed(path, error)
 
     def _run_verification_error(self, source):
         """Every alias of a known failed source shares the same evidence health."""
@@ -4956,16 +4959,16 @@ class CoilGenWorkbench(QMainWindow):
         if direct:
             if path is not None:
                 self._run_verification_paths[source] = path
-                self._run_verification_errors[path] = direct
+                self._source_health.mark_failed(path, direct)
             return direct
         if path is None:
             return ""
-        error = getattr(self, "_run_verification_errors", {}).get(path, "")
+        error = self._source_health.error(path)
         if not error:
             for id_, detail in errors.items():
                 if self._run_verification_directory(id_) == path:
                     self._run_verification_paths[id_] = path
-                    self._run_verification_errors[path] = detail
+                    self._source_health.mark_failed(path, detail)
                     error = detail
                     break
         return error
@@ -4985,22 +4988,25 @@ class CoilGenWorkbench(QMainWindow):
         for alias in aliases:
             self._job_verification_errors.pop(alias, None)
         if path is not None:
-            self._run_verification_errors.pop(path, None)
+            self._source_health.mark_verified(source if hasattr(source, "directory") else path)
 
     def _view_results_id(self):
         id_ = self._execution_job_id()
         if id_ is not None:
             state = self.states.get(id_, {})
-            return (
-                id_
-                if state.get("status") == "completed" and id_ in self.runs and not self._run_verification_error(id_)
-                else None
+            actions = run_actions(
+                self.stage_selector.currentData(),
+                state=state,
+                record=self.runs.get(id_),
+                source_error=self._run_verification_error(id_),
             )
-        return (
-            self._selected_run
-            if self._selected_run in self.runs and not self._run_verification_error(self._selected_run)
-            else None
+            return id_ if actions.can_view_results else None
+        actions = run_actions(
+            self.stage_selector.currentData(),
+            record=self.runs.get(self._selected_run),
+            source_error=self._run_verification_error(self._selected_run),
         )
+        return self._selected_run if actions.can_view_results else None
 
     def _update_execution_feedback(self):
         if not hasattr(self, "execution_label"):
@@ -5014,21 +5020,30 @@ class CoilGenWorkbench(QMainWindow):
         state = self.states.get(id_, {})
         selected_state = self.states.get(self._selected_job_id(), {})
         if hasattr(self, "cancel_action"):
-            can_cancel = self.jobs is not None and selected_state.get("status") in {"queued", "running"}
             resume_plan = self._selected_resume_plan()
-            resume = resume_plan.through(self.stage_selector.currentData())
-            can_resume = resume is not None and not self._submitting
+            actions = run_actions(
+                self.stage_selector.currentData(),
+                state=selected_state,
+                reuse=resume_plan,
+                source_error=self._run_verification_error(
+                    self._selected_job_id()
+                    if selected_state.get("status") in STOPPED_JOB_STATES
+                    else self._selected_run
+                ),
+                submitting=self._submitting,
+                runtime_available=self.jobs is not None,
+            )
+            resume = actions.resume_stage
+            can_cancel, can_resume = actions.can_cancel, actions.can_resume
             # Qt treats hidden actions as unavailable. Derive visibility from
             # job state so an action can reappear when its operation is valid.
             self.cancel_action.setVisible(can_cancel)
             self.cancel_action.setEnabled(can_cancel)
             self.resume_action.setVisible(self._selected_run is not None or bool(selected_state))
             self.resume_action.setEnabled(can_resume)
-            self.resume_action.setText(
-                f"Resume from {resume.stage.value}" if resume is not None else "Resume selected run"
-            )
+            self.resume_action.setText(f"Resume from {resume.value}" if resume is not None else "Resume selected run")
             self.resume_action.setToolTip(
-                f"Continue using the verified {resume.stage.value} checkpoint; worker compatibility is checked again."
+                f"Continue using the verified {resume.value} checkpoint; worker compatibility is checked again."
                 if resume is not None
                 else (
                     resume_plan.diagnostics[0]
@@ -5507,7 +5522,7 @@ class CoilGenWorkbench(QMainWindow):
         metadata = record.metadata
         self.problems_panel.set_run(record, diagnostic=self._run_verification_error(id_))
         self._problems_health_key = (id(record), self._run_verification_error(id_))
-        run_arrays = record.arrays
+        run_arrays = record.select_arrays(copy=False) if hasattr(record, "select_arrays") else record.arrays
         self.viewport.display_run(run_arrays, metadata=metadata)
         wire_fields = metadata.get("wire_fields", {})
         self.wire_fields_table.setRowCount(len(wire_fields))

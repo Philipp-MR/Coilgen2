@@ -187,7 +187,13 @@ class FocusedFormSection(QWidget):
 
     def _describe_card(self):
         pending, error = self._draft_state
-        status = " Invalid input draft; correct the highlighted settings." if error else " Pending input edits." if pending else ""
+        status = (
+            " Invalid input draft; correct the highlighted settings."
+            if error
+            else " Pending input edits."
+            if pending
+            else ""
+        )
         self.setAccessibleDescription("Open this decision independently. Closing keeps pending edits." + status)
         self.setProperty("draftState", "error" if error else "pending" if pending else "normal")
 
@@ -459,7 +465,9 @@ def group_form_controls(window, form, title, keys, *, icon_name="settings", summ
 def open_focused_control(window, control):
     """Reveal a failed control in the inspector or its owned focused window."""
     changed = getattr(window, "_changed_controls", ())
-    key = next((name for name, candidate in getattr(window, "_draft_controls", {}).items() if candidate is control), None)
+    key = next(
+        (name for name, candidate in getattr(window, "_draft_controls", {}).items() if candidate is control), None
+    )
     if (
         isinstance(control, QAbstractSpinBox)
         and not control.isEnabled()

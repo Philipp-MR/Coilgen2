@@ -10,8 +10,8 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QDockWidget, QPushButton
 
 from coilgen.application import ProjectAssembly, ProjectDocument
+from coilgen.application import preflight
 from coilgen.application.presets import preset_config
-from coilgen.gui import readiness
 
 
 application = usability.application
@@ -277,7 +277,7 @@ def test_identical_designs_in_distinct_owned_channels_submit_independently(windo
 def test_unavailable_physical_solver_blocks_nonmodally_and_method_change_recovers(windows, monkeypatch):
     window = windows()
     original = window.project
-    monkeypatch.setattr(readiness, "find_spec", lambda _name: None)
+    monkeypatch.setattr(preflight, "find_spec", lambda _name: None)
 
     assert window.compute() is None
     assert not window.service.submissions

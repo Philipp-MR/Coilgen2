@@ -21,9 +21,15 @@ application = native.application
 
 def _state(job="a" * 32, **changes):
     return {
-        "id": job, "status": "running", "stage": "Preparing model", "progress": 0.2,
-        "request_sha256": "b" * 64, "project_id": "c" * 32,
-        "project_fingerprint": "d" * 64, "project_revision": 3, **changes,
+        "id": job,
+        "status": "running",
+        "stage": "Preparing model",
+        "progress": 0.2,
+        "request_sha256": "b" * 64,
+        "project_id": "c" * 32,
+        "project_fingerprint": "d" * 64,
+        "project_revision": 3,
+        **changes,
     }
 
 
@@ -35,7 +41,7 @@ def _write_manifest(jobs, state, content="prepared"):
 
 
 def _preview(directory, stage="prepared"):
-    return StagePreview(directory, {"pipeline_stage": stage}, {"vertices_m": np.array([[0., 0., 0.]])})
+    return StagePreview(directory, {"pipeline_stage": stage}, {"vertices_m": np.array([[0.0, 0.0, 0.0]])})
 
 
 def _wait(application, predicate, message="Background preview did not finish", timeout=3):
@@ -100,8 +106,10 @@ def test_loader_runs_off_ui_and_ready_returns_on_ui_with_detached_identity(contr
     assert calls[0][0] != main_thread and ready[0][0] == main_thread
     assert calls[0][1] == directory.resolve()
     assert calls[0][2] == {
-        "expected_request_sha256": "b" * 64, "expected_project_id": "c" * 32,
-        "expected_project_fingerprint": "d" * 64, "expected_project_revision": 3,
+        "expected_request_sha256": "b" * 64,
+        "expected_project_id": "c" * 32,
+        "expected_project_fingerprint": "d" * 64,
+        "expected_project_revision": 3,
     }
     assert controller.preview is ready[0][2] and controller.error is None
     assert changed and all(thread == main_thread for thread in changed)
@@ -290,10 +298,16 @@ def test_corrupt_announcement_keeps_last_good_preview_and_recovers_on_new_commit
     assert controller.preview is not good and controller.error is None
 
 
-@pytest.mark.parametrize("changes", [
-    {"id": "../outside"}, {"id": "C:/outside"}, {"request_sha256": "invalid"},
-    {"project_id": None}, {"project_fingerprint": ""},
-])
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"id": "../outside"},
+        {"id": "C:/outside"},
+        {"request_sha256": "invalid"},
+        {"project_id": None},
+        {"project_fingerprint": ""},
+    ],
+)
 def test_unverified_job_identity_never_reads_files(controllers, changes):
     _jobs, create, _releases = controllers
     calls = []

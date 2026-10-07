@@ -81,7 +81,9 @@ class _ChoiceTile(QAbstractButton):
         palette = self.palette()
         group = QPalette.ColorGroup.Active if self.isEnabled() else QPalette.ColorGroup.Disabled
         border = QPalette.ColorRole.Highlight if self.isChecked() or self.hasFocus() else QPalette.ColorRole.Mid
-        background = QPalette.ColorRole.AlternateBase if self.isChecked() or self.underMouse() else QPalette.ColorRole.Base
+        background = (
+            QPalette.ColorRole.AlternateBase if self.isChecked() or self.underMouse() else QPalette.ColorRole.Base
+        )
         painter.setPen(palette.color(group, border))
         painter.setBrush(palette.color(group, background))
         painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 7, 7)
@@ -243,7 +245,10 @@ class GraphicalChoiceCombo(QComboBox):
         self.grid.setRowStretch(max(1, (len(self.buttons) + self._columns - 1) // self._columns), 1)
 
     def _item_enabled(self, index):
-        return bool(self.model().flags(self.model().index(index, self.modelColumn(), self.rootModelIndex())) & Qt.ItemFlag.ItemIsEnabled)
+        return bool(
+            self.model().flags(self.model().index(index, self.modelColumn(), self.rootModelIndex()))
+            & Qt.ItemFlag.ItemIsEnabled
+        )
 
     def _sync_selection(self, *_args):
         for index, button in enumerate(self.buttons):
@@ -267,7 +272,9 @@ class GraphicalChoiceCombo(QComboBox):
 
     def _elide_selection(self):
         available = max(30, self.selected_button.width() - self.selected_button.iconSize().width() - 22)
-        self.selected_button.setText(self.fontMetrics().elidedText(self._selection_label, Qt.TextElideMode.ElideRight, available))
+        self.selected_button.setText(
+            self.fontMetrics().elidedText(self._selection_label, Qt.TextElideMode.ElideRight, available)
+        )
 
     def setCurrentIndex(self, index):
         super().setCurrentIndex(index)

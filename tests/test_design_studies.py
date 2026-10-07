@@ -182,6 +182,9 @@ def test_original_request_owner_and_result_owner_must_agree(tmp_path):
     metadata["metadata_sha256"] = result_metadata_digest(metadata)
     atomic_json(record.directory / "result.json", metadata)
     other = replace(project, id="different-owner")
+    with pytest.raises(ValueError, match="changed after it was selected"):
+        pin_baseline(other, record)
+    record = DesignService.load_run(record.directory)
     with pytest.raises(ValueError, match="identities disagree"):
         pin_baseline(other, record)
 

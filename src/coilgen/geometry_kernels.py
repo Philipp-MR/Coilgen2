@@ -298,9 +298,7 @@ def _segments_numpy(first, second):
     values = np.empty(len(first), dtype=np.float64)
     for start in range(0, len(first), 4096):
         a, b = first[start : start + 4096], second[start : start + 4096]
-        values[start : start + len(a)] = segment_distances(
-            a[:, 0], a[:, 1] - a[:, 0], b[:, 0], b[:, 1] - b[:, 0]
-        )
+        values[start : start + len(a)] = segment_distances(a[:, 0], a[:, 1] - a[:, 0], b[:, 0], b[:, 1] - b[:, 0])
     return values
 
 
@@ -312,16 +310,12 @@ def _triangles_numpy(first, second):
         best = np.full(len(a), np.inf)
         for i in range(3):
             j = (i + 1) % 3
-            hits = _segment_hits_triangle_numpy(a[:, i], a[:, j], b) | _segment_hits_triangle_numpy(
-                b[:, i], b[:, j], a
-            )
+            hits = _segment_hits_triangle_numpy(a[:, i], a[:, j], b) | _segment_hits_triangle_numpy(b[:, i], b[:, j], a)
             best[hits] = 0.0
             best = np.minimum(best, _point_triangle_sq_numpy(a[:, i], b))
             best = np.minimum(best, _point_triangle_sq_numpy(b[:, i], a))
             for k in range(3):
-                distances = segment_distances(
-                    a[:, i], a[:, j] - a[:, i], b[:, k], b[:, (k + 1) % 3] - b[:, k]
-                )
+                distances = segment_distances(a[:, i], a[:, j] - a[:, i], b[:, k], b[:, (k + 1) % 3] - b[:, k])
                 best = np.minimum(best, distances * distances)
         values[start : start + len(a)] = np.sqrt(np.maximum(best, 0.0))
     return values
@@ -407,4 +401,6 @@ def segment_pair_distances(first, second, *, backend="auto") -> DistanceResult:
 
 
 def triangle_pair_distances(first, second, *, backend="auto") -> DistanceResult:
-    return _run(first, second, vertices=3, backend=backend, reference=_triangles_reference, numpy_kernel=_triangles_numpy)
+    return _run(
+        first, second, vertices=3, backend=backend, reference=_triangles_reference, numpy_kernel=_triangles_numpy
+    )

@@ -9,6 +9,7 @@ import pytest
 
 import test_native_workbench as workbench_tests
 from coilgen.application import ProjectDocument
+from coilgen.application import preflight
 from coilgen.application.assets import mesh_asset
 from coilgen.application.presets import preset_config
 from coilgen.application.targets import SolidHarmonicTarget
@@ -28,7 +29,7 @@ def numeric_config():
 
 @pytest.mark.parametrize("geometry", ["cylinder", "cone", "cone_y20"])
 def test_valid_generated_models_need_no_imported_inputs_or_unused_solver(geometry, monkeypatch):
-    monkeypatch.setattr(readiness, "find_spec", lambda _name: pytest.fail("Unused solver checked"))
+    monkeypatch.setattr(preflight, "find_spec", lambda _name: pytest.fail("Unused solver checked"))
     monkeypatch.setattr(
         "coilgen.physics.calculate_sensitivity_matrix", lambda *_a, **_k: pytest.fail("Operator assembled")
     )
@@ -177,7 +178,7 @@ def test_invalid_mesh_indices_are_actionable_geometry_error(tmp_path):
 
 
 def test_physical_and_strict_solvers_block_only_when_actually_unavailable(monkeypatch):
-    monkeypatch.setattr(readiness, "find_spec", lambda _name: None)
+    monkeypatch.setattr(preflight, "find_spec", lambda _name: None)
     physical = ProjectDocument.from_config(preset_config())
     report = check_readiness(physical)
     assert not report.ready and report.blocking[-1].title == "Unavailable solver"
@@ -205,7 +206,7 @@ def test_valid_physical_examples_pass_with_actual_installed_conic_backend(geomet
 
 
 def test_explicit_uninstalled_backend_is_blocked_by_actual_solver_selector(monkeypatch):
-    monkeypatch.setattr(readiness, "find_spec", lambda _name: object())
+    monkeypatch.setattr(preflight, "find_spec", lambda _name: object())
     monkeypatch.setattr(
         "coilgen.optimization_solvers.conic_solver_order",
         lambda requested: conic_solver_order(requested, installed_solvers=()),
@@ -216,7 +217,7 @@ def test_explicit_uninstalled_backend_is_blocked_by_actual_solver_selector(monke
 
 
 def test_explicit_legacy_fallback_is_a_warning_not_silent_method_change(monkeypatch):
-    monkeypatch.setattr(readiness, "find_spec", lambda _name: None)
+    monkeypatch.setattr(preflight, "find_spec", lambda _name: None)
     project = ProjectDocument.from_config(
         replace(
             numeric_config(),
@@ -231,7 +232,7 @@ def test_explicit_legacy_fallback_is_a_warning_not_silent_method_change(monkeypa
 
 
 def test_preoptimized_stream_function_does_not_need_unused_solver(tmp_path, monkeypatch):
-    monkeypatch.setattr(readiness, "find_spec", lambda _name: pytest.fail("Unused solver checked"))
+    monkeypatch.setattr(preflight, "find_spec", lambda _name: pytest.fail("Unused solver checked"))
     path = tmp_path / "sf.npz"
     np.savez(path, stream_function=np.zeros(24))
     project = ProjectDocument.from_config(

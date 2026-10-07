@@ -3440,24 +3440,6 @@ def _draw_reference_meshes_3d(ax: Any, parts: Sequence[CoilPart]) -> None:
         _draw_reference_mesh_3d(ax, part)
 
 
-def _draw_mesh_3d(ax: Any, part: CoilPart) -> None:
-    vertices = part.mesh.vertices
-    try:
-        ax.plot_trisurf(
-            vertices[:, 0],
-            vertices[:, 1],
-            vertices[:, 2],
-            triangles=part.mesh.faces,
-            color=MESH_FACE_COLOR,
-            edgecolor=MESH_EDGE_COLOR,
-            linewidth=MESH_EDGE_LINEWIDTH,
-            alpha=MESH_FACE_ALPHA,
-            shade=False,
-        )
-    except Exception:
-        _draw_mesh_edges_3d(ax, part)
-
-
 def _draw_reference_mesh_3d(ax: Any, part: CoilPart) -> None:
     _draw_mesh_edges_3d(
         ax,

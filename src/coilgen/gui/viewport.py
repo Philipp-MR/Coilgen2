@@ -1739,7 +1739,8 @@ class ComparisonDialog(QDialog):
             column.addWidget(label)
             column.addWidget(pane, 1)
             row.addLayout(column, 1)
-            pane.display_run(record.arrays, metadata=record.metadata)
+            arrays = record.select_arrays(copy=False) if hasattr(record, "select_arrays") else record.arrays
+            pane.display_run(arrays, metadata=record.metadata)
         layout.addLayout(row, 1)
         footer = QHBoxLayout()
         self.scope = QLabel(

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 import json
+import logging
 from pathlib import Path
 from types import MappingProxyType
 from tempfile import TemporaryDirectory
@@ -38,7 +40,22 @@ class RunRecord:
 
     @property
     def arrays(self) -> dict[str, np.ndarray]:
-        return {name: value.copy() for name, value in self._arrays.items()}
+        return self.select_arrays()
+
+    @property
+    def array_names(self) -> tuple[str, ...]:
+        return tuple(self._arrays)
+
+    def array(self, name: str, *, copy: bool = True) -> np.ndarray:
+        """Copy one saved array, or explicitly borrow a read-only view."""
+        value = self._arrays[name]
+        return value.copy() if copy else value.view()
+
+    def select_arrays(self, names=None, *, copy: bool = True) -> dict[str, np.ndarray]:
+        """Avoid copying unrelated field maps; existing ``arrays`` stays detached."""
+        if isinstance(names, str):
+            raise TypeError("Array names must be a collection, not a single string.")
+        return {name: self.array(name, copy=copy) for name in (self.array_names if names is None else names)}
 
 
 class DesignService:
@@ -51,17 +68,42 @@ class DesignService:
 
         return validate_config(project.config, project_root=project.project_root)
 
+    @classmethod
+    def preflight(cls, project: ProjectDocument, *, pipeline_stage=None):
+        from .preflight import check_preflight
+
+        return check_preflight(project, validator=cls.validate, pipeline_stage=pipeline_stage)
+
+    @staticmethod
+    def plan(project: ProjectDocument, *, states=(), reuse=None, **request_controls):
+        from .execution import plan_execution
+
+        return plan_execution(project, states=states, reuse=reuse, **request_controls)
+
+    @classmethod
+    def submit_plan(cls, project: ProjectDocument, jobs, plan):
+        """Reject stale plans and recheck execution state before submitting."""
+        from .execution import matches_active_request
+        from ..research.jobs import JobManager
+
+        plan.require_current(project)
+        controls = plan.request_controls()
+        if isinstance(jobs, JobManager):
+            return cls.submit(project, jobs, reuse_active=True, **controls)
+        existing = next((state for state in jobs.list() if matches_active_request(state, project, controls)), None)
+        return existing if existing is not None else cls.submit(project, jobs, **controls)
+
     @staticmethod
     def prepare(project: ProjectDocument, output_dir: str | Path, **request_controls):
-        DesignService.validate(project).raise_for_errors()
+        DesignService.preflight(project, pipeline_stage=request_controls.get("pipeline_stage")).raise_for_errors()
         request_controls.setdefault("project_fingerprint", project.fingerprint)
         return project.snapshot(output_dir, **request_controls)
 
     @classmethod
-    def submit(cls, project: ProjectDocument, jobs, **request_controls) -> dict:
+    def submit(cls, project: ProjectDocument, jobs, *, reuse_active=False, **request_controls) -> dict:
         root = Path(jobs.directory) / "inputs" / project.id / project.fingerprint
         request = cls.prepare(project, root, **request_controls)
-        state = jobs.submit(request)
+        state = jobs.submit(request, reuse_active=True) if reuse_active else jobs.submit(request)
         state.update(
             project_id=project.id,
             project_revision=project.revision,
@@ -71,7 +113,59 @@ class DesignService:
         return state
 
     @classmethod
-    def run(cls, project: ProjectDocument, output_dir: str | Path, *, threads: int = 1, **request_controls) -> dict:
+    def run(
+        cls,
+        project: ProjectDocument,
+        output_dir: str | Path,
+        *,
+        threads: int = 1,
+        progress=None,
+        cancel_check=None,
+        **request_controls,
+    ) -> dict:
+        """Run with optional typed events and cooperative engine cancellation.
+
+        A returned cached result is evidence availability, not new computation.
+        Cancellation uses the engine's existing checks; it cannot interrupt an
+        external solver at an arbitrary instruction.
+        """
+        from ..progress import DesignCancelled, progress_context
+        from .execution import ExecutionEvent
+
+        for callback in (progress, cancel_check):
+            if callback is not None and not callable(callback):
+                raise TypeError("Progress and cancellation callbacks must be callable.")
+
+        def emit(event):
+            if progress is not None:
+                try:
+                    progress(event)
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("Progress observer failed: %s", exc)
+
+        def sink(event):
+            emit(ExecutionEvent.from_progress(event))
+
+        context = (
+            progress_context(sink, cancel_check) if progress is not None or cancel_check is not None else nullcontext()
+        )
+        emit(ExecutionEvent("started", payload={"project_id": project.id, "project_revision": project.revision}))
+        try:
+            with context:
+                if cancel_check is not None and cancel_check():
+                    raise DesignCancelled("Design cancelled by the user.")
+                result = cls._run(project, output_dir, threads=threads, **request_controls)
+        except DesignCancelled as exc:
+            emit(ExecutionEvent("cancelled", str(exc)))
+            raise
+        except Exception as exc:
+            emit(ExecutionEvent("failed", str(exc)))
+            raise
+        emit(ExecutionEvent("result_available", payload={"request_sha256": result.get("request_sha256")}))
+        return result
+
+    @classmethod
+    def _run(cls, project: ProjectDocument, output_dir: str | Path, *, threads: int = 1, **request_controls) -> dict:
         """Run or replay an identical verified result; never replace completed history.
 
         The same OS directory lock is used by legacy runners and the application.
@@ -142,20 +236,15 @@ class DesignService:
         }
 
     @staticmethod
-    def load_run(directory: str | Path) -> RunRecord:
+    def load_run(directory: str | Path, *, array_names=None) -> RunRecord:
+        """Verify all evidence, optionally decompressing only selected NPZ arrays."""
+        from .evidence import verified_run_metadata
+
+        if isinstance(array_names, str):
+            raise TypeError("Array names must be a collection, not a single string.")
+        names = None if array_names is None else tuple(array_names)
         directory = Path(directory).expanduser().resolve()
-        result = json.loads((directory / "result.json").read_text(encoding="utf-8"))
-        if not isinstance(result, dict):
-            raise ValueError("Malformed run result.")
-        digest = result.get("request_sha256")
-        if not isinstance(digest, str) or verified_result(directory, digest) is None:
-            raise ValueError("Run is incomplete or its artifact integrity check failed.")
-        manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
-        if not isinstance(manifest, dict):
-            raise ValueError("Malformed run manifest.")
-        if manifest.get("request_sha256") != digest:
-            raise ValueError("Run request and manifest identity disagree.")
-        verify_input_files(manifest, relocated_root=directory)
+        result, _manifest, _verification = verified_run_metadata(directory)
         arrays = {}
         for artifact in result["artifacts"]:
             if artifact.get("kind") != "npz":
@@ -164,7 +253,12 @@ class DesignService:
             if path.name != "scientific_result.npz":
                 continue
             with np.load(path, allow_pickle=False) as data:
-                arrays = {key: np.array(data[key], copy=True) for key in data.files}
+                selected = data.files if names is None else names
+                arrays = {key: data[key] for key in selected}
+        if names is not None and set(names) - set(arrays):
+            raise KeyError(
+                "Requested scientific arrays are unavailable: " + ", ".join(sorted(set(names) - set(arrays)))
+            )
         job = directory / "job.json"
         if job.is_file():
             result["job"] = json.loads(job.read_text(encoding="utf-8"))

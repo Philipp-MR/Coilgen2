@@ -118,40 +118,18 @@ Primary sources:
   K-Space*, IEEE Transactions on Medical Imaging, 2025,
   https://arxiv.org/abs/2505.07117.
 
-## Near-Term Project Improvements
+## Current implementation and remaining work
 
-For an implementation-oriented breakdown of these items, see
-[Detailed Improvement Roadmap](IMPROVEMENT_ROADMAP.md).
+General field components, current-density and concomitant-field reports, and
+constrained minimax objectives are implemented. See
+[Physical Assumptions](PHYSICAL_ASSUMPTIONS.md),
+[Stream-function optimization](STREAM_FUNCTION_OPTIMIZATION.md) and
+[Headless physical design](RESEARCH_PHYSICS_API.md) for their scope and limits.
 
-1. Generalize target components.
-   Keep the current Bz-first API, but add an expert path for vector targets and
-   `B dot b0_hat` targets. This makes conventional MRI, Halbach systems, shim
-   coils, and non-MRI field-shaping applications fit the same data model.
-
-2. Add concomitant-field reports.
-   For MRI gradient use, report the Maxwell concomitant-field estimate over the
-   DSV using the fitted layout gradient, configured B0 strength, and B0
-   direction.
-
-3. Add current-density and thermal screening.
-   Current density is already easy to compute from fitted current and conductor
-   cross-section. Extend reports with `A/mm^2`, duty-cycle inputs, RMS current,
-   average `I^2R`, and warning thresholds.
-
-4. Add minimax or peak-current-density optimization.
-   Resistance minimization reduces global Ohmic power, but it can still produce
-   local current-density hot spots. A minimax mode would directly target
-   manufacturability and pulsed-heating risk.
-
-5. Add PNS/vector-potential export hooks.
-   Even a first pass that writes vector-potential maps, gradient impulse fields,
-   and coil inductance/resistance in standard tables would let downstream tools
-   evaluate PNS and waveform constraints.
-
-6. Promote application templates.
-   Present conventional gradient, portable/Halbach-like B0, shim coil, local
-   nonlinear gradient, active shielding, and arbitrary imported target-field
-   templates beside any project-specific studies.
+Duty-cycle/cooling models, complete terminals and leads, winding order, and
+validated downstream waveform/PNS/eddy-current analysis remain engineering
+work. The [Engineering Roadmap](IMPROVEMENT_ROADMAP.md) keeps those open items
+and their validation criteria.
 
 ## Documentation Rule
 

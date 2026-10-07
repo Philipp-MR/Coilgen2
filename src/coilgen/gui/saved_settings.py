@@ -2,47 +2,13 @@
 
 from __future__ import annotations
 
-from hashlib import sha256
 import json
 
 from PySide6.QtCore import QObject, QRunnable, Qt, Signal
 from PySide6.QtWidgets import QDialog, QLabel, QPlainTextEdit, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout
 
-from ..application.service import DesignService
-from ..research.requests import ResearchRequest
-from ..research.storage import result_metadata_digest
-
-
-class SavedEvidenceError(ValueError):
-    """An inspected saved source failed verification, rather than lacking settings."""
-
-
-def load_saved_request(record):
-    """Reverify the selected identity; never infer inputs from current settings."""
-    try:
-        verified = DesignService.load_run(record.directory)
-    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
-        raise SavedEvidenceError(str(exc)) from exc
-    original = {key: value for key, value in record.metadata.items() if key != "job"}
-    metadata = {key: value for key, value in verified.metadata.items() if key != "job"}
-    if result_metadata_digest(original) != result_metadata_digest(metadata):
-        raise SavedEvidenceError("The saved result changed since it was selected. Reopen the intended run.")
-    artifact = next((item for item in metadata.get("artifacts", ()) if item.get("name") == "request.json"), None)
-    if artifact is None or not artifact.get("sha256"):
-        raise ValueError("This run has no verified original request.json; its saved settings cannot be inferred.")
-    try:
-        raw = (verified.directory / "request.json").read_bytes()
-    except OSError as exc:
-        raise SavedEvidenceError("The verified original request is no longer readable: " + str(exc)) from exc
-    if sha256(raw).hexdigest() != artifact["sha256"]:
-        raise SavedEvidenceError("The original request failed integrity verification.")
-    try:
-        request = ResearchRequest.from_dict(json.loads(raw))
-    except (ValueError, TypeError, KeyError) as exc:
-        raise SavedEvidenceError("The verified original request is invalid: " + str(exc)) from exc
-    if request.project_id != metadata.get("project_id") or request.project_revision != metadata.get("project_revision"):
-        raise SavedEvidenceError("The original request and result have different project/revision identities.")
-    return request.to_dict()
+from ..application.evidence import EvidenceIntegrityError as SavedEvidenceError
+from ..application.evidence import load_saved_request as load_saved_request
 
 
 class _Signals(QObject):

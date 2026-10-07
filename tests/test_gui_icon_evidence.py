@@ -11,7 +11,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QCoreApplication, QEvent, Qt
+from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtWidgets import QApplication, QPushButton
 
 from coilgen.application.cad import GeometryOption
@@ -27,7 +27,6 @@ from coilgen.gui.export_panel import GeometryExportPanel
 from coilgen.gui.history import HistoryPanel
 from coilgen.gui.problems import ProblemsPanel, _problem_icon
 from coilgen.gui.readiness import ReadinessIssue, ReadinessPanel
-from coilgen.gui.workflow import WORKFLOW_STEPS, WorkflowNavigation
 
 
 @pytest.fixture(scope="module")
@@ -55,20 +54,6 @@ def _assert_labelled(button):
     assert not button.icon().isNull()
     assert button.text()
     assert button.accessibleName()
-
-
-def test_workflow_icons_select_sections_without_marking_them_accepted(widgets):
-    panel = widgets(WorkflowNavigation)
-    received = []
-    panel.step_requested.connect(received.append)
-    for step, label, _explanation in WORKFLOW_STEPS:
-        button = panel.buttons[step]
-        _assert_labelled(button)
-        assert button.text() == label
-        assert button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonTextBesideIcon
-        assert "not accepted" in button.accessibleDescription()
-        button.click()
-        assert panel.current_step == step and received[-1] == step
 
 
 def test_stage_badges_use_saved_evidence_and_do_not_promote_evaluated_fields(widgets):

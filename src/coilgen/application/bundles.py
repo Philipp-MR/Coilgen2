@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 
 from ..research.storage import result_metadata_digest
+from .evidence import EvidenceIntegrityError, verify_record
 from .service import DesignService, RunRecord
 
 
@@ -141,9 +142,9 @@ class RunArchive:
 
     @classmethod
     def capture(cls, record: RunRecord, alias: str | None = None):
-        verified = DesignService.load_run(record.directory)
+        verified = verify_record(record)
         directory = verified.directory
-        result = json.loads((directory / "result.json").read_bytes())
+        result = {key: value for key, value in verified.metadata.items() if key != "job"}
         names = {"result.json", "manifest.json", "request.json"}
         names.update(_relative_name(item["name"]) for item in result["artifacts"])
         files = {}
@@ -152,6 +153,10 @@ class RunArchive:
             if not path.is_relative_to(directory):
                 raise ValueError("Archived artifact leaves the source run directory.")
             files[name] = path.read_bytes()
+        if result_metadata_digest(json.loads(files["result.json"])) != result_metadata_digest(result):
+            raise EvidenceIntegrityError(
+                "Saved run metadata changed while its archive was being captured. Reload the run."
+            )
         manifest = json.loads(files["manifest.json"])
         for item in manifest.get("input_files", {}).values():
             expected = _digest(item["sha256"])

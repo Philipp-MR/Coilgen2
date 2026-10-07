@@ -142,7 +142,15 @@ class JobManager:
             self._owner.close()
             raise
 
-    def submit(self, value: ResearchRequest | dict) -> dict:
+    def submit(self, value: ResearchRequest | dict, *, reuse_active: bool = False) -> dict:
+        """Queue work, optionally reusing an exactly identified active request.
+
+        Reuse checks stored provenance and study controls under the queue lock.
+        Missing legacy controls never establish a match. Ordinary submissions
+        continue to create independent jobs, including identical requests.
+        """
+        if not isinstance(reuse_active, bool):
+            raise TypeError("reuse_active must be a boolean.")
         request = ResearchRequest.from_dict(value.to_dict() if isinstance(value, ResearchRequest) else value)
         config = request.to_config(threads=self.policy.threads_per_worker)
         controls = {key: item for key, item in request.to_dict().items() if key not in {"name", "config"}}
@@ -150,6 +158,34 @@ class JobManager:
         with self._lock:
             if self._stop.is_set():
                 raise RuntimeError("The runtime is shutting down.")
+            if (
+                reuse_active
+                and request.project_id.strip()
+                and request.project_fingerprint.strip()
+                and request.project_revision is not None
+            ):
+                identity = (
+                    "project_id",
+                    "project_fingerprint",
+                    "project_revision",
+                    "pipeline_stage",
+                    "validation_resolution",
+                    "design_margin",
+                    "fabricate",
+                    "kernel_backend",
+                )
+                candidate_digest = None
+                for state in reversed(self._states.values()):
+                    if state.get("status") in {"queued", "running", "cancelling"} and all(
+                        key in state and state[key] == getattr(request, key) for key in identity
+                    ):
+                        # Project fingerprints are caller-supplied provenance.
+                        # Also prove actual numerical settings, input contents,
+                        # checkpoint bytes, engine source and solver versions.
+                        if candidate_digest is None:
+                            candidate_digest, _manifest = request_identity(request.to_dict(), asdict(config))
+                        if state.get("request_sha256") == candidate_digest:
+                            return deepcopy(state)
             pending = sum(s["status"] in {"queued", "running", "cancelling"} for s in self._states.values())
             if pending >= self.policy.max_pending:
                 raise ValueError(f"The queue is full ({self.policy.max_pending} pending jobs).")
@@ -206,6 +242,10 @@ class JobManager:
                 "project_fingerprint": request.project_fingerprint,
                 "project_model_fingerprint": request.project_model_fingerprint,
                 "pipeline_stage": request.pipeline_stage,
+                "validation_resolution": request.validation_resolution,
+                "design_margin": request.design_margin,
+                "fabricate": request.fabricate,
+                "kernel_backend": request.kernel_backend,
                 "completed_stage": None,
                 "completed_stages": [],
             }

@@ -114,7 +114,9 @@ def _publish(window, state, stage):
     directory = preview.directory
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "stage_preview.json").write_text(stage, encoding="utf-8")
-    window.jobs.states[0].update(status="running", stage=f"Computing after {stage}", completed_stages=preview.metadata["completed_stages"])
+    window.jobs.states[0].update(
+        status="running", stage=f"Computing after {stage}", completed_stages=preview.metadata["completed_stages"]
+    )
     window.poll_jobs()
     return preview
 
@@ -143,13 +145,20 @@ def test_actual_stage_previews_update_graphics_without_creating_results(window):
     state = window.compute()
     for stage in KEYS:
         preview = _publish(window, state, stage)
-        _wait(lambda: window.viewport.stage_preview_metadata is not None and window.viewport.stage_preview_metadata["pipeline_stage"] == stage)
+        _wait(
+            lambda: (
+                window.viewport.stage_preview_metadata is not None
+                and window.viewport.stage_preview_metadata["pipeline_stage"] == stage
+            )
+        )
         np.testing.assert_array_equal(window.viewport.stage_arrays["target_field_T"], preview.arrays["target_field_T"])
         assert window.view_context.context.source == "live"
         assert f"Live {stage}" in window.view_context.context.viewing_text
         assert window.runs == {}
         assert window._selected_run is None
-        assert sum(item.status == "complete" for item in window.design_progress.snapshot.stages) == KEYS.index(stage) + 1
+        assert (
+            sum(item.status == "complete" for item in window.design_progress.snapshot.stages) == KEYS.index(stage) + 1
+        )
         assert all(window.stage_items[key].text(1) == "Computed" for key in KEYS[: KEYS.index(stage) + 1])
         assert window._workbench_view_state()["source"] == "model"
         assert window._workbench_view_state()["dataset"] == "preview_target"

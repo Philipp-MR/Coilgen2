@@ -504,6 +504,7 @@ def test_stage_status_fits_inside_narrow_model_tree(windows, application):
     window.states["failed"] = {
         "project_id": window.project.id,
         "project_fingerprint": window.project.fingerprint,
+        "project_revision": window.project.revision,
         "pipeline_stage": "evaluated",
         "status": "failed",
     }

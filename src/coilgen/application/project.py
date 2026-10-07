@@ -321,20 +321,7 @@ class ProjectDocument:
     def update_study(self, changes: Mapping[str, Any]) -> ProjectDocument:
         if not isinstance(changes, Mapping):
             raise TypeError("Study changes must be a mapping.")
-        values = _study({**self.study, **dict(changes)})
-        if values == self.study:
-            return self
-        return ProjectDocument(
-            self.id,
-            self.name,
-            self.revision + 1,
-            self._values,
-            self._assets,
-            self.project_root,
-            _study=values,
-            _runs=self._runs,
-            _session=self._session,
-        )
+        return self.update_inputs(study_changes=changes)
 
     def rename(self, name: str) -> ProjectDocument:
         if name == self.name:
@@ -380,15 +367,49 @@ class ProjectDocument:
         """
         if not isinstance(changes, Mapping):
             raise TypeError("Configuration changes must be a mapping.")
+        return self.update_inputs(config_changes=changes, allow_incomplete=allow_incomplete)
+
+    def update_inputs(
+        self,
+        config_changes: Mapping[str, Any] | None = None,
+        study_changes: Mapping[str, Any] | None = None,
+        *,
+        allow_incomplete: bool = False,
+        expected_fingerprint: str | None = None,
+    ) -> ProjectDocument:
+        """Commit config and study drafts as one immutable revision.
+
+        Both mappings are validated before publishing a document. An optional
+        baseline fingerprint rejects stale drafts before reading new inputs.
+        Only changed config values trigger numerical configuration validation;
+        study-only edits retain the existing incomplete-project behavior.
+        Untouched native values, input ownership, results and session survive.
+        """
+        if config_changes is not None and not isinstance(config_changes, Mapping):
+            raise TypeError("Configuration changes must be a mapping.")
+        if study_changes is not None and not isinstance(study_changes, Mapping):
+            raise TypeError("Study changes must be a mapping.")
         if not isinstance(allow_incomplete, bool):
             raise TypeError("allow_incomplete must be a boolean.")
+        if expected_fingerprint is not None:
+            if not isinstance(expected_fingerprint, str) or not expected_fingerprint:
+                raise TypeError("Expected fingerprint must be a nonempty string.")
+            if expected_fingerprint != self.fingerprint:
+                raise ValueError("The project changed after this draft was created; reload or resolve the draft.")
+        changes = {} if config_changes is None else dict(config_changes)
         unknown = set(changes) - _CONFIG_FIELDS
         if unknown:
             raise ValueError(f"Unknown CoilGenConfig settings: {', '.join(sorted(unknown))}")
+        study = self.study if study_changes is None else _study({**self.study, **deepcopy(dict(study_changes))})
         values = json_value(self._values)
-        values.update(deepcopy(dict(changes)))
-        captured, assets = self._capture(CoilGenConfig(**values), self.project_root, self._assets)
-        if captured == json_value(self._values):
+        values.update(deepcopy(changes))
+        captured, assets = (
+            self._capture(CoilGenConfig(**values), self.project_root, self._assets)
+            if changes
+            else (values, self._assets)
+        )
+        config_changed = captured != json_value(self._values)
+        if not config_changed and study == self.study:
             return self
         updated = ProjectDocument(
             self.id,
@@ -397,10 +418,12 @@ class ProjectDocument:
             captured,
             assets,
             self.project_root,
-            _study=self._study,
+            _study=study,
             _runs=self._runs,
             _session=self._session,
         )
+        if not config_changed:
+            return updated
         from ..config_validation import ConfigValidationReport, validate_config
 
         try:
@@ -556,8 +579,6 @@ class ProjectDocument:
         from ..research.requests import ResearchRequest
 
         directory = Path(directory).expanduser().resolve()
-        config = self._resolved_config(directory / "inputs")
-        config.output_directory = directory
         controls = {**self.study, **request_controls}
         for key, value in (
             ("project_fingerprint", self.fingerprint),
@@ -568,6 +589,11 @@ class ProjectDocument:
             if key in request_controls and request_controls[key] != value:
                 raise ValueError(f"Snapshot {key} must identify this project revision.")
             controls[key] = value
+        # Reject malformed controls/provenance before materializing owned
+        # assets. A rejected request must not create a partial output snapshot.
+        ResearchRequest(name=self.name, config=self.values, **controls)
+        config = self._resolved_config(directory / "inputs")
+        config.output_directory = directory
         return ResearchRequest.from_config(config, name=self.name, **controls)
 
     def export_script(self, path: str | Path) -> Path:

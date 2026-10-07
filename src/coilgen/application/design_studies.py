@@ -12,6 +12,7 @@ from ..research.requests import ResearchRequest
 from ..research.storage import result_metadata_digest
 from .assets import InputAsset
 from .bundles import RunArchive
+from .evidence import read_verified_artifact, verify_record
 from .project import ProjectDocument, _CONFIG_FIELDS, _INPUT_FIELDS, _values
 from .service import DesignService, RunRecord
 
@@ -161,7 +162,7 @@ def _with_state(project, state):
 
 
 def _owned_record(project, record):
-    verified = DesignService.load_run(record.directory if isinstance(record, RunRecord) else record)
+    verified = verify_record(record) if isinstance(record, RunRecord) else DesignService.load_run(record)
     if verified.metadata.get("project_id") != project.id:
         raise ValueError("This operation requires a verified run owned by the current project.")
     if not any(
@@ -169,7 +170,7 @@ def _owned_record(project, record):
         for artifact in verified.metadata.get("artifacts", ())
     ):
         raise ValueError("Design studies require an integrity-checked original request.json artifact.")
-    request = json.loads((verified.directory / "request.json").read_bytes())
+    request = json.loads(read_verified_artifact(verified, "request.json"))
     if (
         not isinstance(request, dict)
         or request.get("project_id") != project.id

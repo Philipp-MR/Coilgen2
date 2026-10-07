@@ -25,6 +25,20 @@ the support mesh. Contours of this scalar function become wire turns. The
 stream-function solution is the magnetostatic inverse-design result before
 discrete routing.
 
+The numerical core uses nodal, piecewise-linear stream-function basis functions
+on each vertex's incident triangles. Their surface currents are constant within
+each triangle; Biot-Savart integration maps those currents to the target points.
+The sensitivity operator uses configurable Gaussian triangle quadrature; mesh
+refinement and quadrature convergence are separate numerical checks.
+Boundary-loop constants and gauge reduction determine the allowed current paths
+and independent unknowns, so changing them changes the physical problem.
+
+Resistance regularization uses the quadratic sheet-loss form `psi.T R psi`.
+Applying `R.T R` instead changes the objective. See
+[Physical Assumptions](PHYSICAL_ASSUMPTIONS.md) and
+[Stream-function optimization](STREAM_FUNCTION_OPTIMIZATION.md) for the actual
+objectives, reduction and acceptance contracts.
+
 ## Contours
 
 Contours are closed level sets of the stream function. Their spacing and number

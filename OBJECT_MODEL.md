@@ -1,8 +1,8 @@
 # CoilGen Object Model
 
-This note describes the high-level classes intended for future user-facing APIs
-for physicists, MR scientists, coil engineers, and application developers. They
-are additive and do not replace the existing `CoilGenConfig` pipeline yet.
+These public classes describe design problems, channels and parameter studies.
+They convert to the existing `CoilGenConfig` pipeline and preserve its numerical
+execution path.
 
 ## Main Classes
 
@@ -59,6 +59,20 @@ Keep geometry, target fields, optimization settings, layout settings, and
 evaluation metrics separate. This makes parameter studies cleaner: one can vary
 the support body geometry while keeping DSV, active-shielding target points,
 conductor, and optimization criterion fixed.
+
+## Internal array conventions
+
+Python `Mesh.vertices` and `Mesh.faces` have shapes `(n_vertices, 3)` and
+`(n_faces, 3)`; face indices are zero-based. `TargetField.coords` and `b` use
+`(n_points, 3)` with Cartesian components in the last axis. MATLAB reference
+arrays commonly use `3-by-N` coordinates and one-based faces, so convert both
+orientation and indexing at the import boundary. Retain coordinate frames, SI
+units, face winding and boundary-loop identity when comparing implementations.
+
+Each `CoilPart` retains one disconnected support component's mesh, basis,
+operators, stream function, contours and conductor paths. Its sensitivity array
+uses `(3, n_target_points, n_basis_nodes)`, unlike point-cloud field arrays.
+`CoilGenResult` combines the parts, target, evaluated fields and diagnostics.
 
 ## Current Integration Status
 

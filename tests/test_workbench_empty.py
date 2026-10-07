@@ -46,7 +46,9 @@ def test_empty_startup_has_no_hidden_default_document(window):
     assert window.workspace_stack.currentWidget() is window.welcome
     assert window.welcome.isVisible()
     assert {button.objectName() for button in window.welcome.findChildren(QPushButton)} == {
-        "welcome_new_project", "welcome_open_project", "welcome_load_template"
+        "welcome_new_project",
+        "welcome_open_project",
+        "welcome_load_template",
     }
     assert window.findChild(QDockWidget, "model_dock").isHidden()
     assert window.findChild(QToolBar, "study_toolbar").isHidden()
@@ -143,10 +145,15 @@ def test_explicit_template_has_one_compute_and_tree_navigation(window, applicati
     assert window.tree.isVisible()
     assert window.compute_button.isVisible()
     assert window.stage_selector.isHidden()
-    assert [button for button in window.findChildren(QPushButton)
-            if button.isVisible() and button.objectName() == "primary_compute"] == [window.compute_button]
-    assert not any(button.isVisible() and button.text() in {"Brief", "Jobs", "Results", "History"}
-                   for button in window.workspace.findChildren(QPushButton))
+    assert [
+        button
+        for button in window.findChildren(QPushButton)
+        if button.isVisible() and button.objectName() == "primary_compute"
+    ] == [window.compute_button]
+    assert not any(
+        button.isVisible() and button.text() in {"Brief", "Jobs", "Results", "History"}
+        for button in window.workspace.findChildren(QPushButton)
+    )
     assert window.service.submissions == []
 
 
@@ -163,7 +170,9 @@ def test_blank_target_popup_only_changes_field_after_explicit_tile_choice(window
     assert isinstance(control, GraphicalChoiceCombo)
     assert control.currentIndex() == -1
     assert [control.itemText(index) for index in range(control.count())] == [
-        "Linear gradient", "Analytic expression", "Spherical harmonic"
+        "Linear gradient",
+        "Analytic expression",
+        "Spherical harmonic",
     ]
     QTest.mouseClick(section.button, Qt.MouseButton.LeftButton)
     application.processEvents()

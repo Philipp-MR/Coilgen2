@@ -1340,16 +1340,6 @@ def _sweep_lateral_quad_metrics(vertices, ring_count, section_count, *, closed, 
     return (a, b, c, d), use_alternate, selected_folds, selected_aspects, selected_dots
 
 
-def _quad_triangulation_metrics(
-    vertices: np.ndarray,
-    triangles: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return fold flags, worst altitude aspects, and normal dots per quad."""
-
-    coordinates = vertices[np.asarray(triangles, dtype=np.int64)]
-    return _quad_coordinate_metrics(coordinates)
-
-
 def _quad_coordinate_metrics(coordinates):
     normals = np.cross(
         coordinates[:, :, 1] - coordinates[:, :, 0],

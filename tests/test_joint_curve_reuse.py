@@ -227,6 +227,7 @@ def test_failed_or_interrupted_coupling_queries_are_retried_without_cached_score
         work.spatial_pairs = work.limits.maximum_spatial_pairs
         expected_error = shapes._DistanceBudgetExceeded
     else:
+
         def cancel(_diagnostics):
             raise RuntimeError("cancelled")
 

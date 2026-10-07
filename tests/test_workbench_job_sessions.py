@@ -178,13 +178,39 @@ def test_reusing_matching_earlier_active_job_does_not_claim_its_submission(sessi
         status="running",
         project_id=project.id,
         project_fingerprint=project.fingerprint,
-        pipeline_stage=project.study["pipeline_stage"],
+        project_revision=project.revision,
+        **project.study,
     )
     window, _ = session_windows(project, (prior,))
     state = window.compute()
     assert state["id"] == prior["id"]
     assert not window.service.submissions
     assert not window._session_job_ids
+    assert _item(window, prior["id"], "Session").text() == "Earlier session"
+
+
+@pytest.mark.parametrize("difference", ["missing_revision", "missing_backend", "different_validation"])
+def test_unproven_or_different_earlier_active_request_does_not_replace_new_submission(session_windows, difference):
+    project = ProjectDocument.from_config(preset_config()).update_study(preset_study())
+    prior = _state(
+        "earlier-request",
+        status="running",
+        project_id=project.id,
+        project_fingerprint=project.fingerprint,
+        project_revision=project.revision,
+        **project.study,
+    )
+    if difference == "missing_revision":
+        prior.pop("project_revision")
+    elif difference == "missing_backend":
+        prior.pop("kernel_backend")
+    else:
+        prior["validation_resolution"] += 1
+    window, _ = session_windows(project, (prior,))
+    state = window.compute()
+    assert state["id"] != prior["id"]
+    assert len(window.service.submissions) == 1
+    assert window._session_job_ids == {state["id"]}
     assert _item(window, prior["id"], "Session").text() == "Earlier session"
 
 
