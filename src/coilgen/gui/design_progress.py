@@ -103,6 +103,79 @@ def _percent(value):
     return round(value * 100) if math.isfinite(value) and 0 <= value <= 1 else None
 
 
+class ComputationIndicator(QWidget):
+    """Persistent runtime activity, independent of the viewed design or result."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("computing_indicator")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.label = QLabel(self)
+        self.label.setObjectName("computing_label")
+        self.label.setTextFormat(Qt.TextFormat.PlainText)
+        self.label.setAccessibleName("Current computation activity")
+        font = self.label.font()
+        font.setBold(True)
+        self.label.setFont(font)
+        layout.addWidget(self.label)
+        self.progress = QProgressBar(self)
+        self.progress.setFixedSize(36, 10)
+        self.progress.setTextVisible(False)
+        layout.addWidget(self.progress)
+        self.message = QLabel(self)
+        self.message.setTextFormat(Qt.TextFormat.PlainText)
+        self.message.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        layout.addWidget(self.message, 1)
+        self.hide()
+
+    def set_activity(self, states=(), *, working=(), unavailable=None):
+        active = [state for state in states if state.get("status") in {"running", "cancelling"}]
+        queued = [state for state in states if state.get("status") == "queued"]
+        percent = None
+        busy = bool(active or working)
+        details = []
+        if unavailable:
+            text, busy = "Activity unavailable", False
+            details.append(unavailable)
+        elif active:
+            cancelling = all(state["status"] == "cancelling" for state in active)
+            if len(active) > 1:
+                text = f"{'Cancelling' if cancelling else 'Computing'} ({len(active)} jobs)"
+            elif cancelling:
+                text = "Cancelling…"
+            else:
+                percent = _percent(active[0].get("progress"))
+                text = f"Computing ({percent}%)" if percent is not None else "Computing…"
+            for state in active:
+                value = _percent(state.get("progress"))
+                details.append(
+                    f"{state.get('name') or state.get('id') or 'Worker'}: {state['status']}"
+                    + (f" ({value}%)" if value is not None else "")
+                    + (f" · {state['stage']}" if state.get("stage") else "")
+                )
+            details.append("Worker-reported progress; multiple jobs have no combined percentage.")
+        elif working:
+            text = "Working…"
+        elif queued:
+            text = "Queued" if len(queued) == 1 else f"Queued ({len(queued)} jobs)"
+            details.append("Waiting for an available worker; computation has not started.")
+        else:
+            self.label.clear()
+            self.hide()
+            return
+        details.extend(working)
+        self.label.setText(text)
+        self.setToolTip("\n".join(details))
+        self.label.setToolTip(self.toolTip())
+        self.progress.setVisible(busy)
+        self.progress.setRange(0, 100 if percent is not None else 0)
+        if percent is not None:
+            self.progress.setValue(percent)
+        apply_tone(self.label, "warning" if unavailable else "info")
+        self.show()
+
+
 def build_design_progress(
     requested_stage,
     state=None,

@@ -112,7 +112,7 @@ from .workspace_windows import EvidenceWindows, PanelWindow
 from .view_context import ViewContextHeader, build_view_context
 from .conductor_preview import ConductorPreview
 from .conductor_profile import ConductorProfileEditor
-from .design_progress import DesignProgress
+from .design_progress import ComputationIndicator, DesignProgress
 from .live_preview import LivePreviewController
 
 
@@ -349,6 +349,9 @@ class CoilGenWorkbench(QMainWindow):
         self._build_settings_dock()
         self._build_evidence_windows()
         self._build_actions()
+        self.computation_indicator = ComputationIndicator(self)
+        self.statusBar().addPermanentWidget(self.computation_indicator, 1)
+        self.statusBar().messageChanged.connect(self._refresh_computation_indicator)
         self.live_preview.preview_ready.connect(self._show_live_preview)
         self.live_preview.changed.connect(self._refresh_design_progress)
         for name in ("dataset", "inspection_task"):
@@ -3294,6 +3297,7 @@ class CoilGenWorkbench(QMainWindow):
             )
 
     def _show_preflight(self, info):
+        self._refresh_computation_indicator()
         if self.project is None:
             return
         self._preflight = info
@@ -3991,6 +3995,7 @@ class CoilGenWorkbench(QMainWindow):
 
     def _saved_settings_finished(self, request, error):
         task, self._saved_settings_task = self._saved_settings_task, None
+        self._refresh_computation_indicator()
         if error:
             if task is not None and task.verification_error:
                 source = next(
@@ -4710,6 +4715,7 @@ class CoilGenWorkbench(QMainWindow):
 
     def _gradient_action_finished(self, value, error):
         task, callback, label = self._gradient_tasks.pop(self.sender())
+        self._refresh_computation_indicator()
         if error:
             self._error(f"{label}: {error}")
         elif self.project is None or task.project is not self.project or self._has_input_drafts():
@@ -5094,13 +5100,17 @@ class CoilGenWorkbench(QMainWindow):
             return None
 
     def poll_jobs(self):
-        if self.project is None:
-            return
         if self.jobs is None:
             self._update_execution_feedback()
             return
         try:
             states = self.jobs.list()
+            self._last_job_states = tuple(states)
+            if self.project is None:
+                self._last_runtime_error = None
+                self._refresh_computation_indicator()
+                return
+            self._refresh_computation_indicator()
             self._snapshot_existing_jobs(states)
             merged_states = []
             stopped_changed = False
@@ -5408,7 +5418,28 @@ class CoilGenWorkbench(QMainWindow):
         )
         return self._selected_run if actions.can_view_results else None
 
+    def _refresh_computation_indicator(self, *_args):
+        if not hasattr(self, "computation_indicator"):
+            return
+        working = []
+        for active, label in (
+            (self._submitting, "Submitting study"),
+            (self._loading_job_id is not None, "Verifying completed results"),
+            (self._geometry_export_task is not None, "Exporting conductor geometry"),
+            (self._design_study_task is not None, self._design_study_task_label),
+            (self._saved_settings_task is not None, "Verifying saved settings"),
+            (getattr(self.viewport, "_preview_worker", None) is not None, "Preparing model preview"),
+        ):
+            if active:
+                working.append(label)
+        working.extend(task[2] for task in getattr(self, "_gradient_tasks", {}).values())
+        self.computation_indicator.message.setText(self.statusBar().currentMessage())
+        self.computation_indicator.set_activity(
+            self._last_job_states, working=working, unavailable=self._last_runtime_error
+        )
+
     def _update_execution_feedback(self):
+        self._refresh_computation_indicator()
         if hasattr(self, "gradient_actions"):
             record = self.runs.get(self._selected_run)
             verified = record is not None and not self._run_verification_error(record)

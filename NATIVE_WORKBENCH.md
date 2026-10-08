@@ -114,6 +114,12 @@ Finishing an older revision leaves the selected view intact and makes its result
 available through Jobs and Results. Stopped live snapshots retain their stopped status.
 Selecting another plot pauses **Follow run**; enable it to resume. Jobs stays an
 on-demand window, so submitting a computation keeps the graphics visible.
+The lower-left status bar displays **Computing (45%)** using reported worker
+progress, or **Computing…** when its percentage is unknown. It remains visible
+while viewing an older run, switching channels or closing the project. Multiple
+workers show a count with individual progress in the tooltip. Queued jobs,
+cancellation and other background work have distinct labels; terminal jobs clear
+the indicator. Status messages remain visible alongside it.
 Live snapshots remain separate from completed results and are not embedded as
 results in project JSON or offered for CAD export.
 
