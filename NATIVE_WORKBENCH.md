@@ -138,6 +138,9 @@ target, field, wire and connection views in a single menu. The plot's **Layers**
 and **Display** popups contain view options and sample-slab
 controls. Field component, units, current selection and the displayed sampling
 scope remain visible where applicable. These controls change the view only.
+Drag in the 3D view to rotate the camera. A left click selects an object and
+opens its settings only after release; camera drags and modified navigation
+gestures do not open settings windows.
 Missing, empty or malformed datasets and unavailable current variants are grey
 and disabled, with their reason and required step. Inspection uses the selected
 current policy and does not silently switch to a different stored field. Comparison

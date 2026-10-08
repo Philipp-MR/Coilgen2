@@ -9,6 +9,7 @@ import json
 import numpy as np
 from PySide6.QtCore import QEvent, QObject, QRunnable, QSignalBlocker, QSize, QThreadPool, QTimer, Qt, Signal, Slot
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -200,6 +201,9 @@ class ScientificViewport(QWidget):
         self._target_identity = None
         self._model_owner = None
         self._model_complete = False
+        self._pick_press = None
+        self._pick_dragged = False
+        self._pending_pick = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
@@ -528,8 +532,12 @@ class ScientificViewport(QWidget):
         self.plotter = QtInteractor(self)
         self.plotter.set_background("#fafafa")
         self.plotter.enable_parallel_projection()
+        self.plotter.interactor.installEventFilter(self)
+        self.plotter.interactor.setToolTip(
+            "Drag to rotate; click and release to inspect an object and probe its sample."
+        )
         layout.addWidget(self.plotter.interactor, 1)
-        self.caption = QLabel("Coordinates [m] · left-click selects a model object and probes its nearest sample")
+        self.caption = QLabel("Coordinates [m] · drag to rotate; click and release to inspect a model object")
         self.caption.setWordWrap(True)
         layout.addWidget(self.caption)
         self.probe = QLabel("Probe: —")
@@ -562,6 +570,36 @@ class ScientificViewport(QWidget):
         self._refresh_availability()
 
     def eventFilter(self, watched, event):
+        if watched is getattr(getattr(self, "plotter", None), "interactor", None):
+            kind = event.type()
+            if kind == QEvent.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self._pick_press = event.globalPosition()
+                    self._pick_dragged = bool(event.modifiers()) or event.buttons() != Qt.MouseButton.LeftButton
+                    self._pending_pick = None
+                elif self._pick_press is not None:
+                    self._pick_dragged = True
+            elif kind == QEvent.Type.MouseMove and self._pick_press is not None:
+                self._pick_dragged |= (
+                    (event.globalPosition() - self._pick_press).manhattanLength() >= QApplication.startDragDistance()
+                    or bool(event.modifiers())
+                    or event.buttons() != Qt.MouseButton.LeftButton
+                )
+            elif kind == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                actor = self._pending_pick
+                inspect = (
+                    self._pick_press is not None
+                    and not self._pick_dragged
+                    and not event.modifiers()
+                    and not event.buttons()
+                    and (event.globalPosition() - self._pick_press).manhattanLength() < QApplication.startDragDistance()
+                )
+                self._pick_press = self._pending_pick = None
+                if inspect and actor is not None:
+                    self._picked_actor(actor)
+            elif kind in {QEvent.Type.Leave, QEvent.Type.FocusOut, QEvent.Type.Hide}:
+                self._pick_press = self._pending_pick = None
+            # Do not consume events: VTK retains its rotate, pan and zoom gestures.
         # QWidgetAction otherwise sends Tab back to the QMenu action list.
         # Keep keyboard focus among the actual, available controls in a popup.
         if event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
@@ -1274,6 +1312,10 @@ class ScientificViewport(QWidget):
         return actor.GetAddressAsString("") if hasattr(actor, "GetAddressAsString") else id(actor)
 
     def _picked_actor(self, actor):
+        if self._pick_press is not None:
+            # PyVista picks on press, before a camera drag can be distinguished.
+            self._pending_pick = actor
+            return
         key = self._actors.get(self._actor_key(actor))
         if key:
             self.selected.emit(key)
