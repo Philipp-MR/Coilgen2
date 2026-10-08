@@ -193,6 +193,7 @@ class ScientificViewport(QWidget):
         self._closed = False
         self._actors = {}
         self._dataset_mesh = None
+        self._dataset_actor_key = None
         self._synchronous_preview = synchronous_preview
         self._preview_generation = 0
         self._preview_worker = None
@@ -204,6 +205,7 @@ class ScientificViewport(QWidget):
         self._pick_press = None
         self._pick_dragged = False
         self._pending_pick = None
+        self._navigation_camera = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
@@ -421,7 +423,8 @@ class ScientificViewport(QWidget):
         self.view = QComboBox()
         self.view.setAccessibleName("Camera orientation")
         self.view.setToolTip("Choose a world-coordinate camera view; the coil model is unchanged.")
-        self.view.addItems(["Isometric", "XY", "XZ", "YZ"])
+        self.view.addItems(["Isometric", "XY", "XZ", "YZ", "Custom"])
+        self.view.model().item(self.view.findText("Custom")).setEnabled(False)
         for index in range(self.view.count()):
             self.view.setItemIcon(index, icon("placement"))
         view_toolbar.addWidget(self.view)
@@ -537,6 +540,19 @@ class ScientificViewport(QWidget):
             "Drag to rotate; click and release to inspect an object and probe its sample."
         )
         layout.addWidget(self.plotter.interactor, 1)
+        self.hidden_geometry = QWidget()
+        self.hidden_geometry.setObjectName("viewport_hidden_geometry")
+        hidden_layout = QHBoxLayout(self.hidden_geometry)
+        hidden_layout.setContentsMargins(4, 0, 4, 0)
+        hidden_note = QLabel("Support hidden. Its geometry is available; enable the support layer to display it.")
+        hidden_note.setWordWrap(True)
+        hidden_layout.addWidget(hidden_note, 1)
+        self.show_support = QPushButton("Show support")
+        self.show_support.setObjectName("viewport_show_support")
+        self.show_support.clicked.connect(lambda: self.support_layer.setChecked(True))
+        hidden_layout.addWidget(self.show_support)
+        self.hidden_geometry.hide()
+        layout.addWidget(self.hidden_geometry)
         self.caption = QLabel("Coordinates [m] · drag to rotate; click and release to inspect a model object")
         self.caption.setWordWrap(True)
         layout.addWidget(self.caption)
@@ -561,6 +577,8 @@ class ScientificViewport(QWidget):
         for widget in (self.clip, self.support_layer, self.roi_layer, self.edges):
             widget.toggled.connect(self._render)
         self.view.currentIndexChanged.connect(self._set_view)
+        # Activating the current preset must work after manually moving its camera.
+        self.view.activated.connect(self._set_view)
         self.orthographic.toggled.connect(self._set_projection)
         reset.clicked.connect(self._fit_view)
         self.plotter.enable_mesh_picking(
@@ -573,6 +591,8 @@ class ScientificViewport(QWidget):
         if watched is getattr(getattr(self, "plotter", None), "interactor", None):
             kind = event.type()
             if kind == QEvent.Type.MouseButtonPress:
+                if self._navigation_camera is None:
+                    self._navigation_camera = deepcopy(self.plotter.camera_position)
                 if event.button() == Qt.MouseButton.LeftButton:
                     self._pick_press = event.globalPosition()
                     self._pick_dragged = bool(event.modifiers()) or event.buttons() != Qt.MouseButton.LeftButton
@@ -599,6 +619,15 @@ class ScientificViewport(QWidget):
                     self._picked_actor(actor)
             elif kind in {QEvent.Type.Leave, QEvent.Type.FocusOut, QEvent.Type.Hide}:
                 self._pick_press = self._pending_pick = None
+            if (
+                kind == QEvent.Type.MouseButtonRelease
+                and not event.buttons()
+                or kind in {QEvent.Type.Leave, QEvent.Type.FocusOut, QEvent.Type.Hide}
+            ) and self._navigation_camera is not None:
+                before, self._navigation_camera = self._navigation_camera, None
+                # VTK handles the event after this filter. Compare its resulting
+                # camera, so clipping-widget interaction does not imply rotation.
+                QTimer.singleShot(0, self, lambda: self._camera_gesture_finished(before))
             # Do not consume events: VTK retains its rotate, pan and zoom gestures.
         # QWidgetAction otherwise sends Tab back to the QMenu action list.
         # Keep keyboard focus among the actual, available controls in a popup.
@@ -614,6 +643,13 @@ class ScientificViewport(QWidget):
                         available[index].setFocus(Qt.FocusReason.TabFocusReason)
                         return True
         return super().eventFilter(watched, event)
+
+    def _camera_gesture_finished(self, before):
+        if not self._closed and not np.array_equal(before, self.plotter.camera_position):
+            for pane in (self, self._comparison_peer):
+                if pane is not None and not pane._closed:
+                    with QSignalBlocker(pane.view):
+                        pane.view.setCurrentText("Custom")
 
     def _rebuild_capabilities(self):
         arrays = self._stage_arrays if self._live_stage_preview else self._arrays
@@ -1316,20 +1352,41 @@ class ScientificViewport(QWidget):
             # PyVista picks on press, before a camera drag can be distinguished.
             self._pending_pick = actor
             return
-        key = self._actors.get(self._actor_key(actor))
-        if key:
-            self.selected.emit(key)
+        actor_key = self._actor_key(actor)
+        key = self._actors.get(actor_key)
+        if key is None:
+            return
+        dataset = self.dataset.currentText()
+        primary = actor_key == self._dataset_actor_key
+        layer = (
+            dataset
+            if primary
+            else {"geometry": "Support layer", "target": "Target points layer"}.get(key, "Winding layer")
+        )
+        text = f"Selected {layer}"
         point = getattr(self.plotter, "picked_point", None)
         mesh = self._dataset_mesh
-        if point is not None and mesh is not None and mesh.n_points:
+        valid_point = point is not None and np.asarray(point).shape == (3,) and np.all(np.isfinite(point))
+        if valid_point:
+            text += f" at ({point[0]:.6g}, {point[1]:.6g}, {point[2]:.6g}) m"
+        if primary and valid_point and mesh is not None and mesh.n_points:
             index = mesh.find_closest_point(point)
             coordinates = mesh.points[index]
             value = ""
             if mesh.active_scalars is not None:
                 value = f" · {mesh.active_scalars_name}: {float(mesh.active_scalars[index]):.8g}"
-            self.probe.setText(
-                f"Nearest displayed sample: ({coordinates[0]:.6g}, {coordinates[1]:.6g}, {coordinates[2]:.6g}) m{value}"
+            distance = float(np.linalg.norm(coordinates - point))
+            source = "Nearest stored sample before clipping" if self.clip.isChecked() else "Nearest displayed sample"
+            text += (
+                f"\n{source} in {dataset}: ({coordinates[0]:.6g}, {coordinates[1]:.6g}, {coordinates[2]:.6g}) m"
+                f" · distance {distance:.6g} m{value} · no interpolation"
             )
+        elif not primary:
+            text += f" · viewing {dataset}; no field value sampled at this position"
+        # Capture source/sample feedback before navigation can change the model
+        # preview or primary plot; the click refers to the scene that was picked.
+        self.selected.emit(key)
+        self.probe.setText(text)
 
     def _field_mesh(self, arrays, key):
         point_key = "validation_points_m" if key == "validation" else "target_points_m"
@@ -1453,9 +1510,12 @@ class ScientificViewport(QWidget):
         self.plotter.clear()
         self._actors.clear()
         self._dataset_mesh = None
+        self._dataset_actor_key = None
         self.probe.setText("Probe: —")
         key = self.dataset.currentData()
         available = self._capability(key, comparison=False).available
+        hidden_support = key == "support" and available and not self.support_layer.isChecked()
+        self.hidden_geometry.setVisible(hidden_support)
         self._last_valid_dataset = key if available or key in {"support", "preview_target"} else None
         model = key in {"support", "preview_target"}
         live = self._live_stage_preview and not model
@@ -1525,7 +1585,7 @@ class ScientificViewport(QWidget):
                     self._add(points, "target", color="#c5965b", point_size=4, opacity=0.45)
             if key == "support":
                 mesh = self._support if self.support_layer.isChecked() else None
-                caption += " · current model support"
+                caption += " · support hidden" if hidden_support else " · current model support"
                 options = {"color": "#79949d", "show_edges": self.edges.isChecked(), "opacity": 0.72}
             elif key == "stream_function" and {"vertices_m", "faces", "stream_function_A"} <= arrays.keys():
                 mesh = self._mesh(arrays["vertices_m"], arrays["faces"])
@@ -1567,7 +1627,9 @@ class ScientificViewport(QWidget):
                         "opacity": 0.18 if locating else 1,
                     }
                     if self.clip.isChecked():
-                        widgets.add_mesh_clip_plane(body, reset_camera=False, **options)
+                        actor = widgets.add_mesh_clip_plane(body, reset_camera=False, **options)
+                        if actor is not None:
+                            self._actors[self._actor_key(actor)] = "winding"
                     else:
                         self._add(body, "winding", **options)
                     swept_count += 1
@@ -1636,14 +1698,14 @@ class ScientificViewport(QWidget):
                         "label_font_size": 11,
                     }
                 self._dataset_mesh = mesh
+                selection = "target" if is_field else "optimization" if key == "stream_function" else "geometry"
                 if self.clip.isChecked():
-                    widgets.add_mesh_clip_plane(mesh, reset_camera=False, **options)
+                    actor = widgets.add_mesh_clip_plane(mesh, reset_camera=False, **options)
                 else:
-                    self._add(
-                        mesh,
-                        "target" if is_field else "optimization" if key == "stream_function" else "geometry",
-                        **options,
-                    )
+                    actor = self._add(mesh, selection, **options)
+                if actor is not None:
+                    self._dataset_actor_key = self._actor_key(actor)
+                    self._actors[self._dataset_actor_key] = selection
             elif key not in {
                 "contours",
                 "routes",
@@ -1743,13 +1805,15 @@ class ScientificViewport(QWidget):
             self.plotter.render()
 
     def _set_view(self, *_args):
-        {
+        preset = {
             "Isometric": self.plotter.view_isometric,
             "XY": self.plotter.view_xy,
             "XZ": self.plotter.view_xz,
             "YZ": self.plotter.view_yz,
-        }[self.view.currentText()]()
-        self._fit_view()
+        }.get(self.view.currentText())
+        if preset is not None:
+            preset()
+            self._fit_view()
 
     def _set_projection(self, enabled):
         self.plotter.enable_parallel_projection() if enabled else self.plotter.disable_parallel_projection()

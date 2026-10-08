@@ -75,7 +75,7 @@ def _status(value) -> str:
 def _verified_record(record: RunRecord) -> RunRecord:
     if not isinstance(record, RunRecord):
         raise TypeError("CAD operations require a verified RunRecord.")
-    return verify_record(record)
+    return verify_record(record, array_names=())
 
 
 def _artifact_path(record: RunRecord, name: str) -> Path:

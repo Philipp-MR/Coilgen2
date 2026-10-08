@@ -75,6 +75,28 @@ def _saved_run(tmp_path, *, checksum=True, request=True):
     return directory
 
 
+def test_metadata_only_record_verification_skips_array_decompression(tmp_path, monkeypatch):
+    directory = _saved_run(tmp_path)
+    record = DesignService.load_run(directory)
+
+    def unexpected_array_read(_archive, _name):
+        raise AssertionError("Metadata-only verification must not decompress scientific arrays")
+
+    monkeypatch.setattr(np.lib.npyio.NpzFile, "__getitem__", unexpected_array_read)
+    verified = verify_record(record, array_names=())
+    assert verified.arrays == {}
+    assert verified.metadata == record.metadata
+
+
+def test_metadata_only_record_verification_still_rejects_corrupt_arrays(tmp_path):
+    directory = _saved_run(tmp_path)
+    record = DesignService.load_run(directory)
+    with (directory / "scientific_result.npz").open("ab") as archive:
+        archive.write(b"changed after selection")
+    with pytest.raises(EvidenceIntegrityError):
+        verify_record(record, array_names=())
+
+
 def test_evidence_module_imports_without_gui_runtime():
     result = subprocess.run(
         [sys.executable, "-c", "import sys; import coilgen.application.evidence; assert 'PySide6' not in sys.modules"],

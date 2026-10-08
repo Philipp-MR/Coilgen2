@@ -46,6 +46,7 @@ class GuidanceState:
     action_key: str
     tone: str
     stages: tuple[GuidanceStage, ...] = ()
+    job_id: str | None = None
 
 
 def _config(project):
@@ -159,7 +160,8 @@ def _winding_detail(metadata):
     return " ".join(parts)
 
 
-def _stages(metadata, blockers, issues, *, pending, stale, running):
+def _stages(metadata, blockers, issues, *, pending, stale):
+    """Describe selected saved evidence, independently of active worker activity."""
     stage = metadata.get("pipeline_stage", (metadata.get("summary") or {}).get("pipeline_stage"))
     order = ("prepared", "sheet", "contours", "routed", "evaluated")
     index = order.index(stage) if stage in order else -1
@@ -186,8 +188,6 @@ def _stages(metadata, blockers, issues, *, pending, stale, running):
             if key in blocked_nodes
             else "pending"
             if pending
-            else "running"
-            if running
             else "stale"
             if stale
             else "computed"
@@ -206,7 +206,7 @@ def _stages(metadata, blockers, issues, *, pending, stale, running):
                 else "warning"
                 if status in {"pending", "stale"}
                 else "info"
-                if status in {"computed", "running"}
+                if status == "computed"
                 else "neutral",
             )
         )
@@ -222,8 +222,6 @@ def _stages(metadata, blockers, issues, *, pending, stale, running):
         if "check" in blocked_nodes
         else "pending"
         if pending
-        else "running"
-        if running
         else "stale"
         if stale
         else "failed"
@@ -310,14 +308,14 @@ def assess_guidance(project, record=None, *, issues=(), active_job=None, readine
     other_owner = owner is not None and owner != project.id
     stale = bool(metadata) and (other_owner or fingerprint != project.fingerprint)
     job = active_job or {}
-    running = job.get("status") in {"queued", "running", "cancelling"} and _identity(job, "project_id") in {
+    active = job.get("status") in {"queued", "running", "cancelling"} and _identity(job, "project_id") in {
         None,
         project.id,
     }
-    stages = _stages(metadata, blockers, issues, pending=pending, stale=stale, running=running)
+    stages = _stages(metadata, blockers, issues, pending=pending, stale=stale)
 
-    def state(title, detail, label, action, tone):
-        return GuidanceState(title, detail, label, action, tone, stages)
+    def state(title, detail, label, action, tone, *, job_id=None):
+        return GuidanceState(title, detail, label, action, tone, stages, job_id)
 
     if pending:
         return state(
@@ -336,14 +334,37 @@ def assess_guidance(project, record=None, *, issues=(), active_job=None, readine
             "correct_input",
             "error",
         )
-    if running:
-        current = job.get("project_fingerprint") == project.fingerprint
+    if active:
+        status = job["status"]
+        job_fingerprint = _identity(job, "project_fingerprint")
+        identified = _identity(job, "project_id") == project.id and isinstance(job_fingerprint, str)
+        current = identified and job_fingerprint == project.fingerprint
+        activity = {"queued": "queued", "running": "computing", "cancelling": "cancelling"}[status]
+        if current:
+            title = "Current study queued" if status == "queued" else f"{activity.capitalize()} current study"
+        elif identified:
+            title = f"An earlier revision is {activity}"
+        else:
+            title = f"{activity.capitalize()} study · identity unverified"
+        detail = {
+            "queued": "Waiting for an available worker. ",
+            "running": "The worker owns its submitted inputs. ",
+            "cancelling": "Cancellation requested; waiting for the worker to stop. ",
+        }[status]
+        detail += "Model edits do not alter that job; inspect its activity before starting another study."
+        detail += (
+            " Overview results describe the selected saved run, independently of this worker's progress."
+            if metadata
+            else " Recorded stage progress is shown separately in the computation strip."
+        )
+        id_ = job.get("id")
         return state(
-            "Computing current study" if current else "An earlier revision is computing",
-            "The worker owns its submitted inputs. Model edits do not alter that job; inspect its activity before starting another study.",
+            title,
+            detail,
             "View computation",
             "show_job",
-            "info",
+            "warning" if status == "cancelling" or not identified else "info",
+            job_id=id_ if isinstance(id_, str) and id_.strip() else None,
         )
     if stale:
         title = (
@@ -372,13 +393,25 @@ def assess_guidance(project, record=None, *, issues=(), active_job=None, readine
     failed, errors = _explicit_failure(metadata, issues)
     solids = _solid_artifacts(metadata)
     if failed:
-        detail = "Inspect the recorded field and conductor failures before changing model settings. A passed sheet cannot override failed conductor checks."
+        verdicts = run_verdicts(metadata)
+        detail = (
+            f"Saved sheet checks: {verdicts['sheet']}; pipeline conductor geometry: {verdicts['sweeps']}; "
+            f"fabrication review: {verdicts['fabrication']}. "
+            "Inspect the recorded field and conductor failures before changing model settings. "
+            "A passed sheet cannot override failed conductor checks."
+        )
+        warnings = sum(getattr(issue, "severity", "error") == "warning" for issue in issues)
+        if errors or warnings:
+            detail += (
+                f" The saved problem list contains {len(errors)} {'error' if len(errors) == 1 else 'errors'}"
+                f" and {warnings} {'warning' if warnings == 1 else 'warnings'}."
+            )
         if solids:
             detail += f" {len(solids)} solid CAD files remain available for the saved geometry; that availability does not resolve the failed checks."
         return state(
             "Review computed engineering failures",
             detail,
-            f"Review {len(errors)} problems" if errors else "Review failed checks",
+            f"Review {len(errors)} {'error' if len(errors) == 1 else 'errors'}" if errors else "Review failed checks",
             "inspect_problems",
             "error",
         )

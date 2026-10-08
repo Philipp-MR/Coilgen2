@@ -198,6 +198,19 @@ def test_actual_guidance_state_contract(overview):
     assert overview.action_button.text() == current.action_label
 
 
+def test_overview_labels_keep_saved_computation_and_acceptance_scope_visible(overview):
+    current = state()
+    current.stages = tuple(
+        SimpleNamespace(**{**vars(stage), "status": "computed" if stage.key == "solve" else "passed"})
+        if stage.key in {"solve", "check"}
+        else stage
+        for stage in current.stages
+    )
+    overview.set_state(current)
+    assert overview.status_labels["solve"].text().endswith("Saved computation")
+    assert overview.status_labels["check"].text().endswith("Passed in saved scope")
+
+
 def test_actual_guidance_details_use_full_strip_width(overview, application):
     from coilgen.application import ProjectDocument
     from coilgen.application.presets import preset_config

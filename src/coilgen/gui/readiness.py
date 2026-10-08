@@ -61,6 +61,7 @@ class ReadinessPanel(QWidget):
         self._updating_colors = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 8)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.heading = QLabel()
         self.heading.setObjectName("compute_readiness_heading")
         self.heading.setWordWrap(True)
@@ -73,8 +74,10 @@ class ReadinessPanel(QWidget):
         scroll.setMaximumHeight(200)
         content = QWidget()
         self.rows = QVBoxLayout(content)
+        self.rows.setAlignment(Qt.AlignmentFlag.AlignTop)
         scroll.setWidget(content)
         layout.addWidget(scroll)
+        layout.addStretch(1)
         self.hide()
 
     def set_issues(self, issues):

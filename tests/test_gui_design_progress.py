@@ -156,6 +156,72 @@ def test_unknown_or_invalid_legacy_percentage_remains_indeterminate_for_active_j
     assert "worker activity unrecorded" in snapshot.activity
 
 
+@pytest.mark.parametrize("value", [None, 0, 0.45, 1, float("nan"), "0.45"])
+def test_runtime_unavailable_does_not_present_last_known_progress_as_current(value):
+    state = {"status": "running", "progress": value, "stage": "Optimizing sheet", "project_revision": 4}
+    before = dict(state)
+    snapshot = build_design_progress(
+        "evaluated",
+        state,
+        completed=("prepared",),
+        reusable=("sheet",),
+        active_stage="sheet",
+        preview_stage="prepared",
+        unavailable="Job status file is temporarily unreadable",
+    )
+    assert snapshot.status == "unavailable"
+    assert "Runtime unavailable" in snapshot.activity and "last known: running" in snapshot.activity
+    assert snapshot.percent is None and snapshot.busy is False and snapshot.follow_available is False
+    assert [stage.status for stage in snapshot.stages] == ["complete", "reusable", "waiting", "waiting", "waiting"]
+    assert snapshot.stages[0].viewed and not any(stage.inferred for stage in snapshot.stages)
+    assert "does not establish engineering acceptance" in snapshot.stages[0].tooltip
+    assert "Job status file is temporarily unreadable" in snapshot.tooltip
+    assert "Last known operation: Optimizing sheet" in snapshot.tooltip
+    assert "Last known worker progress" in snapshot.tooltip and "current progress is unavailable" in snapshot.tooltip
+    assert state == before
+
+
+@pytest.mark.parametrize("verification", [None, "pending", "verified", "failed"])
+def test_unavailable_runtime_cannot_animate_or_invent_completed_evidence(verification):
+    snapshot = build_design_progress(
+        "sheet",
+        {"status": "completed", "progress": 1, "stage": "All stages accepted"},
+        verification=verification,
+        unavailable="Runtime list failed",
+    )
+    assert not any(stage.status == "complete" for stage in snapshot.stages)
+    assert snapshot.percent is None and not snapshot.busy
+    assert "last known: completed" in snapshot.activity
+    assert "Last known worker progress: 100%" in snapshot.tooltip
+    assert "engineering acceptance" in snapshot.tooltip
+    if verification == "failed":
+        assert snapshot.tone == "error" and "verification failed" in snapshot.activity
+
+
+@pytest.mark.parametrize("value", [None, 0.45])
+def test_unavailable_runtime_disables_follow_hides_animation_and_recovers(progress, value):
+    events = []
+    progress.follow_requested.connect(events.append)
+    state = {"status": "running", "progress": value}
+    progress.set_state("evaluated", state, completed=("prepared",), following=True)
+    assert progress.chips["sheet"].property("stageStatus") == "current"
+    assert progress.follow_button.isEnabled()
+    progress.set_state("evaluated", state, completed=("prepared",), following=True, unavailable="Status unreadable")
+    assert progress.progress_bar.isHidden() and progress.progress_bar.maximum() == 100
+    assert progress.chips["sheet"].property("stageStatus") == "waiting"
+    assert not progress.follow_button.isHidden() and not progress.follow_button.isEnabled()
+    assert progress.follow_button.isChecked() and "unavailable" in progress.follow_button.toolTip()
+    assert "Status unreadable" in progress.activity_label.toolTip()
+    assert events == []
+    progress.set_state("evaluated", state, completed=("prepared",), following=True)
+    assert not progress.progress_bar.isHidden() and progress.follow_button.isEnabled()
+    assert progress.chips["sheet"].property("stageStatus") == "current"
+    assert progress.snapshot.percent == (45 if value is not None else None)
+    assert progress.progress_bar.maximum() == (100 if value is not None else 0)
+    assert "Runtime unavailable" not in progress.snapshot.activity
+    assert events == []
+
+
 @pytest.mark.parametrize("value, expected", [(0, 0), (0.275, 28), (1, 100)])
 def test_only_finite_fraction_progress_is_presented(value, expected):
     snapshot = build_design_progress("evaluated", {"status": "running", "progress": value})

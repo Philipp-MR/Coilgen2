@@ -136,7 +136,8 @@ class ComputationIndicator(QWidget):
         busy = bool(active or working)
         details = []
         if unavailable:
-            text, busy = "Activity unavailable", False
+            text = "Working… · job activity unavailable" if working else "Activity unavailable"
+            busy = bool(working)
             details.append(unavailable)
         elif active:
             cancelling = all(state["status"] == "cancelling" for state in active)
@@ -187,6 +188,7 @@ def build_design_progress(
     pending=False,
     verification=None,
     active_stage=None,
+    unavailable=None,
 ):
     """Build presentation without guessing completion from worker activity.
 
@@ -197,7 +199,9 @@ def build_design_progress(
     ``active_stage`` may identify the worker's current operation if structured;
     free-text ``state['stage']`` is never parsed for it. Without that identity, a
     running job highlights the first unrecorded stage as an explicitly inferred
-    boundary. ``progress`` is a fraction in [0, 1].
+    boundary. ``progress`` is a fraction in [0, 1]. ``unavailable`` reports a
+    failed runtime refresh: retained activity is explicitly last known, without
+    an active-stage highlight, progress claim or animation.
     """
     if requested_stage not in _KEYS:
         raise ValueError(f"Unknown design stage: {requested_stage!r}")
@@ -205,6 +209,7 @@ def build_design_progress(
         raise ValueError(f"Unknown evidence verification state: {verification!r}")
     state = state if isinstance(state, Mapping) else {}
     status = _text(state.get("status")) or "idle"
+    runtime_unavailable = unavailable is not None
     boundary = _KEYS.index(requested_stage)
     recorded = (
         frozenset(key for key in completed if isinstance(key, str) and key in _KEYS)
@@ -222,7 +227,7 @@ def build_design_progress(
     current = active_stage if explicit_active else remaining[0] if remaining else None
     # Queued jobs have not entered the numerical pipeline. Completed workers
     # awaiting verification likewise cannot claim a current or finished stage.
-    mark_current = status in {"running", "cancelling", "failed", "cancelled", "interrupted"}
+    mark_current = not runtime_unavailable and status in {"running", "cancelling", "failed", "cancelled", "interrupted"}
     stages = []
     for index, (key, label, description, icon_name) in enumerate(_STAGES):
         stage_status = (
@@ -258,7 +263,12 @@ def build_design_progress(
     if isinstance(revision, int) and not isinstance(revision, bool) and revision >= 0:
         provenance += (" · " if provenance else "") + f"revision {revision}"
     tone = "info" if status in _ACTIVE else "neutral"
-    if verification == "failed":
+    if runtime_unavailable:
+        description = "Runtime unavailable · last known: " + (status if status != "idle" else "status unrecorded")
+        tone = "error" if verification == "failed" else "warning"
+        if verification == "failed":
+            description += " · saved evidence verification failed"
+    elif verification == "failed":
         description, tone = "Evidence verification failed · see Messages", "error"
     elif verification == "pending":
         description = "Execution finished · verifying saved evidence…"
@@ -305,15 +315,42 @@ def build_design_progress(
         )
         if pending:
             tooltip += " Pending drafts are not included in that compatibility check and may invalidate the cache."
-    if following and status in _ACTIVE:
+    if runtime_unavailable:
+        tooltip += " Runtime refresh failed: " + (_text(unavailable) or "No current worker status is available.")
+        if activity:
+            tooltip += " Last known operation: " + activity + "."
+        error = _text(state.get("error"))
+        if error:
+            tooltip += " Last known worker error: " + error + "."
+        tooltip += " Follow run is unavailable until runtime status recovers; the selected plot is retained."
+    elif following and status in _ACTIVE:
         tooltip += " The plot follows the latest loaded stage preview when available."
     elif status in _ACTIVE:
         tooltip += " Plot following is paused; the selected dataset is retained."
     percent = _percent(state.get("progress"))
-    if percent is not None:
+    if runtime_unavailable:
+        tooltip += (
+            f" Last known worker progress: {percent}%; current progress is unavailable."
+            if percent is not None
+            else " Last known worker progress: unreported; current progress is unavailable."
+        )
+        percent = None
+    elif percent is not None:
         tooltip += f" Worker-reported work progress: {percent}%; it does not verify stage completion."
-    busy = verification == "pending" or (status in _ACTIVE and percent is None)
-    return DesignProgressState(tuple(stages), text, tooltip, tone, percent, busy, status in _ACTIVE, provenance, status)
+    busy = not runtime_unavailable and (
+        verification == "pending" or (status in {"running", "cancelling"} and percent is None)
+    )
+    return DesignProgressState(
+        tuple(stages),
+        text,
+        tooltip,
+        tone,
+        percent,
+        busy,
+        not runtime_unavailable and status in _ACTIVE,
+        provenance,
+        "unavailable" if runtime_unavailable else status,
+    )
 
 
 class _StageChip(QWidget):
@@ -460,11 +497,22 @@ class DesignProgress(QWidget):
         self.activity_label.setToolTip(snapshot.tooltip)
         self.activity_label.setAccessibleDescription(snapshot.tooltip)
         apply_tone(self.activity_label, snapshot.tone)
-        self.progress_bar.setVisible(snapshot.status != "idle")
+        self.progress_bar.setVisible(snapshot.status not in {"idle", "unavailable"})
         self.progress_bar.setRange(0, 0 if snapshot.busy else 100)
         self.progress_bar.setValue(snapshot.percent if snapshot.percent is not None else 0)
-        self.progress_bar.setFormat("%p%" if snapshot.percent is not None else "Unreported")
-        self.follow_button.setVisible(snapshot.follow_available)
+        self.progress_bar.setFormat(
+            "Queued" if snapshot.status == "queued" else "%p%" if snapshot.percent is not None else "Unreported"
+        )
+        last_status = _text(state.get("status")) if isinstance(state, Mapping) else ""
+        self.follow_button.setVisible(
+            snapshot.follow_available or snapshot.status == "unavailable" and last_status in _ACTIVE
+        )
+        self.follow_button.setEnabled(snapshot.follow_available)
+        self.follow_button.setToolTip(
+            "Runtime status is unavailable. Following can resume when status recovers; the selected plot is retained."
+            if snapshot.status == "unavailable"
+            else "Show completed stage previews as the design runs. Turn off to keep inspecting the selected dataset."
+        )
         with QSignalBlocker(self.follow_button):
             self.follow_button.setChecked(bool(options.get("following", True)))
         self.updateGeometry()

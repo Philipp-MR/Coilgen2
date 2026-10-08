@@ -594,7 +594,7 @@ def test_resume_and_export_use_verified_selected_run(window, tmp_path):
             "project_id": window.project.id,
             "artifacts": [
                 {"name": checkpoint.name, "kind": "checkpoint", "sha256": file_digest(checkpoint)},
-                {"name": field.name, "kind": "csv"},
+                {"name": field.name, "kind": "csv", "sha256": file_digest(field)},
             ],
             "summary": {},
         },

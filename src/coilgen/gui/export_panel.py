@@ -1,6 +1,15 @@
 """Selection of immutable conductor solids; export never changes the design."""
 
-from PySide6.QtCore import QEvent, QObject, QRunnable, QSignalBlocker, QSize, QTimer, Qt, Signal
+from copy import deepcopy
+from dataclasses import dataclass, field
+from inspect import Parameter, signature
+import os
+from pathlib import Path, PurePosixPath, PureWindowsPath
+import shutil
+from tempfile import TemporaryDirectory
+
+from PySide6.QtCore import QEvent, QObject, QRunnable, QSignalBlocker, QSize, QTimer, Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -18,17 +27,133 @@ from .icons import icon
 from .run_context import run_compatibility
 
 
+@dataclass
+class ExportReceipt:
+    directory: Path | None = None
+    text: str = ""
+    error: str = ""
+    complete: bool = False
+
+
+@dataclass
+class GeometryExportState:
+    names: tuple[str, ...] | None = None
+    unit: str = "mm"
+    include_project: bool = True
+    receipt: ExportReceipt = field(default_factory=ExportReceipt)
+
+
+def export_record_key(record):
+    """Retain choices only for the same immutable source, including its identity."""
+    if record is None:
+        return None
+    from ..research.storage import result_metadata_digest
+
+    metadata = {key: value for key, value in record.metadata.items() if key != "job"}
+    return (str(Path(record.directory).resolve()), result_metadata_digest(metadata))
+
+
+class ExportReceiptPanel(QWidget):
+    """A durable action result, separate from the saved run's engineering verdict."""
+
+    retry_requested = Signal()
+
+    def __init__(self, receipt=None, *, retry=False, parent=None):
+        super().__init__(parent)
+        self.receipt = receipt or ExportReceipt()
+        self.setObjectName("export_receipt")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 4)
+        self.status = QLabel()
+        self.status.setObjectName("export_receipt_status")
+        self.status.setWordWrap(True)
+        self.status.setTextFormat(Qt.TextFormat.PlainText)
+        self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.status)
+        self.open_button = QPushButton("Open export folder")
+        self.open_button.setObjectName("open_export_folder")
+        self.open_button.setIcon(icon("open"))
+        self.open_button.clicked.connect(self._open_folder)
+        layout.addWidget(self.open_button)
+        self.retry_button = QPushButton("Retry export…") if retry else None
+        if self.retry_button is not None:
+            self.retry_button.setObjectName("retry_export")
+            self.retry_button.clicked.connect(self.retry_requested)
+            layout.addWidget(self.retry_button)
+        self.refresh()
+
+    def set_pending(self, directory, text):
+        self.receipt.directory = Path(directory).expanduser().resolve()
+        self.receipt.text, self.receipt.error, self.receipt.complete = text, "", False
+        self.refresh()
+
+    def set_finished(self, directory, text):
+        self.receipt.directory = Path(directory).expanduser().resolve()
+        self.receipt.text, self.receipt.error, self.receipt.complete = text, "", True
+        self.refresh()
+
+    def set_failed(self, error, *, directory=None):
+        if directory is not None:
+            self.receipt.directory = Path(directory).expanduser().resolve()
+        self.receipt.text, self.receipt.error, self.receipt.complete = "", str(error), False
+        self.refresh()
+
+    def refresh(self):
+        result = self.receipt
+        text = "Export failed: " + result.error if result.error else result.text
+        if result.directory is not None:
+            text += "\nDestination: " + str(result.directory)
+        self.status.setText(text)
+        apply_tone(self.status, "error" if result.error else "success" if result.complete else "info")
+        self.open_button.setVisible(result.complete)
+        if self.retry_button is not None:
+            self.retry_button.setVisible(bool(result.error))
+        self.setVisible(bool(result.text or result.error))
+
+    def _open_folder(self):
+        if self.receipt.complete and self.receipt.directory is not None:
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.receipt.directory))):
+                self.status.setText(
+                    self.status.text() + "\nCould not open the folder. Copy the destination path above."
+                )
+                apply_tone(self.status, "warning")
+
+
+def geometry_export_description(package):
+    """Describe the committed manifest's actual units, rather than requested units."""
+    manifest = getattr(package, "manifest", {})
+    geometry = manifest.get("geometry", ())
+    formats = tuple(dict.fromkeys(f"{item['format'].upper()} [{item['actual_unit']}]" for item in geometry))
+    count = len(package.paths)
+    text = f"Exported {count} solid {'file' if count == 1 else 'files'}"
+    text += " · " + ", ".join(formats) if formats else ""
+    if manifest.get("project_companion"):
+        text += " · project JSON and results included"
+    return text + f". Units and provenance: {package.manifest_path.name}."
+
+
 class GeometryExportPanel(QWidget):
     export_requested = Signal(object, str, bool)
     review_requested = Signal()
     problems_requested = Signal()
 
     def __init__(
-        self, record=None, options=(), *, diagnostic="", parent=None, project=None, assembly=None, pending=False
+        self,
+        record=None,
+        options=(),
+        *,
+        diagnostic="",
+        parent=None,
+        project=None,
+        assembly=None,
+        pending=False,
+        state=None,
     ):
         super().__init__(parent)
         self._has_record = record is not None
         self._record = record
+        self.record_key = export_record_key(record)
+        self.state = state if state is not None else GeometryExportState()
         self._diagnostic = str(diagnostic)
         self._exporting = False
         self._review_allowed = False
@@ -82,6 +207,7 @@ class GeometryExportPanel(QWidget):
         self.units.setAccessibleName("STL coordinate units")
         self.units.addItem("STL coordinates: millimetres [mm]", "mm")
         self.units.addItem("STL coordinates: metres [m]", "m")
+        self.units.setCurrentIndex(max(0, self.units.findData(self.state.unit)))
         self.units.setToolTip("STL has no unit declaration. Scaling is explicit and recorded in the CAD manifest.")
         self.unit_note = QLabel(
             "STL coordinates are scaled from the saved SI geometry to the selected units. "
@@ -96,7 +222,7 @@ class GeometryExportPanel(QWidget):
         self.include_project.setIcon(icon("project-json"))
         self.include_project.setIconSize(QSize(18, 18))
         self.include_project.setAccessibleName(self.include_project.text())
-        self.include_project.setChecked(True)
+        self.include_project.setChecked(self.state.include_project)
         self.include_project.setObjectName("geometry_export_include_project")
         self.include_project.setToolTip(
             "Save one self-contained project JSON containing model inputs and completed results with the CAD export."
@@ -177,6 +303,8 @@ class GeometryExportPanel(QWidget):
         layout.addWidget(self.include_project)
         layout.addWidget(self.companion_context)
         layout.addWidget(self.export_button)
+        self.receipt = ExportReceiptPanel(self.state.receipt)
+        layout.addWidget(self.receipt)
         layout.addWidget(self.table)
         layout.addWidget(self.bounds)
         layout.addWidget(self.unit_note)
@@ -194,7 +322,8 @@ class GeometryExportPanel(QWidget):
                 name.setIcon(icon("conductor-sweep"))
                 name.setData(Qt.ItemDataRole.UserRole, option.name)
                 name.setFlags(name.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                name.setCheckState(Qt.CheckState.Checked if option.format == "stl" else Qt.CheckState.Unchecked)
+                selected = option.name in self.state.names if self.state.names is not None else option.format == "stl"
+                name.setCheckState(Qt.CheckState.Checked if selected else Qt.CheckState.Unchecked)
                 name.setToolTip(option.name)
                 self.table.setItem(row, 0, name)
                 self.table.setItem(row, 1, QTableWidgetItem())
@@ -225,6 +354,7 @@ class GeometryExportPanel(QWidget):
         self.table.itemSelectionChanged.connect(self._selection_changed)
         self.table.currentCellChanged.connect(self._selection_changed)
         self.units.currentIndexChanged.connect(self._selection_changed)
+        self.include_project.toggled.connect(self._selection_changed)
         self._selection_changed()
         self.set_context(project, assembly=assembly, pending=pending)
 
@@ -285,6 +415,9 @@ class GeometryExportPanel(QWidget):
                     f"STL · {self.units.currentData()}" if option.format == "stl" else f"STEP · {option.source_unit}"
                 )
         names = self.selected_names()
+        self.state.names = names
+        self.state.unit = self.units.currentData()
+        self.state.include_project = self.include_project.isChecked()
         self.export_button.setEnabled(self._has_record and bool(names) and not self._exporting and not self._diagnostic)
         self.export_button.setToolTip(
             self._diagnostic or "Export the selected saved solids and their recorded provenance."
@@ -351,14 +484,151 @@ class GeometryExportTask(QRunnable):
     def __init__(self, record, directory, names, unit, project=None):
         super().__init__()
         self.signals = _ExportSignals()
-        self.record, self.directory, self.names, self.unit, self.project = record, directory, names, unit, project
+        self.record = _detached_record(record)
+        self.record_key = export_record_key(record)
+        self.directory, self.names, self.unit, self.project = directory, tuple(names), unit, project
+        self.verification_error = ""
+        self.feedback_state = None
+        self.source_id = None
 
     def run(self):
         from ..application.cad import export_geometry
+        from ..application.evidence import EvidenceIntegrityError
 
         try:
             package = export_geometry(self.record, self.directory, self.names, unit=self.unit, project=self.project)
         except Exception as exc:
+            if isinstance(exc, EvidenceIntegrityError):
+                self.verification_error = str(exc)
             self.signals.finished.emit(None, f"{type(exc).__name__}: {exc}")
         else:
             self.signals.finished.emit(package, "")
+
+
+def _detached_record(record):
+    from ..application.service import RunRecord
+
+    # CAD and copies need metadata and verified bytes, without copying large
+    # field maps out of the GUI's immutable selected result.
+    return RunRecord(record.directory, record.metadata, {}) if isinstance(record, RunRecord) else deepcopy(record)
+
+
+class ArtifactVerificationError(ValueError):
+    """The selected immutable source failed its export-time integrity check."""
+
+
+def export_verified_artifacts(record, directory, *, loader):
+    """Stage, reverify and exclusively publish saved bytes without overwriting."""
+    from ..persistence import file_digest
+    from ..research.storage import result_metadata_digest
+
+    try:
+        parameters = signature(loader).parameters
+        selects_arrays = "array_names" in parameters or any(
+            parameter.kind == Parameter.VAR_KEYWORD for parameter in parameters.values()
+        )
+    except (TypeError, ValueError):
+        selects_arrays = False
+
+    def verified():
+        try:
+            current = loader(record.directory, array_names=()) if selects_arrays else loader(record.directory)
+            old = {key: value for key, value in record.metadata.items() if key != "job"}
+            new = {key: value for key, value in current.metadata.items() if key != "job"}
+            if result_metadata_digest(old) != result_metadata_digest(new):
+                raise ValueError("Saved run metadata changed after selection. Reload the run.")
+            return current
+        except (ValueError, TypeError, OSError, RuntimeError, KeyError) as exc:
+            raise ArtifactVerificationError(str(exc) or type(exc).__name__) from exc
+
+    current = verified()
+    directory = Path(directory).expanduser().resolve()
+    source_directory = Path(current.directory).resolve()
+    sources = []
+    destinations = set()
+    for artifact in current.metadata.get("artifacts", ()):
+        name = artifact.get("name")
+        if not isinstance(name, str) or not name or "\\" in name:
+            raise ArtifactVerificationError("Saved artifact names must be portable relative paths.")
+        relative = PurePosixPath(name)
+        if relative.is_absolute() or ".." in relative.parts or PureWindowsPath(name).drive:
+            raise ArtifactVerificationError("Saved artifact path leaves its run directory.")
+        source = (source_directory / relative).resolve()
+        destination = (directory / relative).resolve()
+        if not source.is_relative_to(source_directory) or not source.is_file():
+            raise ArtifactVerificationError("Saved artifact must remain a file inside its run directory.")
+        if not destination.is_relative_to(directory):
+            raise ValueError("Export destination must stay inside the selected directory.")
+        if destination in destinations:
+            raise ArtifactVerificationError("Saved artifact names must be unique.")
+        destinations.add(destination)
+        if destination.exists() and destination != source:
+            raise FileExistsError(f"Export would replace an existing file: {destination}")
+        sources.append((source, destination, artifact.get("sha256")))
+    if not sources:
+        raise ValueError("The selected run has no saved artifacts to export.")
+    if directory == source_directory:
+        return tuple(destination for _, destination, _ in sources)
+    if directory.is_relative_to(source_directory):
+        raise ValueError("Export artifacts outside the immutable saved run directory.")
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(prefix=".coilgen-artifacts-", dir=directory.parent) as temporary:
+        stage = Path(temporary)
+        staged = []
+        for source, destination, digest in sources:
+            path = stage / destination.relative_to(directory)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, path)
+            if not isinstance(digest, str) or file_digest(path) != digest:
+                raise ArtifactVerificationError(f"Saved artifact changed while being exported: {source.name}")
+            staged.append((path, destination))
+        verified()
+        created_files, created_directories = [], []
+        try:
+            for path, destination in staged:
+                missing = []
+                parent = destination.parent
+                while not parent.exists():
+                    missing.append(parent)
+                    parent = parent.parent
+                for parent in reversed(missing):
+                    parent.mkdir(exist_ok=False)
+                    created_directories.append(parent)
+                os.link(path, destination)
+                created_files.append(destination)
+        except BaseException:
+            # Roll back only this transaction's checked destination paths;
+            # unrelated files or a concurrent writer are never removed.
+            for path in reversed(created_files):
+                if path.resolve().is_relative_to(directory):
+                    path.unlink(missing_ok=True)
+            for path in reversed(created_directories):
+                if path.resolve() == directory or path.resolve().is_relative_to(directory):
+                    try:
+                        path.rmdir()
+                    except OSError:
+                        pass
+            raise
+    return tuple(destination for _, destination, _ in sources)
+
+
+class ArtifactExportTask(QRunnable):
+    """Copy a detached saved source on a worker; callbacks own the GUI feedback."""
+
+    def __init__(self, record, directory, *, loader):
+        super().__init__()
+        self.signals = _ExportSignals()
+        self.record = _detached_record(record)
+        self.directory = Path(directory).expanduser().resolve()
+        self.loader = loader
+        self.verification_error = ""
+
+    def run(self):
+        try:
+            paths = export_verified_artifacts(self.record, self.directory, loader=self.loader)
+        except Exception as exc:
+            if isinstance(exc, ArtifactVerificationError):
+                self.verification_error = str(exc)
+            self.signals.finished.emit(None, f"{type(exc).__name__}: {exc}")
+        else:
+            self.signals.finished.emit(paths, "")

@@ -12,7 +12,6 @@ import json
 import math
 from pathlib import Path
 import re
-import shutil
 
 import numpy as np
 
@@ -98,7 +97,17 @@ from .acceptance_panel import AcceptancePanel
 from .design_tasks import DesignStudyTask
 from .saved_settings import SavedSettingsDialog, SavedSettingsTask
 from .dataset_capabilities import resolve_dataset
-from .export_panel import GeometryExportPanel, GeometryExportTask
+from .export_panel import (
+    ArtifactExportTask,
+    ArtifactVerificationError,
+    ExportReceiptPanel,
+    GeometryExportPanel,
+    GeometryExportState,
+    GeometryExportTask,
+    export_record_key,
+    export_verified_artifacts,
+    geometry_export_description,
+)
 from .job_history import job_origin, format_job_timestamp
 from .winding_intent import WINDING_INTENTS, winding_intent, winding_overrides
 from .icons import TARGET_MODE_ICONS, WINDING_ICONS, icon
@@ -114,6 +123,7 @@ from .conductor_preview import ConductorPreview
 from .conductor_profile import ConductorProfileEditor
 from .design_progress import ComputationIndicator, DesignProgress
 from .live_preview import LivePreviewController
+from .job_outcomes import JobOutcomeNotice, build_job_outcome
 
 
 STAGES = (
@@ -222,9 +232,11 @@ class ProjectEdit(QUndoCommand):
 
     def redo(self):
         self.window._set_project(self.after, channel_id=self.channel_id)
+        self.window._acknowledge_inputs("Applied" if self.window._applying else "Redid " + self.text())
 
     def undo(self):
         self.window._set_project(self.before, channel_id=self.channel_id)
+        self.window._acknowledge_inputs("Undid " + self.text())
 
 
 class AssemblyEdit(QUndoCommand):
@@ -299,6 +311,8 @@ class CoilGenWorkbench(QMainWindow):
         self._previous_job_ids = set()
         self._runtime_snapshot_taken = False
         self._last_job_states = ()
+        self._observed_job_statuses = {}
+        self._notified_job_outcomes = set()
         self._loaded_ids = set()
         self._selected_run = None
         self._draft_controls = {}
@@ -326,13 +340,17 @@ class CoilGenWorkbench(QMainWindow):
         self._expression_editor_fingerprint = None
         self._guidance_readiness_key = None
         self._guidance_readiness = None
+        self._guidance_state = None
         self._model_change_note = ""
         self._geometry_export_task = None
+        self._geometry_export_states = {}
+        self._artifact_export_task = None
         self._design_study_task = None
         self._design_study_task_label = ""
         self._saved_settings_task = None
         self._acceptance_refresh_key = None
         self._restoring_panels = False
+        self._closing = False
         self._panel_views = {}
         self.validation_resolution = 12
         self.design_margin = 1.0
@@ -413,6 +431,11 @@ class CoilGenWorkbench(QMainWindow):
         self.readiness_panel = ReadinessPanel(self)
         self.readiness_panel.issue_requested.connect(self._open_readiness_issue)
         layout.addWidget(self.readiness_panel)
+        self.modeling_notes_panel = ReadinessPanel(self)
+        self.modeling_notes_panel.issue_requested.connect(self._open_readiness_issue)
+        self.modeling_notes_window = PanelWindow(
+            "Modeling notes — CoilGen2", self.modeling_notes_panel, self, size=(780, 350)
+        )
         self.design_overview = DesignOverview(self)
         self.design_overview.action_requested.connect(self._guidance_action)
         self.design_overview.section_requested.connect(self._open_overview_section)
@@ -426,6 +449,16 @@ class CoilGenWorkbench(QMainWindow):
         self.design_status_label.setObjectName("compact_design_status")
         self.design_status_label.setWordWrap(True)
         destinations.addWidget(self.design_status_label, 1)
+        self.guidance_action_button = QPushButton(self)
+        self.guidance_action_button.setObjectName("compact_guidance_action")
+        self.guidance_action_button.clicked.connect(self._trigger_guidance_action)
+        destinations.addWidget(self.guidance_action_button)
+        self.modeling_notes_button = QPushButton(self)
+        self.modeling_notes_button.setObjectName("modeling_notes_button")
+        self.modeling_notes_button.setIcon(icon("information"))
+        self.modeling_notes_button.clicked.connect(self.modeling_notes_window.open_panel)
+        self.modeling_notes_button.hide()
+        destinations.addWidget(self.modeling_notes_button)
         layout.addLayout(destinations)
         self.output_scope_label = QLabel()
         self.output_scope_label.setObjectName("requested_outputs")
@@ -464,7 +497,14 @@ class CoilGenWorkbench(QMainWindow):
         welcome.addStretch(1)
         self.workspace_stack.addWidget(self.welcome)
         self.workspace_stack.addWidget(center)
-        self.setCentralWidget(self.workspace_stack)
+        central = QWidget(self)
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.addWidget(self.workspace_stack, 1)
+        self.job_outcomes = JobOutcomeNotice(self)
+        self.job_outcomes.action_requested.connect(self._open_job_outcome)
+        central_layout.addWidget(self.job_outcomes)
+        self.setCentralWidget(central)
 
     def _build_model_tree(self):
         self.tree = QTreeWidget()
@@ -600,6 +640,7 @@ class CoilGenWorkbench(QMainWindow):
             following=self.live_preview.following,
             pending=self._has_input_drafts(),
             verification=verification,
+            unavailable=self._last_runtime_error,
         )
         if self.live_preview.error:
             self.design_progress.setToolTip("Live preview unavailable: " + self.live_preview.error)
@@ -1061,6 +1102,7 @@ class CoilGenWorkbench(QMainWindow):
 
     def _set_workspace_active(self, active):
         self.workspace_stack.setCurrentWidget(self.workspace if active else self.welcome)
+        self.job_outcomes.set_result_context(active)
         self.findChild(QDockWidget, "model_dock").setVisible(active)
         if not active:
             self.findChild(QDockWidget, "settings_dock").hide()
@@ -1425,7 +1467,7 @@ class CoilGenWorkbench(QMainWindow):
             )
         except (ValueError, TypeError, OSError, KeyError) as exc:
             self._show_draft_error(str(exc))
-            self._error(f"Input edit rejected: {exc}")
+            self._error(f"Input edit rejected: {exc}", open_window=False)
             return False
         if next_project.fingerprint != self.project.fingerprint:
             self._applying = True
@@ -1575,6 +1617,8 @@ class CoilGenWorkbench(QMainWindow):
 
     def _check_compute_readiness(self, project, *, channel_name=None):
         report = check_readiness(project, pipeline_stage=project.study["pipeline_stage"])
+        if self.project is not None and project.id == self.project.id:
+            self._refresh_modeling_notes(report)
         if report.ready:
             self.readiness_panel.set_issues(())
             return True
@@ -2280,7 +2324,12 @@ class CoilGenWorkbench(QMainWindow):
                     options = geometry_catalog(record)
                 except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
                     diagnostic = f"Saved geometry verification failed: {exc}"
-            self.geometry_export_panel = GeometryExportPanel(record, options, diagnostic=diagnostic)
+            self.geometry_export_panel = GeometryExportPanel(
+                record,
+                options,
+                diagnostic=diagnostic,
+                state=self._geometry_export_states.setdefault(export_record_key(record), GeometryExportState()),
+            )
             self.geometry_export_panel.set_context(
                 self.project, assembly=self.assembly, pending=self._has_input_drafts()
             )
@@ -3255,8 +3304,20 @@ class CoilGenWorkbench(QMainWindow):
         self._refresh_decision_drafts()
         if self._draft_dirty:
             self.statusBar().showMessage("Pending settings · applied on navigation, save or compute")
+        elif self.statusBar().currentMessage().startswith("Pending settings"):
+            self.statusBar().clearMessage()
+        self._update_title()
         self._refresh_guidance()
         self._refresh_view_context()
+
+    def _acknowledge_inputs(self, action):
+        if self.project is not None:
+            text = (
+                f"Applied revision {self.project.revision}"
+                if action == "Applied"
+                else f"{action} · applied revision {self.project.revision}"
+            )
+            self.statusBar().showMessage(text, 7000)
 
     def revert_draft(self):
         self._draft_dirty = False
@@ -3419,7 +3480,7 @@ class CoilGenWorkbench(QMainWindow):
                 accepted = self.apply_config(changes)
             except (ValueError, TypeError, KeyError) as exc:
                 self._show_draft_error(str(exc))
-                self._error(f"Model edit rejected: {exc}")
+                self._error(f"Model edit rejected: {exc}", open_window=False)
                 accepted = False
             self._draft_dirty = not accepted
             if not accepted:
@@ -4172,6 +4233,7 @@ class CoilGenWorkbench(QMainWindow):
         self._collection_mode = assembly is not None
         self._set_assembly(assembly or ProjectAssembly.new(project.name, (project,)))
         self.undo_stack.setClean()
+        self.statusBar().showMessage(f"Opened {self.project.name} · revision {self.project.revision}", 7000)
         return assembly or project
 
     def new_project(self, kind=None, *, name="New coil design", project=None, discard_checked=False):
@@ -4494,38 +4556,75 @@ class CoilGenWorkbench(QMainWindow):
             raise ValueError("Saved evidence failed verification; reopen and verify it before exporting artifacts.")
         source = self.runs[self._selected_run]
         try:
-            record = self.service.load_run(source.directory)
-        except (ValueError, TypeError, OSError, RuntimeError, KeyError) as exc:
+            return export_verified_artifacts(source, directory, loader=self.service.load_run)
+        except ArtifactVerificationError as exc:
             self._mark_run_verification_error(self._selected_run, exc, directory=source.directory)
             self._update_result_state()
             raise
-        directory = Path(directory).expanduser().resolve()
-        sources = []
-        for artifact in record.metadata.get("artifacts", []):
-            source = (record.directory / artifact["name"]).resolve()
-            if not source.is_relative_to(record.directory.resolve()) or not source.is_file():
-                raise ValueError("Run artifact must be a verified file inside its run directory.")
-            destination = (directory / source.relative_to(record.directory)).resolve()
-            if not destination.is_relative_to(directory):
-                raise ValueError("Export destination must stay inside the selected directory.")
-            if destination.exists() and source != destination:
-                raise FileExistsError(f"Export would replace an existing file: {destination}")
-            sources.append((source, destination))
-        directory.mkdir(parents=True, exist_ok=True)
-        for source, destination in sources:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if source != destination:
-                shutil.copy2(source, destination)
-        return tuple(destination for _, destination in sources)
 
     def _export_run_dialog(self):
-        directory = QFileDialog.getExistingDirectory(self, "Export selected run artifacts to an empty directory")
-        if directory:
-            try:
-                paths = self.export_run_artifacts(directory)
-                self.statusBar().showMessage(f"Exported {len(paths)} verified artifacts", 5000)
-            except (ValueError, TypeError, OSError, KeyError) as exc:
-                self._error(f"Cannot export run artifacts: {exc}")
+        if self._artifact_export_task is not None:
+            self.statusBar().showMessage("Run artifact export is already running", 5000)
+            return
+        source_id = self._selected_run
+        record = self.runs.get(source_id)
+        if record is None:
+            self.statusBar().showMessage("Select a completed run before exporting artifacts.", 5000)
+            return
+        source_name = record.metadata.get("name", record.directory.name)
+        receipt = ExportReceiptPanel(retry=True)
+        window = PanelWindow(f"Run artifact export — {source_name}", receipt, self, size=(620, 240))
+
+        def submit():
+            if self._artifact_export_task is not None:
+                self.statusBar().showMessage("Run artifact export is already running", 5000)
+                return
+            directory = QFileDialog.getExistingDirectory(self, f"Export {source_name} artifacts to an empty directory")
+            if not directory:
+                return
+            diagnostic = self._run_verification_error(record)
+            if diagnostic:
+                receipt.set_failed(diagnostic, directory=directory)
+                window.open_panel()
+                return
+            task = ArtifactExportTask(record, directory, loader=self.service.load_run)
+            self._artifact_export_task = task
+            receipt.set_pending(directory, f"Exporting verified saved artifacts for {source_name}…")
+            window.open_panel()
+            self.statusBar().showMessage(f"Exporting verified artifacts for {source_name}…")
+
+            def finished(paths, error):
+                self._artifact_export_task = None
+                if self._closing:
+                    return
+                if error:
+                    receipt.set_failed(error, directory=task.directory)
+                    if task.verification_error:
+                        owner_id = (
+                            source_id
+                            if export_record_key(self.runs.get(source_id)) == export_record_key(record)
+                            else str(record.directory)
+                        )
+                        self._mark_run_verification_error(owner_id, task.verification_error, directory=record.directory)
+                        self._update_result_state()
+                    message = f"Artifact export for {source_name} failed: {error}"
+                else:
+                    formats = ", ".join(dict.fromkeys(path.suffix.lstrip(".").upper() or "file" for path in paths))
+                    description = (
+                        f"Exported {len(paths)} verified {'artifact' if len(paths) == 1 else 'artifacts'} · {formats}. "
+                        "Saved file units preserved; no coordinate conversion."
+                    )
+                    receipt.set_finished(task.directory, description)
+                    message = f"Artifact export for {source_name} saved: {task.directory}"
+                self.messages.appendPlainText(message)
+                self.statusBar().showMessage(message, 15000)
+                self._refresh_computation_indicator()
+
+            task.signals.finished.connect(finished)
+            QThreadPool.globalInstance().start(task)
+
+        receipt.retry_requested.connect(submit)
+        submit()
 
     def resume_selected_run(self):
         if not self._check_expert_draft():
@@ -5036,6 +5135,12 @@ class CoilGenWorkbench(QMainWindow):
         self._gradient_task(compare, show, "Compare measured winding field")
 
     def _focus_job(self, id_, *, open_window=True):
+        if not any(
+            self.jobs_table.item(row, 0).data(Qt.ItemDataRole.UserRole) == id_
+            for row in range(self.jobs_table.rowCount())
+        ):
+            self.jobs_filter.setCurrentIndex(self.jobs_filter.findData("all"))
+            self._fill_jobs(self._last_job_states)
         self._feedback_job_id = id_
         self.evidence.setCurrentWidget(self.jobs_table)
         if open_window:
@@ -5107,7 +5212,10 @@ class CoilGenWorkbench(QMainWindow):
             states = self.jobs.list()
             self._last_job_states = tuple(states)
             if self.project is None:
+                self.states.update((state["id"], dict(state)) for state in states)
                 self._last_runtime_error = None
+                self._fill_jobs(states)
+                self._record_job_outcomes(states)
                 self._refresh_computation_indicator()
                 return
             self._refresh_computation_indicator()
@@ -5135,12 +5243,13 @@ class CoilGenWorkbench(QMainWindow):
                     except (ValueError, TypeError, OSError, RuntimeError, KeyError) as exc:
                         self._loaded_ids.add(state["id"])
                         self._mark_run_verification_error(state["id"], exc, directory=self.jobs.directory / state["id"])
-                        self._error(f"Completed run could not be verified: {exc}")
+                        self._error(f"Completed run could not be verified: {exc}", open_window=False)
                     finally:
                         self._loading_job_id = None
                 if state["id"] == self.live_preview.job_id:
                     self.live_preview.refresh(state)
             self._fill_jobs(merged_states)
+            self._record_job_outcomes(merged_states)
             self._refresh_stage_status(refresh_reuse=stopped_changed)
             self._last_runtime_error = None
             self._refresh_channel_overview()
@@ -5151,6 +5260,66 @@ class CoilGenWorkbench(QMainWindow):
                 self._error(message)
                 self._last_runtime_error = message
             self._update_execution_feedback()
+
+    def _record_job_outcomes(self, states):
+        unresolved = {outcome.job_id: outcome for outcome in self.job_outcomes.outcomes}
+        for state in states:
+            id_, status = state["id"], state.get("status")
+            previous = self._observed_job_statuses.get(id_)
+            self._observed_job_statuses[id_] = status
+            if status not in {"completed", "failed", "cancelled", "interrupted"}:
+                continue
+            diagnostic = self._run_verification_error(id_)
+            key = (id_, status)
+            observed = previous in {"queued", "running", "cancelling"} or id_ in self._session_job_ids
+            if not observed and not diagnostic and id_ not in unresolved:
+                continue
+            record = self.runs.get(id_)
+            if status == "completed" and record is None and not diagnostic and id_ in unresolved:
+                continue
+            outcome = build_job_outcome(state, record, diagnostic)
+            if key not in self._notified_job_outcomes:
+                self.messages.appendPlainText(outcome.title + "\n" + outcome.detail)
+                self._notified_job_outcomes.add(key)
+                self.job_outcomes.publish(outcome)
+            elif unresolved.get(id_) is not None and unresolved[id_] != outcome:
+                self.job_outcomes.publish(outcome)
+
+    def _open_job_outcome(self, id_):
+        state = self.states.get(id_) or next((state for state in self._last_job_states if state["id"] == id_), None)
+        if state is None:
+            self.statusBar().showMessage("This job is no longer in the runtime; inspect saved History.", 10000)
+            return
+        self.states.setdefault(id_, dict(state))
+        self._focus_job(id_)
+        diagnostic = self._run_verification_error(id_)
+        record = self.runs.get(id_)
+        if state.get("status") == "completed" and not diagnostic and self.project is not None:
+            directory = record.directory if record is not None else self.jobs.directory / id_
+            self._loading_job_id = id_
+            self._update_execution_feedback()
+            try:
+                record = self.load_run(directory, id_=id_, select=False, expected_record=record)
+                self._loaded_ids.add(id_)
+            except (ValueError, TypeError, OSError, RuntimeError, KeyError) as exc:
+                self._mark_run_verification_error(id_, exc, directory=directory)
+                diagnostic = self._run_verification_error(id_)
+                self._error(f"Completed run could not be verified: {exc}", open_window=False)
+            finally:
+                self._loading_job_id = None
+                self._record_job_outcomes((state,))
+                self._update_execution_feedback()
+        if state.get("status") == "completed" and record is not None and not diagnostic and self.project is not None:
+            self.show_run(id_)
+            self._open_evidence(self.acceptance_panel)
+            if self.job_outcomes.selected and self.job_outcomes.selected.action_label == "Review checks":
+                self._open_evidence(self.problems_panel)
+        else:
+            self.messages.setPlainText(
+                "\n".join(state.get("log", ()))
+                + ("\n" + str(diagnostic or state.get("error")) if diagnostic or state.get("error") else "")
+            )
+            self._open_evidence(self.messages)
 
     def _snapshot_existing_jobs(self, states=None):
         if not self._runtime_snapshot_taken and self.jobs is not None:
@@ -5327,13 +5496,13 @@ class CoilGenWorkbench(QMainWindow):
         return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
 
     def _execution_job_id(self):
-        if self.project is None:
-            return None
         selected = self._selected_job_id()
         if self._loading_job_id is not None:
             return self._loading_job_id
         if selected in self.states:
             return selected
+        if self.project is None:
+            return self._feedback_job_id if self._feedback_job_id in self.states else None
         previous = self.states.get(self._feedback_job_id, {})
         if previous and previous.get("project_id") in {None, self.project.id}:
             return self._feedback_job_id
@@ -5426,6 +5595,7 @@ class CoilGenWorkbench(QMainWindow):
             (self._submitting, "Submitting study"),
             (self._loading_job_id is not None, "Verifying completed results"),
             (self._geometry_export_task is not None, "Exporting conductor geometry"),
+            (self._artifact_export_task is not None, "Exporting saved artifacts"),
             (self._design_study_task is not None, self._design_study_task_label),
             (self._saved_settings_task is not None, "Verifying saved settings"),
             (getattr(self.viewport, "_preview_worker", None) is not None, "Preparing model preview"),
@@ -5457,16 +5627,11 @@ class CoilGenWorkbench(QMainWindow):
             )
         if not hasattr(self, "execution_label"):
             return
-        if self.project is None:
-            self.execution_label.setText("No project open")
-            self.compute_button.setEnabled(False)
-            self.compute_action.setEnabled(False)
-            return
         id_ = self._execution_job_id()
         state = self.states.get(id_, {})
         selected_state = self.states.get(self._selected_job_id(), {})
         if hasattr(self, "cancel_action"):
-            resume_plan = self._selected_resume_plan()
+            resume_plan = self._selected_resume_plan() if self.project is not None else ReusePlan((), (), ())
             actions = run_actions(
                 self.stage_selector.currentData(),
                 state=selected_state,
@@ -5477,7 +5642,7 @@ class CoilGenWorkbench(QMainWindow):
                     else self._selected_run
                 ),
                 submitting=self._submitting,
-                runtime_available=self.jobs is not None,
+                runtime_available=self.jobs is not None and not self._last_runtime_error,
             )
             resume = actions.resume_stage
             can_cancel, can_resume = actions.can_cancel, actions.can_resume
@@ -5485,7 +5650,9 @@ class CoilGenWorkbench(QMainWindow):
             # job state so an action can reappear when its operation is valid.
             self.cancel_action.setVisible(can_cancel)
             self.cancel_action.setEnabled(can_cancel)
-            self.resume_action.setVisible(self._selected_run is not None or bool(selected_state))
+            self.resume_action.setVisible(
+                self.project is not None and (self._selected_run is not None or bool(selected_state))
+            )
             self.resume_action.setEnabled(can_resume)
             self.resume_action.setText(f"Resume from {resume.value}" if resume is not None else "Resume selected run")
             self.resume_action.setToolTip(
@@ -5498,11 +5665,14 @@ class CoilGenWorkbench(QMainWindow):
                 )
             )
         if hasattr(self, "compute_button"):
-            self.compute_button.setEnabled(not self._submitting)
-            self.compute_action.setEnabled(not self._submitting)
+            self.compute_button.setEnabled(self.project is not None and not self._submitting)
+            self.compute_action.setEnabled(self.project is not None and not self._submitting)
         results_id = self._view_results_id()
         self.view_results_button.setEnabled(
-            results_id is not None and self._loading_job_id is None and not self._submitting
+            self.project is not None
+            and results_id is not None
+            and self._loading_job_id is None
+            and not self._submitting
         )
         self.execution_progress.setVisible(bool(state))
         self.execution_elapsed.setText(f"Elapsed {self._job_elapsed(state)}" if state else "")
@@ -5525,7 +5695,14 @@ class CoilGenWorkbench(QMainWindow):
                 "failed": f"Execution failed · {state.get('error') or state.get('stage') or 'see Messages'}",
                 "cancelled": "Cancelled · no completed result",
                 "interrupted": "Interrupted · compute again or resume a verified checkpoint",
-            }.get(status, "Verified saved run · review engineering checks" if results_id else "Ready to compute")
+            }.get(
+                status,
+                "Verified saved run · review engineering checks"
+                if results_id
+                else "Ready to compute"
+                if self.project is not None
+                else "No project open",
+            )
         name = state.get("name", "")
         revision = state.get("project_revision")
         prefix = f"{name} · " if name else ""
@@ -5541,12 +5718,59 @@ class CoilGenWorkbench(QMainWindow):
         self.execution_label.setToolTip(
             self._run_verification_error(id_) or state.get("error") or state.get("stage") or text
         )
-        busy = self._loading_job_id is not None or state.get("status") == "cancelling" or progress is None
+        status = state.get("status")
+        busy = (
+            self._submitting
+            or self._loading_job_id is not None
+            or (
+                not self._last_runtime_error
+                and status in {"running", "cancelling"}
+                and (progress is None or status == "cancelling")
+            )
+        )
         self.execution_progress.setRange(0, 0 if busy else 100)
+        self.execution_progress.setFormat(
+            "Last reported: %p%"
+            if self._last_runtime_error and progress is not None
+            else "Unavailable"
+            if self._last_runtime_error
+            else "Queued"
+            if status == "queued"
+            else "%p%"
+            if progress is not None
+            else "Unreported"
+        )
         if not busy:
-            self.execution_progress.setValue(progress)
-        apply_tone(self.execution_label, "error" if state.get("status") == "failed" else "info" if state else "neutral")
+            self.execution_progress.setValue(progress if progress is not None else 0)
+        apply_tone(
+            self.execution_label,
+            "error"
+            if status == "failed" or self._run_verification_error(id_)
+            else "warning"
+            if self._last_runtime_error or status in {"cancelling", "cancelled", "interrupted"}
+            else "info"
+            if state or self._submitting or self._loading_job_id is not None
+            else "neutral",
+        )
         self._refresh_guidance()
+
+    def _refresh_modeling_notes(self, report):
+        warnings = tuple(report.warnings)
+        if warnings != self.modeling_notes_panel.issues:
+            self.modeling_notes_panel.set_issues(warnings)
+        count = len(warnings)
+        self.modeling_notes_button.setText(f"{count} modeling {'note' if count == 1 else 'notes'}")
+        self.modeling_notes_button.setToolTip("\n".join(f"{issue.title}: {issue.message}" for issue in warnings))
+        self.modeling_notes_button.setVisible(bool(warnings))
+        self.modeling_notes_window.setWindowTitle(
+            f"Modeling notes — {self.project.name} · revision {self.project.revision}"
+            if self.project
+            else "Modeling notes"
+        )
+
+    def _trigger_guidance_action(self):
+        if self._guidance_state is not None:
+            self._guidance_action(self._guidance_state.action_key)
 
     def _refresh_guidance(self):
         if not hasattr(self, "design_overview") or self.project is None:
@@ -5558,6 +5782,7 @@ class CoilGenWorkbench(QMainWindow):
         if key != self._guidance_readiness_key:
             self._guidance_readiness = check_readiness(self.project, pipeline_stage=stage)
             self._guidance_readiness_key = key
+        self._refresh_modeling_notes(self._guidance_readiness)
         record = self.runs.get(self._selected_run)
         active = next(
             (
@@ -5576,6 +5801,15 @@ class CoilGenWorkbench(QMainWindow):
             active_job=active,
             pending=self._has_input_drafts(),
         )
+        if self._last_runtime_error and state.action_key == "show_job":
+            state = replace(
+                state,
+                title="Computation activity unavailable",
+                detail=self._last_runtime_error
+                + " Last recorded job state is retained; activity resumes when the runtime reconnects.",
+                action_label="View last known job",
+                tone="warning",
+            )
         if self._model_change_note and state.action_key == "recompute":
             state = replace(state, detail=self._model_change_note + " " + state.detail)
         operation = dict((key, label) for label, key in STAGES)[stage]
@@ -5622,6 +5856,13 @@ class CoilGenWorkbench(QMainWindow):
         self.design_status_label.setText(state.title)
         self.design_status_label.setToolTip(state.detail)
         apply_tone(self.design_status_label, state.tone)
+        self._guidance_state = state
+        self.guidance_action_button.setText(state.action_label)
+        self.guidance_action_button.setToolTip(state.detail)
+        self.guidance_action_button.setAccessibleDescription(state.detail)
+        self.guidance_action_button.setVisible(
+            bool(state.action_key) and state.action_key not in {"compute_full", "recompute"}
+        )
         outputs = ["Mesh", "Target samples"]
         boundary = [key for _label, key in STAGES].index(stage)
         if boundary >= 1:
@@ -5755,8 +5996,11 @@ class CoilGenWorkbench(QMainWindow):
             if key != "review_fabrication" or self.project.study["fabricate"]:
                 self.compute()
         elif key == "show_job":
-            self.evidence.setCurrentWidget(self.jobs_table)
-            self._show_dock("evidence_dock")
+            id_ = self._guidance_state.job_id if self._guidance_state is not None else None
+            if id_ is not None:
+                self._focus_job(id_)
+            else:
+                self._open_evidence(self.jobs_table)
         elif key == "inspect_problems":
             self.navigate_workflow("review")
             self._open_evidence(self.problems_panel)
@@ -5796,6 +6040,17 @@ class CoilGenWorkbench(QMainWindow):
         if self._geometry_export_task is not None:
             self.statusBar().showMessage("Geometry export is already running", 5000)
             return
+        source_id = self._selected_run
+        record = self.runs.get(source_id)
+        key = export_record_key(record)
+        panel = getattr(self, "geometry_export_panel", None) if self._workflow_page() == "export" else None
+        feedback = (
+            panel.state
+            if panel is not None and panel.record_key == key
+            else self._geometry_export_states.setdefault(key, GeometryExportState())
+        )
+        names = tuple(names)
+        feedback.names, feedback.unit, feedback.include_project = names, unit, include_project
         name = re.sub(r"[^A-Za-z0-9_.-]+", "-", self.project.name).strip("-") or "coilgen"
         directory, _filter = QFileDialog.getSaveFileName(self, "Create a new CAD export folder", name + "-cad")
         if not directory:
@@ -5803,32 +6058,65 @@ class CoilGenWorkbench(QMainWindow):
         try:
             if include_project and not self._apply_document_inputs():
                 return
-            record = self.runs.get(self._selected_run)
             if record is None:
                 raise ValueError("Select a saved run before exporting.")
-            if self._run_verification_error(self._selected_run):
+            if self._run_verification_error(record):
                 raise ValueError("Saved evidence failed verification; reopen and verify the run before exporting.")
             project = self._export_companion(record) if include_project else None
             task = GeometryExportTask(record, directory, names, unit, project)
+            task.feedback_state, task.source_id = feedback, source_id
             task.signals.finished.connect(self._geometry_export_finished)
             self._geometry_export_task = task
-            self.geometry_export_panel.set_exporting(True)
+            feedback.receipt.directory = Path(directory).expanduser().resolve()
+            feedback.receipt.text = "Writing verified saved geometry and provenance…"
+            feedback.receipt.error, feedback.receipt.complete = "", False
+            panel = getattr(self, "geometry_export_panel", None) if self._workflow_page() == "export" else None
+            if panel is not None and panel.record_key == key:
+                panel.set_exporting(True)
+                panel.receipt.refresh()
             self.statusBar().showMessage("Writing verified geometry and provenance…")
             QThreadPool.globalInstance().start(task)
         except (ValueError, TypeError, OSError, RuntimeError, KeyError) as exc:
-            self._error(f"Geometry export failed: {exc}")
+            feedback.receipt.directory = Path(directory).expanduser().resolve()
+            feedback.receipt.text, feedback.receipt.error, feedback.receipt.complete = "", str(exc), False
+            panel = getattr(self, "geometry_export_panel", None) if self._workflow_page() == "export" else None
+            if panel is not None and panel.record_key == key:
+                panel.receipt.refresh()
+            self.messages.appendPlainText(f"Geometry export failed: {exc}")
+            self.statusBar().showMessage(f"Geometry export failed: {exc}", 15000)
 
     def _geometry_export_finished(self, package, error):
+        task = self._geometry_export_task
         self._geometry_export_task = None
+        if task is None:
+            return
+        feedback = task.feedback_state
+        source_name = task.record.metadata.get("name", task.record.directory.name)
         if error:
-            self._error("Geometry export failed: " + error)
+            if task.verification_error:
+                owner_id = (
+                    task.source_id
+                    if export_record_key(self.runs.get(task.source_id)) == task.record_key
+                    else str(task.record.directory)
+                )
+                self._mark_run_verification_error(owner_id, task.verification_error, directory=task.record.directory)
+                self._update_result_state()
+            feedback.receipt.directory = Path(task.directory).expanduser().resolve()
+            feedback.receipt.text, feedback.receipt.error, feedback.receipt.complete = "", error, False
+            message = f"Geometry export for {source_name} failed: {error}"
         else:
-            self.messages.appendPlainText(
-                f"Exported {len(package.paths)} solid files to {package.directory}; units and provenance: {package.manifest_path.name}."
-            )
-            self.statusBar().showMessage(f"Geometry package saved: {package.directory}", 15000)
-        if self._workflow_page() == "export":
-            self._node_changed(self._current_node)
+            feedback.receipt.directory = package.directory
+            feedback.receipt.text = geometry_export_description(package)
+            feedback.receipt.error, feedback.receipt.complete = "", True
+            message = f"Geometry export for {source_name} saved: {package.directory}"
+        self.messages.appendPlainText(message)
+        self.statusBar().showMessage(message, 15000)
+        panel = getattr(self, "geometry_export_panel", None) if self._workflow_page() == "export" else None
+        if panel is not None:
+            panel.set_exporting(False)
+            if panel.record_key == task.record_key:
+                panel.receipt.refresh()
+        self._refresh_computation_indicator()
 
     def view_results(self, _checked=False):
         id_ = self._view_results_id()
@@ -5838,7 +6126,7 @@ class CoilGenWorkbench(QMainWindow):
             self._report_compute_draft_error()
             return False
         try:
-            self.load_run(self.runs[id_].directory, id_=id_)
+            self.load_run(self.runs[id_].directory, id_=id_, expected_record=self.runs[id_])
             self._clear_run_verification_error(self.runs[id_], id_=id_)
             self.navigate_workflow("review")
             self._update_execution_feedback()
@@ -5858,9 +6146,14 @@ class CoilGenWorkbench(QMainWindow):
             except (ValueError, TypeError, OSError, RuntimeError, KeyError) as exc:
                 self._error(f"Cannot cancel job: {exc}")
 
-    def load_run(self, path, *, id_=None, select=True):
+    def load_run(self, path, *, id_=None, select=True, expected_record=None):
         try:
             record = self.service.load_run(path)
+            if expected_record is not None:
+                old = {key: value for key, value in expected_record.metadata.items() if key != "job"}
+                current = {key: value for key, value in record.metadata.items() if key != "job"}
+                if result_metadata_digest(old) != result_metadata_digest(current):
+                    raise ValueError("Saved run metadata changed after selection. Reopen and verify the run.")
         except (ValueError, TypeError, OSError, RuntimeError, KeyError) as exc:
             self._mark_run_verification_error(id_ or str(Path(path).expanduser().resolve()), exc, directory=path)
             raise
@@ -6106,11 +6399,12 @@ class CoilGenWorkbench(QMainWindow):
         )
         self._update_execution_feedback()
 
-    def _error(self, message):
+    def _error(self, message, *, open_window=True):
         self.messages.appendPlainText(message)
         self.statusBar().showMessage(message, 15000)
-        self.evidence.setCurrentWidget(self.messages)
-        self._show_dock("evidence_dock")
+        if open_window:
+            self.evidence.setCurrentWidget(self.messages)
+            self._show_dock("evidence_dock")
 
     def _refresh_status_colors(self):
         if not hasattr(self, "execution_label"):
@@ -6151,6 +6445,7 @@ class CoilGenWorkbench(QMainWindow):
         if not self._can_discard():
             event.ignore()
             return
+        self._closing = True
         self._save_session()
         self.evidence.close_all()
         for dialog in self.findChildren(QDialog):

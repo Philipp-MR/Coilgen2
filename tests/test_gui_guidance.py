@@ -94,21 +94,77 @@ def test_pending_edits_do_not_offer_export_of_the_draft():
     assert "recorded revision" in state.detail
 
 
-@pytest.mark.parametrize("status", ("queued", "running", "cancelling"))
-def test_current_worker_takes_precedence_over_an_exportable_result(status):
+@pytest.mark.parametrize(
+    "status, title, tone",
+    (
+        ("queued", "Current study queued", "info"),
+        ("running", "Computing current study", "info"),
+        ("cancelling", "Cancelling current study", "warning"),
+    ),
+)
+def test_active_study_has_precise_activity_and_keeps_selected_saved_evidence(status, title, tone):
     project = _project()
-    job = {"project_id": project.id, "project_fingerprint": project.fingerprint, "status": status}
+    job = {"id": "active-study", "project_id": project.id, "project_fingerprint": project.fingerprint, "status": status}
     state = assess_guidance(project, _record(project), active_job=job, readiness=READY)
+    assert state.title == title
+    assert state.tone == tone
     assert state.action_key == "show_job"
-    assert _stage(state, "solve").status == "running"
+    assert state.job_id == "active-study"
+    assert _stage(state, "solve").status == "computed"
+    assert _stage(state, "winding").status == "computed"
+    assert _stage(state, "check").status == "passed"
+    assert not any(item.status == "running" for item in state.stages)
+    assert "selected saved run" in state.detail
 
 
-def test_worker_from_an_earlier_revision_is_identified_without_rewriting_its_inputs():
+def test_runtime_boundaries_do_not_supply_overview_saved_results_or_passed_checks():
     project = _project()
-    job = {"project_id": project.id, "project_fingerprint": "old-model", "status": "running"}
+    job = {
+        "id": "active-study",
+        "project_id": project.id,
+        "project_fingerprint": project.fingerprint,
+        "status": "running",
+        "pipeline_stage": "evaluated",
+        "completed_stages": ["prepared", "sheet"],
+        "stage": "Complete; all checks passed",
+    }
+    state = assess_guidance(project, active_job=job, readiness=READY)
+    assert state.job_id == "active-study"
+    assert all(_stage(state, key).status == "not_computed" for key in ("solve", "winding", "check"))
+    assert "computation strip" in state.detail
+
+
+@pytest.mark.parametrize("status", ("queued", "running", "cancelling"))
+def test_current_worker_does_not_relabel_historical_result_as_current_or_running(status):
+    project = _project()
+    historical = _record(project, project_fingerprint="earlier-model", fabrication={"ready": False})
+    job = {"project_id": project.id, "project_fingerprint": project.fingerprint, "status": status}
+    state = assess_guidance(project, historical, active_job=job, readiness=READY)
+    assert state.action_key == "show_job"
+    assert all(_stage(state, key).status == "stale" for key in ("solve", "winding", "check", "export"))
+    assert _stage(state, "check").detail.endswith("These scopes do not establish construction release.")
+    assert "fabrication review: Failed" in _stage(state, "check").detail
+
+
+def test_unidentified_runtime_study_does_not_claim_to_be_a_known_earlier_revision():
+    project = _project()
+    state = assess_guidance(project, active_job={"id": "legacy-job", "status": "running"}, readiness=READY)
+    assert state.title == "Computing study · identity unverified"
+    assert state.tone == "warning"
+    assert state.job_id == "legacy-job"
+    assert "earlier revision" not in state.title
+
+
+@pytest.mark.parametrize("status", ("queued", "running", "cancelling"))
+def test_worker_from_an_earlier_revision_is_identified_without_rewriting_its_inputs(status):
+    project = _project()
+    job = {"id": "earlier-study", "project_id": project.id, "project_fingerprint": "old-model", "status": status}
     state = assess_guidance(project, active_job=job, readiness=READY)
     assert state.action_key == "show_job"
+    assert state.job_id == "earlier-study"
     assert "earlier revision" in state.title.lower()
+    activity = {"queued": "queued", "running": "computing", "cancelling": "cancelling"}[status]
+    assert state.title.endswith(activity)
     assert "do not alter that job" in state.detail
 
 
@@ -171,6 +227,10 @@ def test_standard_gy_geometry_failures_override_a_passing_sheet():
     assert state.action_key == "inspect_problems"
     assert _stage(state, "check").status == "failed"
     assert "passed sheet cannot override" in state.detail.lower()
+    assert state.action_label == "Review failed checks"
+    assert "Saved sheet checks: Passed" in state.detail
+    assert "pipeline conductor geometry: Failed" in state.detail
+    assert "fabrication review: Failed" in state.detail
 
 
 def test_saved_field_failure_and_geometry_export_availability_are_distinct():
@@ -186,6 +246,20 @@ def test_saved_field_failure_and_geometry_export_availability_are_distinct():
     assert _stage(state, "export").status == "available"
     assert _stage(state, "export").tone == "warning"
     assert "CAD files remain available" in state.detail
+    assert state.action_label == "Review 1 error"
+
+
+def test_failure_action_counts_only_recorded_errors_and_reports_warnings_separately():
+    project = _project()
+    issues = (
+        ProblemIssue("field", "Field budget", "Recorded field exceeds its budget."),
+        ProblemIssue("spacing", "Wire spacing", "Recorded clearance is too small."),
+        ProblemIssue("feeds", "Undesigned feeds", "Drive terminals are not designed.", severity="warning"),
+    )
+    state = assess_guidance(project, _record(project), issues=issues, readiness=READY)
+    assert state.action_label == "Review 2 errors"
+    assert "2 errors and 1 warning" in state.detail
+    assert state.job_id is None
 
 
 def test_a_warning_about_undesigned_feeds_does_not_hide_available_closed_turn_geometry():

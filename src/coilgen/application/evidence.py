@@ -324,14 +324,18 @@ def _checked_snapshot_metadata(record):
     return metadata, manifest, report
 
 
-def verify_record(record):
-    """Reverify and load the complete unchanged selected scientific snapshot."""
+def verify_record(record, *, array_names=None):
+    """Reverify the unchanged snapshot, optionally loading selected arrays only."""
     from .service import DesignService, RunRecord
 
     if not isinstance(record, RunRecord):
         raise TypeError("Saved evidence operations require a RunRecord.")
     try:
-        verified = DesignService.load_run(record.directory)
+        verified = (
+            DesignService.load_run(record.directory)
+            if array_names is None
+            else DesignService.load_run(record.directory, array_names=array_names)
+        )
         _assert_same_metadata(record, verified.metadata)
     except (OSError, ValueError, TypeError, KeyError, RuntimeError, EOFError, BadZipFile) as exc:
         if isinstance(exc, EvidenceIntegrityError):

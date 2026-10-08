@@ -148,6 +148,37 @@ def test_failed_runtime_refresh_does_not_present_stale_percent_as_current_activi
     assert window.computation_indicator.label.text() == "Computing (45%)"
 
 
+def test_local_export_stays_active_while_job_runtime_is_unavailable_and_recovers(windows, monkeypatch):
+    window = windows()
+    publish(window)
+    original = window.jobs.list
+    window._artifact_export_task = object()
+
+    def unavailable():
+        raise OSError("worker state unavailable")
+
+    monkeypatch.setattr(window.jobs, "list", unavailable)
+    window.poll_jobs()
+    indicator = window.computation_indicator
+    assert indicator.label.text() == "Working… · job activity unavailable"
+    assert indicator.label.property("semanticTone") == "warning"
+    assert not indicator.progress.isHidden() and indicator.progress.maximum() == 0
+    assert "worker state unavailable" in indicator.toolTip()
+    assert "Exporting saved artifacts" in indicator.toolTip()
+    assert "45%" not in indicator.label.text() and "45%" not in indicator.toolTip()
+    window._artifact_export_task = None
+    window._refresh_computation_indicator()
+    assert indicator.label.text() == "Activity unavailable" and indicator.progress.isHidden()
+    window._artifact_export_task = object()
+    monkeypatch.setattr(window.jobs, "list", original)
+    window.poll_jobs()
+    assert indicator.label.text() == "Computing (45%)" and indicator.progress.value() == 45
+    assert "Exporting saved artifacts" in indicator.toolTip()
+    window._artifact_export_task = None
+    publish(window, status="completed", progress=1)
+    assert indicator.isHidden()
+
+
 def test_repeated_poll_processing_errors_are_reported_once_and_recover(windows, monkeypatch):
     window = windows()
     publish(window)

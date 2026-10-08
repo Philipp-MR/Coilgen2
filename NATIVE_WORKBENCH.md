@@ -53,6 +53,10 @@ Settings open in a floating inspector. Placement, mesh, harmonic basis/origin,
 sheet material and numerical details open in smaller modeless windows from that
 inspector. **Apply & preview** and **Revert** stay outside its scrolling area.
 Closing an editor keeps its draft; applying refreshes the same logical editor.
+Native drafts mark the document as modified immediately. Applying, undoing and
+redoing acknowledge the applied revision; reverting or restoring the original
+value clears the pending-edit message. Rejected edits retain their values and
+show their error in the owning editor.
 
 Inspectors present **numbered decision cards**, with the current choice and its
 scientific icon. Open any card directly; numbers indicate a useful order without
@@ -120,6 +124,15 @@ while viewing an older run, switching channels or closing the project. Multiple
 workers show a count with individual progress in the tooltip. Queued jobs,
 cancellation and other background work have distinct labels; terminal jobs clear
 the indicator. Status messages remain visible alongside it.
+Queued jobs wait without an animated computation bar. Stopped jobs with no
+reported progress show **Unreported**. If the runtime becomes unavailable,
+activity freezes and is identified as last known until it reconnects.
+Observed job outcomes remain in a dismissible notice below the workspace,
+including when the project is closed. Each notice identifies its design and
+revision, distinguishes execution from scoped engineering checks, and opens the
+exact job or saved evidence on request. Finishing a background job preserves the
+chosen plot and open editors. Multiple unresolved outcomes remain selectable;
+previously completed jobs do not produce new startup notices.
 Live snapshots remain separate from completed results and are not embedded as
 results in project JSON or offered for CAD export.
 
@@ -132,6 +145,9 @@ correction. An expert draft cannot overwrite inputs changed in another editor.
 Closing Advanced settings retains its draft and keeps it visible in Editing,
 the modified-project indicator and the next action. Save, Python export and CAD
 project companions include validated drafts and pending History notes for every channel.
+Nonblocking preflight warnings remain accessible through **Modeling notes** beside
+the compact design status. Its next-action button opens the relevant settings,
+job or engineering evidence directly. Notes do not prevent computation.
 
 The plot selector identifies the exact displayed dataset; **Inspect…** offers
 target, field, wire and connection views in a single menu. The plot's **Layers**
@@ -141,6 +157,12 @@ scope remain visible where applicable. These controls change the view only.
 Drag in the 3D view to rotate the camera. A left click selects an object and
 opens its settings only after release; camera drags and modified navigation
 gestures do not open settings windows.
+After camera navigation, its orientation reads **Custom**; choosing a preset,
+including the same preset again, restores that world-coordinate view. A probe
+identifies the selected layer and dataset. Field probes report the nearest stored
+sample, distance and units without interpolation; contextual support, ROI and
+witness layers do not borrow field values from another dataset. When the support
+plot is hidden by its layer control, an explanation offers **Show support**.
 Missing, empty or malformed datasets and unavailable current variants are grey
 and disabled, with their reason and required step. Inspection uses the selected
 current policy and does not silently switch to a different stored field. Comparison
@@ -258,6 +280,10 @@ CoilGen keeps its surface-coil optimization and realization operations explicit:
    Export verifies the saved files and never regenerates a sweep or fits a new
    current. Failed checks label available geometry as inspection output; runs
    without saved solids explain the missing evidence and offer review or problems.
+   Body/format selection, STL units and companion choice remain associated with
+   the exact saved source across navigation and export retries. The export receipt
+   shows the destination, committed formats/units and file count, with **Open
+   export folder**. Changing the selected run does not relabel an ongoing export.
 
 The persistent next-action strip guides the current revision from target to CAD.
 Expand **Pipeline progress and evidence** to inspect Target, Support, Conductor, Solve, Winding,
@@ -598,7 +624,12 @@ The exported script executes the saved stage and validation controls through
 engineering acceptance is failed or unverified. Prepared, contour and routed
 stages do not establish final winding acceptance.
 
-Selected-run artifact export copies verified outputs. Project/Python export also
+Selected-run artifact export copies verified outputs on a background worker;
+the GUI retains activity and a destination receipt, including inline retry on
+failure. Copies preserve saved bytes and units, reverify source integrity and
+never overwrite existing destination files. CAD and artifact exports verify all
+recorded hashes without decompressing unrelated scientific arrays.
+Project/Python export also
 includes owned inputs and is the portable route for rerunning a design elsewhere.
 
 ## Ownership, persistence and reuse
