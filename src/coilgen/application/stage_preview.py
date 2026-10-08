@@ -43,6 +43,8 @@ _BASIC_ARRAYS = {
     "target_weights",
     "stream_function_A",
     "sheet_field_T",
+    "sheet_current_density_points_m",
+    "sheet_current_density_A_per_m",
 }
 _MANIFEST_FIELDS = {
     "schema",
@@ -143,6 +145,19 @@ def _validate_arrays(arrays, *, max_bytes):
         raise ValueError("Stage preview suppression mask does not match target samples.")
     if "sheet_field_T" in arrays and arrays["sheet_field_T"].shape != (count, 3):
         raise ValueError("Stage preview sheet field does not match target samples.")
+    density_keys = {"sheet_current_density_points_m", "sheet_current_density_A_per_m"}
+    if density_keys & arrays.keys():
+        if not density_keys <= arrays.keys():
+            raise ValueError("Stage preview current density requires its recorded face coordinates and vectors.")
+        density = arrays["sheet_current_density_A_per_m"]
+        points = arrays["sheet_current_density_points_m"]
+        if (
+            density.dtype.kind not in "ifu"
+            or points.dtype.kind not in "ifu"
+            or density.shape != (len(arrays["faces"]), 3)
+            or points.shape != density.shape
+        ):
+            raise ValueError("Stage preview current density must contain one real Nx3 vector per support face.")
     if "stream_function_A" in arrays and arrays["stream_function_A"].shape not in {
         (len(arrays["vertices_m"]),),
         (len(arrays["vertices_m"]), 1),
@@ -326,7 +341,11 @@ def load_stage_preview(
         raise ValueError("Malformed stage preview numerical archive.") from exc
     _validate_arrays(arrays, max_bytes=max_bytes)
     stage = PipelineStage(manifest["pipeline_stage"])
-    if stage.index == 0 and {"stream_function_A", "sheet_field_T"} & arrays.keys():
+    if (
+        stage.index == 0
+        and {"stream_function_A", "sheet_field_T", "sheet_current_density_A_per_m", "sheet_current_density_points_m"}
+        & arrays.keys()
+    ):
         raise ValueError("Prepared preview cannot claim solved fields.")
     if stage.index >= PipelineStage.SHEET.index and not {"stream_function_A", "sheet_field_T"} <= arrays.keys():
         raise ValueError("Solved stage preview is missing its stream function or sheet field.")

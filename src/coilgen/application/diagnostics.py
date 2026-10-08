@@ -280,12 +280,23 @@ _BODY_REASONS = {
 }
 
 
-def _field_witness(record, name):
+def _field_witness(record, name, scope=""):
     from ..field_components import field_component_values
 
+    # A sample residual locates field-error evidence only. A fitted gradient,
+    # circuit load or integration-consistency bound has no such witness.
+    if "field error" not in name.lower():
+        return (), "target", "No spatial witness was recorded for this scalar or unavailable constraint."
     arrays = record.arrays
     config = record.metadata.get("config", {})
-    if "fabricated" in name.lower():
+    if scope == "independent_realized_winding" or "independent winding" in name.lower():
+        field_key, point_key, target_key, dataset = (
+            "winding_validation_field_T",
+            "winding_validation_points_m",
+            "winding_validation_target_T",
+            "winding_validation_residual",
+        )
+    elif "fabricated" in name.lower():
         field_key, point_key, target_key, dataset = (
             "fabricated_field_T",
             "fabricated_points_m",
@@ -434,7 +445,7 @@ def run_problems(record) -> tuple[ProblemIssue, ...]:
         ):
             continue
         name = row.get("name", "Constraint")
-        points, dataset, description = _field_witness(record, name)
+        points, dataset, description = _field_witness(record, name, row.get("scope", ""))
         failed = row.get("passed") is False
         issues.append(
             ProblemIssue(

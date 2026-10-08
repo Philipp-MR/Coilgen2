@@ -11,6 +11,7 @@ import math
 from numbers import Real
 
 from ..application.diagnostics import run_verdicts
+from ..application.gradient_review import gradient_review
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +157,7 @@ def _constraint(index, row, metadata):
     lower_name = name.lower()
     physical = (
         scope.startswith("fabricat")
+        or scope == "independent_realized_winding"
         or "fabricat" in lower_name
         or row in (metadata.get("fabricated_physics") or {}).get("checks", ())
     )
@@ -177,7 +179,11 @@ def _constraint(index, row, metadata):
     passed = (
         row.get("passed")
         if row.get("verified") is not False
-        and not ("independent" in lower_name and validation.get("verified") is False)
+        and not (
+            "independent" in lower_name
+            and row.get("scope") != "independent_realized_winding"
+            and validation.get("verified") is False
+        )
         else None
     )
     status = _status(passed)
@@ -190,7 +196,11 @@ def _constraint(index, row, metadata):
         margin = None
     sampling = "independent grid" if "independent" in lower_name else "design grid"
     if stage == "physical" and "field" in lower_name:
-        scope = "Strict reviewed electrical path · design grid · original current; independent winding validation not performed"
+        scope = (
+            "Recorded electrical path · independent grid · original signed current; no refit"
+            if row.get("scope") == "independent_realized_winding"
+            else "Strict reviewed electrical path · design grid · original current; separate independent winding check"
+        )
     elif stage == "sheet" and ("field" in lower_name or lower_name.startswith("standard:")):
         count = (metadata.get("validation") or {}).get("point_count") if sampling == "independent grid" else None
         scope = f"Continuous sheet · {sampling}" + (
@@ -223,6 +233,7 @@ def _constraint(index, row, metadata):
         if "field" in lower_name or lower_name.startswith("standard:")
         else "optimization",
         f"constraint:{index}",
+        body_id=str(row.get("body_id") or ""),
     )
 
 
@@ -396,6 +407,20 @@ def acceptance_report(metadata=None, *, project=None, pending=False) -> Acceptan
                 )
             )
     rows.extend(_body_rows(metadata))
+    if metadata.get("engineering_review") or metadata.get("winding_validation"):
+        for observation in gradient_review(metadata):
+            rows.append(
+                AcceptanceCheck(
+                    "engineering:" + observation.key,
+                    "sheet" if observation.key == "sheet_K" else "physical",
+                    observation.title,
+                    "Evaluated" if observation.value is not None else "Unverified",
+                    observation.value,
+                    unit=observation.unit,
+                    scope=observation.scope,
+                    body_id=observation.body_id,
+                )
+            )
     physical_status = (
         "Failed"
         if "Failed" in (verdicts["sweeps"], verdicts["fabrication"])

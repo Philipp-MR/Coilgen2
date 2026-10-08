@@ -28,6 +28,7 @@ from ..manufacturing import (
 )
 from ..models import CoilPart, FabricationPath, Mesh, WirePath
 from ..physics import biot_savart_wire_path
+from ..gradient_engineering import CircuitSpec
 from ..progress import ProgressReporter
 from ..geometry_collision import (
     _segment_bvh_candidate_pairs,
@@ -183,7 +184,7 @@ def assembly_clearance(records, *, insulation_thickness_m=0.0, tolerance_m=0.0, 
     }
 
 
-def winding_instructions(record, return_path_m=None, *, checkpoint_spacing_m=0.05):
+def winding_instructions(record, return_path_m=None, *, checkpoint_spacing_m=0.05, circuit=None):
     """Group work by turns/connectors and retain the exact sampled route.
 
     Checkpoints are spaced by physical arclength and include sharp bends and
@@ -203,6 +204,17 @@ def winding_instructions(record, return_path_m=None, *, checkpoint_spacing_m=0.0
     terminal_assumption = "Closed mathematical turn; feed break and drive connection are not designed."
     if not record.path.closed:
         terminal_assumption = "Start and finish terminals are exposed; external supply/return geometry is missing."
+    explicit = None
+    if circuit is not None:
+        circuit = CircuitSpec.from_dict(circuit) if isinstance(circuit, dict) else circuit
+        if not isinstance(circuit, CircuitSpec) or circuit.body_id != record.body_id:
+            raise ValueError("Circuit specification must reference the exact fabrication body.")
+        if return_path_m is not None:
+            raise ValueError("Explicit circuit and legacy return geometry cannot both target one body.")
+        explicit = circuit.construct_path(points, closed=record.path.closed)
+        points, electrical_points = explicit["winding_points_m"], explicit["electrical_points_m"]
+        role, circuit_complete = "winding_with_explicit_drive", True
+        terminal_assumption = "Explicit supply, winding, return and drive closure; unswept leads and physical feed cut remain unqualified."
     if return_path_m is not None:
         if record.path.closed:
             raise ValueError("A return must attach to an open winding; closed turns need an explicit feed break first.")
@@ -230,11 +242,31 @@ def winding_instructions(record, return_path_m=None, *, checkpoint_spacing_m=0.0
     winding_count = len(points) - 1
     roles = []
     for index in range(len(lengths)):
-        owner = record.path.segment_owners[index] if index < len(record.path.segment_owners) else None
-        geometry = (
-            record.path.segment_geometry[index].value if index < len(record.path.segment_geometry) else "unspecified"
+        source_index = explicit["source_intervals"][index] if explicit is not None else index
+        owner = (
+            record.path.segment_owners[source_index]
+            if source_index is not None and source_index < len(record.path.segment_owners)
+            else None
         )
-        segment_role = "external_return" if index >= winding_count else "winding"
+        geometry = (
+            record.path.segment_geometry[source_index].value
+            if source_index is not None and source_index < len(record.path.segment_geometry)
+            else "user_supplied_polyline"
+            if explicit is not None
+            else "unspecified"
+        )
+        segment_role = (
+            {
+                "supply": "external_supply",
+                "winding": "winding",
+                "return": "external_return",
+                "drive_closure": "drive_closure",
+            }[explicit["segment_roles"][index]]
+            if explicit is not None
+            else "external_return"
+            if index >= winding_count
+            else "winding"
+        )
         kind = (
             owner.kind if owner is not None else ("contour_loop" if record.path.source_kind == "contour" else "winding")
         )
@@ -242,6 +274,8 @@ def winding_instructions(record, return_path_m=None, *, checkpoint_spacing_m=0.0
         loop = owner.loop_index if owner is not None else (record.contour_index - 1 if record.contour_index else -1)
         connector = owner.connector_index if owner is not None else -1
         connector_role = owner.connector_role if owner is not None else ""
+        if explicit is not None and source_index is None:
+            kind, group, loop = "external_lead", -1, -1
         roles.append((segment_role, kind, group, loop, connector, connector_role, geometry))
     boundaries = [0, *[i for i in range(1, len(roles)) if roles[i] != roles[i - 1]], len(lengths)]
     station_indices = set(boundaries)
@@ -276,7 +310,11 @@ def winding_instructions(record, return_path_m=None, *, checkpoint_spacing_m=0.0
     steps = []
     for number, (start, stop) in enumerate(zip(boundaries[:-1], boundaries[1:]), start=1):
         segment_role, kind, group, loop, connector, connector_role, geometry = roles[start]
-        if segment_role == "external_return":
+        if segment_role == "external_supply":
+            operation, instruction = "route_supply", "Route the explicitly supplied feed"
+        elif segment_role == "drive_closure":
+            operation, instruction = "drive_connection", "Follow the explicitly modeled drive closure"
+        elif segment_role == "external_return":
             operation, instruction = "route_return", "Route the external return"
         elif kind == "inter_group_connector":
             operation, instruction = (
@@ -311,7 +349,7 @@ def winding_instructions(record, return_path_m=None, *, checkpoint_spacing_m=0.0
                 "instruction": f"{instruction} along the exported route from station {markers[start]} to {markers[stop]}.",
             }
         )
-    return {
+    plan = {
         "body_id": record.body_id,
         "circuit_role": role,
         "circuit_complete": circuit_complete,
@@ -329,6 +367,21 @@ def winding_instructions(record, return_path_m=None, *, checkpoint_spacing_m=0.0
         "layer_assignment_designed": False,
         "steps": steps,
     }
+    if explicit is not None:
+        plan.update(
+            drive_feed_designed=True,
+            expected_winding_path_sha256=circuit.expected_path_sha256,
+            electrical_path_sha256=explicit["electrical_path_sha256"],
+            positive_terminal=circuit.positive_terminal,
+            negative_terminal=circuit.negative_terminal,
+            positive_terminal_xyz_m=explicit["positive_terminal_xyz_m"],
+            negative_terminal_xyz_m=explicit["negative_terminal_xyz_m"],
+            current_direction_polarity=circuit.polarity,
+            feed_break_segment=circuit.feed_break_segment,
+            circuit_source=circuit.source,
+            feed_geometry_clearance_certified=False,
+        )
+    return plan
 
 
 @dataclass
@@ -370,7 +423,7 @@ class FabricationReport:
                 for record in self.paths
             ],
             "winding": [
-                {key: value for key, value in item.items() if key != "electrical_points_m"}
+                {key: value for key, value in item.items() if key not in {"electrical_points_m", "winding_points_m"}}
                 for item in self.winding_steps
             ],
         }
@@ -383,6 +436,7 @@ def compile_fabrication(
     strict=True,
     kernel_backend="auto",
     leads=None,
+    circuits=None,
     surface_realization="mesh",
     checkpoint_spacing_m=0.05,
 ):
@@ -391,6 +445,8 @@ def compile_fabrication(
     ``leads`` maps body IDs to explicit finish-to-start return polylines. Those
     paths participate in field/electrical evaluation but require their own
     conductor clearance review. The original result's EM solution is untouched.
+    ``circuits`` optionally supplies geometry-bound CircuitSpec values with an
+    explicit feed break, supply and return. It never invents a closing segment.
 
     The headless compiler preserves the finite-element support by default.
     ``surface_realization='analytic'`` explicitly projects supported cylinders
@@ -460,8 +516,29 @@ def compile_fabrication(
     unknown_leads = set(leads) - {record.body_id for record in records}
     if unknown_leads:
         raise ValueError(f"Lead geometry references unknown fabrication bodies: {sorted(unknown_leads)}")
+    if circuits is None:
+        circuits = {}
+    elif isinstance(circuits, (tuple, list)):
+        values = [CircuitSpec.from_dict(value) if isinstance(value, dict) else value for value in circuits]
+        if any(not isinstance(value, CircuitSpec) for value in values) or len(
+            {value.body_id for value in values}
+        ) != len(values):
+            raise ValueError("Circuit specifications require unique explicit fabrication body IDs.")
+        circuits = {value.body_id: value for value in values}
+    elif not isinstance(circuits, dict):
+        raise ValueError("circuits must map explicit fabrication body IDs to circuit specifications.")
+    unknown_circuits = set(circuits) - {record.body_id for record in records}
+    if unknown_circuits:
+        raise ValueError(f"Circuit geometry references unknown fabrication bodies: {sorted(unknown_circuits)}")
+    if set(circuits) & set(leads):
+        raise ValueError("Explicit circuits and legacy return geometry cannot target the same body.")
     plans = [
-        winding_instructions(record, leads.get(record.body_id), checkpoint_spacing_m=checkpoint_spacing_m)
+        winding_instructions(
+            record,
+            leads.get(record.body_id),
+            checkpoint_spacing_m=checkpoint_spacing_m,
+            circuit=circuits.get(record.body_id),
+        )
         for record in records
     ]
     field = np.zeros_like(result.target_field.b, dtype=float)
@@ -512,6 +589,17 @@ def compile_fabrication(
             reasons.append(f"{record.body_id}:external_return_not_modeled")
         if record.body_id in leads:
             reasons.append(f"{record.body_id}:return_conductor_clearance_not_certified")
+        if record.body_id in circuits:
+            reasons.append(f"{record.body_id}:drive_lead_conductor_clearance_not_certified")
+            if record.path.closed:
+                reasons.append(f"{record.body_id}:physical_feed_break_not_swept")
+            electrical[-1].update(
+                drive_feed_designed=True,
+                electrical_path_sha256=plan["electrical_path_sha256"],
+                current_direction_polarity=plan["current_direction_polarity"],
+                current_source="original_contour_step_explicit_feed_polarity_no_refit",
+                source=plan["circuit_source"],
+            )
     mask = ~np.asarray(result.target_field.suppressed, dtype=bool)
     component = config.target_field_component
     target = field_component_values(result.target_field.b[mask], component, b0_direction=config.b_0_direction)
@@ -562,6 +650,12 @@ def compile_fabrication(
         "circuit_complete": all(plan["circuit_complete"] for plan in plans),
         "finite_cross_section_field_integrated": False,
     }
+    if circuits:
+        metrics.update(
+            field_geometry="physical_retained_winding_with_unswept_explicit_drive_paths_thin_wire",
+            drive_feed_designed=all(plan["drive_feed_designed"] for plan in plans),
+            electrical_path_sha256={plan["body_id"]: plan.get("electrical_path_sha256") for plan in plans},
+        )
     report = FabricationReport(
         records,
         assembly,
@@ -618,9 +712,10 @@ def compile_fabrication(
                 save_mesh_as_step(record.mesh, solid_step, solid_name=record.body_id)
                 report.artifacts.append(str(solid_step.resolve()))
         for plan in plans:
-            if plan["body_id"] not in leads:
+            if plan["body_id"] not in leads and plan["body_id"] not in circuits:
                 continue
-            electrical_path = output / f"{plan['body_id']}_electrical_path_with_return.csv"
+            suffix = "explicit_drive" if plan["body_id"] in circuits else "with_return"
+            electrical_path = output / f"{plan['body_id']}_electrical_path_{suffix}.csv"
             np.savetxt(
                 electrical_path,
                 plan["electrical_points_m"],

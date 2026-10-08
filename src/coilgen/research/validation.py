@@ -138,6 +138,41 @@ def field_budget_check(
     }
 
 
+def sample_independent_target(result: Any, *, resolution: int = 12) -> TargetField:
+    """Sample the executed analytic target without fitting a new normalization.
+
+    Coordinates remain in the world frame. The saved expression scale and
+    configured units are reused; imported targets need a separate dataset.
+    """
+    config = result.input_data
+    imported_map = str(config.target_field_definition_file).strip().lower() not in {"", "none"}
+    legacy_mesh = config.target_region_geometry is None and str(config.target_mesh_file).strip().lower() not in {
+        "",
+        "none",
+    }
+    if imported_map or legacy_mesh:
+        raise ValueError("Imported targets require a separately supplied independent validation dataset.")
+    if isinstance(resolution, bool) or int(resolution) != resolution or resolution < 2:
+        raise ValueError("Independent-grid resolution must be an integer >=2.")
+    if config.target_region_geometry is not None:
+        from ..target_regions import sample_target_region_from_config
+
+        points = sample_target_region_from_config(config, resolution=resolution, independent=True)
+    else:
+        radius = float(config.target_region_radius)
+        axis = (np.arange(resolution) + 0.5) * 2 * radius / resolution - radius
+        points = np.array(np.meshgrid(axis, axis, axis)).reshape(3, -1).T
+        points = points[np.linalg.norm(points, axis=1) <= radius]
+        if config.set_roi_into_mesh_center:
+            # Expressions remain in world coordinates, as define_target_field.
+            points += result.combined_mesh.vertices.mean(axis=0)
+    raw = np.zeros((len(points), 3))
+    scale = float(getattr(result, "regularization_diagnostics", {}).get("target_gradient_normalization_scale", 1.0))
+    raw[:, 2] = evaluate_field_expression(config.field_shape_function, points) * scale
+    target = field_values_to_tesla(raw, config.target_field_units)
+    return TargetField(points, target, np.ones(len(points)), np.zeros(len(points), bool), np.ones(len(points), int))
+
+
 def validate_on_independent_grid(result: Any, *, resolution: int = 12, design_margin: float = 1.0) -> dict[str, Any]:
     """Evaluate unchanged sheet current on a distinct grid without refitting.
 
@@ -155,27 +190,8 @@ def validate_on_independent_grid(result: Any, *, resolution: int = 12, design_ma
         reason = "Imported targets require a separately supplied independent validation dataset."
     if reason:
         return {"available": False, "verified": False, "passed": None, "reason": reason}
-    if isinstance(resolution, bool) or int(resolution) != resolution or resolution < 2:
-        raise ValueError("Independent-grid resolution must be an integer >=2.")
-    if config.target_region_geometry is not None:
-        from ..target_regions import sample_target_region_from_config
-
-        points = sample_target_region_from_config(config, resolution=resolution, independent=True)
-    else:
-        radius = float(config.target_region_radius)
-        axis = (np.arange(resolution) + 0.5) * 2 * radius / resolution - radius
-        points = np.array(np.meshgrid(axis, axis, axis)).reshape(3, -1).T
-        points = points[np.linalg.norm(points, axis=1) <= radius]
-        if config.set_roi_into_mesh_center:
-            # Expressions remain in world coordinates, as define_target_field.
-            points += result.combined_mesh.vertices.mean(axis=0)
-    raw = np.zeros((len(points), 3))
-    scale = float(result.regularization_diagnostics.get("target_gradient_normalization_scale", 1.0))
-    raw[:, 2] = evaluate_field_expression(config.field_shape_function, points) * scale
-    target = field_values_to_tesla(raw, config.target_field_units)
-    validation = TargetField(
-        points, target, np.ones(len(points)), np.zeros(len(points), bool), np.ones(len(points), int)
-    )
+    validation = sample_independent_target(result, resolution=resolution)
+    points, target = validation.coords, validation.b
     parts = [
         replace(
             part,
@@ -209,6 +225,276 @@ def validate_on_independent_grid(result: Any, *, resolution: int = 12, design_ma
         "sampling_weights": "equal_point_weights",
         "target_region_geometry": config.target_region_geometry,
     }
+
+
+def _winding_linearity(result, target, field):
+    """Fit compatible Bz gradients, keeping descriptive evidence separate."""
+    from ..gradient_linearity import gradient_linearity_enabled, gradient_linearity_summary
+
+    config = result.input_data
+    enabled = gradient_linearity_enabled(config)
+    if normalize_field_component(config.target_field_component) != "Bz" or config.design_context != "mr_gradient":
+        reason = "Independent winding linearity currently supports Cartesian Bz MR-gradient contracts only."
+        return {}, [], reason if enabled else ""
+    region = str(config.linearity_region).strip().lower()
+    if region in {"suppression", "secondary", "shield"} or (
+        region in {"all", "any"} and np.any(result.target_field.suppressed)
+    ):
+        reason = "Independent suppression-region winding linearity requires separate validation samples."
+        return {}, [], reason if enabled else ""
+    if np.linalg.matrix_rank(np.column_stack((np.ones(len(target.coords)), target.coords))) < 4:
+        reason = "Independent winding samples cannot identify a complete Cartesian gradient fit."
+        return {}, [], reason if enabled else ""
+    if not enabled:
+        from ..engineering_metrics import fit_bz_field_quality
+
+        # A constant/nonlinear target has no unique desired gradient axis.
+        # Roundoff in its first-order projection must not create an efficiency.
+        target_fit = fit_bz_field_quality(
+            target.b, target, fit_offset=bool(getattr(config, "linearity_fit_offset", True))
+        )
+        tolerance = 128 * np.finfo(float).eps * float(np.max(np.abs(target.b[:, 2])))
+        gradient_scale = target_fit.desired_gradient_T_per_m * float(np.max(np.ptp(target.coords, axis=0)))
+        if (
+            not np.all(np.isfinite(field))
+            or not np.all(np.isfinite([target_fit.linear_max_abs_residual_T, gradient_scale]))
+            or target_fit.linear_max_abs_residual_T > tolerance
+            or gradient_scale <= tolerance
+        ):
+            return {}, [], ""
+    summary = gradient_linearity_summary(field, target, config)
+    if not enabled:
+        summary["linearity_status"] = "not_checked"
+        for key in summary:
+            if key.endswith("_met"):
+                summary[key] = None
+        return summary, [], ""
+    checks = []
+    for title, value, limit in (
+        ("Gradient strength", "linearity_gradient_strength_error_percent", "gradient_strength_tolerance_percent"),
+        ("Gradient RMS linearity", "linearity_rms_percent", "linearity_rms_tolerance_percent"),
+        ("Gradient peak linearity", "linearity_peak_percent", "linearity_peak_tolerance_percent"),
+        ("Cross-gradient", "linearity_cross_gradient_percent", "linearity_cross_gradient_tolerance_percent"),
+    ):
+        maximum = float(getattr(config, limit))
+        if maximum > 0:
+            observed = float(summary[value])
+            checks.append(
+                {
+                    "name": "Independent winding " + title.lower(),
+                    "value": observed if np.isfinite(observed) else None,
+                    "limit": maximum,
+                    "effective_limit": maximum * (1 + 1e-10),
+                    "unit": "%",
+                    "verified": True,
+                    "passed": bool(np.isfinite(observed) and observed <= maximum * (1 + 1e-10)),
+                }
+            )
+    return summary, checks, ""
+
+
+def _samples_on_wire(path, samples):
+    """Exclude singular thin-wire samples instead of accepting kernel zeros."""
+    for start, vector in zip(path[:-1], np.diff(path, axis=0)):
+        length_squared = float(vector @ vector)
+        if length_squared <= 1e-30:
+            continue
+        offsets = samples - start
+        fractions = np.clip(offsets @ vector / length_squared, 0, 1)
+        distances_squared = np.sum((offsets - fractions[:, None] * vector) ** 2, axis=1)
+        if np.any(distances_squared <= 1e-30):
+            return True
+    return False
+
+
+def validate_winding_on_independent_grid(
+    result: Any, fabrication: Any, *, resolution: int = 12, design_margin: float = 1.0
+) -> dict[str, Any]:
+    """Check recorded electrical paths at their original signed body currents.
+
+    A collinear segment-bisection check exercises the existing analytically
+    integrated thin-wire kernel without changing the path geometry. It is not
+    curve-discretization convergence or finite-cross-section validation.
+    Unsupported additional contracts remain unknown even when ROI fields are
+    available. This field check cannot certify drive feeds or construction.
+    """
+    if isinstance(resolution, bool) or int(resolution) != resolution or resolution < 2:
+        raise ValueError("Independent-grid resolution must be an integer >=2.")
+    if not np.isfinite(design_margin) or not 0 < design_margin <= 1:
+        raise ValueError("design_margin must be a finite fraction in (0,1].")
+    config, spec = result.input_data, _spec(result)
+    report = {
+        "available": False,
+        "verified": False,
+        "passed": None,
+        "source": "fabricated_electrical_paths_independent_grid_original_current",
+        "geometry_source": "recorded_fabricated_electrical_paths",
+        "field_model": "thin_wire_exact_segments",
+        "current_source": "original_contour_current_no_refit",
+        "current_refitted": False,
+        "component": normalize_field_component(config.target_field_component),
+        "coordinate_frame": "world",
+        "sampling_weights": "equal_point_weights",
+        "target_region_geometry": config.target_region_geometry,
+        "resolution": int(resolution),
+        "point_count": 0,
+        "distinct_from_design_grid": False,
+        "design_grid_overlap_point_count": 0,
+        "new_point_count": 0,
+        "overlap_tolerance_m": None,
+        "currents_A": {},
+        "linearity": {},
+        "integration_check": {"available": False},
+        "checks": [],
+        "unknown_reasons": [],
+    }
+
+    def unavailable(reason):
+        report.update(reason=reason, unknown_reasons=[reason])
+        return report
+
+    try:
+        target = sample_independent_target(result, resolution=resolution)
+    except (ValueError, TypeError, KeyError, OverflowError) as exc:
+        return unavailable(str(exc))
+    points = np.asarray(target.coords, dtype=float)
+    if not len(points) or not np.all(np.isfinite(points)) or not np.all(np.isfinite(target.b)):
+        return unavailable("Independent analytic target samples must be nonempty and finite.")
+    design_points = np.asarray(result.target_field.coords, dtype=float)
+    if design_points.ndim != 2 or design_points.shape[1] != 3 or not np.all(np.isfinite(design_points)):
+        return unavailable("Original design sample locations must be finite world-frame XYZ coordinates.")
+    # Equivalent locations can differ by floating-point evaluation order.
+    # Tree queries avoid a dense validation-by-design distance matrix.
+    from scipy.spatial import cKDTree
+
+    overlap_tolerance = (
+        64
+        * np.finfo(float).eps
+        * max(1.0, float(np.max(np.abs(points))), float(np.max(np.abs(design_points))) if len(design_points) else 0.0)
+    )
+    overlap = int(np.count_nonzero(cKDTree(design_points).query(points)[0] <= overlap_tolerance))
+    report.update(
+        point_count=len(points),
+        design_grid_overlap_point_count=overlap,
+        new_point_count=len(points) - overlap,
+        overlap_tolerance_m=overlap_tolerance,
+    )
+    if overlap == len(points):
+        return unavailable("The requested winding validation grid repeats only design sample locations.")
+    plans = list(getattr(fabrication, "winding_steps", ()))
+    bodies = list(getattr(fabrication, "electrical_metrics", {}).get("bodies", ()))
+    ids = [plan.get("body_id") for plan in plans]
+    body_ids = [body.get("body_id") for body in bodies]
+    if not ids or any(not isinstance(id_, str) or not id_ for id_ in ids) or len(set(ids)) != len(ids):
+        return unavailable("Recorded winding paths require unique nonempty body identities.")
+    if (
+        any(not isinstance(id_, str) or not id_ for id_ in body_ids)
+        or len(body_ids) != len(set(body_ids))
+        or set(ids) != set(body_ids)
+    ):
+        return unavailable("Recorded electrical paths and original currents do not cover the same bodies.")
+    bodies = {body["body_id"]: body for body in bodies}
+    field, bisected_field = np.zeros_like(points), np.zeros_like(points)
+    unknown = []
+    for plan in plans:
+        id_ = plan["body_id"]
+        try:
+            path = np.asarray(plan["electrical_points_m"], dtype=float)
+            current = float(bodies[id_]["current_A"])
+            if (
+                path.ndim != 2
+                or path.shape[1] != 3
+                or len(path) < 2
+                or not np.all(np.isfinite(path))
+                or not np.isfinite(current)
+                or not np.any(np.linalg.norm(np.diff(path, axis=0), axis=1) > 1e-15)
+            ):
+                raise ValueError("finite Nx3 path and finite recorded current are required")
+        except (ValueError, TypeError, KeyError) as exc:
+            return unavailable(f"Recorded winding body {id_} is invalid: {exc}.")
+        if _samples_on_wire(path, points):
+            return unavailable(
+                "Independent samples intersect a thin-wire centerline; a finite-cross-section field model is required."
+            )
+        if not plan.get("circuit_complete", False) or np.linalg.norm(path[-1] - path[0]) > 1e-10 * max(
+            float(np.max(np.ptp(path, axis=0))), 0.01
+        ):
+            unknown.append(f"Recorded winding body {id_} has no complete modeled return circuit.")
+        report["currents_A"][id_] = current
+        field += current * biot_savart_wire_path(path, points, worker_count=1)
+        bisected = np.empty((2 * len(path) - 1, 3))
+        bisected[::2], bisected[1::2] = path, (path[:-1] + path[1:]) / 2
+        bisected_field += current * biot_savart_wire_path(bisected, points, worker_count=1)
+    if spec.field_constraints or spec.scenarios:
+        unknown.append("Custom field/scenario contracts require separate independent winding operators and datasets.")
+    if (
+        np.any(result.target_field.suppressed)
+        or config.suppression_field_rms_limit_T > 0
+        or config.suppression_field_peak_limit_T > 0
+    ):
+        unknown.append("Suppression contracts require separate independent winding validation samples.")
+    if config.shield_gradient_opposition_enabled:
+        unknown.append("Shield gradient-opposition requires an independent per-support winding operator.")
+    check = field_budget_check(result, field, target.b, design_margin=design_margin)
+    checks = [{"name": "Independent winding field error (original current)", **check}]
+    if not check["verified"]:
+        unknown.append(check["reason"])
+    linearity, gradient_checks, reason = _winding_linearity(result, target, field)
+    checks.extend(gradient_checks)
+    if reason:
+        unknown.append(reason)
+    difference = float(np.max(np.linalg.norm(bisected_field - field, axis=1)))
+    scale = float(np.max(np.linalg.norm(field, axis=1)))
+    integration_limit = max(1e-15, 2e-10 * scale)
+    integration = {
+        "available": True,
+        "method": "collinear_segment_bisection_invariance",
+        "geometry_changed": False,
+        "curve_discretization_convergence": False,
+        "finite_cross_section_check": False,
+        "max_deviation_T": difference,
+        "effective_limit_T": integration_limit,
+        "passed": bool(np.isfinite(difference) and difference <= integration_limit),
+    }
+    checks.append(
+        {
+            "name": "Independent winding exact-segment integration consistency",
+            "value": difference if np.isfinite(difference) else None,
+            "limit": integration_limit,
+            "effective_limit": integration_limit,
+            "unit": "T",
+            "verified": True,
+            "passed": integration["passed"],
+        }
+    )
+    unknown = list(dict.fromkeys(unknown))
+    checks.extend(
+        {"name": reason, "value": None, "limit": None, "unit": "", "verified": False, "passed": None}
+        for reason in unknown
+    )
+    for row in checks:
+        row.update(
+            scope="independent_realized_winding",
+            geometry_source=report["geometry_source"],
+            current_source=report["current_source"],
+        )
+    verified = not unknown and check["verified"]
+    report.update(check)
+    report.update(
+        available=True,
+        verified=verified,
+        passed=bool(all(row["passed"] is True for row in checks)) if verified else None,
+        point_count=len(points),
+        distinct_from_design_grid=True,
+        points_m=points,
+        field_T=field,
+        target_T=target.b,
+        linearity=linearity,
+        integration_check=integration,
+        checks=checks,
+        unknown_reasons=unknown,
+    )
+    return report
 
 
 def wire_force_torque(

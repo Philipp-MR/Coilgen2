@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from types import MappingProxyType
 from typing import Mapping
 
 from ..pipeline_stages import PipelineStage
+from ..persistence import json_value
 from .reuse import ReusePlan, plan_reuse, plan_stopped_reuse
 from .project import _freeze
 
@@ -51,6 +51,7 @@ def matches_active_request(state, project, controls=None):
             state.get(key) == controls[key]
             for key in ("validation_resolution", "design_margin", "fabricate", "kernel_backend")
         )
+        and state.get("engineering") == controls.get("engineering")
     )
 
 
@@ -89,14 +90,14 @@ class ExecutionPlan:
     reuse: ReusePlan
 
     def __post_init__(self):
-        object.__setattr__(self, "controls", MappingProxyType(dict(self.controls)))
+        object.__setattr__(self, "controls", _freeze(json_value(self.controls, nonfinite="raise")))
 
     @property
     def checkpoint(self):
         return self.reuse.through(self.controls["pipeline_stage"])
 
     def request_controls(self):
-        controls = dict(self.controls)
+        controls = json_value(self.controls, nonfinite="raise")
         if not controls.get("resume_checkpoint") and self.checkpoint is not None:
             controls["resume_checkpoint"] = str(self.checkpoint.path)
         return controls

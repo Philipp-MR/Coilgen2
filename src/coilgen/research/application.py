@@ -24,7 +24,11 @@ from .storage import (
     result_metadata_digest,
     verify_input_files,
 )
-from .validation import validate_on_independent_grid, validate_fabricated_constraints
+from .validation import (
+    validate_on_independent_grid,
+    validate_fabricated_constraints,
+    validate_winding_on_independent_grid,
+)
 
 
 def _pipeline_sweep_evidence(parts, config) -> dict:
@@ -335,6 +339,22 @@ def _save_partial_result(request, checkpoint, directory, manifest, digest, start
     return json_value(payload)
 
 
+def _recorded_contour_surface_spacing(parts, config):
+    if config.skip_calculation_min_winding_distance:
+        return None
+    minima = []
+    for part in parts:
+        count = len(part.contour_lines)
+        distances = np.asarray(part.contour_distance_matrix)
+        if count < 2 or distances.shape != (count, count):
+            continue
+        pairs = distances[np.triu_indices(count, 1)]
+        finite = pairs[np.isfinite(pairs) & (pairs >= 0)]
+        if len(finite):
+            minima.append(float(finite.min()))
+    return min(minima, default=None)
+
+
 def _relative_field_error(actual, target, mask, component, direction):
     a = field_component_values(np.asarray(actual)[mask], component, b0_direction=direction)
     b = field_component_values(np.asarray(target)[mask], component, b0_direction=direction)
@@ -469,6 +489,13 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         )
     fabrication = None
     fabricated_physics = None
+    winding_validation = None
+    engineering_review = None
+    engineering = None
+    if request.engineering is not None:
+        from ..gradient_engineering import GradientEngineeringSpec, evaluate_gradient_engineering
+
+        engineering = GradientEngineeringSpec.from_dict(request.engineering)
     artifacts = [
         {"name": "request.json", "kind": "request"},
         {"name": "manifest.json", "kind": "provenance"},
@@ -478,7 +505,11 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
     if request.fabricate:
         progress.report(90, "Conditioning and checking the fabrication assembly")
         fabrication = compile_fabrication(
-            result, output_dir=directory / "fabrication", strict=True, kernel_backend=request.kernel_backend
+            result,
+            output_dir=directory / "fabrication",
+            strict=True,
+            kernel_backend=request.kernel_backend,
+            **({"circuits": engineering.circuit_map} if engineering else {}),
         )
         warnings.extend(fabrication.failure_reasons)
         if any(not plan.get("drive_feed_designed", False) for plan in fabrication.winding_steps):
@@ -497,6 +528,85 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         fabricated_physics = validate_fabricated_constraints(result, fabrication, design_margin=request.design_margin)
         constraints.extend(fabricated_physics["checks"])
         warnings.extend(fabricated_physics["unknown_reasons"])
+        if engineering:
+            if engineering.independent_winding_validation:
+                progress.report(94, "Checking recorded electrical paths on independent target samples")
+                winding_validation = validate_winding_on_independent_grid(
+                    result, fabrication, resolution=request.validation_resolution, design_margin=request.design_margin
+                )
+                constraints.extend(winding_validation["checks"])
+                warnings.extend(winding_validation["unknown_reasons"])
+                if not winding_validation["available"]:
+                    constraints.append(
+                        {
+                            "name": "Independent winding validation unavailable",
+                            "passed": None,
+                            "verified": False,
+                            "scope": "independent_realized_winding",
+                            "value": None,
+                            "limit": None,
+                            "unit": "",
+                            "reason": winding_validation.get("reason"),
+                        }
+                    )
+            engineering_review = evaluate_gradient_engineering(engineering, fabrication)
+            drive = engineering_review["drive"]
+            if engineering.drive is not None and not drive["available"]:
+                constraints.append(
+                    {
+                        "name": "Requested drive review unavailable",
+                        "passed": None,
+                        "verified": False,
+                        "scope": "fabricated_drive_waveform",
+                        "value": None,
+                        "limit": None,
+                        "unit": "",
+                        "reason": drive.get("reason"),
+                    }
+                )
+            for body in drive.get("bodies", ()):
+                for title, value, limit, unit, passed in (
+                    ("Amplifier peak current", "peak_current_A", "current_limit_A", "A", "within_current_limit"),
+                    ("Amplifier peak voltage", "peak_voltage_V", "voltage_limit_V", "V", "within_voltage_limit"),
+                ):
+                    verified = (
+                        title != "Amplifier peak voltage"
+                        or len(drive["bodies"]) == 1
+                        or drive.get("mutual_inductance_included") is True
+                    )
+                    constraints.append(
+                        {
+                            "name": title,
+                            "body_id": body["body_id"],
+                            "value": body[value],
+                            "limit": body[limit],
+                            "effective_limit": body[limit],
+                            "unit": unit,
+                            "passed": body[passed] if verified else None,
+                            "scope": "fabricated_drive_waveform",
+                            "verified": verified,
+                        }
+                    )
+            if len(drive.get("bodies", ())) > 1 and not drive.get("mutual_inductance_included"):
+                warnings.append(
+                    "Multi-body drive voltage estimates exclude mutual inductance; amplifier voltage acceptance remains unverified."
+                )
+            thermal = engineering_review["thermal"]
+            if engineering.drive is not None and engineering.drive.thermal is not None:
+                constraints.append(
+                    {
+                        "name": "Lumped thermal model peak temperature",
+                        "scope": "fabricated_drive_thermal_model",
+                        "value": thermal.get("peak_temperature_K"),
+                        "limit": thermal.get("temperature_limit_K"),
+                        "effective_limit": thermal.get("temperature_limit_K"),
+                        "unit": "K",
+                        "verified": thermal.get("available") is True,
+                        "passed": thermal.get("within_model_limit") if thermal.get("available") else None,
+                        "reason": thermal.get("reason"),
+                        "model": thermal.get("model"),
+                    }
+                )
         for path in fabrication.artifacts:
             name = Path(path).relative_to(directory).as_posix()
             artifacts.append({"name": name, "kind": Path(path).suffix.lstrip(".")})
@@ -544,7 +654,8 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         "fabricated_torque_nm": fabricated_physics.get("torque_Nm") if fabricated_physics else None,
         "sheet_thickness_m": config.conductor_thickness,
         "conductor_resistivity_ohm_m": config.specific_conductivity_conductor,
-        "minimum_spacing_m": None,
+        "minimum_spacing_m": _recorded_contour_surface_spacing(result.coil_parts, config),
+        "minimum_spacing_scope": "recorded surface-geodesic spacing between unconnected contour centerlines; separate from routed/envelope clearance",
         "contour_components": sum(len(part.contour_lines) for part in result.coil_parts),
         "vertices": len(result.combined_mesh.vertices),
         "triangles": len(result.combined_mesh.faces),
@@ -566,6 +677,13 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         # Wire-field validation uses the design samples, not the independent
         # sheet grid. Carry its own coordinates instead of implying a grid.
         arrays["fabricated_points_m"] = result.target_field.coords
+    if winding_validation and winding_validation["available"]:
+        for source, name in (
+            ("points_m", "winding_validation_points_m"),
+            ("field_T", "winding_validation_field_T"),
+            ("target_T", "winding_validation_target_T"),
+        ):
+            arrays[name] = winding_validation[source]
     if fabrication is not None:
         # Review can intentionally re-realize on the FEM mesh while the native
         # pipeline uses an analytic surface. Keep both physical datasets.
@@ -596,6 +714,16 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         "wire_fields": wire_evidence,
         "pipeline_sweeps": pipeline_sweeps,
         "fabrication": fabrication.summary() if fabrication else None,
+        **(
+            {
+                "winding_validation": {
+                    k: v for k, v in winding_validation.items() if k not in {"points_m", "field_T", "target_T"}
+                }
+            }
+            if winding_validation
+            else {}
+        ),
+        **({"engineering_review": engineering_review} if engineering_review else {}),
         "fabricated_physics": {k: v for k, v in fabricated_physics.items() if k != "field_T"}
         if fabricated_physics
         else None,

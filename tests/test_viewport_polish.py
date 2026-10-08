@@ -72,9 +72,12 @@ def test_grouped_selector_retains_all_session_keys_and_skips_headers(scientific_
         "support",
         "preview_target",
         "stream_function",
+        "surface_current_density",
         "target",
         "sheet",
         "validation",
+        "winding_validation",
+        "winding_validation_residual",
         "contour_field",
         "contour_residual",
         "routed_field",
@@ -100,6 +103,51 @@ def test_grouped_selector_retains_all_session_keys_and_skips_headers(scientific_
     assert len(headers) == 4 and all(not header.isEnabled() for header in headers)
     assert viewport.dataset.maxVisibleItems() >= viewport.dataset.count()
     assert viewport.dataset.minimumContentsLength() == 24
+
+
+def test_new_engineering_plots_require_their_own_recorded_data(scientific_viewport):
+    viewport = scientific_viewport
+    arrays = saved_geometry()
+    viewport.display_run(arrays)
+    keys = ("surface_current_density", "winding_validation", "winding_validation_residual")
+    for key in keys:
+        assert not viewport.dataset.model().item(viewport.dataset.findData(key)).isEnabled()
+    points = np.array([[0, 0, 0.01], [0, 0.02, 0]])
+    field = np.array([[0, 0, 7e-6], [0, 0, -3e-6]])
+    reference = np.array([[0, 0, 2e-6], [0, 0, -1e-6]])
+    arrays.update(
+        winding_validation_points_m=points,
+        winding_validation_field_T=field,
+        winding_validation_target_T=reference,
+    )
+    viewport.display_run(arrays)
+    viewport.component.setCurrentText("Bz")
+    viewport.units.setCurrentText("µT")
+    viewport.dataset.setCurrentIndex(viewport.dataset.findData("winding_validation_residual"))
+    mesh = viewport._dataset_mesh
+    np.testing.assert_array_equal(mesh.points, points)
+    np.testing.assert_allclose(mesh.active_scalars, [5, -2], rtol=1e-14)
+    assert "original signed current" in viewport.caption.text()
+    assert not viewport.wire_current.isEnabled()
+    # A design-grid target cannot substitute for a missing independent target.
+    del arrays["winding_validation_target_T"]
+    viewport.display_run(arrays)
+    assert not viewport.dataset.model().item(viewport.dataset.findData("winding_validation_residual")).isEnabled()
+    assert viewport.dataset.model().item(viewport.dataset.findData("winding_validation")).isEnabled()
+
+
+def test_face_current_density_plot_uses_A_per_m_without_field_unit_scaling(scientific_viewport):
+    viewport = scientific_viewport
+    arrays = saved_geometry()
+    points = arrays["vertices_m"].mean(axis=0, keepdims=True)
+    arrays.update(sheet_current_density_points_m=points, sheet_current_density_A_per_m=np.array([[3.0, -4.0, 0.0]]))
+    viewport.display_run(arrays)
+    viewport.units.setCurrentText("µT")
+    viewport.dataset.setCurrentIndex(viewport.dataset.findData("surface_current_density"))
+    np.testing.assert_array_equal(viewport._dataset_mesh.points, points)
+    np.testing.assert_array_equal(viewport._dataset_mesh.active_scalars, [5])
+    assert viewport._dataset_mesh.active_scalars_name == "|K| [A/m]"
+    assert not viewport.component.isEnabled() and not viewport.units.isEnabled()
 
 
 def test_saved_view_overrides_first_result_choice_and_camera_without_refitting(scientific_viewport, monkeypatch):

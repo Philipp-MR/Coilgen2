@@ -246,6 +246,7 @@ class JobManager:
                 "design_margin": request.design_margin,
                 "fabricate": request.fabricate,
                 "kernel_backend": request.kernel_backend,
+                **({"engineering": request.engineering} if request.engineering is not None else {}),
                 "completed_stage": None,
                 "completed_stages": [],
             }

@@ -939,6 +939,19 @@ class CoilGenWorkbench(QMainWindow):
         edit_menu.addActions([self.undo_action, self.redo_action])
         edit_menu.addAction(self._action("Advanced settings…", self._advanced_dialog, icon_name="settings"))
         edit_menu.addAction(self._action("Rename project…", self._rename_dialog, icon_name="edit"))
+        self.gradient_menu = self.menuBar().addMenu("Gradient engineering")
+        self.gradient_actions = {}
+        for title, handler, symbol in (
+            ("Gradient requirements…", self._gradient_requirements_dialog, "target-gradient"),
+            ("Primary, shield and external region…", self._gradient_geometry_dialog, "mesh"),
+            ("Queue convergence study…", self._gradient_convergence_dialog, "compute-study"),
+            ("Review convergence study…", self._gradient_convergence_review, "compare-designs"),
+            ("Terminals, feeds and drive waveform…", self._gradient_circuit_dialog, "connected-winding"),
+            ("Compare measured field…", self._gradient_measured_dialog, "field-error"),
+        ):
+            action = self._action(title, handler, icon_name=symbol)
+            self.gradient_actions[handler.__name__] = action
+            self.gradient_menu.addAction(action)
         channels_menu = self.channels_menu = self.menuBar().addMenu("Channels")
         self.channel_overview_action = self._action("Channel overview…", self._channels_dialog, icon_name="channels")
         channels_menu.addAction(self.channel_overview_action)
@@ -1051,6 +1064,7 @@ class CoilGenWorkbench(QMainWindow):
         self.tree.setEnabled(active)
         self.findChild(QToolBar, "study_toolbar").setVisible(active)
         self.edit_menu.setEnabled(active)
+        self.gradient_menu.setEnabled(active)
         self.channels_menu.setEnabled(active)
         self.view_menu.setEnabled(active)
         for action in self.file_menu.actions():
@@ -2314,6 +2328,24 @@ class CoilGenWorkbench(QMainWindow):
             help_button.setIcon(icon("information"))
             help_button.clicked.connect(help_window.open_panel)
             layout.addWidget(help_button)
+        engineering_actions = {
+            "geometry": ("Primary and shield dimensions…", self._gradient_geometry_dialog),
+            "target": ("Gradient requirements…", self._gradient_requirements_dialog),
+            "winding": ("Define terminals, feeds and drive…", self._gradient_circuit_dialog),
+            "validation": ("Convergence study…", self._gradient_convergence_dialog),
+        }
+        if key in engineering_actions:
+            title, operation = engineering_actions[key]
+            engineering_button = QPushButton(title)
+            engineering_button.setObjectName("gradient_engineering_" + key)
+            engineering_button.clicked.connect(operation)
+            if key == "winding":
+                record = self.runs.get(self._selected_run)
+                engineering_button.setEnabled(
+                    bool(record and record.metadata.get("winding_steps") and not self._run_verification_error(record))
+                )
+                engineering_button.setToolTip("Requires a verified Fabrication review for the applied numerical model.")
+            layout.addWidget(engineering_button)
         advanced = QPushButton("Advanced settings…")
         advanced.setIcon(icon("settings"))
         advanced.clicked.connect(self._advanced_dialog)
@@ -4622,12 +4654,376 @@ class CoilGenWorkbench(QMainWindow):
 
     def _request_controls(self):
         return {
+            **({"engineering": self.project.study["engineering"]} if "engineering" in self.project.study else {}),
             "pipeline_stage": self.stage_selector.currentData(),
             "validation_resolution": self.validation_resolution,
             "design_margin": self.design_margin,
             "fabricate": self.fabricate,
             "kernel_backend": self.project.study["kernel_backend"],
         }
+
+    def _gradient_requirements_dialog(self):
+        from .gradient_tools import GradientRequirementsDialog
+
+        if self.project is None or not self._apply_document_inputs():
+            return
+        project = self.project
+        dialog = GradientRequirementsDialog(project, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            config, study = dialog.result_value
+            self.apply_inputs(
+                config, study, label="Edit gradient requirements", expected_fingerprint=project.fingerprint
+            )
+
+    def _gradient_geometry_dialog(self):
+        from .gradient_tools import GradientGeometryDialog
+
+        if self.project is None or not self._apply_document_inputs():
+            return
+        project = self.project
+        try:
+            dialog = GradientGeometryDialog(project, self)
+        except (ValueError, TypeError, OSError, KeyError) as exc:
+            self._error(f"Gradient support geometry: {exc}")
+            return
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            geometry = dialog.result_value
+            self._gradient_task(
+                lambda captured: geometry.apply(captured, expected_fingerprint=project.fingerprint),
+                lambda result: self._apply_design_document(result, "Edit cylindrical gradient supports"),
+                "Build gradient support meshes",
+            )
+
+    def _gradient_task(self, operation, callback, label):
+        """Run file verification and engineering analysis off the UI thread."""
+        task = DesignStudyTask(operation, self.project)
+        if not hasattr(self, "_gradient_tasks"):
+            self._gradient_tasks = {}
+        self._gradient_tasks[task.signals] = (task, callback, label)
+        task.signals.finished.connect(self._gradient_action_finished)
+        self.statusBar().showMessage(f"{label}…")
+        QThreadPool.globalInstance().start(task)
+
+    def _gradient_action_finished(self, value, error):
+        task, callback, label = self._gradient_tasks.pop(self.sender())
+        if error:
+            self._error(f"{label}: {error}")
+        elif self.project is None or task.project is not self.project or self._has_input_drafts():
+            self.messages.appendPlainText(
+                f"{label}: the project or draft changed during the operation. Repeat the action on the intended revision; submitted jobs retain their original inputs."
+            )
+        else:
+            try:
+                callback(value)
+            except (ValueError, TypeError, OSError, KeyError, RuntimeError) as exc:
+                self._error(f"{label}: {exc}")
+
+    def _gradient_convergence_dialog(self):
+        from .gradient_tools import ConvergenceDialog
+        from ..application.gradient_studies import convergence_candidates, submit_convergence
+
+        if self.project is None or not self._apply_document_inputs():
+            return
+        dialog = ConvergenceDialog(self.project, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        levels, criteria = dialog.result_value
+        if self.jobs is None:
+            try:
+                self.jobs = JobManager(self.jobs_directory, RuntimePolicy())
+                self._own_jobs = True
+            except (ValueError, OSError, RuntimeError) as exc:
+                self._error(f"Cannot start convergence runtime: {exc}")
+                return
+        self._snapshot_existing_jobs()
+        jobs = self.jobs
+
+        def submit(project):
+            candidates = convergence_candidates(project, **levels)
+            submitted = submit_convergence(candidates, jobs)
+            # Candidate requests already own all scientific inputs; this manifest
+            # records their axis and criterion without duplicating mesh payloads.
+            from ..persistence import atomic_json
+            from uuid import uuid4
+
+            path = self.jobs_directory.parent / "convergence" / f"{uuid4()}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_json(
+                path,
+                {
+                    "baseline": candidates[0].project.with_results((), session={}).to_dict(),
+                    "source_fingerprint": project.fingerprint,
+                    "criteria": criteria,
+                    "candidates": [
+                        {
+                            "axis": item.candidate.axis,
+                            "value": item.candidate.value,
+                            "id": item.candidate.project.id,
+                            "revision": item.candidate.project.revision,
+                            "fingerprint": item.candidate.project.fingerprint,
+                            "job_id": item.job_id,
+                        }
+                        for item in submitted
+                    ],
+                },
+            )
+            return submitted, path
+
+        def queued(value):
+            submitted, path = value
+            self._gradient_convergence_path = path
+            self._session_job_ids.update(item.job_id for item in submitted)
+            self.messages.appendPlainText(f"Queued {len(submitted)} convergence candidates. Manifest: {path}")
+            self.poll_jobs()
+            self._focus_job(submitted[0].job_id)
+
+        self._gradient_task(submit, queued, "Queue convergence study")
+
+    def _gradient_convergence_review(self):
+        from ..application.gradient_studies import ConvergenceCriterion, StudyCandidate, summarize_convergence
+
+        if self.project is None or not self._apply_document_inputs():
+            return
+        path = getattr(self, "_gradient_convergence_path", None)
+        if path is None:
+            name, _ = QFileDialog.getOpenFileName(
+                self,
+                "Open convergence manifest",
+                str(self.jobs_directory.parent / "convergence"),
+                "Study manifest (*.json)",
+            )
+            if not name:
+                return
+            path = Path(name)
+        jobs_directory = self.jobs_directory
+
+        def review(_project):
+            descriptor = json.loads(Path(path).read_text(encoding="utf-8"))
+            baseline = ProjectDocument.from_dict(descriptor["baseline"])
+            candidates, records = [], {}
+            for item in descriptor["candidates"]:
+                axis, value = item["axis"], item["value"]
+                candidate = replace(baseline, id=item["id"], revision=1)
+                if axis != "baseline":
+                    fields = {
+                        "mesh": "iteration_num_mesh_refinement",
+                        "quadrature": "gauss_order",
+                        "independent_sampling": "validation_resolution",
+                    }
+                    candidate = candidate.update_inputs(
+                        study_changes={fields[axis]: value} if axis == "independent_sampling" else None,
+                        config_changes=None if axis == "independent_sampling" else {fields[axis]: value},
+                    )
+                candidate = replace(candidate, revision=item["revision"])
+                if candidate.fingerprint != item["fingerprint"]:
+                    raise ValueError("Convergence manifest input fingerprint does not match its candidate.")
+                candidates.append(StudyCandidate(candidate, axis, value, descriptor["source_fingerprint"]))
+                records[candidate.id] = jobs_directory / item["job_id"]
+            criteria = descriptor["criteria"]
+            report = summarize_convergence(
+                candidates,
+                records,
+                criteria=(
+                    ConvergenceCriterion(
+                        "Sheet independent RMS error",
+                        criteria["relative_tolerance"],
+                        criteria["absolute_tolerance_T"] * 1e6,
+                    ),
+                ),
+            )
+            from ..persistence import atomic_json
+
+            atomic_json(Path(path).with_suffix(".review.json"), report.to_dict())
+            return report
+
+        def display(report):
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Verified convergence review")
+            layout = QVBoxLayout(dialog)
+            label = QLabel(
+                "Observed stable axes: "
+                + (", ".join(report.stable_axes) or "none established")
+                + "\n"
+                + "\n".join(report.notes)
+            )
+            label.setWordWrap(True)
+            layout.addWidget(label)
+            table = QTableWidget(len(report.changes), 7)
+            table.setHorizontalHeaderLabels(["Axis", "From", "To", "Metric", "Change", "Criterion", "Scope / gap"])
+            for index, row in enumerate(report.changes):
+                for column, text in enumerate(
+                    (
+                        row.axis,
+                        row.earlier,
+                        row.later,
+                        row.metric,
+                        f"{row.absolute_change:.6g} {row.unit}" if row.absolute_change is not None else "Unavailable",
+                        "Met"
+                        if row.within_tolerance is True
+                        else "Not met"
+                        if row.within_tolerance is False
+                        else "Unverified",
+                        row.reason,
+                    )
+                ):
+                    cell = QTableWidgetItem(text)
+                    cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    table.setItem(index, column, cell)
+            table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+            layout.addWidget(table)
+            dialog.resize(1000, 580)
+            dialog.exec()
+
+        self._gradient_task(review, display, "Verify convergence evidence")
+
+    def _gradient_circuit_dialog(self):
+        from .gradient_tools import CircuitDriveDialog
+
+        if self.project is None or not self._apply_document_inputs():
+            return
+        record = self.runs.get(self._selected_run)
+        if record is None or self._run_verification_error(record):
+            self._error("Select a verified Fabrication review run before authoring its circuit.")
+            return
+
+        def verify(project):
+            saved = DesignService.load_run(record.directory)
+            if (
+                saved.metadata.get("project_id") != project.id
+                or saved.metadata.get("project_model_fingerprint") != project.model_fingerprint
+            ):
+                raise ValueError("Select a fabrication review for this channel's applied numerical model.")
+            return saved
+
+        def edit(saved):
+            project = self.project
+            try:
+                dialog = CircuitDriveDialog(project, saved, self)
+            except (ValueError, TypeError, KeyError) as exc:
+                self._error(str(exc))
+                return
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                from ..persistence import json_value
+
+                if dialog.result_value == json_value(project.study.get("engineering")):
+                    return
+                self.apply_inputs(
+                    study_changes={
+                        "engineering": dialog.result_value,
+                        "fabricate": True,
+                        "pipeline_stage": "evaluated",
+                    },
+                    label="Define gradient circuit and drive",
+                    expected_fingerprint=project.fingerprint,
+                )
+
+        self._gradient_task(verify, edit, "Verify winding for circuit authoring")
+
+    def _gradient_measured_dialog(self):
+        from .gradient_tools import MeasuredFieldDialog
+        from ..application.gradient_studies import saved_winding_currents
+
+        if self.project is None or not self._apply_document_inputs():
+            return
+        record = self.runs.get(self._selected_run)
+        if record is None or self._run_verification_error(record):
+            self._error("Select verified winding evidence before comparing measurements.")
+            return
+
+        def verify(_project):
+            saved = DesignService.load_run(record.directory)
+            return saved, saved_winding_currents(saved)
+
+        def edit(value):
+            saved, currents = value
+            dialog = MeasuredFieldDialog(self, body_ids=tuple(currents["body_currents_A"]))
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self._compare_gradient_measurement(saved, dialog.result_value)
+
+        self._gradient_task(verify, edit, "Verify winding measurement reference")
+
+    def _compare_gradient_measurement(self, record, inputs):
+        from ..application.gradient_studies import MeasuredFieldMap, RigidTransform, compare_measured_winding
+        from ..persistence import atomic_json
+        from uuid import uuid4
+
+        output = self.jobs_directory.parent / "measurements" / f"{uuid4()}.json"
+
+        def compare(_project):
+            values = np.asarray(inputs["values"], dtype=float)
+            measurement = MeasuredFieldMap(
+                values[:, :3],
+                values[:, 3:],
+                inputs["length_unit"],
+                inputs["field_unit"],
+                independent=True,
+                source=inputs["source_file"] + " · " + inputs["source"],
+                source_bytes=inputs["source_bytes"],
+            )
+            transform = RigidTransform(inputs["rotation"], inputs["translation_m"])
+            report = compare_measured_winding(
+                record.directory,
+                measurement,
+                transform=transform,
+                body_currents_A=inputs["currents_A"],
+                rms_limit_T=inputs["rms_limit_T"],
+                peak_limit_T=inputs["peak_limit_T"],
+            )
+            atomic_json(output, report.to_dict())
+            return report
+
+        def show(report):
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Measured winding comparison")
+            layout = QVBoxLayout(dialog)
+            status = (
+                "Within declared limits"
+                if report.passed is True
+                else "Outside declared limits"
+                if report.passed is False
+                else "Descriptive · acceptance unverified"
+            )
+            label = QLabel(
+                f"{status}\nRMS vector error: {report.rms_error_T * 1e6:.6g} µT\nPeak vector error: {report.peak_error_T * 1e6:.6g} µT\nSaved comparison: {output}\nOriginal measurement, world transform and signed current calibration are retained. Thin-wire model; construction release remains separate."
+            )
+            label.setWordWrap(True)
+            layout.addWidget(label)
+            indices = np.arange(len(report.points_m))
+            if len(indices) > 1000:
+                indices = np.argsort(np.linalg.norm(report.residual_T, axis=1))[-1000:][::-1]
+                layout.addWidget(
+                    QLabel("Showing the 1000 largest residual samples. The archive retains every measurement.")
+                )
+            samples = QTableWidget(len(indices), 5)
+            samples.setHorizontalHeaderLabels(
+                ["World x [m]", "World y [m]", "World z [m]", "Measured |B| [µT]", "Residual |ΔB| [µT]"]
+            )
+            for index, (point, measured, residual) in enumerate(
+                zip(report.points_m[indices], report.measured_T[indices], report.residual_T[indices], strict=True)
+            ):
+                for column, value in enumerate(
+                    (*point, np.linalg.norm(measured) * 1e6, np.linalg.norm(residual) * 1e6)
+                ):
+                    cell = QTableWidgetItem(f"{value:.7g}")
+                    cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    samples.setItem(index, column, cell)
+            layout.addWidget(samples)
+            export = QPushButton("Export comparison archive…")
+
+            def save():
+                filename, _ = QFileDialog.getSaveFileName(
+                    dialog, "Export measured comparison", "measured-comparison.json", "Comparison archive (*.json)"
+                )
+                if filename:
+                    atomic_json(filename, report.to_dict())
+
+            export.clicked.connect(save)
+            layout.addWidget(export)
+            dialog.resize(860, 620)
+            dialog.exec()
+            self.messages.appendPlainText(f"Measured winding comparison saved: {output}")
+
+        self._gradient_task(compare, show, "Compare measured winding field")
 
     def _focus_job(self, id_, *, open_window=True):
         self._feedback_job_id = id_
@@ -5009,6 +5405,21 @@ class CoilGenWorkbench(QMainWindow):
         return self._selected_run if actions.can_view_results else None
 
     def _update_execution_feedback(self):
+        if hasattr(self, "gradient_actions"):
+            record = self.runs.get(self._selected_run)
+            verified = record is not None and not self._run_verification_error(record)
+            self.gradient_actions["_gradient_circuit_dialog"].setEnabled(
+                bool(verified and record.metadata.get("winding_steps"))
+            )
+            self.gradient_actions["_gradient_measured_dialog"].setEnabled(
+                bool(
+                    verified
+                    and (
+                        record.metadata.get("winding_steps")
+                        or (record.metadata.get("wire_fields") or {}).get("routed", {}).get("available")
+                    )
+                )
+            )
         if not hasattr(self, "execution_label"):
             return
         if self.project is None:

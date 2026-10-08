@@ -116,6 +116,58 @@ def test_failed_bz_field_locates_actual_design_sample_and_excludes_other_compone
     assert issue.dataset == "fabricated"
 
 
+def test_independent_winding_field_witness_uses_its_own_grid_and_target(problem_record):
+    winding_points = np.array([[0.01, 0.02, 0.03], [0.04, 0.05, 0.06]])
+    winding_target = np.array([[0, 0, 1e-6], [0, 0, 3e-6]])
+    problem_record.arrays = {
+        "winding_validation_points_m": winding_points,
+        "winding_validation_target_T": winding_target,
+        "winding_validation_field_T": winding_target + [[9, 0, 1e-6], [0, 0, -4e-6]],
+        "validation_points_m": np.array([[0.5, 0.5, 0.5]]),
+        "validation_target_T": np.zeros((1, 3)),
+        "validation_field_T": np.array([[0, 0, 100e-6]]),
+    }
+    problem_record.metadata["constraints"] = [
+        {
+            "name": "Independent winding field error (original current)",
+            "passed": False,
+            "scope": "independent_realized_winding",
+        }
+    ]
+    issue = next(issue for issue in run_problems(problem_record) if issue.key.startswith("constraint"))
+    assert issue.points_m == (tuple(winding_points[1]),)
+    assert issue.dataset == "winding_validation_residual"
+    assert issue.scope == "independent_realized_winding"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Independent winding gradient strength",
+        "Independent winding gradient RMS linearity",
+        "Independent winding exact-segment integration consistency",
+        "Independent winding validation unavailable",
+        "Fabricated wire force",
+    ],
+)
+def test_scalar_or_unavailable_contract_has_no_invented_field_residual_witness(problem_record, name):
+    problem_record.arrays = {
+        "validation_points_m": np.array([[0.5, 0.5, 0.5]]),
+        "validation_target_T": np.zeros((1, 3)),
+        "validation_field_T": np.array([[0, 0, 100e-6]]),
+        "winding_validation_points_m": np.array([[0.1, 0.2, 0.3]]),
+        "winding_validation_target_T": np.zeros((1, 3)),
+        "winding_validation_field_T": np.array([[0, 0, 100e-6]]),
+        "fabricated_points_m": np.array([[0.4, 0.4, 0.4]]),
+        "target_field_T": np.zeros((1, 3)),
+        "fabricated_field_T": np.array([[0, 0, 100e-6]]),
+    }
+    problem_record.metadata["constraints"] = [{"name": name, "passed": False, "scope": "independent_realized_winding"}]
+    issue = next(issue for issue in run_problems(problem_record) if issue.key.startswith("constraint"))
+    assert not issue.locatable
+    assert "scalar or unavailable" in issue.location_description
+
+
 def test_async_preview_preflight_has_actual_world_si_target_without_operator_solve(monkeypatch, tmp_path):
     pytest.importorskip("PySide6")
     from coilgen.gui.viewport import _preview_data

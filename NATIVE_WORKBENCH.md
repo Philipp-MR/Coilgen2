@@ -705,6 +705,71 @@ only where their recorded target grids and current policies match. The harmonic
 editor and polynomial expression describe the same normalized Y20 field; the
 explicit world center and reference radius remain independent of ROI sampling.
 
+## Gradient engineering workflow
+
+**Gradient engineering** provides focused editors and studies. The geometry,
+target, winding and validation inspectors also link to the relevant tools.
+
+- **Gradient requirements** edits the native strength, RMS/peak linearity and
+  cross-gradient tolerances, normalization radius/region and offset convention.
+  Zero disables a tolerance. These native gradient fits describe Cartesian Bz
+  gradients in world coordinates; they do not qualify an arbitrary vector target.
+- **Primary, shield and external region** creates owned concentric cylindrical
+  meshes with explicit dimensions, sampling, center and axis. Known cylindrical
+  templates reopen as editable dimensions. Imported geometry is replaced only by
+  an explicit Apply. The external suppression cylinder is closed; its field bound
+  must be supplied separately in optimization requirements.
+- **Queue convergence study** varies native mesh refinement, source quadrature
+  and independent target sampling in separate one-factor series. It retains the
+  baseline inputs once and records candidate identities, jobs and user criteria
+  in a convergence manifest. **Review convergence study** rechecks completed
+  evidence and saves the changes and observed stable axes. Three distinct levels
+  are required for a mesh/quadrature stability claim; changing target sampling
+  does not establish either. Incompatible target/current scopes remain unverified.
+- **Terminals, feeds and drive waveform** requires a verified fabrication review
+  for the applied numerical model. Define named terminals, explicit current
+  polarity, an indexed feed break for a closed turn, supply and return polylines,
+  and any spatial drive closure in world-frame meters. No connector is inferred.
+  Path hashes reject stale definitions. Piecewise-linear time/current waveforms
+  provide I/V margins, exact waveform RMS current and average DC Joule loss.
+  Voltage estimates include both endpoints of each ramp. Mutual terms require
+  separate trusted geometry-matched evidence; multi-body self-only voltage
+  estimates cannot qualify the amplifier. Optional measured lumped thermal
+  parameters provide a scoped RC estimate, without a cooling or release claim.
+- **Compare measured field** evaluates the saved winding at independent measured
+  locations. Import numeric x,y,z,Bx,By,Bz rows with explicit units, or an SI CSV
+  headed `x_m,y_m,z_m,Bx_T,By_T,Bz_T`. Declare the proper rigid transform, signed
+  current for every displayed body and measurement/calibration source. There is
+  no registration/current fitting or field interpolation. Optional RMS/peak vector
+  error limits are separate from design acceptance. The exported archive owns the
+  original data bytes, transformed values, predicted/residual fields and provenance.
+
+Enable **Review fabricated winding on independent samples** in Gradient
+requirements to request evaluated fabrication review. The independent winding
+plots use recorded electrical paths and original signed contour currents, with
+their own coordinates and targets. Repeated fitting grids, singular wire samples
+and unsupported imported/custom/scenario/suppression contracts cannot pass as
+independent evidence. Exact collinear-segment bisection checks exercise kernel
+consistency; they do not check curve discretization or finite copper cross-section.
+
+Results now present achieved/requested gradient, linearity, electrical path
+length/current/R/L, gradient efficiency where a single complete body makes it
+unambiguous, DC copper |I|/area and waveform margins. Compatible affine Bz targets
+retain a descriptive gradient fit when tolerances are zero, with status not checked.
+Surface K [A/m] has a saved face-sample plot. K, copper volume density, recorded
+surface-geodesic contour spacing and physical envelope clearance retain distinct
+scopes. Missing plots are disabled with their
+required step. Feed closure does not certify unswept leads or a physical cut;
+construction release, PNS, acoustic, eddy-current and structural qualification
+remain separate engineering evidence.
+
+The same operations are available without Qt through
+`coilgen.application.gradient_geometry`, `coilgen.application.gradient_studies`,
+`coilgen.application.gradient_review` and `coilgen.gradient_engineering`.
+Optional `ResearchRequest.engineering` controls are saved in the project study,
+advance its immutable input revision, and participate in request identity.
+Omitting them preserves the existing numerical pipeline and defaults.
+
 ## Architecture and verification
 
 The workbench uses repository-owned scientific vector icons for surfaces,

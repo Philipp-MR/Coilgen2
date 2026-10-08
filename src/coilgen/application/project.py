@@ -80,11 +80,15 @@ def _json_object(pairs):
 def _study(values):
     from ..research.requests import ResearchRequest
 
-    if not isinstance(values, Mapping) or set(values) - set(_STUDY_DEFAULTS):
+    if not isinstance(values, Mapping) or set(values) - (set(_STUDY_DEFAULTS) | {"engineering"}):
         raise ValueError("Unknown or malformed study controls.")
     resolved = {**_STUDY_DEFAULTS, **json_value(values, nonfinite="raise")}
+    if resolved.get("engineering") is None:
+        resolved.pop("engineering", None)
     try:
-        ResearchRequest(name="Study", config={}, **resolved)
+        request = ResearchRequest(name="Study", config={}, **resolved)
+        if "engineering" in resolved:
+            resolved["engineering"] = request.engineering
     except (TypeError, OverflowError) as exc:
         raise ValueError(f"Invalid study controls: {exc}") from exc
     return resolved

@@ -107,6 +107,7 @@ def compare_runs(left: RunRecord | str | Path, right: RunRecord | str | Path) ->
                         "fabricate",
                         "kernel_backend",
                         "resume_checkpoint",
+                        "engineering",
                     )
                 },
                 "study",
@@ -264,6 +265,54 @@ def compare_runs(left: RunRecord | str | Path, right: RunRecord | str | Path) ->
         ("continuous sheet before contouring/routing",) * 2,
         True,
     )
+    winding = tuple(value.get("winding_validation") or {} for value in metadata)
+    same_winding_grid = same_component and _same_data(
+        *arrays, ("winding_validation_points_m", "winding_validation_target_T")
+    )
+    same_winding_policy = all(
+        winding[0].get(key) == winding[1].get(key)
+        for key in ("geometry_source", "current_source", "current_refitted", "field_model", "sampling_weights")
+    )
+    winding_scope = tuple(
+        f"{value.get('geometry_source', 'unavailable')}; independent samples; original current; component={component[index]}"
+        for index, value in enumerate(winding)
+    )
+    for title, key, unit, factor in (
+        ("Winding independent RMS error", "rms_error_T", "µT", 1e6),
+        ("Winding independent peak error", "peak_error_T", "µT", 1e6),
+        ("Winding independent relative error", "relative_field_error", "%", 100),
+    ):
+        metric(
+            title,
+            unit,
+            *(value.get(key) for value in winding),
+            winding_scope,
+            same_winding_grid and same_winding_policy and all(value.get("available") is True for value in winding),
+            "Independent winding target grid/component or geometry/current policy differs.",
+            factor=factor,
+        )
+    from .gradient_review import gradient_review
+
+    observations = tuple({row.key: row for row in gradient_review(value)} for value in metadata)
+    for key in sorted(observations[0].keys() | observations[1].keys()):
+        first, second = observations[0].get(key), observations[1].get(key)
+        row = first or second
+        comparable = first is not None and second is not None and first.scope == second.scope
+        if key.startswith("linearity_") or key.endswith(":efficiency"):
+            comparable = comparable and same_winding_grid and same_winding_policy
+        if "margin" in key or "rms_current" in key or "average_joule" in key:
+            comparable = comparable and requests[0].get("engineering", {}).get("drive") == requests[1].get(
+                "engineering", {}
+            ).get("drive")
+        metric(
+            row.title + (f" [{row.body_id}]" if row.body_id else ""),
+            row.unit,
+            first.value if first else None,
+            second.value if second else None,
+            (first.scope if first else "Unavailable", second.scope if second else "Unavailable"),
+            comparable,
+            "Engineering representation, sampling or prescribed drive scope differs.",
+        )
     if not same_design:
         notes.append(
             "Design target samples, values, weights or selected field components differ; wire error percentages are not a common-grid improvement measure."

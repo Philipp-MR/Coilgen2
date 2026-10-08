@@ -288,7 +288,6 @@ class ScientificViewport(QWidget):
         self.dataset.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.dataset.setMinimumContentsLength(24)
         self.dataset.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.dataset.setMaxVisibleItems(24)
         self.dataset.view().setMinimumWidth(330)
         self._dataset_headers = {}
         for group, entries in (
@@ -297,6 +296,7 @@ class ScientificViewport(QWidget):
                 "SAVED RUN · GEOMETRY",
                 (
                     ("Stream function [A]", "stream_function"),
+                    ("Surface current density |K| [A/m]", "surface_current_density"),
                     ("Contours", "contours"),
                     ("Connected routes", "routes"),
                     ("Evaluated winding field paths", "evaluated_winding"),
@@ -322,6 +322,8 @@ class ScientificViewport(QWidget):
                     ("Review conductor centerlines", "review_conductor"),
                     ("Review electrical field paths", "review_electrical"),
                     ("Review field", "fabricated"),
+                    ("Independent winding validation", "winding_validation"),
+                    ("Independent winding residual", "winding_validation_residual"),
                 ),
             ),
         ):
@@ -334,6 +336,7 @@ class ScientificViewport(QWidget):
             header.setFont(font)
             for label, key in entries:
                 self.dataset.addItem(label, key)
+        self.dataset.setMaxVisibleItems(self.dataset.count())
         self.dataset.setCurrentIndex(self.dataset.findData("support"))
         dataset_icons = {
             "support": "mesh",
@@ -346,6 +349,7 @@ class ScientificViewport(QWidget):
             "fabrication": "contours",
             "swept": "conductor-sweep",
             "sheet": "stream-function",
+            "surface_current_density": "stream-function",
             "validation": "independent-validation",
             "contour_field": "contours",
             "contour_residual": "field-error",
@@ -354,6 +358,8 @@ class ScientificViewport(QWidget):
             "review_conductor": "conductor-profile",
             "review_electrical": "current-direction",
             "fabricated": "field-error",
+            "winding_validation": "independent-validation",
+            "winding_validation_residual": "field-error",
         }
         for index in range(self.dataset.count()):
             key = self.dataset.itemData(index)
@@ -1287,12 +1293,16 @@ class ScientificViewport(QWidget):
         point_key = "validation_points_m" if key == "validation" else "target_points_m"
         if key == "fabricated" and "fabricated_points_m" in arrays:
             point_key = "fabricated_points_m"
+        if key.startswith("winding_validation"):
+            point_key = "winding_validation_points_m"
         field_key = {
             "preview_target": "target_field_T",
             "target": "target_field_T",
             "sheet": "sheet_field_T",
             "validation": "validation_field_T",
             "fabricated": "fabricated_field_T",
+            "winding_validation": "winding_validation_field_T",
+            "winding_validation_residual": "winding_validation_field_T",
             "contour_field": "contour_field_T",
             "contour_residual": "contour_field_T",
             "routed_field": "routed_field_T",
@@ -1307,9 +1317,10 @@ class ScientificViewport(QWidget):
         field = np.asarray(arrays[field_key], dtype=float)
         residual = key.endswith("_residual")
         if residual:
-            if "target_field_T" not in arrays:
+            reference_key = "winding_validation_target_T" if key.startswith("winding_validation") else "target_field_T"
+            if reference_key not in arrays:
                 return None
-            reference = np.asarray(arrays["target_field_T"], dtype=float)
+            reference = np.asarray(arrays[reference_key], dtype=float)
             if reference.shape != field.shape:
                 raise ValueError("Residual target and field have incompatible dimensions.")
             field = field - reference
@@ -1350,6 +1361,8 @@ class ScientificViewport(QWidget):
                 "sheet": "immutable continuous-sheet field on design samples",
                 "validation": "independent continuous-sheet grid; unchanged solved current",
                 "fabricated": "fabrication-review thin-wire field; original contour current; design samples",
+                "winding_validation": "recorded electrical paths; independent samples; original signed current; no refit",
+                "winding_validation_residual": "independent thin-wire residual; original signed current; no refit",
             }[key]
         kind = "contour" if key.startswith("contour") else "routed"
         metadata = self._stage_metadata if self._live_stage_preview else self._metadata
@@ -1482,6 +1495,11 @@ class ScientificViewport(QWidget):
                 caption += (
                     " · live continuous-sheet solution" if live else " · immutable run / continuous-sheet solution"
                 )
+            elif key == "surface_current_density" and available:
+                mesh = self.pv.PolyData(np.asarray(arrays["sheet_current_density_points_m"], dtype=float))
+                mesh["|K| [A/m]"] = np.linalg.norm(arrays["sheet_current_density_A_per_m"], axis=1)
+                options = {"scalars": "|K| [A/m]", "cmap": "viridis", "point_size": 6, "render_points_as_spheres": True}
+                caption += " · recorded face current density; continuous sheet; not copper volume density"
             elif is_field:
                 mesh = self._field_mesh(arrays, key)
                 options = {

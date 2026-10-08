@@ -34,6 +34,7 @@ class ResearchRequest:
     project_model_fingerprint: str = ""
     project_id: str = ""
     project_revision: int | None = None
+    engineering: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip() or len(self.name) > 120:
@@ -80,6 +81,13 @@ class ResearchRequest:
             raise ValueError("project_revision must be a positive integer or null.")
         if self.fabricate and self.pipeline_stage != "evaluated":
             raise ValueError("Fabrication review requires an evaluated pipeline result.")
+        if self.engineering is not None:
+            from ..gradient_engineering import GradientEngineeringSpec
+
+            spec = GradientEngineeringSpec.from_dict(self.engineering)
+            if not self.fabricate or self.pipeline_stage != "evaluated":
+                raise ValueError("Gradient engineering review requires evaluated fabrication review.")
+            object.__setattr__(self, "engineering", spec.to_dict())
 
     @classmethod
     def from_config(cls, config: CoilGenConfig, *, name: str = "Research design", **controls) -> ResearchRequest:
@@ -106,7 +114,10 @@ class ResearchRequest:
         return cls(**{"name": "Research design", "config": {}, **dict(value)})
 
     def to_dict(self) -> dict:
-        return json_value(asdict(self))
+        value = json_value(asdict(self))
+        if self.engineering is None:
+            value.pop("engineering")
+        return value
 
     def to_config(self, *, threads: int = 1) -> CoilGenConfig:
         if isinstance(threads, bool) or not isinstance(threads, int) or threads < 1:

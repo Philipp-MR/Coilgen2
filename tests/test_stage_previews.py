@@ -250,6 +250,44 @@ def _replace_arrays(tmp_path, arrays):
     rewrite(tmp_path, changed)
 
 
+def test_current_density_preview_preserves_recorded_face_vectors_in_si(tmp_path):
+    original = checkpoint(tmp_path, "sheet")
+    density = np.array([[3.0, -4.0, 0.0]])
+    original._state.parts[0].current_density = density.copy()
+    publish_stage_preview(tmp_path, original, request(), DIGEST)
+    loaded = load_stage_preview(tmp_path, **identity())
+    np.testing.assert_array_equal(loaded.arrays["sheet_current_density_A_per_m"], density)
+    mesh = original._state.parts[0].mesh
+    np.testing.assert_array_equal(
+        loaded.arrays["sheet_current_density_points_m"], mesh.vertices[mesh.faces].mean(axis=1)
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid", ["missing_points", "missing_vectors", "count", "shape", "nonfinite", "boolean", "prepared"]
+)
+def test_current_density_preview_rejects_unpaired_or_incompatible_face_data(tmp_path, invalid):
+    original = checkpoint(tmp_path, "prepared" if invalid == "prepared" else "sheet")
+    publish_stage_preview(tmp_path, original, request(), DIGEST)
+    arrays = original.scientific_arrays()
+    arrays.update(sheet_current_density_points_m=np.zeros((1, 3)), sheet_current_density_A_per_m=np.ones((1, 3)))
+    if invalid == "missing_points":
+        del arrays["sheet_current_density_points_m"]
+    elif invalid == "missing_vectors":
+        del arrays["sheet_current_density_A_per_m"]
+    elif invalid == "count":
+        arrays["sheet_current_density_A_per_m"] = np.ones((2, 3))
+    elif invalid == "shape":
+        arrays["sheet_current_density_A_per_m"] = np.ones(3)
+    elif invalid == "nonfinite":
+        arrays["sheet_current_density_A_per_m"][0, 0] = np.nan
+    elif invalid == "boolean":
+        arrays["sheet_current_density_A_per_m"] = np.ones((1, 3), dtype=bool)
+    _replace_arrays(tmp_path, arrays)
+    with pytest.raises(ValueError):
+        load_stage_preview(tmp_path, **identity())
+
+
 @pytest.mark.parametrize(
     "key,values",
     [

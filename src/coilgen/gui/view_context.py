@@ -41,6 +41,7 @@ _DATASETS = {
     "support": "Support preview",
     "preview_target": "Support + target preview",
     "stream_function": "Stream function",
+    "surface_current_density": "Surface current density |K| [A/m]",
     "contours": "Contours",
     "routes": "Connected routes",
     "evaluated_winding": "Evaluated winding paths",
@@ -56,6 +57,8 @@ _DATASETS = {
     "review_conductor": "Review conductor",
     "review_electrical": "Review electrical paths",
     "fabricated": "Review field",
+    "winding_validation": "Independent winding validation",
+    "winding_validation_residual": "Independent winding residual",
 }
 
 
@@ -116,10 +119,14 @@ def _dataset_scope(arrays, metadata, key, original, capability=None):
         point_key = "validation_points_m" if key == "validation" else "target_points_m"
         if key == "fabricated" and "fabricated_points_m" in arrays:
             point_key = "fabricated_points_m"
+        if key.startswith("winding_validation"):
+            point_key = "winding_validation_points_m"
         count = _points(arrays, point_key)
         wire = key.startswith(("contour_", "routed_"))
         available = capability.available
-        sampling = "Independent samples" if key == "validation" else "Design samples"
+        sampling = (
+            "Independent samples" if key == "validation" or key.startswith("winding_validation") else "Design samples"
+        )
         sampling += f" · {count} samples" if count else " · samples unavailable"
         current, current_text, detail = None, "", ""
         if wire:
@@ -157,14 +164,23 @@ def _dataset_scope(arrays, metadata, key, original, capability=None):
             current = _number(_mapping(metadata.get("summary")).get("current_a")) if current_source else None
             if current is not None:
                 current_text += f" · recorded complete circuit {current:.6g} A"
-            detail = (
-                "Fabrication-review electrical paths on design samples; independent winding validation not performed."
-            )
+            detail = "Fabrication-review electrical paths on design samples; independent winding evidence has its own dataset."
+        elif key.startswith("winding_validation"):
+            current_text = "Original signed per-body contour currents · no refit"
+            detail = "Exact recorded electrical paths; independent target samples; thin-wire segment model. Display availability does not establish acceptance of additional contracts."
         else:
             detail = "Saved requested field, not a computed coil field."
         if not available:
             detail += " " + capability.explanation
         return available, sampling, current, current_text, detail
+    if key == "surface_current_density":
+        return (
+            capability.available,
+            "Saved mesh faces",
+            None,
+            "Solved sheet coefficients",
+            "Recorded surface density [A/m]; copper volume current density and thermal acceptance require separate evidence.",
+        )
     if key == "stream_function":
         return (
             capability.available,

@@ -25,6 +25,16 @@ def scientific_arrays(parts, target, mesh=None, sheet_field=None) -> dict:
         arrays["stream_function_A"] = mesh.stream_function
     if sheet_field is not None:
         arrays["sheet_field_T"] = sheet_field
+    densities = [getattr(part, "current_density", None) for part in parts]
+    if densities and all(
+        value is not None and np.shape(value) == (part.mesh.n_faces, 3) for part, value in zip(parts, densities)
+    ):
+        values = np.vstack(densities)
+        if np.all(np.isfinite(values)):
+            arrays["sheet_current_density_A_per_m"] = values
+            arrays["sheet_current_density_points_m"] = np.vstack(
+                [part.mesh.vertices[part.mesh.faces].mean(axis=1) for part in parts]
+            )
     for part_index, part in enumerate(parts):
         for contour_index, contour in enumerate(part.contour_lines):
             arrays[f"contour_{part_index}_{contour_index}_points_m"] = contour.v

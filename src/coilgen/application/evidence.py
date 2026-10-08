@@ -21,6 +21,8 @@ FIELD_KEYS = {
     "routed_field": "routed_field_T",
     "routed_residual": "routed_field_T",
     "fabricated": "fabricated_field_T",
+    "winding_validation": "winding_validation_field_T",
+    "winding_validation_residual": "winding_validation_field_T",
 }
 WIRE_FIELDS = ("contour_field", "contour_residual", "routed_field", "routed_residual")
 PATH_PREFIXES = {
@@ -36,6 +38,7 @@ REQUIRED_STEPS = {
     "preview_target": "target",
     "target": "prepared",
     "stream_function": "sheet",
+    "surface_current_density": "sheet",
     "sheet": "sheet",
     "contours": "contours",
     "routes": "routed",
@@ -50,6 +53,8 @@ REQUIRED_STEPS = {
     "review_conductor": "fabrication_review",
     "review_electrical": "fabrication_review",
     "fabricated": "fabrication_review",
+    "winding_validation": "fabrication_review",
+    "winding_validation_residual": "fabrication_review",
 }
 
 
@@ -115,17 +120,27 @@ def resolve_dataset(arrays, key, *, original=False):
         points = "validation_points_m" if key == "validation" else "target_points_m"
         if key == "fabricated" and "fabricated_points_m" in arrays:
             points = "fabricated_points_m"
+        reference = "target_field_T"
+        if key.startswith("winding_validation"):
+            points, reference = "winding_validation_points_m", "winding_validation_target_T"
         field = FIELD_KEYS[key]
         if key in WIRE_FIELDS and original:
             field = field.replace("_field_T", "_field_at_stream_current_T")
-        for name in (points, field, *(("target_field_T",) if key.endswith("_residual") else ())):
+        for name in (points, field, *((reference,) if key.endswith("_residual") else ())):
             reason, invalid = _vectors(arrays, name)
             if reason:
                 break
         if not reason:
             count = len(arrays[points])
-            if len(arrays[field]) != count or key.endswith("_residual") and len(arrays["target_field_T"]) != count:
+            if len(arrays[field]) != count or key.endswith("_residual") and len(arrays[reference]) != count:
                 reason, invalid = "Field coordinates, values and residual target have incompatible dimensions.", True
+    elif key == "surface_current_density":
+        for name in ("sheet_current_density_points_m", "sheet_current_density_A_per_m"):
+            reason, invalid = _vectors(arrays, name)
+            if reason:
+                break
+        if not reason and len(arrays["sheet_current_density_points_m"]) != len(arrays["sheet_current_density_A_per_m"]):
+            reason, invalid = "Sheet current-density coordinates and values have incompatible dimensions.", True
     elif key in {"support", "stream_function"}:
         reason, invalid = _surface(arrays)
         if not reason and key == "stream_function":
