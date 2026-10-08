@@ -142,6 +142,9 @@ editable starting designs into **Gradients**, **Shim coils**, **Coil systems**
 and **Demonstrations**. Choose cylindrical or biplanar Gx/Gy/Gz, an actively
 shielded Gy, uniform Z0, the five second-order modes, or conical Z2. Loading a
 template protects unsaved edits and sets up a full study without starting a job.
+All template settings are already applied. Loading selects full design evaluation
+and leaves the settings windows closed; click **Compute full design** immediately.
+Open a section in the Model Builder only when you want to inspect or change it.
 The shielded template jointly optimizes primary and outer current supports
 against the ROI target and a zero-vector-field constraint on a separate closed
 external cylinder. Both support meshes and the suppression surface are owned
@@ -403,18 +406,23 @@ For a first Gy study:
 1. Choose **File → Load template → Gradients → Cylindrical Y gradient (Gy)**. The support is
    centered on the origin with its axis along z. The spherical ROI has radius
    20 mm, so its diameter (DSV) is 40 mm.
-2. Open **Target**. Gy means `dBz/dy`, the y dependence of the z field component.
+2. Click **Compute full design**. The template already includes its target,
+   conductor, optimization, winding and validation settings. Use **Plot** to
+   compare the target, continuous-sheet solution, contours, connected winding
+   and wire field. For wire maps, choose **Original contour current**, then
+   inspect **Checks** and **Problems**.
+
+Optional template inspection:
+
+- Open **Target** to review the prescribed field. Gy means `dBz/dy`,
+   the y dependence of the z field component.
    The expression `y`, linear-fit normalization and 20 mT/m give
    `ΔBz = 0.02 × y T`, with y in metres. At y = −20 / 0 / +20 mm, the prescribed
    perturbation is −0.4 / 0 / +0.4 mT; it is added to the separate main field.
    The interpretation panel updates when amplitude or ROI radius changes.
-3. Inspect **Material** and **Winding**: 2 × 2 mm conducting copper, 0.1 mm
+- Open **Material** and **Winding** to review 2 × 2 mm conducting copper, 0.1 mm
    insulation on each side, 6 mm minimum bend radius and 16 contour levels.
    A contour level can contain multiple loops; this is not a claim of 16 turns.
-4. Select **Full design evaluation** and **Compute**. Use **Plot** to compare
-   the target, continuous-sheet solution, contours, connected winding and wire
-   field. For wire maps, choose **Original contour current** to inspect the
-   modeled current without refitting, then inspect **Checks** and **Problems**.
 
 Define a custom conductor in **Conductor → Cross-section profile…**. Choose
 **Polygon from straight segments**, edit the ordered **u [mm] / n [mm]** point

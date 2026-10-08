@@ -7,7 +7,8 @@ from coilgen.application import ProjectDocument
 from coilgen.application.templates import TEMPLATE_SPECS
 from coilgen.gui import workbench
 from coilgen.gui.icons import ICON_NAMES
-from PySide6.QtWidgets import QMessageBox, QToolButton
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QDialog, QDockWidget, QMessageBox, QToolButton
 
 application = usability_tests.application
 windows = usability_tests.windows
@@ -58,6 +59,53 @@ def test_clicking_template_loads_full_editable_study_without_computing(windows, 
         window.select_node("optimization")
         assert window.apply_settings()
         assert window.project.model_fingerprint == before
+
+
+@pytest.mark.parametrize("spec", TEMPLATE_SPECS, ids=lambda spec: spec.id)
+def test_every_template_computes_immediately_without_visiting_settings(windows, spec):
+    window = windows()
+    # Even an open editor from the previous design is optional for the new template.
+    window._inspect_node("geometry")
+    assembly = window.load_template(spec.id)
+    project = window.project
+    assert project is assembly.channel(window._active_channel_id).project
+    fingerprint, revision = project.fingerprint, project.revision
+    assert window.tree.currentItem().data(0, Qt.ItemDataRole.UserRole) == "stage:evaluated"
+    assert window.findChild(QDockWidget, "settings_dock").isHidden()
+    assert not window._draft_dirty and window.undo_stack.isClean()
+    assert window.compute_button.text() == "Compute full design" and window.compute_button.isEnabled()
+    assert "Settings loaded" in window.statusBar().currentMessage()
+    assert not window.service.submissions
+    for channel in assembly.channels:
+        assert channel.project.study["pipeline_stage"] == "evaluated"
+        assert channel.project.study["fabricate"]
+    window.compute_button.click()
+    assert len(window.service.submissions) == 1
+    submitted, controls = window.service.submissions[0]
+    assert submitted is project and window.project is project
+    assert (project.fingerprint, project.revision) == (fingerprint, revision)
+    assert controls == project.study
+    assert not window._draft_dirty and window.undo_stack.isClean()
+    assert window.findChild(QDockWidget, "settings_dock").isHidden()
+
+
+def test_loading_template_closes_previous_focused_windows_and_keeps_editing_optional(windows, application):
+    window = windows()
+    window._inspect_node("geometry")
+    window._focused_sections[0].open()
+    assert any(dialog.isVisible() for dialog in window.findChildren(QDialog))
+    window.load_template("cylinder_gx")
+    application.processEvents()
+    assert not any(dialog.isVisible() for dialog in window.findChildren(QDialog))
+    original = window.project
+    window._inspect_node("geometry")
+    assert not window.findChild(QDockWidget, "settings_dock").isHidden()
+    assert window._draft_controls["radius_mm"].value() == original.config.cylinder_mesh_parameter_list[1] * 1000
+    assert window.apply_settings() and window.project is original
+    window._draft_controls["radius_mm"].setValue(95)
+    assert window.apply_settings()
+    assert window.project.config.cylinder_mesh_parameter_list[1] == pytest.approx(0.095)
+    assert window.project.revision == original.revision + 1
 
 
 def test_cancel_protects_pending_changes_when_loading_template(windows, monkeypatch):

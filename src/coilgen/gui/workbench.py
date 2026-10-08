@@ -4186,7 +4186,7 @@ class CoilGenWorkbench(QMainWindow):
         return document
 
     def load_template(self, kind="cylinder"):
-        """Start an owned, editable design while protecting pending project edits."""
+        """Load configured inputs ready to compute; settings remain optional."""
         template = template_spec(kind)
         if not self._can_discard():
             return
@@ -4204,9 +4204,13 @@ class CoilGenWorkbench(QMainWindow):
         self._collection_mode = len(assembly.channels) > 1
         self._set_assembly(assembly)
         self.messages.appendPlainText(template.description)
-        self._inspect_node("geometry")
+        self.select_node(f"stage:{self.project.study['pipeline_stage']}")
+        self.findChild(QDockWidget, "settings_dock").hide()
         self.undo_stack.setClean()
-        self.statusBar().showMessage(f"Loaded template: {template.title}", 5000)
+        self.statusBar().showMessage(
+            f"Loaded template: {template.title} · Settings loaded. Click Compute full design; editing is optional.",
+            10000,
+        )
         return assembly
 
     def export_python(self, path):
