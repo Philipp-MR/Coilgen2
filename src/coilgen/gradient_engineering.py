@@ -420,6 +420,9 @@ class GradientEngineeringSpec:
 def expand_drive_waveform(drive):
     """Expand the explicitly finite pulse train, retaining zero-current rest intervals."""
     times, currents = np.asarray(drive.time_s, dtype=float), np.asarray(drive.currents_A, dtype=float)
+    from .progress import ProgressReporter
+
+    task = ProgressReporter(label="Drive waveform").task("Expanding finite pulse repetitions", drive.repetitions - 1)
     if drive.repetitions == 1:
         return times, currents
     duration = times[-1] - times[0]
@@ -430,6 +433,7 @@ def expand_drive_waveform(drive):
         start = 0 if drive.rest_s > 0 else 1
         all_times.append(shifted[start:])
         all_currents.append(currents[start:])
+        task.advance()
     expanded_times, expanded_currents = np.concatenate(all_times), np.vstack(all_currents)
     if not np.all(np.isfinite(expanded_times)) or np.any(np.diff(expanded_times) <= 0):
         raise ValueError("Expanded pulse train is outside finite, strictly increasing SI time range.")
@@ -439,6 +443,11 @@ def expand_drive_waveform(drive):
 def _thermal_waveform(times, currents, resistances, thermal):
     """Exact first-order lumped response to piecewise-linear supplied current."""
     from scipy.optimize import brentq
+    from .progress import ProgressReporter
+
+    task = ProgressReporter(label="Transient thermal response").task(
+        "Integrating supplied waveform intervals", len(times) - 1
+    )
 
     tau = thermal.thermal_resistance_K_per_W * thermal.heat_capacity_J_per_K
     if not math.isfinite(tau) or tau <= 0:
@@ -492,6 +501,7 @@ def _thermal_waveform(times, currents, resistances, thermal):
         peak = max(peak, *(at(value) for value in candidates))
         temperature = at(duration)
         samples.append(thermal.ambient_temperature_K + temperature)
+        task.advance()
     peak += thermal.ambient_temperature_K
     if not np.all(np.isfinite([peak, *samples])):
         raise ValueError("Thermal response exceeds finite SI reporting range.")
@@ -518,6 +528,10 @@ def evaluate_gradient_engineering(
     authoring a ``verified`` flag in the serialized engineering specification.
     """
     spec = GradientEngineeringSpec.from_dict(spec) if isinstance(spec, dict) else spec
+    from .progress import ProgressReporter, progress_scope
+
+    reporter = ProgressReporter(label="Gradient engineering")
+    reporter.report(None, "Verifying explicit circuit bindings, signed drive and physical R/L evidence")
     if not isinstance(spec, GradientEngineeringSpec):
         raise TypeError("spec must be a GradientEngineeringSpec.")
     output = {
@@ -571,7 +585,9 @@ def evaluate_gradient_engineering(
         else:
             matrix_note += " The supplied matrix has no matching verified source/geometry reference."
     if drive.time_s:
-        times, currents = expand_drive_waveform(drive)
+        with progress_scope(0, 15):
+            times, currents = expand_drive_waveform(drive)
+        reporter.report(None, "Evaluating waveform voltage extrema, current and Joule losses")
         duration = times[-1] - times[0]
         slopes = np.diff(currents, axis=0) / np.diff(times)[:, None]
         inductive = slopes @ matrix.T
@@ -595,7 +611,8 @@ def evaluate_gradient_engineering(
         target_metrics = None
         if drive.thermal is not None:
             try:
-                output["thermal"] = _thermal_waveform(times, currents, resistance, drive.thermal)
+                with progress_scope(25, 95):
+                    output["thermal"] = _thermal_waveform(times, currents, resistance, drive.thermal)
             except (ValueError, OverflowError, FloatingPointError) as exc:
                 output["thermal"] = {
                     "available": False,
@@ -677,4 +694,5 @@ def evaluate_gradient_engineering(
             for index, body in enumerate(drive.body_ids)
         ],
     }
+    reporter.finish("Explicit drive and thermal analysis reviewed")
     return output

@@ -20,6 +20,7 @@ import numpy as np
 
 from ..cohort_shim import ChannelCurrentLimits, CohortFitOptions, RigidTransform, ShimScenario, fit_scenario_currents
 from ..persistence import atomic_json, json_value
+from ..progress import ProgressReporter, progress_scope
 from .gradient_studies import RigidTransform as MapTransform, _saved_winding
 from .service import DesignService, RunRecord
 
@@ -463,13 +464,16 @@ def fit_array_fields(spec, channel_fields_by_case, *, provenance=(), progress=No
         center_frequency=spec.center_frequency, current_regularization=spec.current_regularization
     )
     rows = []
+    reporter = ProgressReporter(label="Array fitting")
     for index, case in enumerate(spec.cases):
         if progress:
             progress(f"Fitting {case.name} ({index + 1}/{len(spec.cases)})")
         matrix = _array(
             channel_fields_by_case[case.name], "Channel field matrix", (len(case.coordinates_m), len(spec.channels))
         )
-        result = fit_scenario_currents(case.scenario(), matrix, limits, options=options)
+        with progress_scope(100 * index / len(spec.cases), 100 * (index + 1) / len(spec.cases), overall=True):
+            reporter.report(None, f"Solving bounded signed currents: {case.name}")
+            result = fit_scenario_currents(case.scenario(), matrix, limits, options=options)
         error = result.residual_T  # actual minus desired, including the explicitly requested frequency offset
         peak = float(np.max(np.abs(error)))
         checks = [
@@ -499,6 +503,8 @@ def fit_array_fields(spec, channel_fields_by_case, *, provenance=(), progress=No
                 "channel_fields_T_per_A": matrix.tolist(),
             }
         )
+        with progress_scope(100 * index / len(spec.cases), 100 * (index + 1) / len(spec.cases), overall=True):
+            reporter.report(100, f"Completed array fit {index + 1}/{len(spec.cases)}")
     return {
         "schema": "coilgen-array-results-v1",
         "spec": spec.to_dict(),
@@ -524,12 +530,16 @@ def evaluate_array(spec, *, run_resolver=None, progress=None):
 
     fields = {case.name: np.zeros((len(case.coordinates_m), len(spec.channels))) for case in spec.cases}
     sources = []
+    reporter = ProgressReporter(label="Array field evaluation")
     for index, channel in enumerate(spec.channels):
         if progress:
             progress(f"Verifying/evaluating {channel.name} ({index + 1}/{len(spec.channels)})")
-        location = run_resolver(channel) if run_resolver is not None else channel.run_directory
-        record = DesignService.load_run(location.directory if isinstance(location, RunRecord) else location)
-        _, _, health = verified_run_metadata(record.directory)
+        start, span = 80 * index / len(spec.channels), 80 / len(spec.channels)
+        with progress_scope(start, start + 0.1 * span, overall=True):
+            reporter.report(None, f"Verifying immutable saved winding: {channel.name}")
+            location = run_resolver(channel) if run_resolver is not None else channel.run_directory
+            record = DesignService.load_run(location.directory if isinstance(location, RunRecord) else location)
+            _, _, health = verified_run_metadata(record.directory)
         if not health.metadata_checked or record.metadata.get("request_sha256") != channel.request_sha256:
             raise ValueError(f"Channel {channel.name}: saved request identity changed or is unverified.")
         paths, _, source, complete = _saved_winding(record, "original")
@@ -537,12 +547,21 @@ def evaluate_array(spec, *, run_resolver=None, progress=None):
             key: winding_path_sha256(path) for key, path in paths.items()
         } != dict(channel.path_sha256):
             raise ValueError(f"Channel {channel.name}: saved electrical geometry changed.")
+        total_samples = sum(len(case.coordinates_m) for case in spec.cases) * len(paths)
+        completed_samples = 0
         for case in spec.cases:
             for body, path in paths.items():
                 if _samples_on_wire(path, case.coordinates_m):
                     raise ValueError(f"Case {case.name}: a sample intersects the thin-wire centreline.")
-                field_values = biot_savart_wire_path(path, case.coordinates_m, worker_count=1)
+                with progress_scope(
+                    start + span * (0.1 + 0.9 * completed_samples / total_samples),
+                    start + span * (0.1 + 0.9 * (completed_samples + len(case.coordinates_m)) / total_samples),
+                    overall=True,
+                ):
+                    reporter.report(0, f"Evaluating {channel.name} · {case.name} · {body}")
+                    field_values = biot_savart_wire_path(path, case.coordinates_m, worker_count=1)
                 fields[case.name][:, index] += channel.body_current_ratios[body] * (field_values @ case.direction)
+                completed_samples += len(case.coordinates_m)
         sources.append(
             {
                 "channel_id": channel.id,
@@ -553,7 +572,8 @@ def evaluate_array(spec, *, run_resolver=None, progress=None):
                 "field_model": "thin_wire_exact_segments",
             }
         )
-    return fit_array_fields(spec, fields, provenance=sources, progress=progress)
+    with progress_scope(80, 100, overall=True):
+        return fit_array_fields(spec, fields, provenance=sources, progress=progress)
 
 
 def synthesize_cohort(project, spec, *, channel_count=None, current_limit_A=None, strategy=None, progress=None):
@@ -601,14 +621,21 @@ def synthesize_cohort(project, spec, *, channel_count=None, current_limit_A=None
     config = deepcopy(project.config)
     config.target_field_component, config.b_0_direction = "BdotB0", direction
     config.symmetry_reduction = "none"
-    meshes = [
-        refine_mesh(mesh, config.iteration_num_mesh_refinement)
-        for mesh in split_disconnected_mesh(load_mesh_from_config(config, project.project_root))
-    ]
-    parts = calculate_basis_functions(calculate_one_ring_by_mesh([CoilPart(mesh=mesh) for mesh in meshes]))
-    parts = calculate_resistance_matrix(parts, config)
+    reporter = ProgressReporter.from_config(config, label="Cohort synthesis")
+    with progress_scope(0, 5, overall=True):
+        reporter.report(None, "Loading and refining the common support surface")
+        meshes = [
+            refine_mesh(mesh, config.iteration_num_mesh_refinement)
+            for mesh in split_disconnected_mesh(load_mesh_from_config(config, project.project_root))
+        ]
+    with progress_scope(5, 10, overall=True):
+        parts = calculate_basis_functions(calculate_one_ring_by_mesh([CoilPart(mesh=mesh) for mesh in meshes]))
+    with progress_scope(10, 15, overall=True):
+        parts = calculate_resistance_matrix(parts, config)
     surface_cases = []
     identity = RigidTransform("world", "scanner", np.eye(4))
+    total_samples = sum(len(case.coordinates_m) for case in spec.cases)
+    completed_samples = 0
     for case in spec.cases:
         if progress:
             progress(f"Assembling registered surface operator: {case.name}")
@@ -619,8 +646,15 @@ def synthesize_cohort(project, spec, *, channel_count=None, current_limit_A=None
             suppressed=np.zeros(len(case.coordinates_m), dtype=bool),
             target_field_group_inds=np.ones(len(case.coordinates_m), dtype=np.int64),
         )
-        calculated = calculate_sensitivity_matrix(deepcopy(parts), target, config)
-        problem = StreamFunctionOptimizationProblem.from_parts(calculated, target, config)
+        with progress_scope(
+            15 + 35 * completed_samples / total_samples,
+            15 + 35 * (completed_samples + len(case.coordinates_m)) / total_samples,
+            overall=True,
+        ):
+            reporter.report(0, f"Assembling registered surface operator: {case.name}")
+            calculated = calculate_sensitivity_matrix(deepcopy(parts), target, config)
+            problem = StreamFunctionOptimizationProblem.from_parts(calculated, target, config)
+        completed_samples += len(case.coordinates_m)
         surface_cases.append(SurfaceShimScenario(case.scenario(), RegisteredSurfaceProblem(problem, identity)))
     options = CohortChannelDesignOptions(
         channel_count=channel_count,
@@ -630,12 +664,14 @@ def synthesize_cohort(project, spec, *, channel_count=None, current_limit_A=None
         channel_resistance_ohm=None if spec.cohort_controls is None else spec.cohort_controls.resistance_ohm,
         total_power_limit_W=None if spec.cohort_controls is None else spec.cohort_controls.total_power_limit_W,
     )
-    result = design_cohort_channels(
-        tuple(item for item, case in zip(surface_cases, spec.cases) if case.membership == "training"),
-        config,
-        options,
-        progress_callback=progress,
-    )
+    with progress_scope(50, 85, overall=True):
+        reporter.report(None, "Designing a common cohort basis; solver work depends on convergence")
+        result = design_cohort_channels(
+            tuple(item for item, case in zip(surface_cases, spec.cases) if case.membership == "training"),
+            config,
+            options,
+            progress_callback=progress,
+        )
     mesh = surface_cases[0].problem.combined_mesh
     asset = mesh_asset(mesh)
     initial = training[0]
@@ -652,6 +688,8 @@ def synthesize_cohort(project, spec, *, channel_count=None, current_limit_A=None
     for case, surface in zip(spec.cases, surface_cases):
         fields[case.name] = surface.problem.unweighted_reduced_sensitivity @ result.channel_basis_per_A
     for index in range(channel_count):
+        with progress_scope(85, 90, overall=True):
+            reporter.report(100 * index / channel_count, f"Creating portable channel {index + 1}/{channel_count}")
         output = StringIO()
         part_indices = np.concatenate(
             [np.full(part.mesh.n_vertices, part_index) for part_index, part in enumerate(parts)]
@@ -715,10 +753,12 @@ def synthesize_cohort(project, spec, *, channel_count=None, current_limit_A=None
             )
         )
     fitted = []
-    for case in spec.cases:
-        fitted_case = fit_scenario_currents(
-            case.scenario(), fields[case.name], result.current_limits, options=options.fit_options
-        )
+    for index, case in enumerate(spec.cases):
+        with progress_scope(90 + 10 * index / len(spec.cases), 90 + 10 * (index + 1) / len(spec.cases), overall=True):
+            reporter.report(None, f"Evaluating signed channel currents: {case.name}")
+            fitted_case = fit_scenario_currents(
+                case.scenario(), fields[case.name], result.current_limits, options=options.fit_options
+            )
         peak = float(np.max(np.abs(fitted_case.residual_T)))
         checks = [
             error <= limit
@@ -739,6 +779,8 @@ def synthesize_cohort(project, spec, *, channel_count=None, current_limit_A=None
                 "diagnostics": _diagnostics(fields[case.name], case.weights, options.fit_options.center_frequency),
             }
         )
+        with progress_scope(90 + 10 * index / len(spec.cases), 90 + 10 * (index + 1) / len(spec.cases), overall=True):
+            reporter.report(100, f"Cohort cases evaluated: {index + 1}/{len(spec.cases)}")
     return {
         "schema": "coilgen-cohort-synthesis-v1",
         "projects": tuple(generated),
@@ -800,15 +842,18 @@ def synthesize_contour_cohort(spec, dictionary=None, *, channel_count=None, curr
         channel_resistance_ohm=None if spec.cohort_controls is None else spec.cohort_controls.resistance_ohm,
         total_power_limit_W=None if spec.cohort_controls is None else spec.cohort_controls.total_power_limit_W,
     )
-    result = design_contour_dictionary_channels(
-        PopulationShimDataset(tuple(case.scenario() for case in training)),
-        dictionary,
-        options,
-        progress_callback=progress,
-    )
-    all_fields = evaluate_contour_family_fields(
-        dictionary, PopulationShimDataset(tuple(case.scenario() for case in spec.cases)), progress_callback=progress
-    )
+    reporter = ProgressReporter(label="Contour cohort synthesis")
+    with progress_scope(0, 65, overall=True):
+        result = design_contour_dictionary_channels(
+            PopulationShimDataset(tuple(case.scenario() for case in training)),
+            dictionary,
+            options,
+            progress_callback=progress,
+        )
+    with progress_scope(65, 90, overall=True):
+        all_fields = evaluate_contour_family_fields(
+            dictionary, PopulationShimDataset(tuple(case.scenario() for case in spec.cases)), progress_callback=progress
+        )
     rows, channels = [], []
     for index in range(channel_count):
         channels.append(
@@ -825,7 +870,7 @@ def synthesize_contour_cohort(spec, dictionary=None, *, channel_count=None, curr
                 ],
             }
         )
-    for case in spec.cases:
+    for case_index, case in enumerate(spec.cases):
         fields = np.column_stack(
             [
                 sum(
@@ -839,7 +884,11 @@ def synthesize_contour_cohort(spec, dictionary=None, *, channel_count=None, curr
                 for channel in range(channel_count)
             ]
         )
-        fit = fit_scenario_currents(case.scenario(), fields, result.current_limits, options=options.fit_options)
+        with progress_scope(
+            90 + 10 * case_index / len(spec.cases), 90 + 10 * (case_index + 1) / len(spec.cases), overall=True
+        ):
+            reporter.report(None, f"Evaluating assigned physical channel currents: {case.name}")
+            fit = fit_scenario_currents(case.scenario(), fields, result.current_limits, options=options.fit_options)
         peak = float(np.max(np.abs(fit.residual_T)))
         checks = [
             error <= limit

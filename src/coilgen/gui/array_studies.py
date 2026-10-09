@@ -120,6 +120,7 @@ class ArrayCaseDialog(EngineeringDialog):
 
 class _Signals(QObject):
     progress = Signal(str)
+    details = Signal(dict)
     finished = Signal(object, str)
 
 
@@ -127,6 +128,9 @@ class _ArrayTask(QRunnable):
     def __init__(self, operation):
         super().__init__()
         self.signals, self.operation, self.cancel = _Signals(), operation, Event()
+        from .design_tasks import ProgressSignalRelay
+
+        self.relay = ProgressSignalRelay(self.report_details)
 
     def report(self, text):
         from ..progress import DesignCancelled
@@ -135,13 +139,22 @@ class _ArrayTask(QRunnable):
             raise DesignCancelled("Array study cancelled between numerical operations.")
         self.signals.progress.emit(text)
 
+    def report_details(self, event):
+        self.signals.details.emit(event)
+        self.signals.progress.emit(str(event.get("message", "")))
+
     def run(self):
+        from ..progress import progress_context
+
         try:
-            result = self.operation(self.report)
-            self.report("Array study computation complete; publishing verified results.")
+            with progress_context(self.relay.report, self.cancel.is_set):
+                result = self.operation(self.report)
+                self.report("Array study computation complete; publishing verified results.")
         except Exception as exc:
+            self.relay.flush()
             self.signals.finished.emit(None, f"{type(exc).__name__}: {exc}")
         else:
+            self.relay.flush()
             self.signals.finished.emit(result, "")
 
 
@@ -212,6 +225,7 @@ class ArrayStudyDialog(QDialog):
     generatedProjects = Signal(object)
     busyChanged = Signal(bool)
     progressChanged = Signal(str)
+    progressDetails = Signal(dict)
 
     def __init__(self, assembly, parent=None, *, saved_spec=None, run_records=(), active_project=None):
         super().__init__(parent)
@@ -668,6 +682,7 @@ class ArrayStudyDialog(QDialog):
         self.worker = _ArrayTask(operation)
         self.worker.signals.progress.connect(self.status.setText)
         self.worker.signals.progress.connect(self.progressChanged.emit)
+        self.worker.signals.details.connect(self._progress_details)
         self.worker.signals.finished.connect(self._finished)
         self.tabs.setEnabled(False)
         self.buttons.setEnabled(False)
@@ -677,6 +692,15 @@ class ArrayStudyDialog(QDialog):
         self.progressChanged.emit("Computing array study…")
         self.busyChanged.emit(True)
         QThreadPool.globalInstance().start(self.worker)
+
+    def _progress_details(self, event):
+        percent = event.get("overall_percent", event.get("percent"))
+        indeterminate = percent is None or event.get("progress_indeterminate", False)
+        self.progress.setRange(0, 0 if indeterminate else 1000)
+        if not indeterminate:
+            self.progress.setValue(min(999, round(float(percent) * 10)) if percent < 100 else 1000)
+            self.progress.setFormat("%p%")
+        self.progressDetails.emit(event)
 
     def _finished(self, result, error):
         self.worker = None

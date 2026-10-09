@@ -436,30 +436,41 @@ def _field_operator(
     from ..basis import calculate_basis_functions, calculate_one_ring_by_mesh
     from ..geometry import compute_face_normals, compute_vertex_normals
     from ..physics import calculate_sensitivity_matrix
+    from ..progress import ProgressReporter, progress_scope
+
+    reporter = ProgressReporter.from_config(config, label="Regional fields")
 
     columns = sum(part.mesh.n_vertices for part in parts)
     if len(points) * columns * 3 * 8 > MAX_OPERATOR_BYTES:
         raise ValueError("One physical scenario operator exceeds the explicit 512 MiB budget.")
     copies = []
-    for part in parts:
+    for index, part in enumerate(parts):
         mesh = part.mesh.copy()
         mesh.vertices = _points_transform(mesh.vertices, support, scale_xyz, centre_m)
-        _reject_sheet_samples(mesh, points)
+        with progress_scope(10 * index / len(parts), 10 * (index + 1) / len(parts)):
+            _reject_sheet_samples(mesh, points)
         mesh.face_normals = compute_face_normals(mesh)
         mesh.vertex_normals = compute_vertex_normals(mesh)
         copies.append(CoilPart(mesh))
-    calculate_one_ring_by_mesh(copies)
-    calculate_basis_functions(copies)
+    with progress_scope(10, 15):
+        calculate_one_ring_by_mesh(copies)
+    with progress_scope(15, 20):
+        calculate_basis_functions(copies)
     target = TargetField(
         points, np.zeros_like(points), np.ones(len(points)), np.zeros(len(points), bool), np.zeros(len(points), int)
     )
-    calculate_sensitivity_matrix(copies, target, config)
+    with progress_scope(20, 100):
+        reporter.report(0, "Evaluating regional current-sheet field operator")
+        calculate_sensitivity_matrix(copies, target, config)
     return np.concatenate([part.sensitivity_matrix for part in copies], axis=2)
 
 
 def _reject_sheet_samples(mesh, points):
     from scipy.spatial import cKDTree
     from ..geometry_kernels import _point_triangle_sq_numpy
+    from ..progress import ProgressReporter
+
+    task = ProgressReporter(label="Regional fields").task("Checking samples against the current sheet", len(points))
 
     triangles = mesh.vertices[mesh.faces]
     centres = triangles.mean(axis=1)
@@ -472,6 +483,7 @@ def _reject_sheet_samples(mesh, points):
         candidates = tree.query_ball_point(samples, radius + tolerance)
         counts = np.array([len(ids) for ids in candidates])
         if not np.any(counts):
+            task.update(min(start + 256, len(points)))
             continue
         if int(counts.sum()) > 1_000_000:
             raise ValueError("Sheet-sample proximity candidates exceed the explicit safety budget.")
@@ -481,6 +493,7 @@ def _reject_sheet_samples(mesh, points):
             raise FieldSamplingError(
                 "A desired sample lies on the current-sheet surface; move it off the singular sheet."
             )
+        task.update(min(start + 256, len(points)))
 
 
 def requirements_evaluation_config(config):
@@ -518,6 +531,7 @@ def requirements_validation_config(config):
 
 def prepare_requirement_constraints(parts, config, spec):
     from ..research.convex import LinearFieldConstraint, ResearchPhysicsSpec
+    from ..progress import ProgressReporter, progress_scope
 
     spec = ResearchRequirements.from_dict(spec)
     physics = ResearchPhysicsSpec.from_dict(config.research_physics or {})
@@ -538,10 +552,15 @@ def prepare_requirement_constraints(parts, config, spec):
     if expected_bytes > MAX_OPERATOR_BYTES:
         raise ValueError("Combined regional/pose operators exceed the explicit 512 MiB budget.")
     allocated = 0
+    reporter = ProgressReporter.from_config(config, label="Regional constraints")
+    total = len(poses) * len(spec.regions)
+    completed = 0
     for pose_name, support, sample, scale, centre in poses:
         for region in spec.regions:
             points, target = _scenario_data(region.design, sample)
-            sensitivity = _field_operator(parts, points, config, support, scale, centre)
+            with progress_scope(100 * completed / total, 100 * (completed + 1) / total, overall=True):
+                reporter.report(0, f"Building constraints: {region.name} · {pose_name}")
+                sensitivity = _field_operator(parts, points, config, support, scale, centre)
             matrix = sensitivity_component_matrix(sensitivity, region.component, b0_direction=config.b_0_direction)
             allocated += matrix.nbytes
             if allocated > MAX_OPERATOR_BYTES:
@@ -559,6 +578,8 @@ def prepare_requirement_constraints(parts, config, spec):
                             group_size=3 if region.component == "vector" else 1,
                         )
                     )
+            completed += 1
+            reporter.report(100 * completed / total, f"Regional constraints assembled: {completed}/{total}")
     return replace(
         config,
         research_physics=replace(
@@ -666,6 +687,7 @@ def evaluate_requirements(
     from ..evaluation import layout_field_geometry
     from ..physics import biot_savart_wire_path
     from ..research.validation import _samples_on_wire
+    from ..progress import ProgressReporter, progress_scope
 
     spec = ResearchRequirements.from_dict(spec)
     if (
@@ -728,12 +750,16 @@ def evaluate_requirements(
         for item in spec.scenarios
     ]
     rows, arrays = [], {}
+    reporter = ProgressReporter.from_config(config, label="Regional validation")
+    total = len(poses) * sum(1 + (region.validation is not None) for region in spec.regions)
+    completed = 0
     for pose_name, membership, support, sample, scale, centre in poses:
         for region in spec.regions:
             datasets = [("design", region.design)]
             if region.validation is not None:
                 datasets.append(("independent_validation", region.validation))
             for sampling, dataset in datasets:
+                start, span = 100 * completed / total, 100 / total
                 points, target = _scenario_data(dataset, sample)
                 common = {
                     "region": region.name,
@@ -751,7 +777,9 @@ def evaluate_requirements(
                 }
                 sheet_reason = "Saved nodal stream function is unavailable."
                 try:
-                    sensitivity = _field_operator(parts, points, config, support, scale, centre) if sheet else None
+                    with progress_scope(start, start + 0.45 * span, overall=True):
+                        reporter.report(0, f"Reviewing {region.name} · {pose_name} · {sampling}: sheet field")
+                        sensitivity = _field_operator(parts, points, config, support, scale, centre) if sheet else None
                 except FieldSamplingError as exc:
                     sensitivity = None
                     sheet_reason = str(exc)
@@ -769,10 +797,15 @@ def evaluate_requirements(
                     if any(np.any(_samples_on_wire(path, points)) for path, _ in moved):
                         wire_reason = "Sample lies on a conductor; singular thin-wire field cannot certify a bound."
                     else:
-                        wire = sum(
-                            (current * biot_savart_wire_path(path, points, worker_count=1) for path, current in moved),
-                            np.zeros_like(points),
-                        )
+                        wire = np.zeros_like(points)
+                        for index, (path, current) in enumerate(moved):
+                            with progress_scope(
+                                start + span * (0.45 + 0.45 * index / len(moved)),
+                                start + span * (0.45 + 0.45 * (index + 1) / len(moved)),
+                                overall=True,
+                            ):
+                                reporter.report(0, f"Evaluating winding body {index + 1}/{len(moved)}")
+                                wire += current * biot_savart_wire_path(path, points, worker_count=1)
                 fields.append(
                     (
                         "complete_electrical_paths"
@@ -810,6 +843,9 @@ def evaluate_requirements(
                         arrays[prefix + "_field_T"] = field
                         arrays[prefix + "_target_T"] = target
                     rows.append(row)
+                completed += 1
+                with progress_scope(start, start + span, overall=True):
+                    reporter.report(100, f"Regional datasets reviewed: {completed}/{total}")
     available = [row for row in rows if row.get("available")]
     wire_rows = [row for row in rows if row["scope"] != "continuous_sheet"]
 

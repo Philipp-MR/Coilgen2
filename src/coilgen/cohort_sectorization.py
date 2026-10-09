@@ -285,6 +285,10 @@ def adaptively_sectorize_cohort_channels(
         _channel_fields_for_surface_scenarios,
         fit_cohort_currents,
     )
+    from .progress import DesignCancelled, ProgressReporter, progress_scope
+
+    reporter = ProgressReporter.from_config(config, label="Adaptive sectorization")
+    reporter.report(None, "Preparing common mesh and channel-support operators")
 
     scenarios = tuple(surface_scenarios)
     if not scenarios:
@@ -322,13 +326,14 @@ def adaptively_sectorize_cohort_channels(
     dataset = PopulationShimDataset(tuple(item.scenario for item in scenarios))
     auxiliary = auxiliary_actuators_by_scenario or {}
     fields = _channel_fields_for_surface_scenarios(scenarios, basis)
-    fit = fit_cohort_currents(
-        dataset,
-        fields,
-        limits,
-        options=fit_options,
-        auxiliary_actuators_by_scenario=auxiliary,
-    )
+    with progress_scope(0, 5):
+        fit = fit_cohort_currents(
+            dataset,
+            fields,
+            limits,
+            options=fit_options,
+            auxiliary_actuators_by_scenario=auxiliary,
+        )
     initial_fit = fit
     anchor_basis = basis.copy()
     anchor_field_rms = _channel_field_rms(
@@ -367,36 +372,40 @@ def adaptively_sectorize_cohort_channels(
                 f"solving with overlap penalty {overlap_penalty:.6g}..."
             )
         overlap_weights = np.sum(damped_occupancy, axis=1, keepdims=True) - damped_occupancy
-        candidate, solver, status, constraint_count = _solve_basis_update(
-            cp,
-            scenarios,
-            fit,
-            basis,
-            anchor_basis,
-            limits,
-            config,
-            fit_options,
-            normalized_scenario_weights,
-            density_operators,
-            face_areas,
-            resistance_weight=options.resistance_weight,
-            basis_anchor_weight=options.basis_anchor_weight,
-            overlap_weights=overlap_weights,
-            overlap_penalty=overlap_penalty,
-            active_face_masks=None,
-            basis_parameterization=discovery_parameterization,
-            enforce_density_constraints=options.enforce_density_during_discovery,
-            minimum_field_projection_ratio=(options.minimum_discovery_field_projection_ratio),
-            progress_callback=progress_callback,
-        )
+        start, span = 5 + 60 * iteration / options.localization_iterations, 60 / options.localization_iterations
+        with progress_scope(start, start + 0.7 * span):
+            reporter.report(None, f"Localizing channel support: {iteration + 1}/{options.localization_iterations}")
+            candidate, solver, status, constraint_count = _solve_basis_update(
+                cp,
+                scenarios,
+                fit,
+                basis,
+                anchor_basis,
+                limits,
+                config,
+                fit_options,
+                normalized_scenario_weights,
+                density_operators,
+                face_areas,
+                resistance_weight=options.resistance_weight,
+                basis_anchor_weight=options.basis_anchor_weight,
+                overlap_weights=overlap_weights,
+                overlap_penalty=overlap_penalty,
+                active_face_masks=None,
+                basis_parameterization=discovery_parameterization,
+                enforce_density_constraints=options.enforce_density_during_discovery,
+                minimum_field_projection_ratio=(options.minimum_discovery_field_projection_ratio),
+                progress_callback=progress_callback,
+            )
         candidate_fields = _channel_fields_for_surface_scenarios(scenarios, candidate)
-        candidate_fit = fit_cohort_currents(
-            dataset,
-            candidate_fields,
-            limits,
-            options=fit_options,
-            auxiliary_actuators_by_scenario=auxiliary,
-        )
+        with progress_scope(start + 0.7 * span, start + span):
+            candidate_fit = fit_cohort_currents(
+                dataset,
+                candidate_fields,
+                limits,
+                options=fit_options,
+                auxiliary_actuators_by_scenario=auxiliary,
+            )
         candidate_density = _face_current_density_magnitudes(density_operators, candidate)
         candidate_field_rms = _channel_field_rms(
             problem,
@@ -419,6 +428,8 @@ def adaptively_sectorize_cohort_channels(
                 options,
             )
             overlap = _continuous_overlap_fraction(candidate_occupancy, face_areas)
+        except DesignCancelled:
+            raise
         except RuntimeError as exc:
             candidate_occupancy = occupancy
             candidate_thresholds = thresholds
@@ -478,22 +489,24 @@ def adaptively_sectorize_cohort_channels(
         )
     if progress_callback is not None:
         progress_callback("Adaptive partition: assigning connected face sectors from localized activity...")
-    ownership = _competitive_ownership(occupancy)
-    labels, seeds, partition_unary = _automatic_face_partition(
-        problem.combined_mesh,
-        ownership,
-        face_areas,
-        adjacency,
-        options,
-    )
-    labels, guard = _harden_partition_with_clearance(
-        labels,
-        seeds,
-        partition_unary,
-        face_areas,
-        adjacency,
-        options,
-    )
+    with progress_scope(65, 75):
+        reporter.report(None, "Assigning connected face sectors and clearance guards")
+        ownership = _competitive_ownership(occupancy)
+        labels, seeds, partition_unary = _automatic_face_partition(
+            problem.combined_mesh,
+            ownership,
+            face_areas,
+            adjacency,
+            options,
+        )
+        labels, guard = _harden_partition_with_clearance(
+            labels,
+            seeds,
+            partition_unary,
+            face_areas,
+            adjacency,
+            options,
+        )
     active_face_masks = np.column_stack([(labels == channel) & ~guard for channel in range(channel_count)])
     _validate_hardened_partition(
         labels,
@@ -513,29 +526,32 @@ def adaptively_sectorize_cohort_channels(
 
     if progress_callback is not None:
         progress_callback("Adaptive hardening: enforcing zero sheet current outside every sector...")
-    hardened, solver, status, constraint_count, local_dof_counts = _solve_sector_local_basis_update(
-        cp,
-        scenarios,
-        fit,
-        basis,
-        anchor_basis,
-        limits,
-        config,
-        fit_options,
-        normalized_scenario_weights,
-        active_face_masks,
-        resistance_weight=options.resistance_weight,
-        basis_anchor_weight=options.basis_anchor_weight,
-        progress_callback=progress_callback,
-    )
+    with progress_scope(75, 95):
+        reporter.report(None, "Enforcing zero sheet current outside the final sectors")
+        hardened, solver, status, constraint_count, local_dof_counts = _solve_sector_local_basis_update(
+            cp,
+            scenarios,
+            fit,
+            basis,
+            anchor_basis,
+            limits,
+            config,
+            fit_options,
+            normalized_scenario_weights,
+            active_face_masks,
+            resistance_weight=options.resistance_weight,
+            basis_anchor_weight=options.basis_anchor_weight,
+            progress_callback=progress_callback,
+        )
     hardened_fields = _channel_fields_for_surface_scenarios(scenarios, hardened)
-    hardened_fit = fit_cohort_currents(
-        dataset,
-        hardened_fields,
-        limits,
-        options=fit_options,
-        auxiliary_actuators_by_scenario=auxiliary,
-    )
+    with progress_scope(95, 99):
+        hardened_fit = fit_cohort_currents(
+            dataset,
+            hardened_fields,
+            limits,
+            options=fit_options,
+            auxiliary_actuators_by_scenario=auxiliary,
+        )
     final_density = _face_current_density_magnitudes(density_operators, hardened)
     final_occupancy, _final_thresholds = _activity_occupancy(
         final_density,
@@ -644,6 +660,7 @@ def adaptively_sectorize_cohort_channels(
         maximum_normalized_field_correlation=maximum_field_correlation,
         history=tuple(history),
     )
+    reporter.finish("Adaptive sectorization and final physical quality gates complete")
     return _readonly(hardened), hardened_fit, result
 
 

@@ -30,17 +30,31 @@ def calculate_sensitivity_matrix(
         method = "vectorized"
     if method not in {"vectorized", "scalar"}:
         raise ValueError("sensitivity_calculation_method must be 'vectorized', 'scalar', or 'auto'.")
-    for part_ind, part in enumerate(parts, start=1):
+    # Plan the existing partitioning before reporting, so several supports share
+    # one completion count rather than each restarting at zero percent.
+    plans = []
+    for part in parts:
         node_count = len(part.basis_elements)
-        sensitivity = np.zeros((3, len(target_points), node_count), dtype=float)
         work_size = node_count * len(target_points) * max(len(gauss_weight), 1)
-        if should_parallelize(work_size, config, worker_count=worker_count):
-            ranges = balanced_ranges(
+        ranges = (
+            balanced_ranges(
                 node_count,
                 worker_count,
                 chunks_per_worker=int(config.sensitivity_chunks_per_worker),
             )
-            task = reporter.task(f"part {part_ind}/{len(parts)} chunks", len(ranges))
+            if should_parallelize(work_size, config, worker_count=worker_count)
+            else None
+        )
+        plans.append(ranges)
+    task = reporter.task(
+        "support work chunks",
+        sum(len(ranges) if ranges is not None else len(part.basis_elements) for part, ranges in zip(parts, plans)),
+    )
+    for part_ind, part in enumerate(parts, start=1):
+        node_count = len(part.basis_elements)
+        sensitivity = np.zeros((3, len(target_points), node_count), dtype=float)
+        ranges = plans[part_ind - 1]
+        if ranges is not None:
             results = parallel_map(
                 lambda node_range: _sensitivity_node_chunk(
                     part.basis_elements,
@@ -53,13 +67,11 @@ def calculate_sensitivity_matrix(
                 ),
                 ranges,
                 worker_count=worker_count,
-                progress_callback=lambda done, total, task=task: task.update(done),
+                progress_callback=lambda done, total: task.advance(),
             )
-            task.done()
             for start, chunk in results:
                 sensitivity[:, :, start : start + chunk.shape[2]] = chunk
         else:
-            task = reporter.task(f"part {part_ind}/{len(parts)} nodes", node_count)
             for node_ind, basis in enumerate(part.basis_elements):
                 sensitivity[:, :, node_ind] = _sensitivity_for_basis(
                     basis,
@@ -69,9 +81,9 @@ def calculate_sensitivity_matrix(
                     gauss_weight,
                     method,
                 )
-                task.update(node_ind + 1)
-            task.done()
+                task.advance()
         part.sensitivity_matrix = sensitivity
+    task.done()
     return parts
 
 
@@ -177,7 +189,8 @@ def _sensitivity_for_basis_vectorized(
 def calculate_resistance_matrix(parts: list[CoilPart], config: CoilGenConfig) -> list[CoilPart]:
     material_factor = config.specific_conductivity_conductor / config.conductor_thickness
     reporter = ProgressReporter.from_config(config, label="Resistance")
-    for part_ind, part in enumerate(parts, start=1):
+    entry_plans = []
+    for part in parts:
         mesh = part.mesh
         adjacency = np.zeros((mesh.n_vertices, mesh.n_vertices), dtype=bool)
         for face in mesh.faces:
@@ -186,11 +199,13 @@ def calculate_resistance_matrix(parts: list[CoilPart], config: CoilGenConfig) ->
             adjacency[b, c] = True
             adjacency[c, a] = True
         adjacency = adjacency | adjacency.T | np.eye(mesh.n_vertices, dtype=bool)
+        entry_plans.append(np.where(adjacency))
+    task = reporter.task("support matrix entries", sum(len(rows) for rows, _cols in entry_plans))
+    for part, (rows, cols) in zip(parts, entry_plans):
+        mesh = part.mesh
         resistance = np.zeros((mesh.n_vertices, mesh.n_vertices), dtype=float)
         basis_by_triangle = _basis_triangle_lookup(part)
-        rows, cols = np.where(adjacency)
-        task = reporter.task(f"part {part_ind}/{len(parts)} matrix entries", len(rows))
-        for entry_ind, (node_a, node_b) in enumerate(zip(rows, cols), start=1):
+        for node_a, node_b in zip(rows, cols):
             shared = set(part.basis_elements[node_a].triangles).intersection(part.basis_elements[node_b].triangles)
             total = 0.0
             for face_ind in shared:
@@ -201,9 +216,9 @@ def calculate_resistance_matrix(parts: list[CoilPart], config: CoilGenConfig) ->
                 current_b = part.basis_elements[node_b].current[local_b]
                 total += float(np.dot(current_a, current_b) * area)
             resistance[node_a, node_b] = total
-            task.update(entry_ind)
-        task.done()
+            task.advance()
         part.resistance_matrix = (resistance + resistance.T) * material_factor / 2.0
+    task.done()
     return parts
 
 
@@ -254,7 +269,7 @@ def biot_savart_wire_path(
     )
     ranges = chunk_ranges(len(segment_starts), effective_chunk_size)
     work_size = len(segment_starts) * len(target_coords)
-    task = progress.task(progress_label, len(ranges)) if progress is not None and progress.enabled else None
+    task = progress.task(progress_label, len(ranges)) if progress is not None else None
     if worker_count > 1 and len(ranges) > 1 and work_size >= int(min_work_size):
         chunks = parallel_map(
             lambda segment_range: _biot_savart_segment_chunk(

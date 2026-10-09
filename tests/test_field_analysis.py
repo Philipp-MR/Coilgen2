@@ -264,7 +264,50 @@ def test_harmonic_fit_preserves_exact_basis_coefficients_shared_target_and_resid
     assert report["fits"]["field"].residual_rms < 1e-20
     assert not report["source_free_verified"] and not report["acceptance_claim"]
     assert "source-free homogeneous domain" in report["sourcefree_caveat"]
-    assert progress == [10, 90, 100]
+    assert progress[0] == 0 and progress[-1] == 100
+    assert None in progress  # LAPACK factorization has no measurable iteration total.
+    determinate = [percent for percent in progress if percent is not None]
+    assert determinate == sorted(determinate)
+
+
+def test_harmonic_basis_cancellation_prevents_opaque_factorization(monkeypatch):
+    import coilgen.spherical_harmonics as harmonics
+
+    points = np.random.default_rng(92).uniform(-0.1, 0.1, (100, 3))
+    cancelled = False
+    observed = []
+
+    def report(percent, message):
+        nonlocal cancelled
+        observed.append(message)
+        if "basis 3/" in message:
+            cancelled = True
+
+    def unexpected_solve(*args, **kwargs):
+        pytest.fail("A cancelled basis must not reach the non-interruptible factorization.")
+
+    monkeypatch.setattr(harmonics.np.linalg, "lstsq", unexpected_solve)
+    with pytest.raises(InterruptedError, match="cancelled"):
+        harmonics.fit_spherical_harmonics_many(
+            points,
+            {"field": points[:, 0]},
+            max_order=4,
+            progress=report,
+            cancel_check=lambda: cancelled,
+        )
+    assert any("basis 3/" in message for message in observed)
+
+
+def test_metric_statistics_can_cancel_before_percentile_sort():
+    cancelled = False
+
+    def report(percent, message):
+        nonlocal cancelled
+        if "selected metric statistics" in message:
+            cancelled = True
+
+    with pytest.raises(InterruptedError, match="cancelled"):
+        metric_map(dataset(), metric="absolute_error", progress=report, cancel_check=lambda: cancelled)
 
 
 @pytest.mark.parametrize("thickness", [0.0, 1e-9, 0.03])

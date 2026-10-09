@@ -380,7 +380,7 @@ class CoilGenWorkbench(QMainWindow):
         for action in actions.values():
             action.triggered.connect(self._pause_live_follow)
         self.timer = QTimer(self)
-        self.timer.setInterval(500)
+        self.timer.setInterval(200)
         self.timer.timeout.connect(self.poll_jobs)
         self.timer.start()
         if hasattr(self.viewport, "selected"):
@@ -4037,6 +4037,7 @@ class CoilGenWorkbench(QMainWindow):
             )
         )
         task.signals.finished.connect(self._design_task_finished)
+        task.signals.progress.connect(self._background_work_progress)
         self._design_study_task = task
         self._design_study_task_label = label
         self.history_panel.setEnabled(False)
@@ -4058,6 +4059,7 @@ class CoilGenWorkbench(QMainWindow):
 
     def _design_task_finished(self, project, error):
         task = self._design_study_task
+        getattr(self, "_local_progress", {}).pop(getattr(task, "signals", None), None)
         label = self._design_study_task_label
         self._design_study_task = None
         self._design_study_task_label = ""
@@ -4647,12 +4649,15 @@ class CoilGenWorkbench(QMainWindow):
                 return
             task = ArtifactExportTask(record, directory, loader=self.service.load_run)
             self._artifact_export_task = task
+            if hasattr(task.signals, "progress"):
+                task.signals.progress.connect(self._background_work_progress)
             receipt.set_pending(directory, f"Exporting verified saved artifacts for {source_name}…")
             window.open_panel()
             self.statusBar().showMessage(f"Exporting verified artifacts for {source_name}…")
 
             def finished(paths, error):
                 self._artifact_export_task = None
+                getattr(self, "_local_progress", {}).pop(task.signals, None)
                 if self._closing:
                     return
                 if error:
@@ -4867,6 +4872,7 @@ class CoilGenWorkbench(QMainWindow):
         if not hasattr(self, "_gradient_tasks"):
             self._gradient_tasks = {}
         self._gradient_tasks[task.signals] = (task, callback, label)
+        task.signals.progress.connect(self._gradient_action_progress)
         task.signals.finished.connect(self._gradient_action_finished)
         self.statusBar().showMessage(f"{label}…")
         self._refresh_computation_indicator()
@@ -4923,12 +4929,13 @@ class CoilGenWorkbench(QMainWindow):
             dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
             self._field_analysis_windows[key] = dialog
             label = f"Field analysis · {saved.metadata.get('name', 'saved result')} · {expected[:8]}"
-            dialog.busyChanged.connect(lambda busy: self._research_busy(label, busy))
+            dialog.busyChanged.connect(lambda busy: self._research_busy(label, busy, key=key))
             dialog.progressChanged.connect(lambda phase: self.statusBar().showMessage(f"{label}: {phase}"))
+            dialog.progressDetails.connect(lambda event: self._research_progress(label, event, key=key))
 
             def closed():
                 self._field_analysis_windows.pop(key, None)
-                self._research_busy(label, False)
+                self._research_busy(label, False, key=key)
 
             dialog.closed.connect(closed)
             dialog.show()
@@ -5184,6 +5191,10 @@ class CoilGenWorkbench(QMainWindow):
         )
         if hasattr(dialog, "busyChanged"):
             dialog.busyChanged.connect(lambda busy: self._research_busy("Fit array / synthesize cohort", busy))
+        if hasattr(dialog, "progressDetails"):
+            dialog.progressDetails.connect(
+                lambda event: self._research_progress("Fit array / synthesize cohort", event)
+            )
         dialog.generatedProjects.connect(self._research_generated_channels)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.apply_inputs(
@@ -5193,17 +5204,62 @@ class CoilGenWorkbench(QMainWindow):
             )
         self._research_busy("Fit array / synthesize cohort", False)
 
-    def _research_busy(self, label, busy):
+    def _research_busy(self, label, busy, *, key=None):
+        key = label if key is None else key
         if not hasattr(self, "_research_active_tasks"):
             self._research_active_tasks = set()
+            self._research_task_labels = {}
         if busy:
-            self._research_active_tasks.add(label)
+            self._research_active_tasks.add(key)
+            self._research_task_labels[key] = label
         else:
-            self._research_active_tasks.discard(label)
+            self._research_active_tasks.discard(key)
+            self._research_task_labels.pop(key, None)
+            getattr(self, "_local_progress", {}).pop(key, None)
         self._refresh_computation_indicator()
         if not self._research_active_tasks and getattr(self, "_research_close_pending", False):
             self._research_close_pending = False
             QTimer.singleShot(0, self, self.close)
+
+    def _research_progress(self, label, event, *, key=None):
+        key = label if key is None else key
+        if key in getattr(self, "_research_active_tasks", ()):
+            self._local_work_progress(key, label, event)
+
+    def _gradient_action_progress(self, event):
+        key = self.sender()
+        task = getattr(self, "_gradient_tasks", {}).get(key)
+        if task is not None:
+            self._local_work_progress(key, task[2], event)
+
+    def _background_work_progress(self, event):
+        key = self.sender()
+        for attribute, label in (
+            ("_geometry_export_task", "Exporting conductor geometry"),
+            ("_artifact_export_task", "Exporting saved artifacts"),
+            ("_design_study_task", self._design_study_task_label),
+        ):
+            task = getattr(self, attribute, None)
+            if task is not None and getattr(task, "signals", None) is key:
+                self._local_work_progress(key, label, event)
+                return
+
+    def _local_work_progress(self, key, label, event):
+        from ..progress import update_work_progress
+
+        if self._closing:
+            return
+        if not hasattr(self, "_local_progress"):
+            self._local_progress = {}
+        state = self._local_progress.setdefault(key, {"name": label})
+        # Local tools may supply a directly measured total without a pipeline
+        # allocation. Keep their current operation distinct from job progress.
+        value = event.get("overall_percent", event.get("percent"))
+        update_work_progress(state, {**event, "overall_percent": value}, completion_limit=1.0)
+        if value is None:
+            state.pop("progress", None)
+        self.statusBar().showMessage(f"{label}: {state['stage']}")
+        self._refresh_computation_indicator()
 
     def _research_generated_channels(self, projects):
         if self.assembly is None:
@@ -5279,7 +5335,9 @@ class CoilGenWorkbench(QMainWindow):
         )
 
     def _gradient_action_finished(self, value, error):
-        task, callback, label = self._gradient_tasks.pop(self.sender())
+        key = self.sender()
+        task, callback, label = self._gradient_tasks.pop(key)
+        getattr(self, "_local_progress", {}).pop(key, None)
         if self._closing:
             return
         self._refresh_computation_indicator()
@@ -6064,19 +6122,23 @@ class CoilGenWorkbench(QMainWindow):
         if not hasattr(self, "computation_indicator"):
             return
         working = []
+        local_progress = getattr(self, "_local_progress", {})
         for active, label in (
             (self._submitting, "Submitting study"),
             (self._loading_job_id is not None, "Verifying completed results"),
-            (self._geometry_export_task is not None, "Exporting conductor geometry"),
-            (self._artifact_export_task is not None, "Exporting saved artifacts"),
-            (self._design_study_task is not None, self._design_study_task_label),
+            (self._geometry_export_task, "Exporting conductor geometry"),
+            (self._artifact_export_task, "Exporting saved artifacts"),
+            (self._design_study_task, self._design_study_task_label),
             (self._saved_settings_task is not None, "Verifying saved settings"),
             (getattr(self.viewport, "_preview_worker", None) is not None, "Preparing model preview"),
         ):
             if active:
-                working.append(label)
-        working.extend(task[2] for task in getattr(self, "_gradient_tasks", {}).values())
-        working.extend(getattr(self, "_research_active_tasks", ()))
+                working.append(local_progress.get(getattr(active, "signals", None), label))
+        working.extend(local_progress.get(key, task[2]) for key, task in getattr(self, "_gradient_tasks", {}).items())
+        labels = getattr(self, "_research_task_labels", {})
+        working.extend(
+            local_progress.get(key, labels.get(key, key)) for key in getattr(self, "_research_active_tasks", ())
+        )
         self.computation_indicator.message.setText(self.statusBar().currentMessage())
         self.computation_indicator.set_activity(
             self._last_job_states, working=working, unavailable=self._last_runtime_error
@@ -6579,6 +6641,8 @@ class CoilGenWorkbench(QMainWindow):
             task = GeometryExportTask(record, directory, names, unit, project)
             task.feedback_state, task.source_id = feedback, source_id
             task.signals.finished.connect(self._geometry_export_finished)
+            if hasattr(task.signals, "progress"):
+                task.signals.progress.connect(self._background_work_progress)
             self._geometry_export_task = task
             feedback.receipt.directory = Path(directory).expanduser().resolve()
             feedback.receipt.text = "Writing verified saved geometry and provenance…"
@@ -6601,6 +6665,7 @@ class CoilGenWorkbench(QMainWindow):
     def _geometry_export_finished(self, package, error):
         task = self._geometry_export_task
         self._geometry_export_task = None
+        getattr(self, "_local_progress", {}).pop(getattr(task, "signals", None), None)
         if task is None:
             return
         feedback = task.feedback_state

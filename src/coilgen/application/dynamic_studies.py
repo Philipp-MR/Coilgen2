@@ -435,13 +435,18 @@ class DynamicStudySpec:
 def verified_circuit_references(spec, fabrication, engineering):
     """Produce evaluator references only after rechecking exact saved complete paths."""
     spec = DynamicStudySpec.from_dict(spec) if isinstance(spec, dict) else spec
+    from ..progress import ProgressReporter
+
+    reporter = ProgressReporter(label="Dynamic circuit references")
+    task = reporter.task("Verifying exact saved circuit bindings", 2)
     drive = engineering.drive
     if drive is None:
         return {}
     plans = {item["body_id"]: item for item in fabrication.winding_steps}
     path_hashes = tuple(plans.get(body, {}).get("electrical_path_sha256") for body in drive.body_ids)
     output = {}
-    for reference in (spec.inductance_reference, spec.efficiency_reference):
+    for index, reference in enumerate((spec.inductance_reference, spec.efficiency_reference)):
+        task.update(index)
         if reference is None or reference.body_ids != drive.body_ids or reference.path_sha256 != path_hashes:
             continue
         if any(not plans.get(body, {}).get("drive_feed_designed") for body in drive.body_ids):
@@ -463,6 +468,7 @@ def verified_circuit_references(spec, fabrication, engineering):
                 "field_component": reference.field_component,
                 "gradient_direction_world": list(reference.gradient_direction_world),
             }
+    task.done(message="Circuit reference bindings reviewed")
     return output
 
 
@@ -484,10 +490,15 @@ def waveform_digest(drive):
 def review_dynamic_analyses(spec, fabrication, engineering=None, engineering_review=None):
     """Report scoped sampled limits; missing or stale bindings yield unverified evidence."""
     spec = DynamicStudySpec.from_dict(spec) if isinstance(spec, dict) else spec
+    from ..progress import ProgressReporter
+
+    reporter = ProgressReporter(label="External dynamic analysis")
+    task = reporter.task("Reviewing external solver contracts and sampled limits", len(spec.analyses))
     plans = {item["body_id"]: item for item in fabrication.winding_steps} if fabrication is not None else {}
     current_waveform = waveform_digest(engineering.drive if engineering else None)
     records, checks = [], []
     for analysis in spec.analyses:
+        reporter.report(None, f"Reviewing external {analysis.kind} analysis: {analysis.name}")
         reasons = []
         if (
             tuple(plans.get(body, {}).get("electrical_path_sha256") for body in analysis.body_ids)
@@ -564,6 +575,7 @@ def review_dynamic_analyses(spec, fabrication, engineering=None, engineering_rev
                 ),
             }
         )
+        task.advance(message=f"Reviewed {analysis.name}")
     return {
         "schema": SCHEMA,
         "qualification_claim": False,

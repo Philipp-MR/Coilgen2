@@ -262,6 +262,80 @@ def test_rank_deficient_fit_has_explicit_warning(application, record, dataset):
     assert harmonic["diagnostics"] and harmonic["source_free_verified"] is False
 
 
+def test_progress_distinguishes_measured_work_from_opaque_operations(application, record, dataset):
+    dialog = dialog_with_data(record, dataset)
+    details, messages = [], []
+    dialog.progressDetails.connect(details.append)
+    dialog.progressChanged.connect(messages.append)
+    dialog._progress(42.25, "Sheet nodes 169/400")
+    assert dialog.progress.maximum() == 100 and dialog.progress.value() == 42
+    dialog._progress(None, "Solve harmonic least squares")
+    assert dialog.progress.maximum() == 0
+    assert "%" not in messages[-1]
+    assert details[-1]["progress_indeterminate"] and details[-1]["percent"] is None
+    dialog._progress(78.5, "Slice 4/5")
+    assert dialog.progress.maximum() == 100 and dialog.progress.value() == 78
+    assert not details[-1]["progress_indeterminate"]
+    dialog.reject()
+
+
+def test_field_plot_publication_retains_computing_status(application, record, dataset, monkeypatch):
+    monkeypatch.setattr(gui, "sample_slices", fake_slices)
+    dialog = dialog_with_data(record, dataset)
+    busy = []
+    dialog.busyChanged.connect(busy.append)
+    draw = dialog._render
+
+    def render():
+        assert busy == [True]
+        assert dialog.progress.maximum() == 0
+        draw()
+
+    monkeypatch.setattr(dialog, "_render", render)
+    dialog.refresh_analysis()
+    wait_worker(application, dialog)
+    assert busy == [True, False]
+    dialog.reject()
+
+
+@pytest.mark.parametrize("suffix", ["csv", "json"])
+def test_large_export_reports_work_and_cancels_atomically(application, record, dataset, tmp_path, suffix):
+    from coilgen.progress import DesignCancelled
+
+    dialog = dialog_with_data(record, dataset)
+    big = replace(
+        dataset,
+        points_m=np.tile(dataset.points_m, (60, 1)),
+        field_T=np.tile(dataset.field_T, (60, 1)),
+        target_T=np.tile(dataset.target_T, (60, 1)),
+    )
+    selection = dialog.selection()
+    state = gui.AnalysisState(selection, big, metric_map(big), None, ())
+    path = tmp_path / ("samples." + suffix)
+    calls = []
+    dialog.export_to(path, state=state, progress=lambda percent, message: calls.append((percent, message)))
+    assert calls[-1][0] == 100
+    if suffix == "csv":
+        assert any(percent is not None and 0 < percent < 99 for percent, message in calls)
+        assert len(np.genfromtxt(path, delimiter=",", skip_header=1)) == len(big.points_m)
+    else:
+        assert sum("Write captured analysis JSON" in message for percent, message in calls) > 2
+        assert len(json.loads(path.read_text())["source"]["points_m"]) == len(big.points_m)
+    path.write_text("Previous complete export")
+    cancelled = False
+
+    def cancel_after_work(percent, message):
+        nonlocal cancelled
+        if message.startswith("Write native samples") or message.startswith("Write captured analysis JSON"):
+            cancelled = True
+
+    with pytest.raises(DesignCancelled, match="cancelled"):
+        dialog.export_to(path, state=state, progress=cancel_after_work, cancel_check=lambda: cancelled)
+    assert path.read_text() == "Previous complete export"
+    assert not tuple(tmp_path.glob(".*.tmp"))
+    dialog.reject()
+
+
 def test_metric_switch_reuses_physics_but_grid_change_resamples(application, record, dataset, monkeypatch):
     calls = []
 

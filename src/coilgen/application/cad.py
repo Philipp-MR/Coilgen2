@@ -24,6 +24,7 @@ from ..geometry import _read_ascii_stl, _read_binary_stl, read_stl
 from ..manufacturing import save_mesh_as_stl
 from ..models import Mesh
 from ..persistence import atomic_json, file_digest
+from ..progress import ProgressReporter, progress_scope
 from .service import RunRecord
 from .evidence import verify_record
 
@@ -155,7 +156,10 @@ def _geometry_catalog(record: RunRecord) -> tuple[GeometryOption, ...]:
     summary = metadata.get("summary") or {}
     options = []
     seen = set()
-    for artifact in metadata.get("artifacts", []):
+    artifacts = metadata.get("artifacts", [])
+    task = ProgressReporter(label="CAD catalog").task("saved artifact inspection", len(artifacts))
+    for artifact_ind, artifact in enumerate(artifacts):
+        task.update(artifact_ind, message="checking saved solid definitions")
         name = artifact.get("name")
         if not isinstance(name, str):
             raise ValueError("Malformed saved artifact name.")
@@ -218,6 +222,7 @@ def _geometry_catalog(record: RunRecord) -> tuple[GeometryOption, ...]:
                 name, body_id, format_, scope, check_status, unit, bounds, inspection_only, artifact["sha256"]
             )
         )
+    task.done()
     return tuple(sorted(options, key=lambda option: (option.body_id, option.format, option.name)))
 
 
@@ -227,7 +232,10 @@ def geometry_catalog(record: RunRecord) -> tuple[GeometryOption, ...]:
     This verifies integrity and records existing check scope. It performs no
     geometry conditioning, electromagnetic calculation or acceptance promotion.
     """
-    return _geometry_catalog(_verified_record(record))
+    with progress_scope(0, 40, "Verifying saved geometry evidence", label="CAD catalog"):
+        record = _verified_record(record)
+    with progress_scope(40, 100, "Reading saved geometry definitions", label="CAD catalog"):
+        return _geometry_catalog(record)
 
 
 def _commit_package(stage: Path, destination: Path) -> None:
@@ -248,11 +256,14 @@ def _commit_package(stage: Path, destination: Path) -> None:
             elif source.is_file():
                 files.append((source, target))
         files.sort(key=lambda pair: pair[1].relative_to(destination) == Path(_MANIFEST_NAME))
+        task = ProgressReporter(label="CAD export").task("published package files", len(files))
         for source, target in files:
             # Staging and destination share a filesystem. Hard-link publication
             # is exclusive on Windows and POSIX, unlike rename-over-existing.
             os.link(source, target)
             published.append(target)
+            task.advance()
+        task.done()
     except BaseException:
         for path in reversed(published):
             if path.resolve().is_relative_to(destination.resolve()):
@@ -282,8 +293,10 @@ def export_geometry(
     """
     if unit not in _UNIT_SCALE:
         raise ValueError("STL export unit must be 'm' or 'mm'.")
-    record = _verified_record(record)
-    catalog = {option.name: option for option in _geometry_catalog(record)}
+    with progress_scope(0, 10, "Verifying saved geometry evidence", label="CAD export"):
+        record = _verified_record(record)
+    with progress_scope(10, 25, "Reading saved conductor solids", label="CAD export"):
+        catalog = {option.name: option for option in _geometry_catalog(record)}
     names = list(catalog) if selected_names is None else list(selected_names)
     if not names or any(not isinstance(name, str) or name not in catalog for name in names):
         raise ValueError("Select at least one available saved solid STL or faceted STEP artifact.")
@@ -304,70 +317,77 @@ def export_geometry(
     companion = None
     with TemporaryDirectory(prefix=".coilgen-cad-", dir=destination.parent) as temporary:
         stage = Path(temporary)
-        for name, filename in zip(names, filenames):
-            option = catalog[name]
-            data = _artifact_bytes(record, name, option.source_sha256)
-            target = stage / filename
-            if option.format == "stl" and unit != "m":
-                # Serialize the saved triangles after a pure unit transform;
-                # no resampling, sweep regeneration or current fitting occurs.
-                source = _stl_geometry(data)
-                save_mesh_as_stl(
-                    Mesh(vertices=source.vertices * _UNIT_SCALE[unit], faces=source.faces),
-                    target,
-                    solid_name=option.body_id,
+        for body_ind, (name, filename) in enumerate(zip(names, filenames)):
+            with progress_scope(
+                25 + 55 * body_ind / len(names),
+                25 + 55 * (body_ind + 1) / len(names),
+                f"Writing saved solid {body_ind + 1}/{len(names)}: {filename}",
+                label="CAD export",
+            ):
+                option = catalog[name]
+                data = _artifact_bytes(record, name, option.source_sha256)
+                target = stage / filename
+                if option.format == "stl" and unit != "m":
+                    # Serialize the saved triangles after a pure unit transform;
+                    # no resampling, sweep regeneration or current fitting occurs.
+                    source = _stl_geometry(data)
+                    save_mesh_as_stl(
+                        Mesh(vertices=source.vertices * _UNIT_SCALE[unit], faces=source.faces),
+                        target,
+                        solid_name=option.body_id,
+                    )
+                    actual_unit = unit
+                    bounds = _bounds(read_stl(target).vertices)
+                else:
+                    target.write_bytes(data)
+                    actual_unit = option.source_unit
+                    scale = _UNITS_PER_M[actual_unit]
+                    bounds = tuple(tuple(value * scale for value in row) for row in option.bounds_m)
+                # Windows' _commit requires a writable descriptor.
+                with target.open("r+b") as saved:
+                    os.fsync(saved.fileno())
+                exported.append(
+                    {
+                        "name": filename,
+                        "body_id": option.body_id,
+                        "format": option.format,
+                        "scope": option.scope,
+                        "geometry_checks": option.check_status,
+                        "inspection_only": option.inspection_only,
+                        "source_artifact": name,
+                        "source_sha256": option.source_sha256,
+                        "export_sha256": file_digest(target),
+                        "requested_unit": unit,
+                        "actual_unit": actual_unit,
+                        "source_unit": option.source_unit,
+                        "original_bounds_m": option.bounds_m,
+                        "exported_bounds": bounds,
+                        "unit_conversion_only": option.format == "stl" and unit != "m",
+                        "step_unit_policy": "preserved_declared_unit" if option.format == "step" else None,
+                    }
                 )
-                actual_unit = unit
-                bounds = _bounds(read_stl(target).vertices)
-            else:
-                target.write_bytes(data)
-                actual_unit = option.source_unit
-                scale = _UNITS_PER_M[actual_unit]
-                bounds = tuple(tuple(value * scale for value in row) for row in option.bounds_m)
-            # Windows' _commit requires a writable descriptor.
-            with target.open("r+b") as saved:
-                os.fsync(saved.fileno())
-            exported.append(
-                {
-                    "name": filename,
-                    "body_id": option.body_id,
-                    "format": option.format,
-                    "scope": option.scope,
-                    "geometry_checks": option.check_status,
-                    "inspection_only": option.inspection_only,
-                    "source_artifact": name,
-                    "source_sha256": option.source_sha256,
-                    "export_sha256": file_digest(target),
-                    "requested_unit": unit,
-                    "actual_unit": actual_unit,
-                    "source_unit": option.source_unit,
-                    "original_bounds_m": option.bounds_m,
-                    "exported_bounds": bounds,
-                    "unit_conversion_only": option.format == "stl" and unit != "m",
-                    "step_unit_policy": "preserved_declared_unit" if option.format == "step" else None,
+        with progress_scope(80, 88, "Packaging project companion", label="CAD export"):
+            if project is not None:
+                project_path = stage / "project.coilgen.json"
+                saved = Path(project.save(project_path)).resolve()
+                if saved != project_path.resolve() or not saved.is_file():
+                    raise ValueError("Project companion must save to the requested package location.")
+                if any(path.is_symlink() for path in stage.rglob("*")):
+                    raise ValueError("Project companions cannot contain symbolic links.")
+                artifacts = [
+                    {"name": path.relative_to(stage).as_posix(), "sha256": file_digest(path)}
+                    for path in sorted(stage.rglob("*"))
+                    if path.is_file() and path.name not in filenames
+                ]
+                companion = {
+                    "name": project_path.name,
+                    "sha256": file_digest(project_path),
+                    "artifacts": artifacts,
+                    "project_id": getattr(project, "id", None),
+                    "revision": getattr(project, "revision", None),
+                    "fingerprint": getattr(project, "fingerprint", None),
+                    "model_fingerprint": getattr(project, "model_fingerprint", None),
                 }
-            )
-        if project is not None:
-            project_path = stage / "project.coilgen.json"
-            saved = Path(project.save(project_path)).resolve()
-            if saved != project_path.resolve() or not saved.is_file():
-                raise ValueError("Project companion must save to the requested package location.")
-            if any(path.is_symlink() for path in stage.rglob("*")):
-                raise ValueError("Project companions cannot contain symbolic links.")
-            artifacts = [
-                {"name": path.relative_to(stage).as_posix(), "sha256": file_digest(path)}
-                for path in sorted(stage.rglob("*"))
-                if path.is_file() and path.name not in filenames
-            ]
-            companion = {
-                "name": project_path.name,
-                "sha256": file_digest(project_path),
-                "artifacts": artifacts,
-                "project_id": getattr(project, "id", None),
-                "revision": getattr(project, "revision", None),
-                "fingerprint": getattr(project, "fingerprint", None),
-                "model_fingerprint": getattr(project, "model_fingerprint", None),
-            }
         manifest = {
             "schema": "coilgen-geometry-package-v1",
             "run_request_sha256": metadata.get("request_sha256"),
@@ -394,11 +414,14 @@ def export_geometry(
                 "Geometry export does not release a design for construction or alter scientific checks.",
             ],
         }
-        atomic_json(stage / _MANIFEST_NAME, manifest)
+        with progress_scope(88, 90, "Writing geometry package manifest", label="CAD export"):
+            atomic_json(stage / _MANIFEST_NAME, manifest)
         # Recheck after companion bundling, before publishing anything. A
         # change to a scientific input or selected artifact invalidates export.
-        _verified_record(record)
-        _commit_package(stage, destination)
+        with progress_scope(90, 95, "Rechecking source evidence before publication", label="CAD export"):
+            _verified_record(record)
+        with progress_scope(95, 100, "Publishing geometry package files", label="CAD export"):
+            _commit_package(stage, destination)
     return GeometryPackage(
         destination, destination / _MANIFEST_NAME, tuple(destination / name for name in filenames), json.dumps(manifest)
     )

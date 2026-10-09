@@ -10,7 +10,7 @@ import numpy as np
 from ..field_components import field_component_values
 from ..pipeline import CoilGenPipeline
 from ..pipeline_stages import PipelineCheckpoint, PipelineStage
-from ..progress import ProgressReporter
+from ..progress import DesignCancelled, ProgressReporter, progress_scope
 from ..reporting import write_design_report
 from ..scientific_arrays import scientific_arrays as _scientific_arrays
 from ..application.stage_preview import MANIFEST_NAME as STAGE_PREVIEW_MANIFEST, publish_stage_preview
@@ -241,9 +241,42 @@ def _target_analysis_recipe(request, target):
     }
 
 
-def _save_partial_result(request, checkpoint, directory, manifest, digest, started, stage_artifacts=()) -> dict:
+def _design_work_ranges(request):
+    """Allocate only requested operations; percentages describe work, not an ETA."""
+    stage = PipelineStage(request.pipeline_stage)
+    full = stage is PipelineStage.EVALUATED
+    weights = [("inputs", 2), ("pipeline", 80), ("checkpoint", 2)]
+    if request.requirements is not None or stage.index >= PipelineStage.SHEET.index:
+        weights.append(("validation", 10))
+    if full and request.fabricate:
+        weights.extend((("fabrication", 30), ("fabricated_physics", 5)))
+        if request.engineering is not None:
+            if request.engineering.get("independent_winding_validation", True) and request.requirements is None:
+                weights.append(("winding_validation", 10))
+            weights.append(("engineering", 5))
+    if full and request.dynamic_analysis is not None:
+        weights.append(("dynamic", 2))
+    if full and request.fabricate and request.requirements is not None:
+        weights.append(("fabricated_requirements", 10))
+    if request.scene is not None and (full or stage is PipelineStage.ROUTED):
+        weights.append(("scene", 8))
+    if full:
+        weights.append(("wire_evidence", 2))
+    weights.append(("save", 8))
+    total, position, ranges = sum(weight for _, weight in weights), 0.0, {}
+    for index, (name, weight) in enumerate(weights):
+        end = 98.0 if index == len(weights) - 1 else position + 98 * weight / total
+        ranges[name] = (position, end)
+        position = end
+    return ranges
+
+
+def _save_partial_result(
+    request, checkpoint, directory, manifest, digest, started, stage_artifacts=(), work_ranges=None
+) -> dict:
     """Incomplete workflows remain inspectable without claiming winding acceptance."""
     state = checkpoint.state
+    work_ranges = _design_work_ranges(request) if work_ranges is None else work_ranges
     diagnostics = checkpoint.diagnostics
     arrays = _scientific_arrays(state.parts, state.target_field, state.combined_mesh, state.sf_b_field)
     pipeline_sweeps = _pipeline_sweep_evidence(state.parts, checkpoint.config)
@@ -259,9 +292,10 @@ def _save_partial_result(request, checkpoint, directory, manifest, digest, start
     if request.requirements is not None:
         from ..application.research_requirements import evaluate_requirements, named_independent_sheet_validation
 
-        requirements_review, requirement_arrays = evaluate_requirements(
-            state.parts, checkpoint.config, request.requirements, design_margin=request.design_margin
-        )
+        with progress_scope(*work_ranges["validation"], "Reviewing regional checkpoint fields", overall=True):
+            requirements_review, requirement_arrays = evaluate_requirements(
+                state.parts, checkpoint.config, request.requirements, design_margin=request.design_margin
+            )
         arrays.update(requirement_arrays)
     if checkpoint.stage.index >= PipelineStage.SHEET.index:
         sheet_view = SimpleNamespace(
@@ -272,9 +306,10 @@ def _save_partial_result(request, checkpoint, directory, manifest, digest, start
             regularization_diagnostics=diagnostics,
         )
         if request.requirements is None:
-            validation = validate_on_independent_grid(
-                sheet_view, resolution=request.validation_resolution, design_margin=request.design_margin
-            )
+            with progress_scope(*work_ranges["validation"], "Checking an independent sheet grid", overall=True):
+                validation = validate_on_independent_grid(
+                    sheet_view, resolution=request.validation_resolution, design_margin=request.design_margin
+                )
             relative = _relative_field_error(
                 state.sf_b_field,
                 state.target_field.b,
@@ -321,7 +356,8 @@ def _save_partial_result(request, checkpoint, directory, manifest, digest, start
     if request.scene is not None and checkpoint.stage is PipelineStage.ROUTED:
         from ..application.spatial_scene import SpatialScene, evaluate_spatial_scene
 
-        scene_review = evaluate_spatial_scene(sheet_view, SpatialScene.from_dict(request.scene))
+        with progress_scope(*work_ranges["scene"], "Checking winding against the spatial scene", overall=True):
+            scene_review = evaluate_spatial_scene(sheet_view, SpatialScene.from_dict(request.scene))
         constraints.extend(scene_review["checks"])
     scope = {
         PipelineStage.PREPARED: "prepared_geometry",
@@ -351,8 +387,13 @@ def _save_partial_result(request, checkpoint, directory, manifest, digest, start
         "contour_components": sum(len(part.contour_lines) for part in state.parts),
         "elapsed_seconds": time.perf_counter() - started,
     }
-    np.savez_compressed(directory / "scientific_result.npz", **arrays)
-    atomic_json(directory / "solver_diagnostics.json", diagnostics)
+    save_start, save_end = work_ranges["save"]
+    save_span = save_end - save_start
+    with progress_scope(
+        save_start, save_start + 0.65 * save_span, "Compressing scientific arrays and saving diagnostics", overall=True
+    ):
+        np.savez_compressed(directory / "scientific_result.npz", **arrays)
+        atomic_json(directory / "solver_diagnostics.json", diagnostics)
     artifacts = [
         {"name": name, "kind": kind}
         for name, kind in (
@@ -364,9 +405,18 @@ def _save_partial_result(request, checkpoint, directory, manifest, digest, start
         )
     ]
     artifacts.extend(stage_artifacts)
-    verify_input_files(manifest)
-    for artifact in artifacts:
-        artifact["sha256"] = file_digest(directory / artifact["name"])
+    with progress_scope(
+        save_start + 0.65 * save_span, save_start + 0.75 * save_span, "Rechecking immutable input files", overall=True
+    ):
+        verify_input_files(manifest)
+    for index, artifact in enumerate(artifacts):
+        with progress_scope(
+            save_start + save_span * (0.75 + 0.2 * index / len(artifacts)),
+            save_start + save_span * (0.75 + 0.2 * (index + 1) / len(artifacts)),
+            f"Verifying checkpoint artifact {index + 1}/{len(artifacts)}: {artifact['name']}",
+            overall=True,
+        ):
+            artifact["sha256"] = file_digest(directory / artifact["name"])
     payload = {
         "name": request.name,
         "config": request.to_dict()["config"],
@@ -388,7 +438,8 @@ def _save_partial_result(request, checkpoint, directory, manifest, digest, start
         "checkpoint": "pipeline_checkpoint.cgstage",
         **_project_provenance(request),
     }
-    atomic_json(directory / "result.json", payload)
+    with progress_scope(save_start + 0.95 * save_span, save_end, "Saving checkpoint result evidence", overall=True):
+        atomic_json(directory / "result.json", payload)
     return json_value(payload)
 
 
@@ -438,22 +489,26 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         plot_flag=False,
         save_stl_flag=False,
     )
-    resolved = asdict(config)
-    digest, manifest = request_identity(request.to_dict(), resolved)
-    manifest["request_sha256"] = digest
-    atomic_json(directory / "request.json", request.to_dict())
-    atomic_json(directory / "manifest.json", manifest)
     progress = ProgressReporter(label="Research")
     started = time.perf_counter()
+    work_ranges = _design_work_ranges(request)
+    with progress_scope(*work_ranges["inputs"], "Verifying and retaining immutable design inputs", overall=True):
+        resolved = asdict(config)
+        digest, manifest = request_identity(request.to_dict(), resolved)
+        manifest["request_sha256"] = digest
+        atomic_json(directory / "request.json", request.to_dict())
+        atomic_json(directory / "manifest.json", manifest)
     stage_artifacts = []
     stage_evidence = []
 
     def retain_stage(completed):
         # Retain actual completed boundaries; an evaluated state cannot be rewound.
         name = f"checkpoints/{completed.stage.value}.cgstage"
+        progress.report(None, f"Saving recovery checkpoint: {completed.stage.value}")
         completed.save(directory / name)
         stage_artifacts.append({"name": name, "kind": "stage_checkpoint", "stage": completed.stage.value})
         try:
+            progress.report(None, f"Verifying recovery checkpoint and updating provenance: {completed.stage.value}")
             stage_evidence.append({**stage_artifacts[-1], "sha256": file_digest(directory / name)})
             atomic_json(
                 directory / "checkpoints/evidence.json",
@@ -485,8 +540,11 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
     def publish_preview(completed):
         preview, error = None, None
         try:
+            progress.report(None, f"Preparing saved viewport evidence: {completed.stage.value}")
             publish_stage_preview(directory, completed, request, digest)
             preview = STAGE_PREVIEW_MANIFEST
+        except DesignCancelled:
+            raise
         except Exception as exc:
             # Display data are optional. Preserve the numerical result and its
             # completed checkpoint if visualization storage is unavailable.
@@ -494,38 +552,38 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         progress.boundary(completed.stage.value, preview=preview, preview_error=error)
 
     with geometry_acceleration(request.kernel_backend):
-        resumed = PipelineCheckpoint.load(request.resume_checkpoint) if request.resume_checkpoint else None
-        pipeline_controls = {"requirements": request.requirements} if request.requirements is not None else {}
-        checkpoint = CoilGenPipeline(config, project_root=directory, **pipeline_controls).run_stage(
-            request.pipeline_stage, resumed, checkpoint_callback=retain_stage
-        )
+        with progress_scope(*work_ranges["pipeline"], "Computing the requested numerical stages", overall=True):
+            resumed = PipelineCheckpoint.load(request.resume_checkpoint) if request.resume_checkpoint else None
+            pipeline_controls = {"requirements": request.requirements} if request.requirements is not None else {}
+            checkpoint = CoilGenPipeline(config, project_root=directory, **pipeline_controls).run_stage(
+                request.pipeline_stage, resumed, checkpoint_callback=retain_stage
+            )
         if resumed is not None and checkpoint.stage is resumed.stage:
             # run_stage has now checked compatibility; no new callback ran.
             publish_preview(checkpoint)
-        checkpoint.save(directory / "pipeline_checkpoint.cgstage")
+        with progress_scope(*work_ranges["checkpoint"], "Saving the completed scientific checkpoint", overall=True):
+            checkpoint.save(directory / "pipeline_checkpoint.cgstage")
     if checkpoint.stage is not PipelineStage.EVALUATED:
-        return _save_partial_result(request, checkpoint, directory, manifest, digest, started, stage_artifacts)
+        return _save_partial_result(
+            request, checkpoint, directory, manifest, digest, started, stage_artifacts, work_ranges
+        )
     result = checkpoint.result
     pipeline_sweeps = _pipeline_sweep_evidence(result.coil_parts, config)
     diagnostics = result.regularization_diagnostics
-    progress.report(
-        86,
-        "Checking named regions and physical poses"
-        if request.requirements is not None
-        else "Checking an independent field grid",
-    )
     requirements_review, requirements_arrays = None, {}
     if request.requirements is not None:
         from ..application.research_requirements import evaluate_requirements, named_independent_sheet_validation
 
-        requirements_review, requirements_arrays = evaluate_requirements(
-            result.coil_parts, config, request.requirements, design_margin=request.design_margin
-        )
-        validation = named_independent_sheet_validation(requirements_review, request.requirements)
+        with progress_scope(*work_ranges["validation"], "Checking named regions and physical poses", overall=True):
+            requirements_review, requirements_arrays = evaluate_requirements(
+                result.coil_parts, config, request.requirements, design_margin=request.design_margin
+            )
+            validation = named_independent_sheet_validation(requirements_review, request.requirements)
     else:
-        validation = validate_on_independent_grid(
-            result, resolution=request.validation_resolution, design_margin=request.design_margin
-        )
+        with progress_scope(*work_ranges["validation"], "Checking an independent field grid", overall=True):
+            validation = validate_on_independent_grid(
+                result, resolution=request.validation_resolution, design_margin=request.design_margin
+            )
     mask = ~np.asarray(result.target_field.suppressed, bool)
     relative = (
         None
@@ -585,14 +643,16 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
     ]
     artifacts.extend(stage_artifacts)
     if request.fabricate:
-        progress.report(90, "Conditioning and checking the fabrication assembly")
-        fabrication = compile_fabrication(
-            result,
-            output_dir=directory / "fabrication",
-            strict=True,
-            kernel_backend=request.kernel_backend,
-            **({"circuits": engineering.circuit_map} if engineering else {}),
-        )
+        with progress_scope(
+            *work_ranges["fabrication"], "Conditioning and checking the fabrication assembly", overall=True
+        ):
+            fabrication = compile_fabrication(
+                result,
+                output_dir=directory / "fabrication",
+                strict=True,
+                kernel_backend=request.kernel_backend,
+                **({"circuits": engineering.circuit_map} if engineering else {}),
+            )
         warnings.extend(fabrication.failure_reasons)
         if any(not plan.get("drive_feed_designed", False) for plan in fabrication.winding_steps):
             warnings.append(
@@ -608,17 +668,25 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
             }
         )
         validation_controls = {"check_default_field": False} if request.requirements is not None else {}
-        fabricated_physics = validate_fabricated_constraints(
-            result, fabrication, design_margin=request.design_margin, **validation_controls
-        )
+        with progress_scope(
+            *work_ranges["fabricated_physics"], "Checking fabricated electrical and physical limits", overall=True
+        ):
+            fabricated_physics = validate_fabricated_constraints(
+                result, fabrication, design_margin=request.design_margin, **validation_controls
+            )
         constraints.extend(fabricated_physics["checks"])
         warnings.extend(fabricated_physics["unknown_reasons"])
         if engineering:
             if engineering.independent_winding_validation and request.requirements is None:
-                progress.report(94, "Checking recorded electrical paths on independent target samples")
-                winding_validation = validate_winding_on_independent_grid(
-                    result, fabrication, resolution=request.validation_resolution, design_margin=request.design_margin
-                )
+                with progress_scope(
+                    *work_ranges["winding_validation"], "Checking winding on independent target samples", overall=True
+                ):
+                    winding_validation = validate_winding_on_independent_grid(
+                        result,
+                        fabrication,
+                        resolution=request.validation_resolution,
+                        design_margin=request.design_margin,
+                    )
                 constraints.extend(winding_validation["checks"])
                 warnings.extend(winding_validation["unknown_reasons"])
                 if not winding_validation["available"]:
@@ -634,12 +702,17 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
                             "reason": winding_validation.get("reason"),
                         }
                     )
-            circuit_references = {}
-            if dynamic_analysis is not None:
-                from ..application.dynamic_studies import verified_circuit_references
+            with progress_scope(
+                *work_ranges["engineering"], "Reviewing the signed drive waveform and thermal model", overall=True
+            ):
+                circuit_references = {}
+                if dynamic_analysis is not None:
+                    from ..application.dynamic_studies import verified_circuit_references
 
-                circuit_references = verified_circuit_references(dynamic_analysis, fabrication, engineering)
-            engineering_review = evaluate_gradient_engineering(engineering, fabrication, **circuit_references)
+                    with progress_scope(0, 10):
+                        circuit_references = verified_circuit_references(dynamic_analysis, fabrication, engineering)
+                with progress_scope(10 if dynamic_analysis is not None else 0, 100):
+                    engineering_review = evaluate_gradient_engineering(engineering, fabrication, **circuit_references)
             drive = engineering_review["drive"]
             if engineering.drive is not None and not drive["available"]:
                 constraints.append(
@@ -707,9 +780,10 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
     if dynamic_analysis is not None:
         from ..application.dynamic_studies import review_dynamic_analyses
 
-        dynamic_analysis_review = review_dynamic_analyses(
-            dynamic_analysis, fabrication, engineering, engineering_review
-        )
+        with progress_scope(*work_ranges["dynamic"], "Reviewing external dynamic-analysis evidence", overall=True):
+            dynamic_analysis_review = review_dynamic_analyses(
+                dynamic_analysis, fabrication, engineering, engineering_review
+            )
         constraints.extend(dynamic_analysis_review["checks"])
         warnings.extend(reason for item in dynamic_analysis_review["analyses"] for reason in item["reasons"])
     if request.requirements is not None:
@@ -741,14 +815,19 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
                 if paths_complete
                 else None
             )
-            requirements_review, requirements_arrays = evaluate_requirements(
-                result.coil_parts,
-                config,
-                request.requirements,
-                fabrication=fabrication,
-                complete_paths=complete_paths,
-                design_margin=request.design_margin,
-            )
+            with progress_scope(
+                *work_ranges["fabricated_requirements"],
+                "Checking fabricated fields in named regions and poses",
+                overall=True,
+            ):
+                requirements_review, requirements_arrays = evaluate_requirements(
+                    result.coil_parts,
+                    config,
+                    request.requirements,
+                    fabrication=fabrication,
+                    complete_paths=complete_paths,
+                    design_margin=request.design_margin,
+                )
         from ..application.research_requirements import requirements_constraint_rows
 
         if not (result.input_data.skip_postprocessing and not request.fabricate):
@@ -759,7 +838,12 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
     if request.scene is not None:
         from ..application.spatial_scene import SpatialScene, evaluate_spatial_scene
 
-        scene_review = evaluate_spatial_scene(result, SpatialScene.from_dict(request.scene), fabrication=fabrication)
+        with progress_scope(
+            *work_ranges["scene"], "Checking conductor and feed clearances in the spatial scene", overall=True
+        ):
+            scene_review = evaluate_spatial_scene(
+                result, SpatialScene.from_dict(request.scene), fabrication=fabrication
+            )
         constraints.extend(scene_review["checks"])
     electrical = fabrication.electrical_metrics["bodies"] if fabrication else []
     # Report a complete circuit inductance only for one fully modeled body;
@@ -815,7 +899,10 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
     }
     array_file = directory / "scientific_result.npz"
     arrays = _scientific_arrays(result.coil_parts, result.target_field, result.combined_mesh, result.b_field_opt_sf)
-    wire_arrays, wire_evidence = _wire_field_evidence(result)
+    with progress_scope(
+        *work_ranges["wire_evidence"], "Retaining evaluated wire-field maps and current provenance", overall=True
+    ):
+        wire_arrays, wire_evidence = _wire_field_evidence(result)
     arrays.update(wire_arrays)
     arrays.update(requirements_arrays)
     if validation["available"] and request.requirements is None:
@@ -844,15 +931,35 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         for index, plan in enumerate(fabrication.winding_steps):
             if plan.get("electrical_points_m") is not None:
                 arrays[f"review_electrical_{index}_points_m"] = np.asarray(plan["electrical_points_m"], dtype=float)
-    np.savez_compressed(array_file, **arrays)
-    artifacts.append({"name": array_file.name, "kind": "npz"})
-    atomic_json(directory / "solver_diagnostics.json", diagnostics)
-    artifacts.append({"name": "solver_diagnostics.json", "kind": "diagnostics"})
-    write_design_report(result, directory / "design_report.md")
-    artifacts.append({"name": "design_report.md", "kind": "report"})
-    verify_input_files(manifest)
-    for artifact in artifacts:
-        artifact["sha256"] = file_digest(directory / artifact["name"])
+    save_start, save_end = work_ranges["save"]
+    save_span = save_end - save_start
+    with progress_scope(
+        save_start, save_start + 0.6 * save_span, "Compressing scientific field and geometry arrays", overall=True
+    ):
+        np.savez_compressed(array_file, **arrays)
+        artifacts.append({"name": array_file.name, "kind": "npz"})
+    with progress_scope(
+        save_start + 0.6 * save_span,
+        save_start + 0.7 * save_span,
+        "Saving solver diagnostics and design report",
+        overall=True,
+    ):
+        atomic_json(directory / "solver_diagnostics.json", diagnostics)
+        artifacts.append({"name": "solver_diagnostics.json", "kind": "diagnostics"})
+        write_design_report(result, directory / "design_report.md")
+        artifacts.append({"name": "design_report.md", "kind": "report"})
+    with progress_scope(
+        save_start + 0.7 * save_span, save_start + 0.75 * save_span, "Rechecking immutable input files", overall=True
+    ):
+        verify_input_files(manifest)
+    for index, artifact in enumerate(artifacts):
+        with progress_scope(
+            save_start + save_span * (0.75 + 0.2 * index / len(artifacts)),
+            save_start + save_span * (0.75 + 0.2 * (index + 1) / len(artifacts)),
+            f"Verifying result artifact {index + 1}/{len(artifacts)}: {artifact['name']}",
+            overall=True,
+        ):
+            artifact["sha256"] = file_digest(directory / artifact["name"])
     validation_summary = {k: v for k, v in validation.items() if k not in {"points_m", "field_T", "target_T"}}
     payload = {
         "name": request.name,
@@ -889,8 +996,8 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         **_project_provenance(request),
         "timing": result.timing_summary,
     }
-    atomic_json(directory / "result.json", payload)
-    progress.report(100, "Research result and evidence saved")
+    with progress_scope(save_start + 0.95 * save_span, save_end, "Saving research result evidence", overall=True):
+        atomic_json(directory / "result.json", payload)
     return json_value(payload)
 
 
@@ -906,9 +1013,10 @@ def execute_owned_design(request: ResearchRequest | dict, output_dir: str | Path
     RuntimePolicy(threads_per_worker=threads)
     with threadpool_limits(limits=threads):
         result = _run_design(request, output_dir, threads=threads)
-        result["runtime"] = {"native_threads_requested": threads, "threadpools": threadpool_info()}
-        result["metadata_sha256"] = result_metadata_digest(result)
-        atomic_json(Path(output_dir) / "result.json", result)
+        with progress_scope(98, 100, "Finalizing verified runtime and result metadata", overall=True):
+            result["runtime"] = {"native_threads_requested": threads, "threadpools": threadpool_info()}
+            result["metadata_sha256"] = result_metadata_digest(result)
+            atomic_json(Path(output_dir) / "result.json", result)
         return result
 
 

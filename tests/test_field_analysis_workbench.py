@@ -88,6 +88,7 @@ def test_analysis_verifies_pinned_snapshot_without_applying_model_draft(
     class Inspector(QDialog):
         busyChanged = Signal(bool)
         progressChanged = Signal(str)
+        progressDetails = Signal(object)
         closed = Signal()
 
         def __init__(self, record, parent=None, **options):

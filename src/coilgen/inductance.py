@@ -8,7 +8,7 @@ from .config import CoilGenConfig
 from .conductor_geometry import conductor_trace
 from .models import CoilPart
 from .parallel import chunk_ranges, memory_limited_chunk_size, parallel_map, resolve_worker_count, should_parallelize
-from .progress import ProgressReporter
+from .progress import ProgressReporter, ProgressTask
 
 MU0 = 4.0 * math.pi * 1e-7
 NEUMANN_COEFF = MU0 / (4.0 * math.pi)
@@ -70,6 +70,14 @@ def calculate_inductance_by_coil_layout(
     reporter = ProgressReporter.from_config(config, label="Inductance")
 
     segment_sets = [_part_segments(part, source=source) for part in parts]
+    task = reporter.task(
+        "self and mutual integral chunks",
+        sum(
+            len(_inductance_chunk_ranges(len(segment_sets[i][3]), len(segment_sets[j][3]), config))
+            for i in range(n_parts)
+            for j in range(i, n_parts)
+        ),
+    )
     for part_ind, part in enumerate(parts):
         starts, ends, centers, dl = segment_sets[part_ind]
         lengths[part_ind] = float(np.linalg.norm(dl, axis=1).sum()) if len(dl) else 0.0
@@ -83,6 +91,7 @@ def calculate_inductance_by_coil_layout(
             worker_count,
             reporter=reporter,
             progress_label=f"part {part_ind + 1}/{n_parts} self chunks",
+            work_task=task,
         )
 
     for i in range(n_parts):
@@ -97,6 +106,7 @@ def calculate_inductance_by_coil_layout(
                 worker_count=worker_count,
                 reporter=reporter,
                 progress_label=f"part {i + 1}-{j + 1} mutual chunks",
+                work_task=task,
             )
             inductance_matrix[i, j] = mutual
             inductance_matrix[j, i] = mutual
@@ -106,6 +116,7 @@ def calculate_inductance_by_coil_layout(
         part.coil_inductance = float(inductance_matrix[part_ind, part_ind])
         part.coil_length = float(lengths[part_ind])
         part.coil_cross_section = float(cross_sections[part_ind])
+    task.done()
     return parts, inductance_matrix, resistance, lengths, cross_sections
 
 
@@ -182,6 +193,7 @@ def _self_inductance(
     worker_count: int = 1,
     reporter: ProgressReporter | None = None,
     progress_label: str = "self chunks",
+    work_task: ProgressTask | None = None,
 ) -> float:
     if len(dl) == 0:
         return 0.0
@@ -196,6 +208,7 @@ def _self_inductance(
         worker_count=worker_count,
         reporter=reporter,
         progress_label=progress_label,
+        work_task=work_task,
     )
     segment_lengths = np.linalg.norm(dl, axis=1)
     radius = max(float(equivalent_radius), 1e-12)
@@ -207,6 +220,23 @@ def _self_inductance(
     self_only = float(np.sum(self_terms))
     total = float(off_diag + self_only)
     return max(total, self_only * 0.05, 0.0)
+
+
+def _inductance_chunk_ranges(
+    segment_count_a: int,
+    segment_count_b: int,
+    config: CoilGenConfig | None,
+    chunk_size: int = 256,
+) -> list[tuple[int, int]]:
+    if segment_count_a == 0 or segment_count_b == 0:
+        return []
+    effective_chunk_size = memory_limited_chunk_size(
+        int(getattr(config, "inductance_chunk_size", chunk_size)),
+        segment_count_b,
+        max_chunk_memory_mb=float(getattr(config, "parallel_max_chunk_memory_mb", 64.0)),
+        bytes_per_pair=40,
+    )
+    return chunk_ranges(segment_count_a, effective_chunk_size)
 
 
 def _mutual_inductance(
@@ -222,20 +252,15 @@ def _mutual_inductance(
     worker_count: int = 1,
     reporter: ProgressReporter | None = None,
     progress_label: str = "mutual chunks",
+    work_task: ProgressTask | None = None,
 ) -> float:
     if len(dl_a) == 0 or len(dl_b) == 0:
         return 0.0
-    configured_chunk_size = int(getattr(config, "inductance_chunk_size", chunk_size))
-    configured_memory_mb = float(getattr(config, "parallel_max_chunk_memory_mb", 64.0))
-    effective_chunk_size = memory_limited_chunk_size(
-        configured_chunk_size,
-        len(dl_b),
-        max_chunk_memory_mb=configured_memory_mb,
-        bytes_per_pair=40,
-    )
-    ranges = chunk_ranges(len(dl_a), effective_chunk_size)
+    ranges = _inductance_chunk_ranges(len(dl_a), len(dl_b), config, chunk_size)
     work_size = len(dl_a) * len(dl_b)
-    task = reporter.task(progress_label, len(ranges)) if reporter is not None and reporter.enabled else None
+    task = work_task
+    if task is None and reporter is not None:
+        task = reporter.task(progress_label, len(ranges))
     if should_parallelize(work_size, config, worker_count=worker_count) and len(ranges) > 1:
         totals = parallel_map(
             lambda segment_range: _mutual_inductance_chunk(
@@ -249,14 +274,14 @@ def _mutual_inductance(
             ),
             ranges,
             worker_count=worker_count,
-            progress_callback=None if task is None else lambda done, total: task.update(done),
+            progress_callback=None if task is None else lambda done, total: task.advance(),
         )
-        if task is not None:
+        if task is not None and work_task is None:
             task.done()
         total = float(np.sum(totals))
     else:
         total = 0.0
-        for chunk_ind, segment_range in enumerate(ranges, start=1):
+        for segment_range in ranges:
             total += _mutual_inductance_chunk(
                 centers_a,
                 dl_a,
@@ -267,8 +292,8 @@ def _mutual_inductance(
                 softening_radius=softening_radius,
             )
             if task is not None:
-                task.update(chunk_ind)
-        if task is not None:
+                task.advance()
+        if task is not None and work_task is None:
             task.done()
     return NEUMANN_COEFF * total
 

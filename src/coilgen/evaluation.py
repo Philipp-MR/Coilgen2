@@ -11,7 +11,7 @@ from .models import CoilPart, TargetField
 from .metrics import dsv_target_mask, fit_target_mode_current
 from .parallel import parallel_map, resolve_worker_count, should_parallelize
 from .physics import biot_savart_wire_path
-from .progress import ProgressReporter
+from .progress import ProgressReporter, ProgressTask, progress_scope
 from .routing_field_objective import longitudinal_field_distortion
 
 
@@ -30,28 +30,45 @@ def evaluate_field_errors(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, float], float, np.ndarray, TargetField]:
     worker_count = resolve_worker_count(config)
     reporter = ProgressReporter.from_config(config, label="Field evaluation")
-    combined_loops_per_amp = calculate_unconnected_contour_field(
-        parts,
-        config,
-        target_field,
-        worker_count=worker_count,
-        reporter=reporter,
-    )
-    for part_ind, part in enumerate(parts, start=1):
-        points, geometry_source = layout_field_geometry(part, config)
+    layout_geometries = [layout_field_geometry(part, config) for part in parts]
+    contour_work = sum(max(len(contour.v) - 1, 0) for part in parts for contour in part.contour_lines)
+    layout_work = [0 if points is None else max(len(points) - 1, 0) for points, _source in layout_geometries]
+    total_work = max(contour_work + sum(layout_work), 1)
+    completed_work = contour_work
+    with progress_scope(
+        0, 95 * contour_work / total_work, "Evaluating unconnected contour fields", label=reporter.label
+    ):
+        combined_loops_per_amp = calculate_unconnected_contour_field(
+            parts,
+            config,
+            target_field,
+            worker_count=worker_count,
+            reporter=reporter,
+        )
+    for part_ind, (part, (points, geometry_source), work) in enumerate(
+        zip(parts, layout_geometries, layout_work), start=1
+    ):
         if points is not None:
-            part.field_by_layout = biot_savart_wire_path(
-                points,
-                target_field.coords,
-                chunk_size=int(config.biot_savart_chunk_size),
-                worker_count=worker_count,
-                min_work_size=int(config.parallel_min_work_size),
-                max_chunk_memory_mb=float(config.parallel_max_chunk_memory_mb),
-                progress=reporter,
-                progress_label=f"part {part_ind}/{len(parts)} {geometry_source} chunks",
-            )
+            with progress_scope(
+                95 * completed_work / total_work,
+                95 * (completed_work + work) / total_work,
+                f"Evaluating support {part_ind}/{len(parts)} {geometry_source}",
+                label=reporter.label,
+            ):
+                part.field_by_layout = biot_savart_wire_path(
+                    points,
+                    target_field.coords,
+                    chunk_size=int(config.biot_savart_chunk_size),
+                    worker_count=worker_count,
+                    min_work_size=int(config.parallel_min_work_size),
+                    max_chunk_memory_mb=float(config.parallel_max_chunk_memory_mb),
+                    progress=reporter,
+                    progress_label=f"part {part_ind}/{len(parts)} {geometry_source} chunks",
+                )
         else:
             part.field_by_layout = part.field_by_loops.copy()
+        completed_work += work
+    reporter.report(95, "evaluated field integrals; selecting current and calculating residual metrics")
 
     combined_layout_per_amp = sum(
         (part.field_by_layout for part in parts), start=np.zeros_like(parts[0].field_by_layout)
@@ -108,6 +125,7 @@ def evaluate_field_errors(
         loop_stream_z=field_component_values(combined_loops_at_sf_current, component, b0_direction=b0_direction),
         sample_mask=component_dsv_mask,
     )
+    reporter.report(100, "evaluated current policy and field residual metrics")
     return (
         combined_layout,
         combined_loops,
@@ -262,6 +280,7 @@ def calculate_unconnected_contour_field(
         return np.zeros((len(target_field.coords), 3), dtype=float)
     resolved_workers = resolve_worker_count(config) if worker_count is None else int(worker_count)
     active_reporter = ProgressReporter.from_config(config, label=progress_label) if reporter is None else reporter
+    task = active_reporter.task("support contour fields", sum(len(part.contour_lines) for part in parts))
     for part_ind, part in enumerate(parts, start=1):
         part.field_by_loops = _field_by_contours(
             part,
@@ -271,7 +290,9 @@ def calculate_unconnected_contour_field(
             active_reporter,
             part_ind,
             len(parts),
+            work_task=task,
         )
+    task.done()
     return sum((part.field_by_loops for part in parts), start=np.zeros_like(parts[0].field_by_loops))
 
 
@@ -283,13 +304,15 @@ def _field_by_contours(
     reporter: ProgressReporter,
     part_ind: int,
     part_count: int,
+    *,
+    work_task: ProgressTask | None = None,
 ) -> np.ndarray:
     target_coords = target_field.coords
     if not part.contour_lines:
         return np.zeros((len(target_coords), 3), dtype=float)
     contour_paths = [(contour, contour_evaluation_points(part.mesh, contour, config)) for contour in part.contour_lines]
     work_size = sum(max(len(points) - 1, 0) for _contour, points in contour_paths) * len(target_coords)
-    task = reporter.task(f"part {part_ind}/{part_count} contour fields", len(part.contour_lines))
+    task = work_task or reporter.task(f"part {part_ind}/{part_count} contour fields", len(part.contour_lines))
     if should_parallelize(work_size, config, worker_count=worker_count) and len(part.contour_lines) > 1:
         fields = parallel_map(
             lambda item: (
@@ -305,22 +328,31 @@ def _field_by_contours(
             ),
             contour_paths,
             worker_count=worker_count,
-            progress_callback=lambda done, total: task.update(done),
+            progress_callback=lambda done, total: task.advance(),
         )
-        task.done()
+        if work_task is None:
+            task.done()
         return np.sum(fields, axis=0)
     loops_field = np.zeros((len(target_coords), 3), dtype=float)
-    for contour_ind, (contour, points) in enumerate(contour_paths, start=1):
-        loops_field += float(contour.turn_multiplicity) * biot_savart_wire_path(
-            points,
-            target_coords,
-            chunk_size=int(config.biot_savart_chunk_size),
-            worker_count=worker_count,
-            min_work_size=int(config.parallel_min_work_size),
-            max_chunk_memory_mb=float(config.parallel_max_chunk_memory_mb),
-        )
-        task.update(contour_ind)
-    task.done()
+    for contour, points in contour_paths:
+        with progress_scope(
+            100 * task.completed / task.total,
+            100 * (task.completed + 1) / task.total,
+            "Evaluating contour field",
+            label=reporter.label,
+        ):
+            loops_field += float(contour.turn_multiplicity) * biot_savart_wire_path(
+                points,
+                target_coords,
+                chunk_size=int(config.biot_savart_chunk_size),
+                worker_count=worker_count,
+                min_work_size=int(config.parallel_min_work_size),
+                max_chunk_memory_mb=float(config.parallel_max_chunk_memory_mb),
+                progress=reporter,
+            )
+        task.advance()
+    if work_task is None:
+        task.done()
     return loops_field
 
 

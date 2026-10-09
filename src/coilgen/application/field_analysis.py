@@ -243,13 +243,14 @@ def _source_geometry(record, spec, row):
     return {"region": geometry, "registration": identity, "sample_transform": identity}
 
 
-def source_catalog(record, *, request=None) -> tuple[FieldDataset, ...]:
+def source_catalog(record, *, request=None, progress=None, cancel_check=None) -> tuple[FieldDataset, ...]:
     """Resolve fields and their own saved desired vectors from a verified RunRecord.
 
     This function consumes the snapshot only. Optional ``request`` must come
     from ``evidence.load_saved_request``; it supplies authored named ROI shapes.
     Missing desired vectors remain unavailable rather than being reconstructed.
     """
+    _checkpoint(progress, cancel_check, 0, "Read saved field source catalog")
     names = set(record.array_names)
     b0 = record.metadata.get("config", {}).get("b_0_direction", (0, 0, 1))
     spec = None
@@ -268,7 +269,9 @@ def source_catalog(record, *, request=None) -> tuple[FieldDataset, ...]:
             raise ValueError("Saved suppression mask must match the exact native target sample order.")
         suppression_count = int(np.count_nonzero(suppressed))
     result = []
-    for key, label, points, actual, target, scope, representation, evidence in _saved_sources(record):
+    descriptors = tuple(_saved_sources(record))
+    for index, (key, label, points, actual, target, scope, representation, evidence) in enumerate(descriptors):
+        _checkpoint(progress, cancel_check, None, f"Load field source {index + 1}/{len(descriptors)} · {label}")
         row = evidence.get("requirements_row")
         target_key = target if target in names else None
         if (
@@ -328,6 +331,8 @@ def source_catalog(record, *, request=None) -> tuple[FieldDataset, ...]:
                 _source_geometry(record, spec, row),
             )
         )
+        _checkpoint(progress, cancel_check, 100 * (index + 1) / len(descriptors), f"Loaded {label}")
+    _checkpoint(progress, cancel_check, 100, "Saved field source catalog complete")
     return tuple(result)
 
 
@@ -403,7 +408,15 @@ class MetricMap:
 
 
 def metric_map(
-    dataset: FieldDataset, component="Bz", metric="field", *, b0_direction=None, sampling="equal", normalization="none"
+    dataset: FieldDataset,
+    component="Bz",
+    metric="field",
+    *,
+    b0_direction=None,
+    sampling="equal",
+    normalization="none",
+    progress=None,
+    cancel_check=None,
 ) -> MetricMap:
     """Global normalization is optional; individual desired zeros never divide.
 
@@ -411,6 +424,9 @@ def metric_map(
     the scalar magnitude difference |B| - |Bdesired|. Percent maps divide by one
     selected desired RMS/peak over the entire positively weighted source.
     """
+    _checkpoint(
+        progress, cancel_check, None, f"Project {len(dataset.points_m):,} saved vector samples onto {component}"
+    )
     weights, convention = _weights(dataset, sampling)
     direction = dataset.provenance.get("b0_direction", (0, 0, 1)) if b0_direction is None else b0_direction
     actual = _scalar(dataset.field_T, component, direction)
@@ -433,10 +449,14 @@ def metric_map(
             else np.hypot.reduce(dataset.field_T - dataset.target_T, axis=1)
         )
     desired = np.hypot.reduce(dataset.target_T, axis=1) if metric == "vector_error" else target
+    _checkpoint(progress, cancel_check, None, "Calculate selected metric statistics and percentile")
     summary = _statistics(values, weights)
     if residual is not None:
         errors = values if metric == "vector_error" else residual
-        error_stats, target_stats = _statistics(errors, weights), _statistics(desired, weights)
+        _checkpoint(progress, cancel_check, None, "Calculate residual statistics and percentile")
+        error_stats = _statistics(errors, weights)
+        _checkpoint(progress, cancel_check, None, "Calculate desired-field normalization statistics")
+        target_stats = _statistics(desired, weights)
         summary.update(
             error_rms_T=error_stats["rms"],
             error_peak_T=error_stats["peak"],
@@ -455,6 +475,7 @@ def metric_map(
             raise ValueError("A zero desired field cannot define global normalization; use SI error metrics.")
         with np.errstate(over="ignore", invalid="ignore"):
             values = (values / scale) * 100
+        _checkpoint(progress, cancel_check, None, "Summarize globally normalized metric")
         summary.update(_statistics(values, weights))
         unit = "%"
     values = np.array(values, copy=True)
@@ -470,6 +491,7 @@ def metric_map(
         "absolute_error": "Absolute " + component + " error",
         "vector_error": "Vector residual magnitude",
     }[metric]
+    _checkpoint(progress, cancel_check, 100, "Saved-sample field metrics complete")
     return MetricMap(values, unit, label, _freeze(summary), scale, convention, component, metric)
 
 
@@ -478,6 +500,8 @@ def _checkpoint(progress, cancel_check, percent, message):
         raise InterruptedError("Field analysis cancelled.")
     if progress is not None:
         progress(percent, message)
+    if cancel_check is not None and cancel_check():
+        raise InterruptedError("Field analysis cancelled.")
 
 
 def analyze_harmonics(
@@ -519,6 +543,7 @@ def analyze_harmonics(
         center = np.asarray(center_m)
         if center.dtype.kind not in "fiu" or center.shape != (3,) or not np.all(np.isfinite(center)):
             raise ValueError("center_m must contain three finite real SI coordinates.")
+    _checkpoint(progress, cancel_check, 0, "Prepare scalar harmonic analysis")
     weights, convention = _weights(dataset, sampling)
     active = weights > 0
     count, terms = int(np.count_nonzero(active)), (max_order + 1) ** 2
@@ -532,7 +557,7 @@ def analyze_harmonics(
             values["residual"] = values["field"] - values["target"]
     if not all(np.all(np.isfinite(value)) for value in values.values()):
         raise ValueError("Derived scalar fields exceed finite SI reporting range.")
-    _checkpoint(progress, cancel_check, 10, "Fit shared solid harmonic basis")
+    _checkpoint(progress, cancel_check, None, "Fit shared solid harmonic basis")
     fits = fit_spherical_harmonics_many(
         dataset.points_m,
         values,
@@ -542,8 +567,12 @@ def analyze_harmonics(
         radius=radius_m,
         rcond=rcond,
         unit="T",
+        progress=lambda percent, message: _checkpoint(
+            progress, cancel_check, None if percent is None else 0.95 * percent, message
+        ),
+        cancel_check=cancel_check,
     )
-    _checkpoint(progress, cancel_check, 90, "Summarize harmonic rank and coefficients")
+    _checkpoint(progress, cancel_check, 95, "Summarize harmonic rank and coefficients")
     reference = fits["field"]
     singular = reference.singular_values
     condition = (

@@ -27,7 +27,7 @@ from .gradient_linearity import (
 )
 from .models import CoilPart, Mesh, TargetField
 from .optimization_solvers import conic_solver_order
-from .progress import ProgressReporter
+from .progress import DesignCancelled, ProgressReporter, progress_scope
 from .spectral_stream_function import build_spectral_stream_function_basis, cotangent_stiffness_and_lumped_mass
 from .symmetry import (
     absolute_tolerance as _symmetry_absolute_tolerance,
@@ -877,6 +877,8 @@ def solve_constrained_quadratic_stream_function(
     fallback_policy = _normalise_constrained_quadratic_fallback_policy(config)
     try:
         solution = _select_constrained_quadratic(problem, config)
+    except DesignCancelled:
+        raise
     except Exception as exc:
         if fallback_policy == "strict":
             raise RuntimeError(
@@ -1495,33 +1497,41 @@ def _select_tikhonov_regularization(
     penalty_weight = spacing["initial_weight"]
     attempts: list[dict[str, float | bool]] = []
     solution: StreamFunctionSolution | None = None
+    progress = ProgressReporter.from_config(config, label="Regularization")
 
-    for _ in range(max_attempts):
+    for attempt_ind in range(max_attempts):
         fixed_quadratic = smoothness["quadratic"]
         if spacing["enabled"]:
             spacing_quadratic = float(penalty_weight) * spacing["scaled_metric"]
             fixed_quadratic = spacing_quadratic if fixed_quadratic is None else fixed_quadratic + spacing_quadratic
-        if method == "fixed":
-            solution = _fixed_regularization_choice(
-                ata,
-                rtr,
-                rhs,
-                scale,
-                config,
-                selection_method="fixed",
-                fixed_quadratic=fixed_quadratic,
-            )
-        else:
-            solution = _l_curve_regularization_choice(
-                problem,
-                ata,
-                rtr,
-                rhs,
-                scale,
-                config,
-                fixed_quadratic=fixed_quadratic,
-            )
+        with progress_scope(
+            95 * attempt_ind / max_attempts,
+            95 * (attempt_ind + 1) / max_attempts,
+            f"Regularization attempt {attempt_ind + 1} of at most {max_attempts}",
+            label=progress.label,
+        ):
+            if method == "fixed":
+                solution = _fixed_regularization_choice(
+                    ata,
+                    rtr,
+                    rhs,
+                    scale,
+                    config,
+                    selection_method="fixed",
+                    fixed_quadratic=fixed_quadratic,
+                )
+            else:
+                solution = _l_curve_regularization_choice(
+                    problem,
+                    ata,
+                    rtr,
+                    rhs,
+                    scale,
+                    config,
+                    fixed_quadratic=fixed_quadratic,
+                )
 
+        progress.report(None, "checking the selected stream-function turn spacing")
         estimated_spacing = _estimate_min_turn_distance(problem, solution.reduced_stream_function, config)
         threshold_met = float(spacing["threshold"]) <= 0.0 or estimated_spacing >= float(spacing["threshold"])
         attempts.append(
@@ -1539,6 +1549,7 @@ def _select_tikhonov_regularization(
         raise RuntimeError("Stream-function regularization did not produce a solution.")
     solution.diagnostics.update(_stream_function_smoothness_diagnostics(smoothness))
     solution.diagnostics.update(_turn_spacing_diagnostics(spacing, attempts))
+    progress.report(100.0, "regularization and turn-spacing review completed")
     return solution
 
 
@@ -1554,23 +1565,31 @@ def _select_target_error_constrained_efficiency(
     penalty_weight = spacing["initial_weight"]
     attempts: list[dict[str, float | bool]] = []
     solution: StreamFunctionSolution | None = None
+    progress = ProgressReporter.from_config(config, label="Target-error efficiency")
 
-    for _ in range(max_attempts):
+    for attempt_ind in range(max_attempts):
         fixed_quadratic = smoothness["quadratic"]
         if spacing["enabled"]:
             spacing_quadratic = float(penalty_weight) * spacing["scaled_metric"]
             fixed_quadratic = spacing_quadratic if fixed_quadratic is None else fixed_quadratic + spacing_quadratic
 
-        solution = _target_error_constrained_efficiency_choice_with_retries(
-            problem,
-            ata,
-            rtr,
-            rhs,
-            scale,
-            config,
-            fixed_quadratic=fixed_quadratic,
-        )
+        with progress_scope(
+            95 * attempt_ind / max_attempts,
+            95 * (attempt_ind + 1) / max_attempts,
+            f"Target-error attempt {attempt_ind + 1} of at most {max_attempts}",
+            label=progress.label,
+        ):
+            solution = _target_error_constrained_efficiency_choice_with_retries(
+                problem,
+                ata,
+                rtr,
+                rhs,
+                scale,
+                config,
+                fixed_quadratic=fixed_quadratic,
+            )
 
+        progress.report(None, "checking the selected stream-function turn spacing")
         estimated_spacing = _estimate_min_turn_distance(problem, solution.reduced_stream_function, config)
         threshold_met = float(spacing["threshold"]) <= 0.0 or estimated_spacing >= float(spacing["threshold"])
         attempts.append(
@@ -1588,6 +1607,7 @@ def _select_target_error_constrained_efficiency(
         raise RuntimeError("Target-error constrained stream-function optimization did not produce a solution.")
     solution.diagnostics.update(_stream_function_smoothness_diagnostics(smoothness))
     solution.diagnostics.update(_turn_spacing_diagnostics(spacing, attempts))
+    progress.report(100.0, "target-error search and turn-spacing review completed")
     return solution
 
 
@@ -1610,15 +1630,23 @@ def _select_constrained_quadratic(
     penalty_weight = spacing["initial_weight"]
     attempts: list[dict[str, float | bool]] = []
     solution: StreamFunctionSolution | None = None
+    progress = ProgressReporter.from_config(config, label="Constrained quadratic")
 
-    for _ in range(max_attempts):
+    for attempt_ind in range(max_attempts):
         fixed_quadratic = smoothness["quadratic"]
         if spacing["enabled"]:
             spacing_quadratic = float(penalty_weight) * spacing["scaled_metric"]
             fixed_quadratic = spacing_quadratic if fixed_quadratic is None else fixed_quadratic + spacing_quadratic
 
-        solution = _constrained_quadratic_choice(problem, rtr, config, fixed_quadratic=fixed_quadratic)
+        with progress_scope(
+            95 * attempt_ind / max_attempts,
+            95 * (attempt_ind + 1) / max_attempts,
+            f"Constrained attempt {attempt_ind + 1} of at most {max_attempts}",
+            label=progress.label,
+        ):
+            solution = _constrained_quadratic_choice(problem, rtr, config, fixed_quadratic=fixed_quadratic)
 
+        progress.report(None, "checking the selected stream-function turn spacing")
         estimated_spacing = _estimate_min_turn_distance(problem, solution.reduced_stream_function, config)
         threshold_met = float(spacing["threshold"]) <= 0.0 or estimated_spacing >= float(spacing["threshold"])
         attempts.append(
@@ -1636,6 +1664,7 @@ def _select_constrained_quadratic(
         raise RuntimeError("Constrained quadratic stream-function optimization did not produce a solution.")
     solution.diagnostics.update(_stream_function_smoothness_diagnostics(smoothness))
     solution.diagnostics.update(_turn_spacing_diagnostics(spacing, attempts))
+    progress.report(100.0, "constrained solve and turn-spacing review completed")
     return solution
 
 
@@ -1654,38 +1683,49 @@ def _target_error_constrained_efficiency_choice_with_retries(
     solutions: list[StreamFunctionSolution] = []
     attempts: list[dict[str, Any]] = []
     solution_attempt_indices: list[int] = []
+    retry_enabled = _target_error_auto_retry_enabled(config)
+    max_reruns = _target_error_auto_retry_max_reruns(config)
+    maximum_attempts = 1 + (max_reruns if retry_enabled else 0)
+    progress = ProgressReporter.from_config(config, label="Target-error efficiency")
 
-    initial_solution = _target_error_constrained_efficiency_choice(
-        problem,
-        ata,
-        rtr,
-        rhs,
-        scale,
-        config,
-        fixed_quadratic=fixed_quadratic,
-    )
+    with progress_scope(0, 95 / maximum_attempts, "Initial target-error search", label=progress.label):
+        initial_solution = _target_error_constrained_efficiency_choice(
+            problem,
+            ata,
+            rtr,
+            rhs,
+            scale,
+            config,
+            fixed_quadratic=fixed_quadratic,
+        )
     solutions.append(initial_solution)
     attempts.append(_target_error_auto_retry_attempt_summary(initial_solution, config, rerun=0))
     solution_attempt_indices.append(0)
 
     selected_index = 0
     selected_violation = _target_error_solution_violation_ratio(initial_solution)
-    retry_enabled = _target_error_auto_retry_enabled(config)
-    max_reruns = _target_error_auto_retry_max_reruns(config)
 
     if retry_enabled and max_reruns > 0 and not _target_error_solution_meets_constraint(initial_solution):
         for rerun in range(1, max_reruns + 1):
             retry_config = _target_error_retry_config(config, rerun)
             try:
-                retry_solution = _target_error_constrained_efficiency_choice(
-                    problem,
-                    ata,
-                    rtr,
-                    rhs,
-                    scale,
-                    retry_config,
-                    fixed_quadratic=fixed_quadratic,
-                )
+                with progress_scope(
+                    95 * rerun / maximum_attempts,
+                    95 * (rerun + 1) / maximum_attempts,
+                    f"Target-error retry {rerun}/{max_reruns}",
+                    label=progress.label,
+                ):
+                    retry_solution = _target_error_constrained_efficiency_choice(
+                        problem,
+                        ata,
+                        rtr,
+                        rhs,
+                        scale,
+                        retry_config,
+                        fixed_quadratic=fixed_quadratic,
+                    )
+            except DesignCancelled:
+                raise
             except Exception as exc:  # pragma: no cover - diagnostic fallback for rare numerical failures
                 attempts.append(_target_error_auto_retry_error_summary(retry_config, rerun, exc))
                 continue
@@ -1716,6 +1756,7 @@ def _target_error_constrained_efficiency_choice_with_retries(
             max_reruns=max_reruns,
         )
     )
+    progress.report(100.0, "target-error search and retry comparison completed")
     return selected_solution
 
 
@@ -1738,16 +1779,17 @@ def _target_error_constrained_efficiency_choice(
         fixed_quadratic=fixed_quadratic,
     )
     lambdas = factors * scale
-    scan = _scan_l_curve_by_normal_equations(
-        problem,
-        ata,
-        rtr,
-        rhs,
-        lambdas,
-        config,
-        fixed_quadratic,
-        progress_label="Target-error efficiency",
-    )
+    with progress_scope(0, 80, "Scanning target-error regularization candidates", label="Target-error efficiency"):
+        scan = _scan_l_curve_by_normal_equations(
+            problem,
+            ata,
+            rtr,
+            rhs,
+            lambdas,
+            config,
+            fixed_quadratic,
+            progress_label="Target-error efficiency",
+        )
     residuals, regularization_norms, candidate_solver = scan
     valid = np.isfinite(residuals) & np.isfinite(regularization_norms)
     if not np.any(valid):
@@ -3893,7 +3935,7 @@ def _solve_constrained_quadratic_cvxpy(
     )
 
     solver_errors: list[str] = []
-    task = progress.task("CVXPY solver attempts", len(solver_order))
+    task = progress.task("CVXPY solver attempts", len(solver_order), indeterminate=True)
     for solver_index, solver_name in enumerate(solver_order):
         options = _cvxpy_solver_options(solver_name, config)
         thread_option, solver_thread_count = _cvxpy_solver_thread_option(solver_name, config)
@@ -3946,7 +3988,6 @@ def _solve_constrained_quadratic_cvxpy(
                 task.advance(1, message=f"{solver_name} failed minimax face-current check", force=True)
                 continue
         task.advance(1, message=f"{solver_name} solved with status {cvx_problem.status} in {elapsed:.2f} s", force=True)
-        task.done(message="done")
         diagnostics = {
             "solver": str(solver_name),
             "status": str(cvx_problem.status),
@@ -3993,9 +4034,10 @@ def _solve_constrained_quadratic_cvxpy(
             **_shield_gradient_opposition_constraint_diagnostics(shield_gradient_constraint, candidate),
             **contour_step_limit,
         }
+        progress.report(100.0, f"accepted {solver_name} solution after {task.completed} solver attempt(s)")
         return candidate, diagnostics
 
-    task.done(message="failed")
+    task.update(task.completed, message="all available solver attempts failed", force=True)
     details = "; ".join(solver_errors) if solver_errors else "no installed conic solver found"
     raise RuntimeError(f"CVXPY constrained quadratic solve failed ({details}).")
 
@@ -4279,16 +4321,17 @@ def _l_curve_regularization_choice(
     )
     lambdas = factors * scale
     scan = None
-    if fixed_quadratic is not None and scan_method in {"auto", "transformed_svd"}:
-        candidate_notes.append(
-            "transformed_svd scan unavailable with fixed turn-spacing penalty; used normal_equations scan"
-        )
-    elif scan_method in {"auto", "transformed_svd"}:
-        scan = _scan_l_curve_by_transformed_svd(problem, lambdas)
-        if scan is None and scan_method == "transformed_svd":
-            candidate_notes.append("transformed_svd scan failed; used normal_equations scan")
-    if scan is None:
-        scan = _scan_l_curve_by_normal_equations(problem, ata, rtr, rhs, lambdas, config, fixed_quadratic)
+    with progress_scope(0, 80, "Scanning L-curve regularization candidates", label="L-curve"):
+        if fixed_quadratic is not None and scan_method in {"auto", "transformed_svd"}:
+            candidate_notes.append(
+                "transformed_svd scan unavailable with fixed turn-spacing penalty; used normal_equations scan"
+            )
+        elif scan_method in {"auto", "transformed_svd"}:
+            scan = _scan_l_curve_by_transformed_svd(problem, lambdas, config)
+            if scan is None and scan_method == "transformed_svd":
+                candidate_notes.append("transformed_svd scan failed; used normal_equations scan")
+        if scan is None:
+            scan = _scan_l_curve_by_normal_equations(problem, ata, rtr, rhs, lambdas, config, fixed_quadratic)
     residuals, regularization_norms, candidate_solver = scan
     smoothing_window = _l_curve_smoothing_window(config)
     selected_index, curvature, fallback_reason = _select_l_curve_knee(
@@ -5116,10 +5159,13 @@ def _adaptive_l_curve_candidate_factors_from_svd(
 
     if not np.isfinite(scale) or scale <= 0.0:
         return None
+    progress = ProgressReporter.from_config(config, label="L-curve")
+    progress.report(None, "factoring resistance to estimate the regularization candidate range")
     whitened = _regularization_whitened_sensitivity(problem)
     if whitened is None:
         return None
     try:
+        progress.report(None, "computing the candidate-range SVD; factorization completion is not available")
         u, singular_values, _vt = np.linalg.svd(whitened.transformed_sensitivity, full_matrices=False)
     except np.linalg.LinAlgError:
         return None
@@ -5221,17 +5267,22 @@ def _l_curve_smoothing_window(config: CoilGenConfig) -> int:
 def _scan_l_curve_by_transformed_svd(
     problem: StreamFunctionOptimizationProblem,
     lambdas: np.ndarray,
+    config: CoilGenConfig | None = None,
 ) -> tuple[np.ndarray, np.ndarray, str] | None:
+    reporter = ProgressReporter.from_config(config, label="L-curve")
+    reporter.report(None, "factoring the resistance operator for the transformed SVD")
     regularization_operator = _regularization_operator_from_quadratic(problem.reduced_resistance)
     if regularization_operator is None:
         return None
     try:
+        reporter.report(None, "transforming the sensitivity matrix")
         transformed = np.linalg.solve(regularization_operator.T, problem.reduced_sensitivity.T).T
     except np.linalg.LinAlgError:
         return None
     if not np.all(np.isfinite(transformed)):
         return None
     try:
+        reporter.report(None, "computing the sensitivity SVD; factorization completion is not available")
         u, singular_values, _vt = np.linalg.svd(transformed, full_matrices=False)
     except np.linalg.LinAlgError:
         return None
@@ -5241,12 +5292,15 @@ def _scan_l_curve_by_transformed_svd(
     projected_target = u.T @ problem.target_z
     residuals = np.full(len(lambdas), np.nan, dtype=float)
     regularization_norms = np.full(len(lambdas), np.nan, dtype=float)
+    task = reporter.task("regularization candidates", len(lambdas))
     for ind, lambda_value in enumerate(lambdas):
         denom = singular_values * singular_values + lambda_value * lambda_value
         y_coefficients = (singular_values / np.maximum(denom, 1e-300)) * projected_target
         fitted_target = u @ (singular_values * y_coefficients)
         residuals[ind] = float(np.linalg.norm(fitted_target - problem.target_z))
         regularization_norms[ind] = float(np.linalg.norm(y_coefficients))
+        task.advance()
+    task.done()
     if np.count_nonzero(_valid_l_curve_points(residuals, regularization_norms)) < 3:
         return None
     return residuals, regularization_norms, "transformed_svd"
@@ -6662,22 +6716,28 @@ def _solve_stream_function_system(lhs: np.ndarray, rhs: np.ndarray, config: Coil
     solver = str(getattr(config, "optimization_solver", "auto")).lower()
     if solver not in {"auto", "solve", "pinv"}:
         raise ValueError("optimization_solver must be 'auto', 'solve', or 'pinv'.")
+    progress = ProgressReporter.from_config(config, label="Linear solve")
     if solver == "pinv":
+        progress.report(None, "computing a pseudoinverse; factorization completion is not available")
         return np.linalg.pinv(lhs) @ rhs
 
     tolerance = max(float(getattr(config, "optimization_solver_residual_tolerance", 1e-8)), 0.0)
     try:
+        progress.report(None, "solving the stream-function system; factorization completion is not available")
         candidate = np.linalg.solve(lhs, rhs)
     except np.linalg.LinAlgError:
         if solver == "solve":
             raise
+        progress.report(None, "direct solve failed; computing a pseudoinverse")
         return np.linalg.pinv(lhs) @ rhs
 
+    progress.report(None, "checking the linear-system residual")
     residual = np.linalg.norm(lhs @ candidate - rhs) / max(np.linalg.norm(rhs), 1e-30)
     if np.all(np.isfinite(candidate)) and float(residual) <= tolerance:
         return candidate
     if solver == "solve":
         raise np.linalg.LinAlgError(f"Direct solve residual {residual:.3e} exceeds tolerance {tolerance:.3e}.")
+    progress.report(None, "direct solve residual failed; computing a pseudoinverse")
     return np.linalg.pinv(lhs) @ rhs
 
 

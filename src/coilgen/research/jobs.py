@@ -18,6 +18,7 @@ import uuid
 from .requests import ResearchRequest
 from .storage import DirectoryOwner, atomic_json, file_digest, request_identity, verified_result, verify_input_files
 from ..pipeline_stages import PipelineStage
+from ..progress import update_work_progress
 
 
 def _now() -> str:
@@ -45,6 +46,12 @@ def _record_completed_boundary(state: dict, event: dict) -> None:
         state["stage_preview_error"] = event["stage_preview_error"][:512]
 
 
+def _record_progress(state: dict, event: dict) -> None:
+    """Separate allocated overall work, local work and scientific evidence."""
+    _record_completed_boundary(state, event)
+    update_work_progress(state, event)
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimePolicy:
     max_workers: int = 1
@@ -70,17 +77,10 @@ class RuntimePolicy:
 def _worker(request: dict, directory: str, events, cancel, threads: int) -> None:
     """Spawn target; only JSON-compatible requests and explicit IPC cross here."""
     from threadpoolctl import threadpool_limits
-    from ..progress import DesignCancelled, progress_context
+    from ..progress import DesignCancelled, ProgressRelay, progress_context
     from .application import run_design
 
-    last_progress = 0.0
-
-    def sink(event: dict) -> None:
-        nonlocal last_progress
-        now = time.monotonic()
-        if event.get("label") != "CoilGen" and now - last_progress < 0.15:
-            return
-        last_progress = now
+    def send(event: dict) -> None:
         try:
             if event.get("completed_stage") is not None:
                 events.put({"kind": "progress", **event}, timeout=0.25)
@@ -89,13 +89,17 @@ def _worker(request: dict, directory: str, events, cancel, threads: int) -> None
         except queue.Full:
             pass
 
+    relay = ProgressRelay(send)
     try:
-        with threadpool_limits(limits=threads), progress_context(sink, cancel.is_set):
+        with threadpool_limits(limits=threads), progress_context(relay.report, cancel.is_set):
             run_design(ResearchRequest.from_dict(request), Path(directory), threads=threads)
+        relay.flush()
         events.put({"kind": "completed"}, timeout=5)
     except DesignCancelled:
+        relay.flush()
         events.put({"kind": "cancelled"}, timeout=5)
     except BaseException as exc:
+        relay.flush()
         (Path(directory) / "error.log").write_text(traceback.format_exc(), encoding="utf-8")
         try:
             events.put({"kind": "failed", "error": f"{type(exc).__name__}: {exc}"}, timeout=5)
@@ -334,6 +338,7 @@ class JobManager:
                 for id_, entry in list(self._active.items()):
                     process, events, cancel, started = entry
                     state = self._states[id_]
+                    changed = False
                     try:
                         while True:
                             if state.get("ipc_error"):
@@ -349,27 +354,40 @@ class JobManager:
                                 break
                             kind = event["kind"]
                             if kind == "progress" and state["status"] != "cancelling":
-                                _record_completed_boundary(state, event)
-                                state["stage"] = str(event["message"])
-                                if event.get("label") == "CoilGen" and event.get("percent") is not None:
-                                    state["progress"] = max(state["progress"], min(0.98, event["percent"] / 100))
+                                _record_progress(state, event)
                                 state["log"] = (state["log"] + [f"{event.get('label', '')}: {event['message']}"])[-160:]
+                                changed = True
                             elif kind == "completed":
                                 if cancel.is_set():
                                     state.update(status="cancelled", stage="Cancelled")
-                                elif self._verified_completion(id_) is not None:
-                                    state.update(status="completed", stage="Complete", progress=1.0)
                                 else:
-                                    state.update(
-                                        status="failed",
-                                        stage="Invalid completion evidence",
-                                        error="Worker result failed its submitted identity or evidence integrity check.",
-                                    )
+                                    state.update(stage="Verifying saved evidence", progress_indeterminate=True)
+                                    self._save(state)
+                                    if self._verified_completion(id_) is not None:
+                                        state.update(
+                                            status="completed",
+                                            stage="Complete",
+                                            progress=1.0,
+                                            progress_indeterminate=False,
+                                        )
+                                    else:
+                                        state.update(
+                                            status="failed",
+                                            stage="Invalid completion evidence",
+                                            error="Worker result failed its submitted identity or evidence integrity check.",
+                                        )
+                                self._save(state)
+                                changed = False
                             elif kind in {"failed", "cancelled"}:
                                 state.update(status=kind, stage=kind.capitalize(), error=event.get("error"))
-                            self._save(state)
+                                self._save(state)
+                                changed = False
                     except queue.Empty:
                         pass
+                    if changed:
+                        # Coalesce routine updates into one durable write per poll;
+                        # numerical workers never wait for each progress JSON write.
+                        self._save(state)
                     timed_out = time.monotonic() - started > self.policy.timeout_seconds
                     force_cancel = state["status"] == "cancelling" and time.monotonic() - state["cancel_time"] > 1.0
                     if (
@@ -403,6 +421,9 @@ class JobManager:
                                 status=status,
                                 stage=status.capitalize(),
                                 progress=1.0 if completed else state["progress"],
+                                progress_indeterminate=False
+                                if completed
+                                else state.get("progress_indeterminate", False),
                                 error=None
                                 if cancel.is_set() or completed
                                 else f"Worker exited without a result (exit {process.exitcode}).",

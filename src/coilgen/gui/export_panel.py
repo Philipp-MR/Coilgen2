@@ -475,6 +475,7 @@ class GeometryExportPanel(QWidget):
 
 
 class _ExportSignals(QObject):
+    progress = Signal(dict)
     finished = Signal(object, str)
 
 
@@ -494,14 +495,20 @@ class GeometryExportTask(QRunnable):
     def run(self):
         from ..application.cad import export_geometry
         from ..application.evidence import EvidenceIntegrityError
+        from ..progress import progress_context
+        from .design_tasks import ProgressSignalRelay
 
+        relay = ProgressSignalRelay(self.signals.progress.emit)
         try:
-            package = export_geometry(self.record, self.directory, self.names, unit=self.unit, project=self.project)
+            with progress_context(relay.report):
+                package = export_geometry(self.record, self.directory, self.names, unit=self.unit, project=self.project)
         except Exception as exc:
             if isinstance(exc, EvidenceIntegrityError):
                 self.verification_error = str(exc)
+            relay.flush()
             self.signals.finished.emit(None, f"{type(exc).__name__}: {exc}")
         else:
+            relay.flush()
             self.signals.finished.emit(package, "")
 
 
@@ -520,6 +527,7 @@ class ArtifactVerificationError(ValueError):
 def export_verified_artifacts(record, directory, *, loader):
     """Stage, reverify and exclusively publish saved bytes without overwriting."""
     from ..persistence import file_digest
+    from ..progress import ProgressReporter, progress_scope
     from ..research.storage import result_metadata_digest
 
     try:
@@ -541,7 +549,8 @@ def export_verified_artifacts(record, directory, *, loader):
         except (ValueError, TypeError, OSError, RuntimeError, KeyError) as exc:
             raise ArtifactVerificationError(str(exc) or type(exc).__name__) from exc
 
-    current = verified()
+    with progress_scope(0, 15, "Verifying saved export artifacts", label="Artifact export"):
+        current = verified()
     directory = Path(directory).expanduser().resolve()
     source_directory = Path(current.directory).resolve()
     sources = []
@@ -568,6 +577,7 @@ def export_verified_artifacts(record, directory, *, loader):
     if not sources:
         raise ValueError("The selected run has no saved artifacts to export.")
     if directory == source_directory:
+        ProgressReporter(label="Artifact export").report(100, "verified artifacts already reside in this directory")
         return tuple(destination for _, destination, _ in sources)
     if directory.is_relative_to(source_directory):
         raise ValueError("Export artifacts outside the immutable saved run directory.")
@@ -575,27 +585,36 @@ def export_verified_artifacts(record, directory, *, loader):
     with TemporaryDirectory(prefix=".coilgen-artifacts-", dir=directory.parent) as temporary:
         stage = Path(temporary)
         staged = []
-        for source, destination, digest in sources:
-            path = stage / destination.relative_to(directory)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, path)
-            if not isinstance(digest, str) or file_digest(path) != digest:
-                raise ArtifactVerificationError(f"Saved artifact changed while being exported: {source.name}")
-            staged.append((path, destination))
-        verified()
+        with progress_scope(15, 55, "Staging and checking saved artifact files", label="Artifact export"):
+            task = ProgressReporter(label="Artifact export").task("staged files", len(sources))
+            for source, destination, digest in sources:
+                path = stage / destination.relative_to(directory)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, path)
+                if not isinstance(digest, str) or file_digest(path) != digest:
+                    raise ArtifactVerificationError(f"Saved artifact changed while being exported: {source.name}")
+                staged.append((path, destination))
+                task.advance()
+            task.done()
+        with progress_scope(55, 65, "Rechecking saved source evidence", label="Artifact export"):
+            verified()
         created_files, created_directories = [], []
         try:
-            for path, destination in staged:
-                missing = []
-                parent = destination.parent
-                while not parent.exists():
-                    missing.append(parent)
-                    parent = parent.parent
-                for parent in reversed(missing):
-                    parent.mkdir(exist_ok=False)
-                    created_directories.append(parent)
-                os.link(path, destination)
-                created_files.append(destination)
+            with progress_scope(65, 100, "Publishing verified artifact files", label="Artifact export"):
+                task = ProgressReporter(label="Artifact export").task("published files", len(staged))
+                for path, destination in staged:
+                    missing = []
+                    parent = destination.parent
+                    while not parent.exists():
+                        missing.append(parent)
+                        parent = parent.parent
+                    for parent in reversed(missing):
+                        parent.mkdir(exist_ok=False)
+                        created_directories.append(parent)
+                    os.link(path, destination)
+                    created_files.append(destination)
+                    task.advance()
+                task.done()
         except BaseException:
             # Roll back only this transaction's checked destination paths;
             # unrelated files or a concurrent writer are never removed.
@@ -624,11 +643,18 @@ class ArtifactExportTask(QRunnable):
         self.verification_error = ""
 
     def run(self):
+        from ..progress import progress_context
+        from .design_tasks import ProgressSignalRelay
+
+        relay = ProgressSignalRelay(self.signals.progress.emit)
         try:
-            paths = export_verified_artifacts(self.record, self.directory, loader=self.loader)
+            with progress_context(relay.report):
+                paths = export_verified_artifacts(self.record, self.directory, loader=self.loader)
         except Exception as exc:
             if isinstance(exc, ArtifactVerificationError):
                 self.verification_error = str(exc)
+            relay.flush()
             self.signals.finished.emit(None, f"{type(exc).__name__}: {exc}")
         else:
+            relay.flush()
             self.signals.finished.emit(paths, "")

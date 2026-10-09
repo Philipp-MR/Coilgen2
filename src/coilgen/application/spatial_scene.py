@@ -274,6 +274,7 @@ def path_mesh_clearance(points_m, part: ScenePart, *, radius_m=0.0):
     for that envelope and the imported faceted, consistently oriented surface.
     """
     from ..research.fabrication import _inside_closed_mesh
+    from ..progress import ProgressReporter, progress_scope
 
     points = _xyz(points_m, "Electrical path", 2)
     radius = _length(radius_m, "Envelope radius")
@@ -282,7 +283,10 @@ def path_mesh_clearance(points_m, part: ScenePart, *, radius_m=0.0):
     # Degenerate triangles encode segments; the shared distance kernel handles
     # them exactly, including intersections with triangle interiors.
     best, witness = np.inf, None
-    inside = _inside_closed_mesh(points[0], part._mesh)
+    reporter = ProgressReporter(label="Spatial clearance")
+    with progress_scope(0, 5):
+        reporter.report(None, f"Checking path containment in {part.name}")
+        inside = _inside_closed_mesh(points[0], part._mesh)
     starts, ends = points[:-1], points[1:]
     for index, (start, end) in enumerate(zip(starts, ends, strict=True)):
         segment = np.asarray([start, end, end])
@@ -293,14 +297,17 @@ def path_mesh_clearance(points_m, part: ScenePart, *, radius_m=0.0):
             axis=1,
         )
         eligible = np.flatnonzero(lower <= best)
-        for chunk_start in range(0, len(eligible), 4096):
-            ids = eligible[chunk_start : chunk_start + 4096]
-            distance = triangle_pair_distances(
-                np.broadcast_to(segment, (len(ids), 3, 3)), triangles[ids], backend="numpy"
-            ).values_m
-            local = int(np.argmin(distance))
-            if distance[local] < best:
-                best, witness = float(distance[local]), index
+        with progress_scope(5 + 95 * index / len(starts), 5 + 95 * (index + 1) / len(starts)):
+            task = reporter.task(f"Checking segment {index + 1}/{len(starts)} against scene facets", len(eligible))
+            for chunk_start in range(0, len(eligible), 4096):
+                ids = eligible[chunk_start : chunk_start + 4096]
+                distance = triangle_pair_distances(
+                    np.broadcast_to(segment, (len(ids), 3, 3)), triangles[ids], backend="numpy"
+                ).values_m
+                local = int(np.argmin(distance))
+                if distance[local] < best:
+                    best, witness = float(distance[local]), index
+                task.update(min(chunk_start + 4096, len(eligible)))
         if best == 0:
             break
     corridor = part.role == "feed_corridor"
@@ -325,6 +332,7 @@ def evaluate_spatial_scene(result, scene: SpatialScene, *, fabrication=None):
     from ..evaluation import layout_field_geometry
     from ..gradient_engineering import winding_path_sha256
     from ..manufacturing import _polygon_centroid
+    from ..progress import ProgressReporter, progress_scope
 
     rows, paths, radius = [], {}, {}
     config = result.input_data
@@ -364,6 +372,9 @@ def evaluate_spatial_scene(result, scene: SpatialScene, *, fabrication=None):
                 legacy_mesh = getattr(part, "swept_body", None)
                 conductor_meshes[id_] = meshes or ((legacy_mesh,) if legacy_mesh is not None else ())
         source = "saved_evaluated_centroid_paths_feeds_excluded"
+    reporter = ProgressReporter.from_config(config, label="Spatial scene review")
+    total = sum(part.role != "reference" for part in scene.parts) * max(len(paths), 1) + len(scene.anchors)
+    completed = 0
     for part in scene.parts:
         if part.role == "reference":
             continue
@@ -371,7 +382,10 @@ def evaluate_spatial_scene(result, scene: SpatialScene, *, fabrication=None):
             rows.append(
                 {"name": part.name, "passed": None, "reason": "No realized winding is available.", "scope": source}
             )
+            completed += 1
+            reporter.report(100 * completed / total, "No realized winding is available for this scene part")
         for id_, points in paths.items():
+            start, span = 100 * completed / total, 100 / total
             checked = points
             if part.role == "feed_corridor":
                 plan = plans.get(id_, {})
@@ -389,6 +403,8 @@ def evaluate_spatial_scene(result, scene: SpatialScene, *, fabrication=None):
                             "scope": source,
                         }
                     )
+                    completed += 1
+                    reporter.report(100 * completed / total, "No modeled feeds are available for this feed corridor")
                     continue
                 checked_paths = [
                     points[int(op["start_sample_index"]) : int(op["end_sample_index"]) + 1] for op in feed_intervals
@@ -396,20 +412,30 @@ def evaluate_spatial_scene(result, scene: SpatialScene, *, fabrication=None):
             else:
                 checked_paths = [checked]
             for index, checked in enumerate(checked_paths):
-                row = path_mesh_clearance(checked, part, radius_m=radius[id_])
                 meshes = conductor_meshes.get(id_, ())
+                cell_start, cell_span = start + span * index / len(checked_paths), span / len(checked_paths)
+                physical = bool(meshes) and part.role != "feed_corridor"
+                with progress_scope(cell_start, cell_start + cell_span * (0.5 if physical else 1)):
+                    reporter.report(0, f"Checking {part.name} · {id_}: conductor envelope")
+                    row = path_mesh_clearance(checked, part, radius_m=radius[id_])
                 if meshes and part.role != "feed_corridor":
-                    solids = [
-                        {
-                            "body_index": i,
-                            **mesh_scene_clearance(
-                                mesh,
-                                part,
-                                margin_m=config.sweep_insulation_thickness + config.sweep_manufacturing_tolerance,
-                            ),
-                        }
-                        for i, mesh in enumerate(meshes)
-                    ]
+                    solids = []
+                    for i, mesh in enumerate(meshes):
+                        with progress_scope(
+                            cell_start + cell_span * (0.5 + 0.5 * i / len(meshes)),
+                            cell_start + cell_span * (0.5 + 0.5 * (i + 1) / len(meshes)),
+                        ):
+                            solids.append(
+                                {
+                                    "body_index": i,
+                                    **mesh_scene_clearance(
+                                        mesh,
+                                        part,
+                                        margin_m=config.sweep_insulation_thickness
+                                        + config.sweep_manufacturing_tolerance,
+                                    ),
+                                }
+                            )
                     solid = min(
                         solids,
                         key=lambda value: (
@@ -437,7 +463,10 @@ def evaluate_spatial_scene(result, scene: SpatialScene, *, fabrication=None):
                         **row,
                     }
                 )
+            completed += 1
     for anchor in scene.anchors:
+        reporter.report(None, f"Checking saved route anchor: {anchor.name}")
+        completed += 1
         points = paths.get(anchor.body_id)
         row = {"name": anchor.name, "scope": source, "body_id": anchor.body_id, "passed": None}
         if points is None or winding_digests.get(anchor.body_id) != anchor.expected_path_sha256:
@@ -469,6 +498,7 @@ def evaluate_spatial_scene(result, scene: SpatialScene, *, fabrication=None):
             distance = float(np.min(distances))
             row.update(distance_m=distance, limit_m=anchor.tolerance_m, passed=distance <= anchor.tolerance_m)
         rows.append(row)
+        reporter.report(100 * completed / total, f"Route anchors reviewed: {anchor.name}")
     checks = []
     for row in rows:
         solid = row.get("realized_conductor_surface", {})
@@ -488,6 +518,7 @@ def evaluate_spatial_scene(result, scene: SpatialScene, *, fabrication=None):
                 "reason": row.get("reason", ""),
             }
         )
+    reporter.finish("Spatial scene geometry reviewed")
     return {
         "schema": "coilgen-spatial-review-v1",
         "scene_sha256": scene.digest,
@@ -505,6 +536,7 @@ def evaluate_spatial_scene(result, scene: SpatialScene, *, fabrication=None):
 def mesh_scene_clearance(mesh, part: ScenePart, *, margin_m=0):
     """Check actual swept facets, including miter extensions beyond capsules."""
     from ..research.fabrication import _candidate_pairs, _inside_closed_mesh
+    from ..progress import ProgressReporter, progress_scope
 
     required = part.clearance_m + _length(margin_m, "Conductor surface offset")
     tolerance = 1e-10
@@ -513,15 +545,21 @@ def mesh_scene_clearance(mesh, part: ScenePart, *, margin_m=0):
     other = part.vertices_m[part.faces]
     pairs = _candidate_pairs(triangles, other, threshold)
     gap, witness = np.inf, None
-    for start in range(0, len(pairs), 4096):
-        block = pairs[start : start + 4096]
-        distances = triangle_pair_distances(triangles[block[:, 0]], other[block[:, 1]], backend="numpy").values_m
-        index = int(np.argmin(distances))
-        if distances[index] < gap:
-            gap, witness = float(distances[index]), block[index].tolist()
-    contained = any(_inside_closed_mesh(point, part._mesh) for point in _component_points(mesh)) or any(
-        _inside_closed_mesh(point, mesh) for point in _component_points(part._mesh)
-    )
+    reporter = ProgressReporter(label="Spatial conductor facets")
+    with progress_scope(0, 90):
+        task = reporter.task("Measuring conductor/scene triangle pairs", len(pairs))
+        for start in range(0, len(pairs), 4096):
+            block = pairs[start : start + 4096]
+            distances = triangle_pair_distances(triangles[block[:, 0]], other[block[:, 1]], backend="numpy").values_m
+            index = int(np.argmin(distances))
+            if distances[index] < gap:
+                gap, witness = float(distances[index]), block[index].tolist()
+            task.update(min(start + 4096, len(pairs)))
+    with progress_scope(90, 100):
+        reporter.report(None, "Checking mutual closed-solid containment")
+        contained = any(_inside_closed_mesh(point, part._mesh) for point in _component_points(mesh)) or any(
+            _inside_closed_mesh(point, mesh) for point in _component_points(part._mesh)
+        )
     exact_gap = gap <= threshold
     return {
         "passed": bool(not contained and gap > tolerance and gap >= required),

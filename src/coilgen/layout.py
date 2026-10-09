@@ -24,7 +24,7 @@ from .models import (
     WireSegmentOwner,
 )
 from .parallel import chunk_ranges, memory_limited_chunk_size, parallel_map, resolve_worker_count, should_parallelize
-from .progress import ProgressReporter
+from .progress import ProgressReporter, progress_scope
 from .surface_distance import SurfaceGeodesicSolver
 from .surface_topology import (
     LoopTopologySignature,
@@ -202,6 +202,9 @@ def find_minimal_contour_distance(
 ) -> list[CoilPart]:
     """Find the closest surface-geodesic spacing between contour loops."""
 
+    pair_count = sum(len(part.contour_lines) * (len(part.contour_lines) - 1) // 2 for part in parts)
+    task = progress.task("contour-distance pairs across supports", pair_count) if progress and pair_count else None
+    completed_pairs = 0
     for part in parts:
         n_loops = len(part.contour_lines)
         part.contour_distance_matrix = np.zeros((n_loops, n_loops), dtype=float)
@@ -224,8 +227,7 @@ def find_minimal_contour_distance(
             for contour in part.contour_lines
         ]
         total_pairs = n_loops * (n_loops - 1) // 2
-        task = progress.task(f"part contour-distance pairs ({n_loops} loops)", total_pairs) if progress else None
-        completed_pairs = 0
+        local_completed = 0
         for ind_a in range(n_loops):
             for ind_b in range(ind_a + 1, n_loops):
                 loop_distance = _find_min_geodesic_loop_distance(
@@ -237,19 +239,20 @@ def find_minimal_contour_distance(
                 distance_matrix[ind_b, ind_a] = loop_distance.distance
                 min_distance = min(min_distance, loop_distance.distance)
                 completed_pairs += 1
+                local_completed += 1
                 if task is not None:
                     task.update(
                         completed_pairs,
-                        message=f"loop pair {completed_pairs}/{total_pairs}; current min {min_distance:.4g} m",
+                        message=f"support loop pair {local_completed}/{total_pairs}; current min {min_distance:.4g} m",
                     )
-        if task is not None:
-            task.done()
 
         if not math.isfinite(min_distance):
             min_distance = 0.0
         part.contour_distance_matrix = distance_matrix
         part.minimal_contour_distance = float(min_distance)
         part.pcb_track_width = float(min_distance)
+    if task is not None:
+        task.done()
     return parts
 
 
@@ -808,8 +811,10 @@ def topological_loop_grouping(
         progress = config
         config = None
 
-    part_task = progress.task("topology parts", len(parts)) if progress else None
+    weights = np.asarray([max(len(part.contour_lines) ** 2, 1) for part in parts], dtype=float)
+    boundaries = np.r_[0, np.cumsum(weights) / max(weights.sum(), 1) * 100]
     for part_ind, part in enumerate(parts):
+        start, end = boundaries[part_ind : part_ind + 2]
         loops = part.contour_lines
         n_loops = len(loops)
         part.groups = []
@@ -819,29 +824,33 @@ def topological_loop_grouping(
         part.loop_in_loop_matrix = np.zeros((n_loops, n_loops), dtype=bool)
         part.topology_diagnostics = {}
         if n_loops == 0:
-            if part_task is not None:
-                part_task.advance(1, message=f"part {part_ind + 1}/{len(parts)} has no contours")
+            if progress is not None:
+                progress.report(end, f"part {part_ind + 1}/{len(parts)} has no contours", force=True)
             continue
 
         if progress is not None:
             progress.report(
-                0.0,
+                None,
                 f"part {part_ind + 1}/{len(parts)}: validating {n_loops} contour loop(s) for intrinsic topology",
                 force=True,
             )
-        validation = validate_intrinsic_topology_inputs(part, check_separating=True, progress=progress)
+        with progress_scope(start, start + 0.4 * (end - start), "Validate intrinsic contour topology"):
+            validation = validate_intrinsic_topology_inputs(part, check_separating=True, progress=progress)
         part.topology_diagnostics = validation.as_dict()
         validation.raise_for_errors()
 
         if progress is not None:
             progress.report(
-                0.0,
+                None,
                 f"part {part_ind + 1}/{len(parts)}: building {n_loops} x {n_loops} loop inclusion matrix",
                 force=True,
             )
-        contains = build_intrinsic_loop_inclusion_matrix(part, validate=False, progress=progress)
+        with progress_scope(start + 0.4 * (end - start), start + 0.9 * (end - start), "Build loop inclusion matrix"):
+            contains = build_intrinsic_loop_inclusion_matrix(part, validate=False, progress=progress)
         part.loop_in_loop_matrix = contains.copy()
 
+        if progress is not None:
+            progress.report(None, f"Classify contour groups on support {part_ind + 1}/{len(parts)}", force=True)
         method = _topological_grouping_method(config)
         contains_groups = _containment_grouping_from_matrix(contains)
         signatures: list[LoopTopologySignature] = []
@@ -878,16 +887,14 @@ def topological_loop_grouping(
                 )
             )
         part.topology_diagnostics["group_outer_loop_indices"] = group_outer_loop_indices
-        if part_task is not None:
-            part_task.advance(
-                1,
+        if progress is not None:
+            progress.report(
+                end,
                 message=(
                     f"part {part_ind + 1}/{len(parts)}: {n_loops} loops -> "
                     f"{len(part.groups)} group(s), {len(part.group_levels)} level(s)"
                 ),
             )
-    if part_task is not None:
-        part_task.done()
     return parts
 
 
@@ -1014,6 +1021,11 @@ def interconnect_within_groups(
                 if task is not None:
                     task.update(completed_groups, message=f"group {group_ind + 1}/{len(part.groups)} is a single loop")
                 continue
+
+            if progress is not None:
+                progress.report(
+                    None, f"Select cuts for support {part_ind + 1} group {group_ind + 1}/{len(part.groups)}", force=True
+                )
 
             opened_loops: list[ContourLine] = []
             opening_cuts: list[np.ndarray] = []
@@ -1160,6 +1172,8 @@ def interconnect_among_groups(
                     force=True,
                 )
             geodesic_solver = SurfaceGeodesicSolver(part.mesh) if use_geodesic_connections else None
+            if progress is not None:
+                progress.report(None, f"Fuse groups on support {part_ind + 1}/{len(parts)}", force=True)
             part.wire_path = _greedy_fuse_connected_groups(
                 part.connected_groups,
                 geodesic_solver,
@@ -1196,6 +1210,12 @@ def interconnect_among_groups(
                                 f"method={config.inter_group_connection_path_method}"
                             ),
                             force=completed_connections == 0,
+                        )
+                    if progress is not None:
+                        progress.report(
+                            None,
+                            f"Select circuit connector on support {part_ind + 1} · {len(groups_to_connect)} groups",
+                            force=True,
                         )
                     connection = _select_group_connection(
                         part,
@@ -3569,7 +3589,12 @@ def shift_return_paths(parts: list[CoilPart], config: CoilGenConfig) -> list[Coi
     The paired underpass is explicitly held on the support surface.
     """
 
-    for part in parts:
+    reporter = ProgressReporter.from_config(config, label="Return paths")
+    for part_index, part in enumerate(parts):
+        reporter.report(
+            100 * part_index / len(parts), f"Completed return-path supports {part_index}/{len(parts)}", force=True
+        )
+        reporter.report(None, f"Resolve return-path crossings on support {part_index + 1}/{len(parts)}", force=True)
         part.normal_shift_diagnostics = {}
         part.normal_shift_provenance = {}
         if part.wire_path is None:
@@ -3823,6 +3848,7 @@ def shift_return_paths(parts: list[CoilPart], config: CoilGenConfig) -> list[Coi
                     "points_after_lift_before_repair is the input-sized vertex-lift stage"
                 ),
             )
+    reporter.report(100, "Return-path supports complete", force=True)
     return parts
 
 
@@ -4493,8 +4519,11 @@ def cleanup_wire_paths(
                 force=part_ind == 0,
             )
         if part.wire_path is None:
-            part.route_diagnostics = route_diagnostics(part, config)
-            _raise_on_bad_route_quality(part, config)
+            with progress_scope(
+                100 * part_ind / len(parts), 100 * (part_ind + 1) / len(parts), "Validate route geometry"
+            ):
+                part.route_diagnostics = route_diagnostics(part, config)
+                _raise_on_bad_route_quality(part, config)
             if task is not None:
                 task.advance(1, message=f"part {part_ind + 1}/{len(parts)} has no connected wire path")
             continue
@@ -4512,8 +4541,11 @@ def cleanup_wire_paths(
         if part.shift_array is not None and len(part.shift_array) == len(source_path.v):
             part.shift_array = _transfer_point_scalars(source_path.v, part.shift_array, cleaned)
             part.points_to_shift = part.shift_array > 0.0
-        part.route_diagnostics = route_diagnostics(part, config)
-        _raise_on_bad_route_quality(part, config)
+        with progress_scope(
+            100 * part_ind / len(parts), 100 * (part_ind + 1) / len(parts), "Validate cleaned route geometry"
+        ):
+            part.route_diagnostics = route_diagnostics(part, config)
+            _raise_on_bad_route_quality(part, config)
         if task is not None:
             task.advance(
                 1,

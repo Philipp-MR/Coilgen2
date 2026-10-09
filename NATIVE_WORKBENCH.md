@@ -210,8 +210,19 @@ Finishing an older revision leaves the selected view intact and makes its result
 available through Jobs and Results. Stopped live snapshots retain their stopped status.
 Selecting another plot pauses **Follow run**; enable it to resume. Jobs stays an
 on-demand window, so submitting a computation keeps the graphics visible.
-The lower-left status bar displays **Computing (45%)** using reported worker
-progress, or **Computing…** when its percentage is unknown. It remains visible
+The lower-left status bar displays **Computing (45%)** using allocated overall
+work, or **Computing…** when its percentage is unknown. Mesh nodes, field chunks,
+contours, routing work, validation samples and saved evidence advance it from
+actual completed work. Updates reach the GUI about five times per second;
+worker messages are coalesced rather than writing each numerical update to disk.
+Enabled operations receive work allocations; omitted or reused stages are
+excluded. These percentages estimate work, not elapsed time or an ETA. An opaque
+factorization or file compression keeps the completed-work percentage and shows
+a busy bar; its activity remains visible without inventing solver convergence.
+The tooltip separates overall work from the current operation's percentage and
+completed/total counts. The job reaches 100% only after saved evidence verifies.
+Field analysis, harmonic fits, array studies and engineering tasks also feed
+their measured progress into this indicator. It remains visible
 while viewing an older run, switching channels or closing the project. Multiple
 workers show a count with individual progress in the tooltip. Queued jobs,
 cancellation and other background work have distinct labels; terminal jobs clear

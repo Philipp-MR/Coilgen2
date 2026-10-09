@@ -180,6 +180,9 @@ def validate_on_independent_grid(result: Any, *, resolution: int = 12, design_ma
     This changes sample locations, not the field-kernel quadrature accuracy.
     """
     config = result.input_data
+    from ..progress import ProgressReporter, progress_scope
+
+    reporter = ProgressReporter.from_config(config, label="Independent sheet validation")
     reason = _unsupported_contract(result)
     imported_map = str(config.target_field_definition_file).strip().lower() not in {"", "none"}
     legacy_mesh = config.target_region_geometry is None and str(config.target_mesh_file).strip().lower() not in {
@@ -190,7 +193,9 @@ def validate_on_independent_grid(result: Any, *, resolution: int = 12, design_ma
         reason = "Imported targets require a separately supplied independent validation dataset."
     if reason:
         return {"available": False, "verified": False, "passed": None, "reason": reason}
-    validation = sample_independent_target(result, resolution=resolution)
+    with progress_scope(0, 10):
+        reporter.report(None, "Sampling the independent desired-field grid")
+        validation = sample_independent_target(result, resolution=resolution)
     points, target = validation.coords, validation.b
     parts = [
         replace(
@@ -204,14 +209,20 @@ def validate_on_independent_grid(result: Any, *, resolution: int = 12, design_ma
         )
         for part in result.coil_parts
     ]
-    for part in parts:
+    for index, part in enumerate(parts):
         part.mesh.face_normals = compute_face_normals(part.mesh)
         part.mesh.vertex_normals = compute_vertex_normals(part.mesh)
-    calculate_one_ring_by_mesh(parts)
-    calculate_basis_functions(parts)
-    calculate_sensitivity_matrix(parts, validation, config)
+        reporter.report(10 + 5 * (index + 1) / len(parts), "Preparing independent surface geometry")
+    with progress_scope(15, 20):
+        calculate_one_ring_by_mesh(parts)
+    with progress_scope(20, 30):
+        calculate_basis_functions(parts)
+    with progress_scope(30, 95):
+        reporter.report(0, "Evaluating independent current-sheet samples")
+        calculate_sensitivity_matrix(parts, validation, config)
     field = sum(np.einsum("ctv,v->tc", part.sensitivity_matrix, part.stream_function) for part in parts)
     check = field_budget_check(result, field, target, design_margin=design_margin)
+    reporter.finish("Independent sheet validation complete")
     return {
         "available": True,
         "point_count": len(points),
@@ -323,6 +334,9 @@ def validate_winding_on_independent_grid(
     if not np.isfinite(design_margin) or not 0 < design_margin <= 1:
         raise ValueError("design_margin must be a finite fraction in (0,1].")
     config, spec = result.input_data, _spec(result)
+    from ..progress import ProgressReporter, progress_scope
+
+    reporter = ProgressReporter.from_config(config, label="Independent winding validation")
     report = {
         "available": False,
         "verified": False,
@@ -354,7 +368,9 @@ def validate_winding_on_independent_grid(
         return report
 
     try:
-        target = sample_independent_target(result, resolution=resolution)
+        with progress_scope(0, 5):
+            reporter.report(None, "Sampling the independent winding-validation grid")
+            target = sample_independent_target(result, resolution=resolution)
     except (ValueError, TypeError, KeyError, OverflowError) as exc:
         return unavailable(str(exc))
     points = np.asarray(target.coords, dtype=float)
@@ -396,7 +412,7 @@ def validate_winding_on_independent_grid(
     bodies = {body["body_id"]: body for body in bodies}
     field, bisected_field = np.zeros_like(points), np.zeros_like(points)
     unknown = []
-    for plan in plans:
+    for index, plan in enumerate(plans):
         id_ = plan["body_id"]
         try:
             path = np.asarray(plan["electrical_points_m"], dtype=float)
@@ -421,10 +437,16 @@ def validate_winding_on_independent_grid(
         ):
             unknown.append(f"Recorded winding body {id_} has no complete modeled return circuit.")
         report["currents_A"][id_] = current
-        field += current * biot_savart_wire_path(path, points, worker_count=1)
+        start, span = 5 + 85 * index / len(plans), 85 / len(plans)
+        with progress_scope(start, start + span / 2):
+            reporter.report(0, f"Evaluating unchanged winding body {index + 1}/{len(plans)}")
+            field += current * biot_savart_wire_path(path, points, worker_count=1)
         bisected = np.empty((2 * len(path) - 1, 3))
         bisected[::2], bisected[1::2] = path, (path[:-1] + path[1:]) / 2
-        bisected_field += current * biot_savart_wire_path(bisected, points, worker_count=1)
+        with progress_scope(start + span / 2, start + span):
+            reporter.report(0, f"Checking exact-segment integration for body {index + 1}/{len(plans)}")
+            bisected_field += current * biot_savart_wire_path(bisected, points, worker_count=1)
+    reporter.report(90, "Comparing independent winding fields, linearity and error bounds")
     if spec.field_constraints or spec.scenarios:
         unknown.append("Custom field/scenario contracts require separate independent winding operators and datasets.")
     if (
@@ -494,6 +516,7 @@ def validate_winding_on_independent_grid(
         checks=checks,
         unknown_reasons=unknown,
     )
+    reporter.finish("Independent winding validation complete")
     return report
 
 
@@ -525,6 +548,9 @@ def validate_fabricated_constraints(
     coordinates, so their absence is an explicit unknown acceptance blocker.
     """
     config, spec = result.input_data, _spec(result)
+    from ..progress import ProgressReporter, progress_scope
+
+    reporter = ProgressReporter.from_config(config, label="Fabricated physics validation")
     unknown: list[str] = []
     checks: list[dict[str, Any]] = []
     if spec.sheet_power_limit_W is not None:
@@ -572,7 +598,7 @@ def validate_fabricated_constraints(
     field = np.zeros_like(result.target_field.b, dtype=float)
     force, torque = np.zeros(3), np.zeros(3)
     complete_circuits = paths_valid
-    for plan in plans:
+    for index, plan in enumerate(plans):
         body = bodies.get(plan.get("body_id"))
         if body is None:
             paths_valid = False
@@ -594,7 +620,9 @@ def validate_fabricated_constraints(
                 unknown.append(
                     f"Electrical path {plan.get('body_id')} claims a complete circuit but is geometrically open."
                 )
-            field += current * biot_savart_wire_path(points, result.target_field.coords, worker_count=1)
+            with progress_scope(95 * index / len(plans), 95 * (index + 1) / len(plans)):
+                reporter.report(0, f"Rechecking original-current field and mechanical loads: {plan.get('body_id')}")
+                field += current * biot_savart_wire_path(points, result.target_field.coords, worker_count=1)
         except (KeyError, TypeError, ValueError) as exc:
             unknown.append(f"Electrical path {plan.get('body_id')} is invalid: {exc}")
             paths_valid = False
@@ -645,6 +673,7 @@ def validate_fabricated_constraints(
     checks.extend({"name": reason, "value": None, "limit": None, "unit": "", "passed": None} for reason in unknown)
     uniform_paths_available = paths_valid and spec.background_B_per_face_T is None
     uniform_available = uniform_paths_available and complete_circuits
+    reporter.finish("Fabricated physical limits reviewed")
     return {
         "checks": checks,
         "unknown_reasons": unknown,

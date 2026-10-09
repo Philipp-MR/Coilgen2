@@ -3,12 +3,16 @@ from __future__ import annotations
 import numpy as np
 
 from .models import BasisElement, CoilPart
+from .progress import ProgressReporter
 
 
 MAX_CURRENT_DENSITY_MATRIX_BYTES = 512 * 1024**2
 
 
 def calculate_one_ring_by_mesh(parts: list[CoilPart]) -> list[CoilPart]:
+    task = ProgressReporter(label="One-ring").task(
+        "mesh faces and vertex neighborhoods", sum(part.mesh.n_faces + part.mesh.n_vertices for part in parts)
+    )
     for part in parts:
         mesh = part.mesh
         if mesh.vertex_normals is None:
@@ -17,6 +21,7 @@ def calculate_one_ring_by_mesh(parts: list[CoilPart]) -> list[CoilPart]:
         for face_ind, face in enumerate(mesh.faces):
             for node in face:
                 node_triangles[int(node)].append(face_ind)
+            task.advance()
         one_ring_list: list[np.ndarray] = []
         for node_ind, tri_inds in enumerate(node_triangles):
             pairs: list[list[int]] = []
@@ -33,12 +38,15 @@ def calculate_one_ring_by_mesh(parts: list[CoilPart]) -> list[CoilPart]:
                     other.reverse()
                 pairs.append(other)
             one_ring_list.append(np.asarray(pairs, dtype=np.int64))
+            task.advance()
         part.node_triangles = [np.asarray(tris, dtype=np.int64) for tris in node_triangles]
         part.one_ring_list = one_ring_list
+    task.done()
     return parts
 
 
 def calculate_basis_functions(parts: list[CoilPart]) -> list[CoilPart]:
+    task = ProgressReporter(label="Basis").task("support vertices", sum(part.mesh.n_vertices for part in parts))
     for part in parts:
         mesh = part.mesh
         dense_bytes = mesh.n_vertices * mesh.n_faces * 3 * np.dtype(float).itemsize
@@ -83,8 +91,10 @@ def calculate_basis_functions(parts: list[CoilPart]) -> list[CoilPart]:
                     current=np.asarray(currents, dtype=float),
                 )
             )
+            task.advance()
         part.basis_elements = basis_elements
         part.current_density_mat = current_density_mat
+    task.done()
     return parts
 
 

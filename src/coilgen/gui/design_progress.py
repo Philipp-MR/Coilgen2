@@ -100,7 +100,21 @@ def _percent(value):
         value = float(value)
     except (OverflowError, ValueError):
         return None
-    return round(value * 100) if math.isfinite(value) and 0 <= value <= 1 else None
+    if not math.isfinite(value) or not 0 <= value <= 1:
+        return None
+    return min(99, round(value * 100)) if value < 1 else 100
+
+
+def _work_detail(state):
+    detail = ""
+    if state.get("progress_indeterminate"):
+        detail = " · current operation has no measurable work total"
+    elif (value := _percent(state.get("phase_progress"))) is not None:
+        detail = f" · current operation {value}%"
+    completed, total = state.get("progress_completed"), state.get("progress_total")
+    if isinstance(completed, int) and isinstance(total, int) and total > 0:
+        detail += f" ({completed}/{total} work units)"
+    return detail
 
 
 class ComputationIndicator(QWidget):
@@ -133,6 +147,7 @@ class ComputationIndicator(QWidget):
         active = [state for state in states if state.get("status") in {"running", "cancelling"}]
         queued = [state for state in states if state.get("status") == "queued"]
         percent = None
+        indeterminate = False
         busy = bool(active or working)
         details = []
         if unavailable:
@@ -141,12 +156,15 @@ class ComputationIndicator(QWidget):
             details.append(unavailable)
         elif active:
             cancelling = all(state["status"] == "cancelling" for state in active)
-            if len(active) > 1:
+            if working:
+                text = f"Computing ({len(active) + len(working)} tasks)"
+            elif len(active) > 1:
                 text = f"{'Cancelling' if cancelling else 'Computing'} ({len(active)} jobs)"
             elif cancelling:
                 text = "Cancelling…"
             else:
                 percent = _percent(active[0].get("progress"))
+                indeterminate = bool(active[0].get("progress_indeterminate"))
                 text = f"Computing ({percent}%)" if percent is not None else "Computing…"
             for state in active:
                 value = _percent(state.get("progress"))
@@ -154,10 +172,18 @@ class ComputationIndicator(QWidget):
                     f"{state.get('name') or state.get('id') or 'Worker'}: {state['status']}"
                     + (f" ({value}%)" if value is not None else "")
                     + (f" · {state['stage']}" if state.get("stage") else "")
+                    + _work_detail(state)
                 )
-            details.append("Worker-reported progress; multiple jobs have no combined percentage.")
+            details.append(
+                "Overall progress estimates allocated work, not elapsed or remaining time. Concurrent tasks have no combined percentage."
+            )
         elif working:
-            text = "Working…"
+            if len(working) == 1 and isinstance(working[0], Mapping):
+                percent = _percent(working[0].get("progress"))
+                indeterminate = bool(working[0].get("progress_indeterminate"))
+                text = f"Computing ({percent}%)" if percent is not None else "Computing…"
+            else:
+                text = f"Working ({len(working)} tasks)" if len(working) > 1 else "Working…"
         elif queued:
             text = "Queued" if len(queued) == 1 else f"Queued ({len(queued)} jobs)"
             details.append("Waiting for an available worker; computation has not started.")
@@ -165,12 +191,22 @@ class ComputationIndicator(QWidget):
             self.label.clear()
             self.hide()
             return
-        details.extend(working)
+        for item in working:
+            if isinstance(item, Mapping):
+                value = _percent(item.get("progress"))
+                details.append(
+                    str(item.get("name", "Computing"))
+                    + (f" ({value}%)" if value is not None else "")
+                    + (f" · {item['stage']}" if item.get("stage") else "")
+                    + _work_detail(item)
+                )
+            else:
+                details.append(str(item))
         self.label.setText(text)
         self.setToolTip("\n".join(details))
         self.label.setToolTip(self.toolTip())
         self.progress.setVisible(busy)
-        self.progress.setRange(0, 100 if percent is not None else 0)
+        self.progress.setRange(0, 100 if percent is not None and not indeterminate else 0)
         if percent is not None:
             self.progress.setValue(percent)
         apply_tone(self.label, "warning" if unavailable else "info")
@@ -337,8 +373,10 @@ def build_design_progress(
         percent = None
     elif percent is not None:
         tooltip += f" Worker-reported work progress: {percent}%; it does not verify stage completion."
+        tooltip += " Overall progress estimates allocated work, not remaining time." + _work_detail(state)
     busy = not runtime_unavailable and (
-        verification == "pending" or (status in {"running", "cancelling"} and percent is None)
+        verification == "pending"
+        or (status in {"running", "cancelling"} and (percent is None or state.get("progress_indeterminate", False)))
     )
     return DesignProgressState(
         tuple(stages),
@@ -501,8 +539,13 @@ class DesignProgress(QWidget):
         self.progress_bar.setRange(0, 0 if snapshot.busy else 100)
         self.progress_bar.setValue(snapshot.percent if snapshot.percent is not None else 0)
         self.progress_bar.setFormat(
-            "Queued" if snapshot.status == "queued" else "%p%" if snapshot.percent is not None else "Unreported"
+            "Queued"
+            if snapshot.status == "queued"
+            else f"{snapshot.percent}%"
+            if snapshot.percent is not None
+            else "Unreported"
         )
+        self.progress_bar.setToolTip(snapshot.tooltip)
         last_status = _text(state.get("status")) if isinstance(state, Mapping) else ""
         self.follow_button.setVisible(
             snapshot.follow_available or snapshot.status == "unavailable" and last_status in _ACTIVE

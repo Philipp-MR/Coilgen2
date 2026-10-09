@@ -131,6 +131,78 @@ def test_background_work_is_visible_even_without_a_design_job(windows):
     assert indicator.isHidden()
 
 
+def test_local_field_work_reports_percent_phase_and_unknown_factorization(windows):
+    window = windows()
+    label = "Field analysis"
+    window._research_busy(label, True)
+    window._research_progress(
+        label, {"percent": 37, "message": "slice point integration", "completed": 37, "total": 100}
+    )
+    indicator = window.computation_indicator
+    assert indicator.label.text() == "Computing (37%)" and indicator.progress.value() == 37
+    assert "37/100 work units" in indicator.toolTip()
+    window._research_progress(label, {"percent": None, "message": "harmonic factorization"})
+    assert indicator.label.text() == "Computing…" and indicator.progress.maximum() == 0
+    assert "harmonic factorization" in indicator.toolTip()
+    window._research_busy(label, False)
+    assert indicator.isHidden() and label not in window._local_progress
+    # Late queued callbacks cannot resurrect a completed/closed task.
+    window._research_progress(label, {"percent": 98, "message": "late callback"})
+    assert indicator.isHidden()
+
+
+def test_opaque_worker_keeps_completed_work_floor_and_shows_busy_activity(windows):
+    window = windows()
+    publish(window, progress=0.45, progress_indeterminate=True, phase_progress=None, stage="Sparse factorization")
+    indicator = window.computation_indicator
+    assert indicator.label.text() == "Computing (45%)" and indicator.progress.maximum() == 0
+    assert "current operation has no measurable work total" in indicator.toolTip()
+    publish(
+        window, progress=0.46, progress_indeterminate=False, phase_progress=0.3, progress_completed=3, progress_total=10
+    )
+    assert indicator.label.text() == "Computing (46%)" and indicator.progress.value() == 46
+    assert "current operation 30% (3/10 work units)" in indicator.toolTip()
+
+
+def test_nearly_finished_local_work_cannot_round_to_100_percent(windows):
+    window = windows()
+    window._research_busy("Field analysis", True)
+    window._research_progress("Field analysis", {"percent": 99.95, "message": "Final samples"})
+    assert window.computation_indicator.label.text() == "Computing (99%)"
+    window._research_progress("Field analysis", {"percent": 100, "message": "Complete"})
+    assert window.computation_indicator.label.text() == "Computing (100%)"
+    window._research_busy("Field analysis", False)
+
+
+def test_two_copied_result_analyses_with_same_label_keep_independent_activity(windows):
+    window = windows()
+    label = "Field analysis · identical saved run"
+    first, second = ("first directory", "digest"), ("second directory", "digest")
+    window._research_busy(label, True, key=first)
+    window._research_busy(label, True, key=second)
+    assert window.computation_indicator.label.text() == "Working (2 tasks)"
+    window._research_busy(label, False, key=first)
+    assert window._research_active_tasks == {second}
+    window._research_progress(label, {"percent": 24, "message": "Samples"}, key=second)
+    assert window.computation_indicator.label.text() == "Computing (24%)"
+    window._research_busy(label, False, key=second)
+    assert window.computation_indicator.isHidden()
+
+
+def test_engineering_task_progress_signal_updates_indicator_and_clears_on_finish(windows):
+    from coilgen.gui.design_tasks import DesignStudyTask
+
+    window = windows()
+    task = DesignStudyTask(lambda project: None, window.project)
+    window._gradient_tasks = {task.signals: (task, lambda value: None, "Measurement comparison")}
+    task.signals.progress.connect(window._gradient_action_progress)
+    task.signals.finished.connect(window._gradient_action_finished)
+    task.signals.progress.emit({"percent": 61, "message": "Compared samples"})
+    assert window.computation_indicator.label.text() == "Computing (61%)"
+    task.signals.finished.emit(None, "")
+    assert window.computation_indicator.isHidden() and task.signals not in window._local_progress
+
+
 def test_failed_runtime_refresh_does_not_present_stale_percent_as_current_activity(windows, monkeypatch):
     window = windows()
     publish(window)
@@ -172,11 +244,24 @@ def test_local_export_stays_active_while_job_runtime_is_unavailable_and_recovers
     window._artifact_export_task = object()
     monkeypatch.setattr(window.jobs, "list", original)
     window.poll_jobs()
-    assert indicator.label.text() == "Computing (45%)" and indicator.progress.value() == 45
+    assert indicator.label.text() == "Computing (2 tasks)" and indicator.progress.maximum() == 0
     assert "Exporting saved artifacts" in indicator.toolTip()
     window._artifact_export_task = None
     publish(window, status="completed", progress=1)
     assert indicator.isHidden()
+
+
+def test_concurrent_field_analysis_and_job_have_individual_percentages_without_ambiguous_total(windows):
+    window = windows()
+    publish(window, progress=0.53)
+    window._research_busy("Field analysis", True)
+    window._research_progress("Field analysis", {"percent": 19, "message": "Slice integration"})
+    indicator = window.computation_indicator
+    assert indicator.label.text() == "Computing (2 tasks)" and indicator.progress.maximum() == 0
+    assert "Gradient study: running (53%)" in indicator.toolTip()
+    assert "Field analysis (19%)" in indicator.toolTip()
+    window._research_busy("Field analysis", False)
+    assert indicator.label.text() == "Computing (53%)"
 
 
 def test_repeated_poll_processing_errors_are_reported_once_and_recover(windows, monkeypatch):

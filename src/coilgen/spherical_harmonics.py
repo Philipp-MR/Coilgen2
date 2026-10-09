@@ -7,6 +7,13 @@ from typing import Any, Mapping
 import numpy as np
 
 
+def _fit_activity(progress, cancel_check, percent, message):
+    if cancel_check is not None and cancel_check():
+        raise InterruptedError("Spherical harmonic analysis cancelled.")
+    if progress is not None:
+        progress(percent, message)
+
+
 @dataclass(frozen=True, slots=True)
 class SphericalHarmonicTerm:
     """One real solid spherical-harmonic basis term."""
@@ -66,6 +73,8 @@ def solid_spherical_harmonic_basis(
     center: np.ndarray | None = None,
     radius: float | None = None,
     weights: np.ndarray | None = None,
+    progress=None,
+    cancel_check=None,
 ) -> tuple[np.ndarray, tuple[SphericalHarmonicTerm, ...], np.ndarray, float]:
     """Build a normalized real solid spherical-harmonic basis for sample points.
 
@@ -75,6 +84,7 @@ def solid_spherical_harmonic_basis(
     comparable between before/after fits on the same target cloud.
     """
 
+    _fit_activity(progress, cancel_check, 0, "Prepare harmonic basis coordinates")
     coords = _as_coordinate_array(coords)
     finite = np.all(np.isfinite(coords), axis=1)
     if not np.any(finite):
@@ -111,9 +121,13 @@ def solid_spherical_harmonic_basis(
     terms = solid_spherical_harmonic_terms(max_order)
     basis = np.empty((len(coords), len(terms)), dtype=float)
     for column, term in enumerate(terms):
+        _fit_activity(
+            progress, cancel_check, 100 * column / len(terms), f"Construct harmonic basis {column}/{len(terms)}"
+        )
         degree = int(term.degree)
         order = int(term.order)
         basis[:, column] = np.power(rho, degree) * _real_spherical_harmonic(degree, order, cos_theta, phi)
+    _fit_activity(progress, cancel_check, 100, f"Harmonic basis {len(terms)}/{len(terms)} complete")
     return basis, terms, center_arr, radius_value
 
 
@@ -152,9 +166,12 @@ def fit_spherical_harmonics_many(
     radius: float | None = None,
     rcond: float | None = None,
     unit: str = "",
+    progress=None,
+    cancel_check=None,
 ) -> dict[str, SphericalHarmonicFit]:
     """Fit fields on one common support with a single basis/factorization."""
 
+    _fit_activity(progress, cancel_check, None, "Validate common harmonic fit samples")
     if not values_by_source:
         return {}
     coords = _as_coordinate_array(coords)
@@ -179,6 +196,8 @@ def fit_spherical_harmonics_many(
         center=center,
         radius=radius,
         weights=fit_weights,
+        progress=lambda percent, message: _fit_activity(progress, cancel_check, None, message),
+        cancel_check=cancel_check,
     )
     if fit_weights is None:
         weighted_basis = basis
@@ -188,12 +207,19 @@ def fit_spherical_harmonics_many(
         weighted_basis = basis * root_weights
         weighted_values = fit_values * root_weights
 
+    _fit_activity(
+        progress, cancel_check, None, "Solve shared harmonic least squares (factorization progress unavailable)"
+    )
     coefficients, _, rank, singular_values = np.linalg.lstsq(weighted_basis, weighted_values, rcond=rcond)
+    _fit_activity(progress, cancel_check, None, "Reconstruct harmonic fields and residuals")
     fitted = basis @ coefficients
     residual = fit_values - fitted
     basis_rms = _weighted_rms_columns(basis, fit_weights)
     fits = {}
     for index, source in enumerate(source_keys):
+        _fit_activity(
+            progress, cancel_check, None, f"Summarize harmonic field {index + 1}/{len(source_keys)} · {source}"
+        )
         field_rms = _weighted_rms(fit_values[:, index], fit_weights)
         residual_rms = _weighted_rms(residual[:, index], fit_weights)
         fits[source] = SphericalHarmonicFit(
@@ -212,6 +238,7 @@ def fit_spherical_harmonics_many(
             rank=int(rank),
             singular_values=np.asarray(singular_values, dtype=float).copy(),
         )
+    _fit_activity(progress, cancel_check, 100, "Common harmonic fit complete")
     return fits
 
 

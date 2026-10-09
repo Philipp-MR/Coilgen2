@@ -32,6 +32,7 @@ from .cohort_shim import (
 )
 from .models import CoilGenResult, CoilPart
 from .physics import biot_savart_wire_path
+from .progress import ProgressReporter, progress_scope
 
 
 ProgressCallback = Callable[[str], None]
@@ -39,6 +40,7 @@ _SCHEMA_VERSION = 1
 
 
 def _emit(callback: ProgressCallback | None, message: str) -> None:
+    ProgressReporter(label="Contour cohort").report(None, message)
     if callback is not None:
         callback(message)
 
@@ -507,6 +509,7 @@ def evaluate_contour_family_fields(
     cache: dict[tuple[bytes, tuple[float, float, float]], np.ndarray] = {}
     total = len(dataset.scenarios) * dictionary.contour_count
     completed = 0
+    reporter = ProgressReporter(label="Contour dictionary fields")
     started = perf_counter()
     _emit(
         progress_callback,
@@ -526,20 +529,22 @@ def evaluate_contour_family_fields(
                 f"Contour fields {scenario_index + 1}/{len(dataset.scenarios)}: "
                 f"{scenario.scenario_id} reused identical sampling cache.",
             )
+            reporter.report(100 * completed / total, f"Reused verified sampling cache: {completed}/{total} contours")
             continue
         family_matrix = np.zeros((scenario.sample_count, dictionary.family_count), dtype=float)
         b0 = np.asarray(direction, dtype=float)
         for family_index, family_paths in enumerate(contour_points):
             vector_field = np.zeros((scenario.sample_count, 3), dtype=float)
             for path in family_paths:
-                vector_field += biot_savart_wire_path(
-                    path,
-                    coords,
-                    chunk_size=chunk_size,
-                    worker_count=worker_count,
-                    min_work_size=min_work_size,
-                    max_chunk_memory_mb=max_chunk_memory_mb,
-                )
+                with progress_scope(100 * completed / total, 100 * (completed + 1) / total):
+                    vector_field += biot_savart_wire_path(
+                        path,
+                        coords,
+                        chunk_size=chunk_size,
+                        worker_count=worker_count,
+                        min_work_size=min_work_size,
+                        max_chunk_memory_mb=max_chunk_memory_mb,
+                    )
                 completed += 1
             family_matrix[:, family_index] = vector_field @ b0
         immutable = _readonly(family_matrix)
@@ -550,6 +555,7 @@ def evaluate_contour_family_fields(
             f"Contour fields {scenario_index + 1}/{len(dataset.scenarios)} complete: "
             f"{scenario.scenario_id}; {completed}/{total} references in {perf_counter() - started:.2f} s.",
         )
+        reporter.report(100 * completed / total, f"Contour/scenario references evaluated: {completed}/{total}")
     return fields
 
 
@@ -567,16 +573,17 @@ def design_contour_dictionary_channels(
     if dictionary.family_count < settings.channel_count:
         raise ValueError("The contour dictionary needs at least one family per channel.")
     scenario_weights = _design_scenario_weights(dataset, settings)
-    family_fields = evaluate_contour_family_fields(
-        dictionary,
-        dataset,
-        scanner_from_source=scanner_from_source,
-        chunk_size=settings.biot_savart_chunk_size,
-        worker_count=settings.worker_count,
-        min_work_size=settings.parallel_min_work_size,
-        max_chunk_memory_mb=settings.parallel_max_chunk_memory_mb,
-        progress_callback=progress_callback,
-    )
+    with progress_scope(0, 50):
+        family_fields = evaluate_contour_family_fields(
+            dictionary,
+            dataset,
+            scanner_from_source=scanner_from_source,
+            chunk_size=settings.biot_savart_chunk_size,
+            worker_count=settings.worker_count,
+            min_work_size=settings.parallel_min_work_size,
+            max_chunk_memory_mb=settings.parallel_max_chunk_memory_mb,
+            progress_callback=progress_callback,
+        )
     family_stack = _weighted_field_stack(dataset, family_fields, scenario_weights, center=True)
     family_metrics = _field_metrics(family_stack)
     if family_metrics[1] < settings.channel_count:
@@ -625,6 +632,7 @@ def design_contour_dictionary_channels(
     best: tuple[tuple[float, float, float, tuple[int, ...], tuple[int, ...]], Any] | None = None
     feasible_count = 0
     completed = 0
+    reporter = ProgressReporter(label="Contour dictionary assignment")
     report_interval = max(candidate_count // 20, 1)
     for canonical_partition in partitions:
         for polarity in _relative_polarities(
@@ -657,9 +665,13 @@ def design_contour_dictionary_channels(
                             progress_callback,
                             f"Contour assignment progress: {completed}/{candidate_count} candidates.",
                         )
+                    reporter.report(
+                        50 + 50 * completed / candidate_count, f"Candidates checked: {completed}/{candidate_count}"
+                    )
                     continue
                 feasible_count += 1
-                fit = fit_cohort_currents(dataset, channel_fields, limits, options=settings.fit_options)
+                with progress_scope(50 + 50 * (completed - 1) / candidate_count, 50 + 50 * completed / candidate_count):
+                    fit = fit_cohort_currents(dataset, channel_fields, limits, options=settings.fit_options)
                 objective = float(scenario_weights @ np.square(fit.rms_after_T))
                 score = (
                     objective,
@@ -680,6 +692,9 @@ def design_contour_dictionary_channels(
                         progress_callback,
                         f"Contour assignment progress: {completed}/{candidate_count} candidates.",
                     )
+                reporter.report(
+                    50 + 50 * completed / candidate_count, f"Candidates checked: {completed}/{candidate_count}"
+                )
     if best is None:
         raise RuntimeError("No full-rank contour assignment satisfied the configured normalized field-condition limit.")
     score, payload = best

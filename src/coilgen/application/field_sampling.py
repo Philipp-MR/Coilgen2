@@ -318,6 +318,8 @@ def _physical(points, kind, source, config, check, progress=None):
     from ..physics import biot_savart_wire_path, calculate_sensitivity_matrix
 
     values = np.full_like(points, np.nan)
+    if progress is not None:
+        progress(None)
     valid = _sheet_mask(points, source[0], check) if kind == "sheet" else _wire_mask(points, source, check)
     indices = np.flatnonzero(valid)
     count = len(source[1]) if kind == "sheet" else 1
@@ -326,7 +328,14 @@ def _physical(points, kind, source, config, check, progress=None):
         _cancel(check)
         selected = indices[start : start + chunk_size]
         samples = points[selected]
-        with progress_context(lambda _event: None, cancel_check=check):
+
+        def kernel_progress(event):
+            if progress is not None:
+                percent = None if event.get("progress_indeterminate") else event.get("percent")
+                fraction = None if percent is None else (start + len(selected) * percent / 100) / len(indices)
+                progress(fraction)
+
+        with progress_context(kernel_progress, cancel_check=check):
             if kind == "sheet":
                 part, sf = source
                 target = TargetField(
@@ -341,6 +350,8 @@ def _physical(points, kind, source, config, check, progress=None):
                 part.sensitivity_matrix = None
             else:
                 field_values = np.zeros_like(samples)
+                total_segments = sum(len(path) - 1 for path, _ in source)
+                completed_segments = 0
                 for path, current in source:
                     _cancel(check)
                     for segment_start in range(0, len(path) - 1, 256):
@@ -349,6 +360,9 @@ def _physical(points, kind, source, config, check, progress=None):
                         field_values += current * biot_savart_wire_path(
                             segment_path, samples, worker_count=1, chunk_size=128
                         )
+                        completed_segments += len(segment_path) - 1
+                        if progress is not None:
+                            progress((start + len(selected) * completed_segments / total_segments) / len(indices))
                 values[selected] = field_values
         if progress is not None:
             progress(min(start + chunk_size, len(indices)) / max(len(indices), 1))
@@ -360,10 +374,17 @@ def _physical(points, kind, source, config, check, progress=None):
 class _Interpolator:
     """Affine-rank aware linear interpolation without hull extrapolation or nearest fill."""
 
-    def __init__(self, points, values, max_gap_m=None):
+    def __init__(self, points, values, max_gap_m=None, *, progress=None, cancel_check=None):
         from scipy.spatial import cKDTree, Delaunay
 
         points, values = np.asarray(points), np.asarray(values)
+
+        def activity(message):
+            _cancel(cancel_check)
+            if progress is not None:
+                progress(None, message)
+
+        activity("Check saved interpolation coordinates")
         if len(points) > 100000:
             raise ValueError("Display interpolation supports at most 100000 saved samples.")
         unique, first, inverse = np.unique(points, axis=0, return_index=True, return_inverse=True)
@@ -375,6 +396,7 @@ class _Interpolator:
         self.origin, self.values, self.points = points.mean(axis=0), values, points
         self.tree = cKDTree(points)
         self.tolerance = 128 * np.finfo(float).eps * max(1, np.max(np.abs(points)))
+        activity("Find interpolation coordinate span")
         _, singular, vh = np.linalg.svd(points - self.origin, full_matrices=False)
         self.rank = int(np.count_nonzero(singular > self.tolerance * max(np.sqrt(len(points)), 1)))
         self.basis = vh[: self.rank].T
@@ -386,8 +408,10 @@ class _Interpolator:
             self.max_gap_m = 3 * float(np.median(spacing[spacing > 0]))
         else:
             self.max_gap_m = 0.0
+        activity("Triangulate saved interpolation coverage")
         self.triangulation = Delaunay(self.local) if self.rank >= 2 else None
         self.sorted = np.argsort(self.local[:, 0]) if self.rank == 1 else None
+        _cancel(cancel_check)
 
     def sample(self, points):
         points = np.asarray(points)
@@ -684,6 +708,9 @@ def sample_slices(
     the two in-plane axes. ``direct`` refuses unavailable physical source data;
     ``auto`` explicitly records a display interpolation fallback. Target masks
     are separate: absent imported target coverage never hides a valid field.
+    Percentages count planned slice work, including field blocks and completed
+    geometry/target phases. Opaque reconstruction and triangulation report
+    ``None`` instead of claiming a percentage of unknown work.
     """
     from .field_analysis import FieldDataset, source_catalog
     from .evidence import EvidenceIntegrityError
@@ -700,6 +727,14 @@ def sample_slices(
     if len(set(offsets)) != len(offsets) or len(offsets) * resolution**2 > MAX_GRID_POINTS:
         raise ValueError("Slices must have distinct offsets and at most 524288 combined grid points.")
     _cancel(cancel_check)
+
+    def report(percent, message):
+        _cancel(cancel_check)
+        if progress is not None:
+            progress(percent, message)
+
+    report(0, "Prepare saved-field slice analysis")
+    report(None, "Read verified saved slice request")
     request = _request(record, request)
     if isinstance(dataset, str):
         dataset = next((item for item in source_catalog(record, request=request) if item.key == dataset), None)
@@ -712,9 +747,16 @@ def sample_slices(
     config = CoilGenConfig(
         **{key: value for key, value in config_values.items() if key in {item.name for item in fields(CoilGenConfig)}}
     )
-    config = replace(config, parallel_worker_count=1, progress_flag=False)
+    config = replace(
+        config,
+        parallel_worker_count=1,
+        progress_flag=False,
+        progress_min_interval_seconds=min(config.progress_min_interval_seconds, 0.2),
+        progress_percent_step=min(config.progress_percent_step, 1.0),
+    )
     kind = dataset.provenance.get("physical_representation", "samples")
     source, fallback_reason, mask_source = None, "", None
+    report(None, "Verify saved desired-field recipe")
     target_function = _target_evaluator(record, dataset, request, row, scenario)
     _check_target_recipe(record, dataset, target_function, row)
     if dataset.key == "target" and target_function is not None and representation != "interpolation":
@@ -722,6 +764,7 @@ def sample_slices(
     elif representation != "interpolation" and kind in {"sheet", "wire"}:
         try:
             _cancel(cancel_check)
+            report(None, "Reconstruct saved physical source and unchanged currents")
             source = (
                 _sheet_source(record, config, scenario)
                 if kind == "sheet"
@@ -738,7 +781,15 @@ def sample_slices(
             check_indices = np.unique(
                 np.linspace(0, len(dataset.points_m) - 1, min(24, len(dataset.points_m)), dtype=int)
             )
-            check_field, valid = _physical(dataset.points_m[check_indices], kind, source, config, cancel_check)
+            report(None, "Reproduce original saved field samples")
+            check_field, valid = _physical(
+                dataset.points_m[check_indices],
+                kind,
+                source,
+                config,
+                cancel_check,
+                lambda fraction: report(None, "Verify saved physical field"),
+            )
             scale = max(float(np.max(np.abs(dataset.field_T[check_indices]))), 1e-15)
             if not np.any(valid):
                 raise ValueError(
@@ -773,7 +824,9 @@ def sample_slices(
         if representation == "direct":
             raise ValueError("This source has no saved physical reevaluation contract.")
         chosen = "display_interpolation"
-        interpolator = _Interpolator(dataset.points_m, dataset.field_T, interpolation_max_gap_m)
+        interpolator = _Interpolator(
+            dataset.points_m, dataset.field_T, interpolation_max_gap_m, progress=report, cancel_check=cancel_check
+        )
     else:
         interpolator = None
     _cancel(cancel_check)
@@ -783,16 +836,25 @@ def sample_slices(
     region = TargetRegion.from_dict(geometry.get("region", geometry)) if geometry is not None else None
     if region is not None and region.shape == "enclosing_mesh":
         try:
+            report(None, "Read and verify owned target boundary")
             enclosure = _owned_enclosure(record, geometry)
         except EvidenceIntegrityError:
             raise
         except (ValueError, OSError) as exc:
             roi_reason, roi_representation = str(exc), "unavailable_owned_enclosure"
     # A convex sampling hull is a coverage overlay, never an authored target volume.
-    hull = _Interpolator(dataset.points_m, dataset.field_T, interpolation_max_gap_m) if geometry is None else None
+    hull = (
+        _Interpolator(
+            dataset.points_m, dataset.field_T, interpolation_max_gap_m, progress=report, cancel_check=cancel_check
+        )
+        if geometry is None
+        else None
+    )
     target_interpolator = None
     if dataset.target_T is not None and target_function is None:
-        target_interpolator = _Interpolator(dataset.points_m, dataset.target_T, interpolation_max_gap_m)
+        target_interpolator = _Interpolator(
+            dataset.points_m, dataset.target_T, interpolation_max_gap_m, progress=report, cancel_check=cancel_check
+        )
     target_representation = (
         "owned_analytic"
         if target_function is not None
@@ -805,8 +867,7 @@ def sample_slices(
     v = np.linspace(centre[vertical] - size[1] / 2, centre[vertical] + size[1] / 2, resolution)
     uv = np.meshgrid(u, v, indexing="xy")
     slices = []
-    if progress is not None:
-        progress(0, f"Sampling {dataset.label} · {chosen}")
+    report(0, f"Sampling {dataset.label} · {chosen}")
     for index, offset in enumerate(offsets):
         _cancel(cancel_check)
         coordinates = np.empty((resolution, resolution, 3))
@@ -814,19 +875,36 @@ def sample_slices(
         points = coordinates.reshape(-1, 3)
         if not np.all(np.isfinite(points)):
             raise ValueError("Slice centre and size overflow finite world coordinates.")
+
+        def slice_progress(fraction, message):
+            percent = None if fraction is None else 100 * (index + fraction) / len(offsets)
+            report(percent, f"Slice {index + 1}/{len(offsets)} · {message}")
+
+        def interpolated_grid(interpolation, message, *, field_progress=False):
+            values, available = np.empty_like(points), np.empty(len(points), bool)
+            for start in range(0, len(points), 1024):
+                _cancel(cancel_check)
+                selected = slice(start, start + 1024)
+                values[selected], available[selected] = interpolation.sample(points[selected])
+                fraction = 0.9 * min(start + 1024, len(points)) / len(points) if field_progress else None
+                slice_progress(fraction, message)
+            return values, available
+
         if kind == "target" and source is not None:
+            slice_progress(None, "Evaluate owned desired field")
             actual = source(points)
             valid = np.all(np.isfinite(actual), axis=1)
+            slice_progress(0.9, "Owned desired field sampled")
         elif source is not None:
 
             def sampled(fraction):
-                if progress is not None:
-                    progress(100 * (index + fraction) / len(offsets), f"Sampling slice {index + 1}/{len(offsets)}")
+                slice_progress(None if fraction is None else 0.9 * fraction, "Evaluate unchanged physical field")
 
             actual, valid = _physical(points, kind, source, config, cancel_check, sampled)
         else:
-            actual, valid = interpolator.sample(points)
+            actual, valid = interpolated_grid(interpolator, "Interpolate saved field coverage", field_progress=True)
             if mask_source is not None:
+                slice_progress(None, "Mask singular physical source locations")
                 mask_kind, saved_source = mask_source
                 valid &= (
                     _sheet_mask(points, saved_source[0], cancel_check)
@@ -834,6 +912,7 @@ def sample_slices(
                     else _wire_mask(points, saved_source, cancel_check)
                 )
                 actual[~valid] = np.nan
+        slice_progress(None, "Intersect target volume and slice plane")
         if geometry is not None:
             try:
                 if region.shape == "enclosing_mesh":
@@ -852,12 +931,14 @@ def sample_slices(
             except ValueError as exc:
                 roi, outlines, roi_representation, roi_reason = None, (), "unavailable_owned_enclosure", str(exc)
         else:
-            _, coverage = hull.sample(points)
+            _, coverage = interpolated_grid(hull, "Find saved sampling hull")
             roi = coverage.reshape(resolution, resolution)
             outlines = _marching_outline(coordinates, np.where(roi, -1.0, 1.0), cancel_check)
+        slice_progress(0.94, "Target boundary complete")
         desired = None
         target_valid = np.zeros(len(points), bool)
         if target_function is not None:
+            slice_progress(None, "Evaluate paired desired field")
             desired = target_function(points)
             target_valid = np.all(np.isfinite(desired), axis=1)
             if roi is not None:
@@ -865,15 +946,17 @@ def sample_slices(
             elif geometry is not None:
                 target_valid[:] = False
         elif target_interpolator is not None:
-            desired, target_valid = target_interpolator.sample(points)
+            desired, target_valid = interpolated_grid(target_interpolator, "Interpolate paired desired field")
             if geometry is not None and roi is not None:
                 target_valid &= roi.ravel()
             elif geometry is not None:
                 target_valid[:] = False
         if desired is not None:
             desired[~target_valid] = np.nan
+        slice_progress(0.97, "Paired target samples complete")
         context = ()
         if "vertices_m" in record.array_names and "faces" in record.array_names:
+            slice_progress(None, "Intersect coil support and slice plane")
             context = _mesh_section(
                 _support_points(record.array("vertices_m", copy=False), scenario),
                 record.array("faces", copy=False),
@@ -898,8 +981,7 @@ def sample_slices(
                 },
             )
         )
-        if progress is not None:
-            progress(100 * (index + 1) / len(offsets), f"Sampled slice {index + 1}/{len(offsets)}")
+        slice_progress(1, "Field, target and geometry complete")
     provenance = {
         "request_sha256": record.metadata.get("request_sha256"),
         "source_scope": dataset.scope,

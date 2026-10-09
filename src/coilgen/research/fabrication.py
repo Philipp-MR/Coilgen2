@@ -29,7 +29,7 @@ from ..manufacturing import (
 from ..models import CoilPart, FabricationPath, Mesh, WirePath
 from ..physics import biot_savart_wire_path
 from ..gradient_engineering import CircuitSpec
-from ..progress import ProgressReporter
+from ..progress import ProgressReporter, progress_scope
 from ..geometry_collision import (
     _segment_bvh_candidate_pairs,
     accelerated_mesh_collision_diagnostics as accelerated_mesh_collision_diagnostics,
@@ -94,8 +94,11 @@ def assembly_clearance(records, *, insulation_thickness_m=0.0, tolerance_m=0.0, 
         raise ValueError("Assembly insulation, tolerance and margin must be finite non-negative lengths.")
     epsilon = 1e-10
     rows = []
+    reporter = ProgressReporter(label="Assembly clearance")
+    task = reporter.task("Checking independent conductor-body pairs", len(records) * (len(records) - 1) // 2)
     for index, first in enumerate(records):
         for second in records[index + 1 :]:
+            reporter.report(None, f"Checking faceted conductor clearance: {first.body_id} / {second.body_id}")
             row = {
                 "first_body": first.body_id,
                 "second_body": second.body_id,
@@ -125,6 +128,7 @@ def assembly_clearance(records, *, insulation_thickness_m=0.0, tolerance_m=0.0, 
             if not len(candidates):
                 row["certificate"] = "disjoint_centroid_capsules"
                 rows.append(row)
+                task.advance()
                 continue
             distances = segment_pair_distances(
                 first_segments[candidates[:, 0]], second_segments[candidates[:, 1]], backend=backend
@@ -135,6 +139,7 @@ def assembly_clearance(records, *, insulation_thickness_m=0.0, tolerance_m=0.0, 
             if not row["conservative_envelope_overlap"]:
                 row["certificate"] = "disjoint_centroid_capsules"
                 rows.append(row)
+                task.advance()
                 continue
             first_triangles, second_triangles = (
                 first.mesh.vertices[first.mesh.faces],
@@ -173,6 +178,7 @@ def assembly_clearance(records, *, insulation_thickness_m=0.0, tolerance_m=0.0, 
             elif row["confirmed_clearance_violation"]:
                 row["status"] = "insulation_or_margin_violation"
             rows.append(row)
+            task.advance()
     return {
         "checked_body_pairs": len(rows),
         "passed": all(not row["confirmed_clearance_violation"] for row in rows),
@@ -469,15 +475,23 @@ def compile_fabrication(
             )
             if part.wire_path is not None and len(part.wire_path.v) >= 2:
                 local = replace(part, swept_body=None, swept_bodies=[], fabrication_path=None)
-                create_swept_coil_meshes([local], replace(config, contour_only_sweep_mode=False))
+                with progress_scope(
+                    35 * (part_index - 1) / len(result.coil_parts), 35 * part_index / len(result.coil_parts)
+                ):
+                    create_swept_coil_meshes([local], replace(config, contour_only_sweep_mode=False))
                 bodies = local.swept_bodies
             else:
-                bodies = [
-                    create_swept_contour_body(
-                        part, contour, config, part_index=part_index, contour_index=index, validate=False
-                    )
-                    for index, contour in enumerate(part.contour_lines, start=1)
-                ]
+                bodies = []
+                for index, contour in enumerate(part.contour_lines, start=1):
+                    with progress_scope(
+                        35 * ((part_index - 1) + (index - 1) / len(part.contour_lines)) / len(result.coil_parts),
+                        35 * ((part_index - 1) + index / len(part.contour_lines)) / len(result.coil_parts),
+                    ):
+                        bodies.append(
+                            create_swept_contour_body(
+                                part, contour, config, part_index=part_index, contour_index=index, validate=False
+                            )
+                        )
             for body_index, body in enumerate(bodies, start=1):
                 body_id = f"part{part_index:03d}_body{body_index:04d}"
                 if body.fabrication_path is None:
@@ -502,14 +516,15 @@ def compile_fabrication(
                     reasons.append(f"{body_id}:weighted_turns_not_physically_expanded")
     if not records:
         reasons.append("no_fabrication_paths")
-    reporter.report(40.0, "Checking insulation and conductor clearance across every body pair")
-    assembly = assembly_clearance(
-        records,
-        insulation_thickness_m=config.sweep_insulation_thickness,
-        tolerance_m=config.sweep_manufacturing_tolerance,
-        margin_m=config.sweep_bend_clearance_margin,
-        backend=kernel_backend,
-    )
+    with progress_scope(35, 55):
+        reporter.report(0, "Checking insulation and conductor clearance across every body pair")
+        assembly = assembly_clearance(
+            records,
+            insulation_thickness_m=config.sweep_insulation_thickness,
+            tolerance_m=config.sweep_manufacturing_tolerance,
+            margin_m=config.sweep_bend_clearance_margin,
+            backend=kernel_backend,
+        )
     if not assembly["passed"]:
         reasons.append("assembly_clearance_violation")
     leads = leads or {}
@@ -532,23 +547,22 @@ def compile_fabrication(
         raise ValueError(f"Circuit geometry references unknown fabrication bodies: {sorted(unknown_circuits)}")
     if set(circuits) & set(leads):
         raise ValueError("Explicit circuits and legacy return geometry cannot target the same body.")
-    plans = [
-        winding_instructions(
-            record,
-            leads.get(record.body_id),
-            checkpoint_spacing_m=checkpoint_spacing_m,
-            circuit=circuits.get(record.body_id),
-        )
-        for record in records
-    ]
+    plans = []
+    for index, record in enumerate(records):
+        with progress_scope(55 + 5 * index / len(records), 55 + 5 * (index + 1) / len(records)):
+            plans.append(
+                winding_instructions(
+                    record,
+                    leads.get(record.body_id),
+                    checkpoint_spacing_m=checkpoint_spacing_m,
+                    circuit=circuits.get(record.body_id),
+                )
+            )
     field = np.zeros_like(result.target_field.b, dtype=float)
     source_field = np.zeros_like(field)
     electrical = []
     for record, plan in zip(records, plans):
-        reporter.report(
-            60.0 + 30.0 * len(electrical) / max(len(records), 1),
-            f"Evaluating physical field and electrical path for {record.body_id}",
-        )
+        start, span = 60 + 35 * len(electrical) / len(records), 35 / len(records)
         points = plan["electrical_points_m"]
         contour_step = result.coil_parts[record.part_index - 1].contour_step
         if contour_step is None:
@@ -556,10 +570,14 @@ def compile_fabrication(
         current = float(contour_step)
         if not np.isfinite(current) or current == 0.0:
             raise ValueError("Fabrication field evaluation requires finite nonzero physical contour currents.")
-        field += current * biot_savart_wire_path(points, result.target_field.coords, worker_count=1)
-        source_field += current * biot_savart_wire_path(
-            record.path.source_points_m, result.target_field.coords, worker_count=1
-        )
+        with progress_scope(start, start + 0.3 * span):
+            reporter.report(0, f"Evaluating fabricated field for {record.body_id}")
+            field += current * biot_savart_wire_path(points, result.target_field.coords, worker_count=1)
+        with progress_scope(start + 0.3 * span, start + 0.6 * span):
+            reporter.report(0, f"Evaluating original source field for {record.body_id}")
+            source_field += current * biot_savart_wire_path(
+                record.path.source_points_m, result.target_field.coords, worker_count=1
+            )
         area = _polygon_area(record.path.cross_section_m)
         proxy = CoilPart(mesh=result.coil_parts[record.part_index - 1].mesh, wire_path=WirePath(v=points))
         circuit_config = replace(
@@ -570,7 +588,9 @@ def compile_fabrication(
             cross_sectional_points=record.path.cross_section_m,
             parallel_worker_count=1,
         )
-        _, inductance, resistance, lengths, _ = calculate_inductance_by_coil_layout([proxy], circuit_config)
+        with progress_scope(start + 0.6 * span, start + span):
+            reporter.report(0, f"Evaluating physical inductance and resistance for {record.body_id}")
+            _, inductance, resistance, lengths, _ = calculate_inductance_by_coil_layout([proxy], circuit_config)
         electrical.append(
             {
                 "body_id": record.body_id,
@@ -674,7 +694,8 @@ def compile_fabrication(
         reporter.report(95.0, "Writing centroid paths, winding instructions and qualified solid artifacts")
         output = Path(output_dir)
         output.mkdir(parents=True, exist_ok=True)
-        for record in records:
+        for index, record in enumerate(records):
+            reporter.report(95 + 4 * index / max(len(records), 1), f"Writing fabrication artifacts: {record.body_id}")
             path = output / f"{record.body_id}_fabrication_centroid.csv"
             np.savetxt(path, record.points_m, delimiter=",", header="x_m,y_m,z_m", comments="", fmt="%.17g")
             report.artifacts.append(str(path.resolve()))

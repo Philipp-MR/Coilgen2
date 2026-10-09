@@ -464,6 +464,23 @@ def test_physical_layout_slices_and_overlays_use_the_evaluated_signed_current():
         np.testing.assert_allclose(section.maps["dBz_dx"][section.mask], expected_dx, rtol=1e-12, atol=1e-16)
 
 
+def test_slice_map_progress_covers_physics_before_diagnostic_tiles_and_preserves_arrays():
+    from coilgen.progress import progress_context, progress_scope
+
+    original = _layout_slice_map_result(parallel_worker_count=1)
+    expected = evaluate_gradient_slice_maps(original)
+    events = []
+    with progress_context(events.append), progress_scope(0, 100, overall=True):
+        actual = evaluate_gradient_slice_maps(_layout_slice_map_result(parallel_worker_count=1))
+    measured = [item["overall_percent"] for item in events]
+    assert measured == sorted(measured) and measured[-1] == 100
+    assert len(set(measured)) > 20
+    assert any("Biot-Savart" in item["message"] and item["overall_percent"] < 90 for item in events)
+    for wanted, saved in zip(expected.slices, actual.slices, strict=True):
+        for name in wanted.maps:
+            np.testing.assert_array_equal(saved.maps[name], wanted.maps[name])
+
+
 def test_slice_cache_tracks_physical_geometry_and_source_even_when_raw_path_is_unchanged():
     result = _layout_slice_map_result(parallel_worker_count=1)
     first = gradient_slice_maps.gradient_slice_map_result(result)

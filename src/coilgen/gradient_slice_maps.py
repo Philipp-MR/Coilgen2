@@ -11,7 +11,7 @@ from .engineering_metrics import ConcomitantFieldReport
 from .metrics import dsv_target_mask, suppression_target_mask
 from .parallel import chunk_ranges, resolve_worker_count
 from .physics import biot_savart_wire_path
-from .progress import ProgressReporter
+from .progress import ProgressReporter, progress_scope
 
 
 AXIS_NAMES = ("x", "y", "z")
@@ -236,6 +236,8 @@ def evaluate_gradient_slice_maps(result: Any, spec: GradientSliceMapSpec | None 
     if resolved_spec.gradient_method != "finite_difference":
         raise ValueError("Only gradient_method='finite_difference' is implemented.")
 
+    reporter = ProgressReporter.from_config(config, label="Gradient slice maps")
+    reporter.report(None, "Prepare gradient slice-grid geometry", force=True)
     axis = _axis_index(resolved_spec.axis)
     plot_axes = _slice_plot_axes(axis)
     region = _slice_region(result, resolved_spec.domain, axis=axis, plot_axes=plot_axes)
@@ -245,8 +247,6 @@ def evaluate_gradient_slice_maps(result: Any, spec: GradientSliceMapSpec | None 
     source = _normalise_source(resolved_spec.source)
     current_scale = _current_scale_A(result, resolved_spec.current)
     polylines = _source_polylines(result, source) if source != "target" else ()
-    reporter = ProgressReporter.from_config(config, label="Gradient slice maps")
-    task = reporter.task("slice-grid field evaluation", len(slice_values)) if reporter.enabled else None
 
     raw_slices: list[dict[str, Any]] = []
     component_units: dict[str, str] = {}
@@ -266,31 +266,32 @@ def evaluate_gradient_slice_maps(result: Any, spec: GradientSliceMapSpec | None 
         )
 
     all_points = _stack_slice_points(raw_slices)
-    base_all = _evaluate_source_field_batched(
-        result,
-        source=source,
-        points=all_points,
-        current=resolved_spec.current,
-        current_scale_A=current_scale,
-        polylines=polylines,
-        config=config,
-    )
     derivative_axes = _requested_gradient_axes(resolved_spec.gradient_components)
-    derivative_all = (
-        _finite_difference_field_gradient_batched(
+    base_end = 90 / (1 + 2 * len(derivative_axes))
+    with progress_scope(0, base_end, "Evaluate slice-grid base field"):
+        base_all = _evaluate_source_field_batched(
             result,
             source=source,
             points=all_points,
-            step_m=gradient_step,
             current=resolved_spec.current,
             current_scale_A=current_scale,
             polylines=polylines,
             config=config,
-            axes=derivative_axes,
         )
-        if derivative_axes
-        else None
-    )
+    derivative_all = None
+    if derivative_axes:
+        with progress_scope(base_end, 90, "Evaluate finite-difference slice gradients"):
+            derivative_all = _finite_difference_field_gradient_batched(
+                result,
+                source=source,
+                points=all_points,
+                step_m=gradient_step,
+                current=resolved_spec.current,
+                current_scale_A=current_scale,
+                polylines=polylines,
+                config=config,
+                axes=derivative_axes,
+            )
 
     point_offset = 0
     for slice_ind, item in enumerate(raw_slices, start=1):
@@ -314,12 +315,12 @@ def evaluate_gradient_slice_maps(result: Any, spec: GradientSliceMapSpec | None 
         if len(points):
             fit_coords.append(points)
             fit_bz.append(base_field[:, 2])
-        if task is not None:
-            task.update(slice_ind)
+        reporter.report(
+            90 + 5 * slice_ind / len(raw_slices), f"Construct slice component maps {slice_ind}/{len(raw_slices)}"
+        )
         point_offset = next_offset
-    if task is not None:
-        task.done()
 
+    reporter.report(None, "Fit slice-grid linearity reference", force=True)
     coeff = _fit_affine_bz(
         np.vstack(fit_coords) if fit_coords else np.zeros((0, 3), dtype=float),
         np.concatenate(fit_bz) if fit_bz else np.zeros(0, dtype=float),
@@ -330,7 +331,7 @@ def evaluate_gradient_slice_maps(result: Any, spec: GradientSliceMapSpec | None 
     residual_values: list[np.ndarray] = []
     concomitant_values: list[np.ndarray] = []
     slices: list[GradientSliceMapSlice] = []
-    for item in raw_slices:
+    for slice_index, item in enumerate(raw_slices):
         points = item["points"]
         mask = item["mask"]
         maps = item["maps"]
@@ -368,6 +369,10 @@ def evaluate_gradient_slice_maps(result: Any, spec: GradientSliceMapSpec | None 
                 dsv_outline_radius_m=_slice_dsv_outline_radius(region, axis, float(item["value"])),
             )
         )
+        reporter.report(
+            95 + 4 * (slice_index + 1) / len(raw_slices),
+            f"Summarize slice diagnostics {slice_index + 1}/{len(raw_slices)}",
+        )
 
     residual_all = np.concatenate(residual_values) if residual_values else np.zeros(0, dtype=float)
     concomitant_all = np.concatenate(concomitant_values) if concomitant_values else np.zeros(0, dtype=float)
@@ -391,6 +396,7 @@ def evaluate_gradient_slice_maps(result: Any, spec: GradientSliceMapSpec | None 
     summary["gradient_slice_map_sampling_scope"] = (
         "spherical_dsv_diagnostic" if region.spherical else "saved_target_sample_bounding_box_diagnostic"
     )
+    reporter.report(100, "Gradient slice maps complete", force=True)
     return GradientSliceMapResult(
         spec=resolved_spec,
         axis=axis,
@@ -649,15 +655,18 @@ def _evaluate_source_field_batched(
         )
     field = np.zeros((len(points), 3), dtype=float)
     for start, stop in chunk_ranges(len(points), batch_size):
-        field[start:stop] = _evaluate_source_field(
-            result,
-            source=source,
-            points=points[start:stop],
-            current=current,
-            current_scale_A=current_scale_A,
-            polylines=polylines,
-            config=config,
-        )
+        with progress_scope(
+            100 * start / len(points), 100 * stop / len(points), f"Field samples {start:,}–{stop:,}/{len(points):,}"
+        ):
+            field[start:stop] = _evaluate_source_field(
+                result,
+                source=source,
+                points=points[start:stop],
+                current=current,
+                current_scale_A=current_scale_A,
+                polylines=polylines,
+                config=config,
+            )
     return field
 
 
@@ -680,15 +689,21 @@ def _evaluate_source_field(
         raise ValueError(f"Gradient slice-map source {source!r} has no evaluable wire or contour paths.")
     worker_count = resolve_worker_count(config)
     field = np.zeros((len(points), 3), dtype=float)
-    for line in polylines:
-        field += biot_savart_wire_path(
-            line,
-            points,
-            chunk_size=int(getattr(config, "biot_savart_chunk_size", 512)),
-            worker_count=worker_count,
-            min_work_size=int(getattr(config, "parallel_min_work_size", 50000)),
-            max_chunk_memory_mb=float(getattr(config, "parallel_max_chunk_memory_mb", 64.0)),
-        )
+    counts = np.asarray([max(len(line) - 1, 1) for line in polylines], dtype=float)
+    boundaries = np.r_[0, np.cumsum(counts) / counts.sum() * 100]
+    for index, line in enumerate(polylines):
+        with progress_scope(
+            boundaries[index], boundaries[index + 1], f"Evaluate saved winding {index + 1}/{len(polylines)}"
+        ):
+            field += biot_savart_wire_path(
+                line,
+                points,
+                chunk_size=int(getattr(config, "biot_savart_chunk_size", 512)),
+                worker_count=worker_count,
+                min_work_size=int(getattr(config, "parallel_min_work_size", 50000)),
+                max_chunk_memory_mb=float(getattr(config, "parallel_max_chunk_memory_mb", 64.0)),
+                progress=ProgressReporter.from_config(config, label="Slice field"),
+            )
     return field * float(current_scale_A)
 
 
@@ -755,19 +770,22 @@ def _finite_difference_field_gradient_batched(
     sample_batch_size = max(_field_sample_batch_size(config) // 2, 1)
     for start, stop in chunk_ranges(len(points), sample_batch_size):
         chunk = points[start:stop]
-        for dim in axes:
+        for dimension_index, dim in enumerate(axes):
             offset = np.zeros(3, dtype=float)
             offset[dim] = float(step_m)
             paired_points = np.vstack((chunk + offset, chunk - offset))
-            paired_field = _evaluate_source_field_batched(
-                result,
-                source=source,
-                points=paired_points,
-                current=current,
-                current_scale_A=current_scale_A,
-                polylines=polylines,
-                config=config,
-            )
+            start_work = (start * len(axes) + len(chunk) * dimension_index) / (len(points) * len(axes))
+            end_work = (start * len(axes) + len(chunk) * (dimension_index + 1)) / (len(points) * len(axes))
+            with progress_scope(100 * start_work, 100 * end_work, f"Evaluate gradient axis {'xyz'[dim]}"):
+                paired_field = _evaluate_source_field_batched(
+                    result,
+                    source=source,
+                    points=paired_points,
+                    current=current,
+                    current_scale_A=current_scale_A,
+                    polylines=polylines,
+                    config=config,
+                )
             midpoint = len(chunk)
             derivative[start:stop, :, dim] = (paired_field[:midpoint] - paired_field[midpoint:]) / (2.0 * float(step_m))
     return derivative

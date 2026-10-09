@@ -22,7 +22,7 @@ from .metrics import dsv_target_mask
 from .models import CoilPart, ContourLine, Mesh, TargetField, WirePath
 from .parallel import parallel_map, resolve_worker_count, should_parallelize
 from .physics import biot_savart_wire_path
-from .progress import ProgressReporter
+from .progress import ProgressReporter, progress_scope
 from .symmetry import (
     absolute_tolerance as _symmetry_absolute_tolerance,
     generated_candidate_symmetric_part_pairs as _symmetry_candidate_part_pairs,
@@ -1045,25 +1045,26 @@ def _raise_for_strict_symmetry_failures(reports: list[dict[str, object]], mode: 
 
 def extract_contours(parts: list[CoilPart], config: CoilGenConfig) -> list[CoilPart]:
     reporter = ProgressReporter.from_config(config, label="Contours")
+    for part in parts:
+        part.potential_level_list = regularize_contour_levels(
+            part.mesh, part.stream_function, part.potential_level_list
+        )
+    task = reporter.task(
+        "support levels, cleanup and symmetry review", sum(len(part.potential_level_list) + 1 for part in parts) + 1
+    )
     for part_ind, part in enumerate(parts, start=1):
         mesh = part.mesh
         contours: list[ContourLine] = []
         stitch_diagnostics = _empty_stitch_diagnostics()
-        regularized_levels = regularize_contour_levels(
-            mesh,
-            part.stream_function,
-            part.potential_level_list,
-        )
-        part.potential_level_list = regularized_levels
+        regularized_levels = part.potential_level_list
         levels = list(regularized_levels)
-        task = reporter.task(f"part {part_ind}/{len(parts)} levels", len(levels))
-        for level_ind, level in enumerate(levels, start=1):
+        for level in levels:
             segments = _segments_for_level(mesh, part.stream_function, float(level))
             stitched_contours, level_stitch_diagnostics = _stitch_segments_with_diagnostics(segments, float(level))
             contours.extend(stitched_contours)
             _accumulate_stitch_diagnostics(stitch_diagnostics, level_stitch_diagnostics)
-            task.update(level_ind)
-        task.done()
+            task.advance()
+        reporter.report(None, f"cleaning contours on support {part_ind}/{len(parts)}")
         closed_contour_count_before_cleaning = len(contours)
         cleaned_contours = []
         for contour in contours:
@@ -1085,8 +1086,10 @@ def extract_contours(parts: list[CoilPart], config: CoilGenConfig) -> list[CoilP
             else 0.0
         )
         part.contour_level_diagnostics.update(_finalize_stitch_diagnostics(stitch_diagnostics))
+        task.advance()
     _enforce_symmetric_extracted_contour_counts(parts, config)
     _record_symmetric_extraction_diagnostics(parts, config)
+    task.done()
     return parts
 
 
@@ -1754,13 +1757,13 @@ def filter_loop_significance(parts: list[CoilPart], target_field: TargetField, c
         return parts
     worker_count = resolve_worker_count(config)
     reporter = ProgressReporter.from_config(config, label="Loop significance")
+    task = reporter.task("contour fields and pruning review", sum(len(part.contour_lines) for part in parts) + 1)
     field_by_key: dict[tuple[int, int], np.ndarray] = {}
     significance_by_key: dict[tuple[int, int], float] = {}
     for part_ind, part in enumerate(parts, start=1):
         if not part.contour_lines:
             continue
         work_size = sum(max(len(contour.v) - 1, 0) for contour in part.contour_lines) * len(target_field.coords)
-        task = reporter.task(f"part {part_ind}/{len(parts)} contour fields", len(part.contour_lines))
         if should_parallelize(work_size, config, worker_count=worker_count) and len(part.contour_lines) > 1:
             fields = parallel_map(
                 lambda contour: (
@@ -1776,25 +1779,30 @@ def filter_loop_significance(parts: list[CoilPart], target_field: TargetField, c
                 ),
                 part.contour_lines,
                 worker_count=worker_count,
-                progress_callback=lambda done, total: task.update(done),
+                progress_callback=lambda done, total: task.advance(),
             )
-            task.done()
         else:
             fields = []
-            for contour_ind, contour in enumerate(part.contour_lines, start=1):
-                fields.append(
-                    float(contour.turn_multiplicity)
-                    * biot_savart_wire_path(
-                        contour.v,
-                        target_field.coords,
-                        chunk_size=int(config.biot_savart_chunk_size),
-                        worker_count=worker_count,
-                        min_work_size=int(config.parallel_min_work_size),
-                        max_chunk_memory_mb=float(config.parallel_max_chunk_memory_mb),
+            for contour in part.contour_lines:
+                with progress_scope(
+                    100 * task.completed / task.total,
+                    100 * (task.completed + 1) / task.total,
+                    "Evaluating contour significance",
+                    label=reporter.label,
+                ):
+                    fields.append(
+                        float(contour.turn_multiplicity)
+                        * biot_savart_wire_path(
+                            contour.v,
+                            target_field.coords,
+                            chunk_size=int(config.biot_savart_chunk_size),
+                            worker_count=worker_count,
+                            min_work_size=int(config.parallel_min_work_size),
+                            max_chunk_memory_mb=float(config.parallel_max_chunk_memory_mb),
+                            progress=reporter,
+                        )
                     )
-                )
-                task.update(contour_ind)
-            task.done()
+                task.advance()
         stacked = np.stack(fields, axis=2)
         combined = stacked.sum(axis=2)
         scale = max(float(np.mean(np.abs(combined[:, 2]))), 1e-30)
@@ -1810,7 +1818,9 @@ def filter_loop_significance(parts: list[CoilPart], target_field: TargetField, c
         (part_ind, contour_ind) for part_ind, part in enumerate(parts) for contour_ind in range(len(part.contour_lines))
     ]
     if not all_keys:
+        task.done()
         return parts
+    reporter.report(None, "reviewing contour significance and pruning groups")
     groups, protected_keys, symmetry_complete = _contour_loop_pruning_groups(parts, config)
     keep_keys = set(all_keys)
     significance_removed: set[tuple[int, int]] = set()
@@ -1870,6 +1880,7 @@ def filter_loop_significance(parts: list[CoilPart], target_field: TargetField, c
         part.contour_level_diagnostics["contour_loop_pruning_retained_loop_count"] = int(len(part.contour_lines))
     if bool(getattr(config, "contour_loop_pruning_preserve_symmetry", True)):
         _record_symmetric_extraction_diagnostics(parts, config)
+    task.done()
     return parts
 
 
@@ -2065,8 +2076,10 @@ def _prune_contour_loops_to_residual_budget(
     removed_keys: set[tuple[int, int]] = set()
     selected_metric = baseline_metric
     selected_current = baseline_current
+    progress = ProgressReporter.from_config(config, label="Loop significance")
 
     while len(active_groups) > 1:
+        progress.report(None, f"testing residual-budget removals for {len(active_groups)} active loop groups")
         candidates: list[tuple[float, int, float, np.ndarray]] = []
         for group_ind, group in enumerate(active_groups):
             if set(group) & protected_keys:
@@ -2235,9 +2248,19 @@ def regularize_contour_paths(parts: list[CoilPart], config: CoilGenConfig) -> li
     if not do_smoothing and not do_resampling and not resampling_deferred:
         return parts
 
+    reporter = ProgressReporter.from_config(config, label="Contour regularization")
+    task = reporter.task(
+        "contour processing steps",
+        sum(
+            len(part.contour_lines) * (int(do_smoothing) + int(do_resampling) + 1) + 1
+            for part in parts
+            if part.contour_lines
+        ),
+    )
     for part in parts:
         if not part.contour_lines:
             continue
+        reporter.report(None, "checking original contour spacing")
         original_min_distance = _part_min_centerline_distance(part.contour_lines)
         candidate_contours = list(part.contour_lines)
         smoothing_applied = False
@@ -2258,20 +2281,23 @@ def regularize_contour_paths(parts: list[CoilPart], config: CoilGenConfig) -> li
         proposed_min_distance = original_min_distance
         if do_smoothing:
             smoother = MeshContourBSplineSmoother(part.mesh, patch_rings=patch_rings)
-            smoothing_results = [
-                smoother.smooth(
-                    contour,
-                    smoothing_factor=smoothing_factor,
-                    target_segment_length_m=target_length,
-                    max_displacement_m=max_displacement,
-                    scale_mode=smoothing_scale_mode,
-                    mesh_gain=smoothing_mesh_gain,
-                    work_samples_per_mesh_length=smoothing_work_samples,
-                    output_samples_per_mesh_length=smoothing_output_samples,
+            smoothing_results = []
+            for contour in candidate_contours:
+                smoothing_results.append(
+                    smoother.smooth(
+                        contour,
+                        smoothing_factor=smoothing_factor,
+                        target_segment_length_m=target_length,
+                        max_displacement_m=max_displacement,
+                        scale_mode=smoothing_scale_mode,
+                        mesh_gain=smoothing_mesh_gain,
+                        work_samples_per_mesh_length=smoothing_work_samples,
+                        output_samples_per_mesh_length=smoothing_output_samples,
+                    )
                 )
-                for contour in candidate_contours
-            ]
+                task.advance()
             smoothed = [result.contour for result in smoothing_results]
+            reporter.report(None, "checking proposed contour spacing")
             proposed_min_distance = _part_min_centerline_distance(smoothed)
             proposed = [result.applied for result in smoothing_results]
             accepted = list(proposed)
@@ -2332,14 +2358,17 @@ def regularize_contour_paths(parts: list[CoilPart], config: CoilGenConfig) -> li
                 candidate_contours = smoothed
                 smoothing_applied = True
         if do_resampling:
-            candidate_contours = [
-                _resample_contour_on_surface(part.mesh, contour, target_length) for contour in candidate_contours
-            ]
+            resampled_contours = []
+            for contour in candidate_contours:
+                resampled_contours.append(_resample_contour_on_surface(part.mesh, contour, target_length))
+                task.advance()
+            candidate_contours = resampled_contours
         cleaned_contours = []
         for contour in candidate_contours:
             cleaned = clean_contour_line(contour, config)
             if cleaned is not None and len(cleaned.v) >= config.min_point_loop_number:
                 cleaned_contours.append(cleaned)
+            task.advance()
         part.contour_lines = cleaned_contours
         part.combined_loop_length = float(sum(contour.length for contour in part.contour_lines))
         part.contour_level_diagnostics.update(
@@ -2394,6 +2423,8 @@ def regularize_contour_paths(parts: list[CoilPart], config: CoilGenConfig) -> li
                 "contour_path_count_after_regularization": int(len(part.contour_lines)),
             }
         )
+        task.advance()
+    task.done()
     return parts
 
 

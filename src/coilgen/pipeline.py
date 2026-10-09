@@ -62,7 +62,7 @@ from .optimization import (
 )
 from .physics import calculate_resistance_matrix, calculate_sensitivity_matrix
 from .preoptimization import apply_preoptimized_stream_function, has_preoptimized_stream_function
-from .progress import ProgressReporter
+from .progress import ProgressReporter, progress_scope
 from .pipeline_stages import PipelineCheckpoint, PipelineStage, PipelineState, stage_fingerprints
 from .symmetry import mirror_symmetric_mesh_from_half
 from .surface_topology import mesh_quality_report
@@ -99,6 +99,21 @@ class _ExecutionContext:
         # The stages have very different and data-dependent costs. Completion
         # counts are not an elapsed-work percentage, especially after resume.
         self.progress.report(None, message, force=True)
+
+    def operations(self, weights):
+        """Allocate a stage's work; completed inner units supply its updates."""
+        total = sum(value for _, value in weights)
+        position = 0.0
+        self._operation_ranges = {}
+        for name, value in weights:
+            end = position + 100 * value / total
+            self._operation_ranges[name] = (position, end)
+            position = end
+
+    def compute(self, name, operation, *args, **kwargs):
+        start, end = self._operation_ranges[name]
+        with progress_scope(start, end, name, label="CoilGen"):
+            return operation(*args, **kwargs)
 
 
 class CoilGenPipeline:
@@ -172,6 +187,12 @@ class CoilGenPipeline:
         else:
             context.progress.report(0.0, "start", force=True)
         methods = (self._prepare, self._solve_sheet, self._extract_contours, self._route_and_realize, self._evaluate)
+        # These are work allocations, not a time prediction. Reused and
+        # unrequested stages are excluded; local kernels report actual units.
+        routing = not (self.config.skip_postprocessing or self.config.contour_only_sweep_mode)
+        weights = (30, 20, 15, 25 if routing else 8 if not self.config.skip_sweep else 2, 10)
+        remaining_weight = sum(weights[first_stage : selected.index + 1])
+        position = 0.0
         for index in range(first_stage, selected.index + 1):
             canonical_config = self.config
             if self.requirements is not None and index > 0:
@@ -179,18 +200,42 @@ class CoilGenPipeline:
 
                 self.config = requirements_evaluation_config(canonical_config)
             try:
-                methods[index](state, context)
+                end = position + 100 * weights[index] / remaining_weight
+                with progress_scope(
+                    position,
+                    end,
+                    f"Computing {tuple(PipelineStage)[index].value}",
+                    label="CoilGen",
+                    stage=tuple(PipelineStage)[index].value,
+                    overall=True,
+                ):
+                    if completed is None:
+                        methods[index](state, context)
+                    else:
+                        with progress_scope(0, 95, "Computing numerical stage", label="CoilGen"):
+                            methods[index](state, context)
+                        with progress_scope(95, 100, "Retaining checkpoint and stage preview", label="CoilGen"):
+                            completed(tuple(PipelineStage)[index], state)
+                position = end
             finally:
                 self.config = canonical_config
-            if completed is not None:
-                completed(tuple(PipelineStage)[index], state)
         if selected is not PipelineStage.EVALUATED:
             context.progress.finish(f"{selected.value} stage completed")
         return state, context
 
     def _prepare(self, state: PipelineState, context: _ExecutionContext) -> None:
+        context.operations(
+            (
+                ("Load meshes", 5),
+                ("Prepare meshes", 10),
+                ("Sample desired field", 5),
+                ("Build mesh neighborhoods", 10),
+                ("Build stream-function basis", 10),
+                ("Assemble field sensitivity", 60),
+            )
+        )
         stage = context.stage
-        coil_mesh = load_mesh_from_config(self.config, self.project_root)
+        coil_mesh = context.compute("Load meshes", load_mesh_from_config, self.config, self.project_root)
         coil_mesh, symmetry_mesh_diagnostics = _prepare_half_mesh_symmetry_if_requested(coil_mesh, self.config)
         target_mesh = (
             load_optional_target_mesh(self.config.target_mesh_file, self.config, self.project_root)
@@ -199,9 +244,13 @@ class CoilGenPipeline:
         )
         stage("loaded meshes")
 
-        prepared_meshes = [
-            refine_mesh(mesh, self.config.iteration_num_mesh_refinement) for mesh in split_disconnected_mesh(coil_mesh)
-        ]
+        prepared_meshes = context.compute(
+            "Prepare meshes",
+            lambda: [
+                refine_mesh(mesh, self.config.iteration_num_mesh_refinement)
+                for mesh in split_disconnected_mesh(coil_mesh)
+            ],
+        )
         prepared_meshes, refinement_symmetry_diagnostics = _restore_refined_single_mesh_symmetry(
             prepared_meshes,
             self.config,
@@ -226,18 +275,23 @@ class CoilGenPipeline:
         )
         suppression_surface_diagnostics = _suppression_surface_diagnostics(secondary_target_mesh)
         stage("prepared coil meshes")
-        target_field = (
-            define_target_field([part.mesh for part in parts], target_mesh, secondary_target_mesh, self.config)
-            if self.requirements is None
-            else self._requirements_target()
+        target_field = context.compute(
+            "Sample desired field",
+            lambda: (
+                define_target_field([part.mesh for part in parts], target_mesh, secondary_target_mesh, self.config)
+                if self.requirements is None
+                else self._requirements_target()
+            ),
         )
         stage("defined target field")
 
-        parts = calculate_one_ring_by_mesh(parts)
+        parts = context.compute("Build mesh neighborhoods", calculate_one_ring_by_mesh, parts)
         stage("built one-ring mesh neighborhoods")
-        parts = calculate_basis_functions(parts)
+        parts = context.compute("Build stream-function basis", calculate_basis_functions, parts)
         stage("built stream-function basis")
-        parts = calculate_sensitivity_matrix(parts, target_field, self.config)
+        parts = context.compute(
+            "Assemble field sensitivity", calculate_sensitivity_matrix, parts, target_field, self.config
+        )
         sensitivity_diagnostics = _sensitivity_matrix_diagnostics(parts, target_field)
         stage("calculated sensitivity matrix")
         state.parts = parts
@@ -254,10 +308,23 @@ class CoilGenPipeline:
         return requirements_target(self.requirements)
 
     def _solve_sheet(self, state: PipelineState, context: _ExecutionContext) -> None:
+        preoptimized = has_preoptimized_stream_function(self.config)
+        named_weight = 10 if self.requirements is not None else 0
+        context.operations(
+            (("Prepare named operators", named_weight), ("Load stream function", 90))
+            if preoptimized
+            else (
+                ("Prepare named operators", named_weight),
+                ("Assemble resistance", 25),
+                ("Optimize stream function", 65),
+            )
+        )
         if self.requirements is not None:
             from .application.research_requirements import prepare_requirement_constraints
 
-            self.config = prepare_requirement_constraints(state.parts, self.config, self.requirements)
+            self.config = context.compute(
+                "Prepare named operators", prepare_requirement_constraints, state.parts, self.config, self.requirements
+            )
         parts = state.parts
         target_field = state.target_field
         combined_mesh = state.combined_mesh
@@ -266,7 +333,9 @@ class CoilGenPipeline:
         primary_surface_ind = state.primary_surface_index
         stage = context.stage
         if has_preoptimized_stream_function(self.config):
-            parts, combined_mesh, sf_b_field, regularization_diagnostics = apply_preoptimized_stream_function(
+            parts, combined_mesh, sf_b_field, regularization_diagnostics = context.compute(
+                "Load stream function",
+                apply_preoptimized_stream_function,
                 parts,
                 target_field,
                 self.config,
@@ -281,10 +350,10 @@ class CoilGenPipeline:
             regularization_diagnostics.update(density_limit_diagnostics)
             stage("loaded preoptimized stream function")
         else:
-            parts = calculate_resistance_matrix(parts, self.config)
+            parts = context.compute("Assemble resistance", calculate_resistance_matrix, parts, self.config)
             stage("calculated resistance matrix")
-            parts, combined_mesh, sf_b_field, regularization_diagnostics = stream_function_optimization(
-                parts, target_field, self.config
+            parts, combined_mesh, sf_b_field, regularization_diagnostics = context.compute(
+                "Optimize stream function", stream_function_optimization, parts, target_field, self.config
             )
             stage("optimized stream function")
         regularization_diagnostics.update(stream_function_current_density_diagnostics(parts, self.config))
@@ -299,6 +368,24 @@ class CoilGenPipeline:
         state.primary_surface_index = primary_surface_ind
 
     def _extract_contours(self, state: PipelineState, context: _ExecutionContext) -> None:
+        distance_weight = 0 if self.config.skip_calculation_min_winding_distance else 10
+        context.operations(
+            (
+                ("Select potential levels", 5),
+                ("Extract contours", 20),
+                ("Check loop significance", 15),
+                ("Smooth contours", 10),
+                ("Check contourability", 10),
+                ("Sparsify contours", 10 if self.config.contour_sparsification_mode != "off" else 0),
+                ("Prune contours", 5 if self.config.contour_sparsification_pruning_mode != "off" else 0),
+                (
+                    "Merge retained contours",
+                    5 if self.config.contour_sparsification_post_pruning_merge_mode != "off" else 0,
+                ),
+                ("Measure contour spacing", distance_weight),
+                ("Measure wire spacing", distance_weight),
+            )
+        )
         parts = state.parts
         target_field = state.target_field
         combined_mesh = state.combined_mesh
@@ -306,21 +393,25 @@ class CoilGenPipeline:
         regularization_diagnostics = state.regularization_diagnostics
         primary_surface_ind = state.primary_surface_index
         stage = context.stage
-        parts, primary_surface_ind = calc_potential_levels(parts, combined_mesh, self.config)
+        parts, primary_surface_ind = context.compute(
+            "Select potential levels", calc_potential_levels, parts, combined_mesh, self.config
+        )
         if 0 <= primary_surface_ind < len(parts):
             regularization_diagnostics.update(dict(parts[primary_surface_ind].contour_level_diagnostics))
         stage("calculated potential levels")
-        parts = extract_contours(parts, self.config)
+        parts = context.compute("Extract contours", extract_contours, parts, self.config)
         if 0 <= primary_surface_ind < len(parts):
             regularization_diagnostics.update(dict(parts[primary_surface_ind].contour_level_diagnostics))
         stage("extracted contours")
-        parts = filter_loop_significance(parts, target_field, self.config)
+        parts = context.compute("Check loop significance", filter_loop_significance, parts, target_field, self.config)
         stage("filtered loop significance")
-        parts = regularize_contour_paths(parts, self.config)
+        parts = context.compute("Smooth contours", regularize_contour_paths, parts, self.config)
         if 0 <= primary_surface_ind < len(parts):
             regularization_diagnostics.update(dict(parts[primary_surface_ind].contour_level_diagnostics))
         stage("regularized contour paths")
-        parts, contourability_diagnostics = validate_and_repair_contourability(
+        parts, contourability_diagnostics = context.compute(
+            "Check contourability",
+            validate_and_repair_contourability,
             parts,
             combined_mesh,
             target_field,
@@ -331,19 +422,25 @@ class CoilGenPipeline:
             regularization_diagnostics.update(dict(parts[primary_surface_ind].contour_level_diagnostics))
         regularization_diagnostics.update(contourability_diagnostics)
         stage("validated contourability")
-        parts = sparsify_contours(
+        parts = context.compute(
+            "Sparsify contours",
+            sparsify_contours,
             parts,
             target_field,
             self.config,
             progress=ProgressReporter.from_config(self.config, label="Contour sparsification"),
         )
-        parts = prune_sparsified_contours(
+        parts = context.compute(
+            "Prune contours",
+            prune_sparsified_contours,
             parts,
             target_field,
             self.config,
             progress=ProgressReporter.from_config(self.config, label="Sparse contour pruning"),
         )
-        parts = consolidate_pruned_contours(
+        parts = context.compute(
+            "Merge retained contours",
+            consolidate_pruned_contours,
             parts,
             target_field,
             self.config,
@@ -356,12 +453,16 @@ class CoilGenPipeline:
         if self.config.skip_calculation_min_winding_distance:
             regularization_diagnostics["contour_distance_diagnostics_skipped"] = True
         else:
-            parts = find_minimal_contour_distance(
+            parts = context.compute(
+                "Measure contour spacing",
+                find_minimal_contour_distance,
                 parts,
                 self.config,
                 progress=ProgressReporter.from_config(self.config, label="Contour distance"),
             )
-            parts = calculate_unconnected_contour_wire_distances(
+            parts = context.compute(
+                "Measure wire spacing",
+                calculate_unconnected_contour_wire_distances,
                 parts,
                 self.config,
                 progress=ProgressReporter.from_config(self.config, label="Unconnected wire distance"),
@@ -387,6 +488,21 @@ class CoilGenPipeline:
         state.primary_surface_index = primary_surface_ind
 
     def _route_and_realize(self, state: PipelineState, context: _ExecutionContext) -> None:
+        routing = not (self.config.skip_postprocessing or self.config.contour_only_sweep_mode)
+        context.operations(
+            (
+                ("Group contour topology", 10 if routing else 0),
+                ("Connect loop groups", 15 if routing else 0),
+                ("Connect circuits", 15 if routing else 0),
+                ("Shift return paths", 5 if routing else 0),
+                ("Clean wire paths", 5),
+                ("Realize conductors", 5 if context.realize_for_routing else 0),
+                ("Select joint routes", 25 if routing else 0),
+                ("Sweep conductors", 15 if not self.config.skip_sweep else 0),
+                ("Validate circuit assembly", 4 if routing else 0),
+                ("Generate PCB", 1 if self.config.make_cylndrical_pcb else 0),
+            )
+        )
         parts = state.parts
         target_field = state.target_field
         combined_mesh = state.combined_mesh
@@ -403,7 +519,9 @@ class CoilGenPipeline:
                 part.opening_cuts_among_groups = []
             stage("skipped topology/routing postprocessing")
         else:
-            parts = topological_loop_grouping(
+            parts = context.compute(
+                "Group contour topology",
+                topological_loop_grouping,
                 parts,
                 config=self.config,
                 progress=ProgressReporter.from_config(self.config, label="Topology"),
@@ -416,44 +534,50 @@ class CoilGenPipeline:
                 parts = assemble_routing_parts(parts, primary_surface_index=primary_surface_ind)
                 primary_surface_ind = 0
                 regularization_diagnostics["routing_parts_assembled"] = True
-            parts = interconnect_within_groups(
+            parts = context.compute(
+                "Connect loop groups",
+                interconnect_within_groups,
                 parts,
                 self.config,
                 progress=ProgressReporter.from_config(self.config, label="Within-group routing"),
             )
             stage("interconnected within loop groups")
-            parts = interconnect_among_groups(
+            parts = context.compute(
+                "Connect circuits",
+                interconnect_among_groups,
                 parts,
                 self.config,
                 progress=ProgressReporter.from_config(self.config, label="Inter-group routing"),
             )
             stage("interconnected among loop groups")
-            parts = shift_return_paths(parts, self.config)
+            parts = context.compute("Shift return paths", shift_return_paths, parts, self.config)
             stage("shifted return paths")
-        parts = cleanup_wire_paths(
+        parts = context.compute(
+            "Clean wire paths",
+            cleanup_wire_paths,
             parts,
             config=self.config,
             progress=ProgressReporter.from_config(self.config, label="Route cleanup"),
         )
         stage("cleaned wire paths")
         if realize_for_routing:
-            parts = realize_coil_paths(parts, self.config)
+            parts = context.compute("Realize conductors", realize_coil_paths, parts, self.config)
             stage("realized fabrication centerlines")
-        parts = improve_group_routes(parts, self.config, target_field)
+        parts = context.compute("Select joint routes", improve_group_routes, parts, self.config, target_field)
         stage("selected joint group routes")
         # Parts arrive without a mesh. A body returned by route
         # selection belongs to an independently validated candidate; retain its
         # exact geometry, including any routing-specific clearance contract.
         unswept_parts = [part for part in parts if part.swept_body is None]
         if unswept_parts:
-            create_swept_coil_meshes(unswept_parts, self.config)
+            context.compute("Sweep conductors", create_swept_coil_meshes, unswept_parts, self.config)
         refresh_retained_route_diagnostics(parts)
         stage("finalized swept conductor meshes")
         if not skip_postprocessing:
             from .routing_assembly import validate_routing_assembly
 
-            validate_routing_assembly(parts, self.config)
-        parts = generate_cylindrical_pcb_print(parts, self.config)
+            context.compute("Validate circuit assembly", validate_routing_assembly, parts, self.config)
+        parts = context.compute("Generate PCB", generate_cylindrical_pcb_print, parts, self.config)
         state.parts = parts
         state.target_field = target_field
         state.combined_mesh = combined_mesh
@@ -462,6 +586,15 @@ class CoilGenPipeline:
         state.primary_surface_index = primary_surface_ind
 
     def _evaluate(self, state: PipelineState, context: _ExecutionContext) -> None:
+        context.operations(
+            (
+                ("Evaluate inductance and resistance", 30),
+                ("Evaluate winding fields", 50),
+                ("Check final field diagnostics", 15),
+                ("Fit gradient", 5),
+                ("Evaluate gradient slices", 20 if gradient_slice_maps_enabled(self.config) else 0),
+            )
+        )
         parts = state.parts
         target_field = state.target_field
         combined_mesh = state.combined_mesh
@@ -470,8 +603,8 @@ class CoilGenPipeline:
         primary_surface_ind = state.primary_surface_index
         stage = context.stage
         skip_postprocessing = self.config.skip_postprocessing or self.config.contour_only_sweep_mode
-        parts, inductance_matrix, resistance, coil_lengths, coil_cross_sections = calculate_inductance_by_coil_layout(
-            parts, self.config
+        parts, inductance_matrix, resistance, coil_lengths, coil_cross_sections = context.compute(
+            "Evaluate inductance and resistance", calculate_inductance_by_coil_layout, parts, self.config
         )
         stage("calculated inductance and resistance")
 
@@ -484,7 +617,9 @@ class CoilGenPipeline:
             opt_current_layout,
             sf_b_field_1a,
             target_field_1a,
-        ) = evaluate_field_errors(parts, self.config, target_field, sf_b_field)
+        ) = context.compute(
+            "Evaluate winding fields", evaluate_field_errors, parts, self.config, target_field, sf_b_field
+        )
         if any("routing_assembly" in part.topology_diagnostics for part in parts):
             from .group_route_fields import assess_group_route_field
 
@@ -510,8 +645,15 @@ class CoilGenPipeline:
             layout_target_residual_diagnostics(field_by_layout, target_field, self.config)
         )
         regularization_diagnostics.update(
-            final_field_diagnostics(
-                parts, self.config, target_field, field_layout_per_amp, field_loops_per_amp, opt_current_layout
+            context.compute(
+                "Check final field diagnostics",
+                final_field_diagnostics,
+                parts,
+                self.config,
+                target_field,
+                field_layout_per_amp,
+                field_loops_per_amp,
+                opt_current_layout,
             )
         )
         if not skip_postprocessing and all(part.fabrication_path is not None for part in parts):
@@ -529,14 +671,12 @@ class CoilGenPipeline:
                 )
         design_context = normalize_design_context(getattr(self.config, "design_context", "mr_gradient"))
         layout_gradient = (
-            calculate_layout_gradient(field_layout_per_amp, target_field)
+            context.compute("Fit gradient", calculate_layout_gradient, field_layout_per_amp, target_field)
             if design_context.enabled(EvaluationFeature.GRADIENT_FIT)
             else None
         )
         _apply_result_memory_policy(parts, self.config)
         context.record_timing("evaluated field errors")
-        context.progress.report(100.0, "evaluated field errors", force=True)
-        context.progress.finish()
 
         potential_step = parts[primary_surface_ind].contour_step or np.nan
         result = CoilGenResult(
@@ -568,7 +708,7 @@ class CoilGenPipeline:
         )
         if gradient_slice_maps_enabled(self.config):
             slice_start = time.perf_counter()
-            slice_maps = gradient_slice_map_result(result)
+            slice_maps = context.compute("Evaluate gradient slices", gradient_slice_map_result, result)
             result.regularization_diagnostics.update(dict(slice_maps.summary))
             result.timing_summary.append(
                 {
@@ -578,6 +718,7 @@ class CoilGenPipeline:
                 }
             )
         state.result = result
+        context.progress.finish()
 
 
 def _restore_refined_single_mesh_symmetry(

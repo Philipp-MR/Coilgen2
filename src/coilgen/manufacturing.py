@@ -18,6 +18,7 @@ from .geometry_collision import (
 from .geometry_kernels import active_geometry_backend, segment_distance as _segment_distance
 from .geometry import combine_meshes, compute_face_normals, compute_vertex_normals, rotation_matrix_by_vector
 from .models import CoilGenResult, CoilPart, ContourLine, FabricationPath, Mesh, SweptBody, WirePath, WirePathGeometry
+from .progress import ProgressReporter, progress_scope
 from .wire_provenance import nearest_source_segment_indices, transfer_segment_geometry
 
 _DEFAULT_MESH_AREA_TOLERANCE_M2 = 1e-12
@@ -26,6 +27,11 @@ _WIRE_TRACE_STEP_MIN_SEGMENT_LENGTH_M = 1e-12
 
 class SweptBodyExportError(ValueError):
     """A swept body failed manufacturing readiness checks for export."""
+
+
+def _work_boundaries(weights):
+    values = np.asarray([max(weight, 1) for weight in weights], dtype=float)
+    return np.r_[0, np.cumsum(values) / max(values.sum(), 1) * 100]
 
 
 def realize_coil_paths(parts: list[CoilPart], config: CoilGenConfig) -> list[CoilPart]:
@@ -40,13 +46,17 @@ def realize_coil_paths(parts: list[CoilPart], config: CoilGenConfig) -> list[Coi
     cross_section = (
         None if config.skip_sweep or config.contour_only_sweep_mode else conductor_cross_section_points(config)
     )
-    for part in parts:
+    boundaries = _work_boundaries([0 if part.wire_path is None else len(part.wire_path.v) for part in parts])
+    for index, part in enumerate(parts):
         part.swept_body = None
         part.swept_bodies = []
         part.fabrication_path = None
         diagnostics = {"fabrication_path_created": False, "swept_body_created": False}
         if cross_section is not None and part.wire_path is not None and len(part.wire_path.v) >= 2:
-            realized, diagnostics = _realize_wire_path(part, cross_section, config)
+            with progress_scope(
+                boundaries[index], boundaries[index + 1], f"Realize conductor {index + 1}/{len(parts)}"
+            ):
+                realized, diagnostics = _realize_wire_path(part, cross_section, config)
             diagnostics.update(
                 {
                     "fabrication_path_created": realized is not None,
@@ -79,15 +89,19 @@ def create_swept_coil_meshes(parts: list[CoilPart], config: CoilGenConfig) -> li
         return create_swept_contour_meshes(parts, config)
 
     cross_section = conductor_cross_section_points(config)
-    for part in parts:
+    boundaries = _work_boundaries([0 if part.wire_path is None else len(part.wire_path.v) for part in parts])
+    for index, part in enumerate(parts):
         part.swept_bodies = []
         part.fabrication_path = None
         if part.wire_path is None or len(part.wire_path.v) < 2:
             part.swept_body = None
             part.manufacturing_diagnostics = {"swept_body_created": False, "manufacturing_ok": False}
             continue
-        part.swept_body, sweep_diagnostics = _sweep_wire_path_with_diagnostics(part, cross_section, config)
-        part.manufacturing_diagnostics = mesh_manufacturing_diagnostics(part.swept_body)
+        start, end = boundaries[index : index + 2]
+        with progress_scope(start, start + 0.95 * (end - start), f"Sweep conductor {index + 1}/{len(parts)}"):
+            part.swept_body, sweep_diagnostics = _sweep_wire_path_with_diagnostics(part, cross_section, config)
+        with progress_scope(start + 0.95 * (end - start), end, "Validate swept conductor"):
+            part.manufacturing_diagnostics = mesh_manufacturing_diagnostics(part.swept_body)
         part.manufacturing_diagnostics.update(sweep_diagnostics)
         part.manufacturing_diagnostics.update(
             {
@@ -119,22 +133,28 @@ def create_swept_contour_meshes(parts: list[CoilPart], config: CoilGenConfig) ->
 
     cross_section = conductor_cross_section_points(config)
     weighted_representatives = str(getattr(config, "contour_sparsification_mode", "off")).strip().lower() != "off"
+    boundaries = _work_boundaries([len(contour.v) for part in parts for contour in part.contour_lines])
+    completed = 0
     for part_index, part in enumerate(parts, start=1):
         part.fabrication_path = None
         bodies: list[SweptBody] = []
         for contour_index, contour in enumerate(part.contour_lines, start=1):
-            bodies.append(
-                create_swept_contour_body(
-                    part,
-                    contour,
-                    config,
-                    cross_section=cross_section,
-                    weighted_representative=weighted_representatives,
-                    validate=True,
-                    part_index=part_index,
-                    contour_index=contour_index,
+            with progress_scope(
+                boundaries[completed], boundaries[completed + 1], f"Sweep support {part_index} contour {contour_index}"
+            ):
+                bodies.append(
+                    create_swept_contour_body(
+                        part,
+                        contour,
+                        config,
+                        cross_section=cross_section,
+                        weighted_representative=weighted_representatives,
+                        validate=True,
+                        part_index=part_index,
+                        contour_index=contour_index,
+                    )
                 )
-            )
+            completed += 1
 
         part.swept_bodies = bodies
         part.swept_body = combine_meshes([body.mesh for body in bodies]) if bodies else None
@@ -177,8 +197,10 @@ def create_swept_contour_body(
         manufacturing_diagnostics={},
         fabrication_path=None,
     )
-    mesh, sweep_diagnostics = _sweep_wire_path_with_diagnostics(contour_part, section, config)
-    diagnostics = mesh_manufacturing_diagnostics(mesh)
+    with progress_scope(0, 95, "Sweep closed contour conductor"):
+        mesh, sweep_diagnostics = _sweep_wire_path_with_diagnostics(contour_part, section, config)
+    with progress_scope(95, 99, "Validate closed contour mesh"):
+        diagnostics = mesh_manufacturing_diagnostics(mesh)
     diagnostics.update(sweep_diagnostics)
     diagnostics.update(
         {
@@ -202,6 +224,7 @@ def create_swept_contour_body(
             part_index=part_index,
             contour_index=contour_index,
         )
+    ProgressReporter.from_config(config, label="Contour sweep").report(100, "Closed contour body complete", force=True)
     return SweptBody(
         mesh=mesh,
         contour_index=contour_index,
@@ -883,14 +906,15 @@ def _realize_wire_path(
     cross_section = _validated_cross_section(cross_section)
     route_precheck_reasons = _manufacturing_route_precheck_reasons(part, cross_section, config)
     route_precheck_failed = bool(route_precheck_reasons)
-    points, segment_geometry, path_diagnostics = _prepare_sweep_centerline(
-        part,
-        raw_points,
-        raw_geometry,
-        cross_section,
-        config,
-        closed=closed_path,
-    )
+    with progress_scope(0, 45, "Prepare mounted conductor centerline"):
+        points, segment_geometry, path_diagnostics = _prepare_sweep_centerline(
+            part,
+            raw_points,
+            raw_geometry,
+            cross_section,
+            config,
+            closed=closed_path,
+        )
     path_diagnostics["manufacturing_route_precheck_failure"] = route_precheck_failed
     path_diagnostics["manufacturing_route_precheck_failure_reasons"] = ";".join(route_precheck_reasons)
     minimum_point_count = 3 if closed_path else 2
@@ -900,15 +924,16 @@ def _realize_wire_path(
     mounting_offset = _mounting_centerline_offset(config, cross_section)
     prepared_points = points
     prepared_geometry = segment_geometry
-    points, tangents, normals, binormals, vertices, ring_repair_diagnostics = _build_sweep_rings(
-        part,
-        points,
-        segment_geometry,
-        cross_section,
-        config,
-        closed=closed_path,
-        mounting_offset=mounting_offset,
-    )
+    with progress_scope(45, 75, "Build and repair conductor profile rings"):
+        points, tangents, normals, binormals, vertices, ring_repair_diagnostics = _build_sweep_rings(
+            part,
+            points,
+            segment_geometry,
+            cross_section,
+            config,
+            closed=closed_path,
+            mounting_offset=mounting_offset,
+        )
     final_segment_geometry = _transfer_path_segment_geometry(
         prepared_points,
         prepared_geometry,
@@ -917,6 +942,9 @@ def _realize_wire_path(
         target_closed=closed_path,
     )
     path_diagnostics.update(ring_repair_diagnostics)
+    ProgressReporter.from_config(config, label="Conductor realization").report(
+        None, "Audit final conductor frames and profile", force=True
+    )
     path_diagnostics.update(
         _final_frame_and_profile_diagnostics(
             points,
@@ -942,16 +970,20 @@ def _realize_wire_path(
         "sweep_frame_method_requested": _normalised_text(config.sweep_frame_method),
         "sweep_frame_method": _effective_sweep_frame_method(config, segment_geometry),
     }
-    diagnostics.update(
-        _physical_clearance_diagnostics(
-            part,
-            points + mounting_offset * normals,
-            cross_section,
-            config,
-            closed=closed_path,
+    with progress_scope(75, 95, "Check physical conductor clearance"):
+        diagnostics.update(
+            _physical_clearance_diagnostics(
+                part,
+                points + mounting_offset * normals,
+                cross_section,
+                config,
+                closed=closed_path,
+            )
         )
-    )
     diagnostics["sweep_capsule_centerline_reference"] = "mounted_profile_origin"
+    ProgressReporter.from_config(config, label="Conductor realization").report(
+        None, "Map physical path ownership and source displacement", force=True
+    )
     centroid = _polygon_centroid(cross_section)
     mounted_points = points + (mounting_offset + centroid[1]) * normals + centroid[0] * binormals
     physical_points = np.vstack((mounted_points, mounted_points[0])) if closed_path else mounted_points
@@ -974,6 +1006,9 @@ def _realize_wire_path(
     diagnostics.update(_source_path_displacement_diagnostics(source_points, physical_points, source_indices))
     diagnostics["sweep_surface_realization"] = getattr(config, "sweep_surface_realization", "analytic")
     diagnostics["sweep_physics_geometry"] = "mounted_profile_centroid"
+    ProgressReporter.from_config(config, label="Conductor realization").report(
+        100, "Physical centerline complete", force=True
+    )
     return _RealizedWirePath(part.fabrication_path, points, vertices, mounting_offset), diagnostics
 
 
@@ -982,7 +1017,8 @@ def _sweep_wire_path_with_diagnostics(
     cross_section: np.ndarray,
     config: CoilGenConfig,
 ) -> tuple[Mesh, dict[str, float | int | bool | str]]:
-    realized, diagnostics = _realize_wire_path(part, cross_section, config)
+    with progress_scope(0, 55, "Realize conductor sweep path"):
+        realized, diagnostics = _realize_wire_path(part, cross_section, config)
     if realized is None:
         return Mesh(vertices=np.zeros((0, 3), dtype=float), faces=np.zeros((0, 3), dtype=np.int64)), diagnostics
 
@@ -993,13 +1029,14 @@ def _sweep_wire_path_with_diagnostics(
     closed_path = fabrication_path.closed
     ring_count = len(points)
     section_count = len(cross_section)
-    faces, loft_diagnostics = _triangulate_sweep_laterals(
-        vertices,
-        ring_count,
-        section_count,
-        closed=closed_path,
-        optimize_diagonals=True,
-    )
+    with progress_scope(55, 65, "Triangulate conductor profile rings"):
+        faces, loft_diagnostics = _triangulate_sweep_laterals(
+            vertices,
+            ring_count,
+            section_count,
+            closed=closed_path,
+            optimize_diagonals=True,
+        )
     loft_diagnostics["sweep_diagonal_optimization_skip_reason"] = ""
 
     if not closed_path:
@@ -1019,7 +1056,11 @@ def _sweep_wire_path_with_diagnostics(
     mesh = Mesh(vertices=vertices, faces=np.asarray(faces, dtype=np.int64))
     diagnostics["sweep_end_cap_count"] = 0 if closed_path else 2
     diagnostics.update(loft_diagnostics)
-    diagnostics.update(_swept_mesh_quality_diagnostics(mesh, config))
+    with progress_scope(65, 80, "Check conductor mesh quality"):
+        diagnostics.update(_swept_mesh_quality_diagnostics(mesh, config))
+    ProgressReporter.from_config(config, label="Conductor sweep").report(
+        None, "Check swept section conservation", force=True
+    )
     diagnostics.update(
         _sweep_section_conservation_diagnostics(
             mesh,
@@ -1032,8 +1073,10 @@ def _sweep_wire_path_with_diagnostics(
             closed=closed_path,
         )
     )
-    diagnostics.update(_support_conformity_diagnostics(part, mesh, points, config))
-    diagnostics.update(_final_mesh_collision_diagnostics(part, mesh, diagnostics))
+    with progress_scope(80, 90, "Validate conductor support conformity"):
+        diagnostics.update(_support_conformity_diagnostics(part, mesh, points, config))
+    with progress_scope(90, 100, "Check swept conductor collision"):
+        diagnostics.update(_final_mesh_collision_diagnostics(part, mesh, diagnostics))
     return mesh, diagnostics
 
 
@@ -1423,6 +1466,8 @@ def _swept_mesh_self_intersection_diagnostics(
 ) -> dict[str, float | int | bool | str]:
     """Check non-adjacent swept triangles using a BVH broad phase."""
 
+    reporter = ProgressReporter(label="Swept collision")
+    reporter.report(None, "Check non-adjacent swept triangles", force=True)
     backend = active_geometry_backend()
     if backend is not None:
         return accelerated_mesh_collision_diagnostics(
@@ -1469,6 +1514,7 @@ def _swept_mesh_self_intersection_diagnostics(
     candidate_count = 0
     intersection_count = 0
     truncated = False
+    visited = 0
     faces = np.asarray(mesh.faces, dtype=np.int64)
 
     def test_pair(first_index: int, second_index: int) -> None:
@@ -1489,6 +1535,10 @@ def _swept_mesh_self_intersection_diagnostics(
             truncated = intersection_count >= maximum_reported_intersections
 
     def collect(first: _SegmentBvhNode, second: _SegmentBvhNode) -> None:
+        nonlocal visited
+        visited += 1
+        if visited % 256 == 0:
+            reporter.report(None, f"Sweep collision · {visited:,} BVH visits · {candidate_count:,} candidate pairs")
         if truncated or not boxes_overlap(first, second):
             return
         if first is second:
@@ -1813,6 +1863,11 @@ def _build_sweep_rings(
     maximum_quality_removals = max(int(np.ceil(0.02 * len(points))), 0)
 
     for _iteration in range(max_iterations + 1):
+        ProgressReporter.from_config(config, label="Conductor rings").report(
+            None,
+            f"Repair profile rings · pass {_iteration + 1}/{max_iterations + 1} · {len(points):,} samples",
+            force=True,
+        )
         tangents = _path_tangents(points, closed=closed)
         normals, binormals = _path_frames(
             part,
@@ -5960,6 +6015,11 @@ class _SurfaceProjector:
         closest_face_normals = np.zeros_like(points)
         closest_face_indices = np.full(len(points), -1, dtype=np.int64)
         closest_barycentric = np.zeros((len(points), 3), dtype=float)
+        task = (
+            ProgressReporter(label="Support projection").task("support samples", len(points), indeterminate=True)
+            if len(points) >= 128
+            else None
+        )
         vertex_candidates = None
         centroid_candidates = None
         if self.vertex_tree is not None and len(points) > 1:
@@ -5972,6 +6032,8 @@ class _SurfaceProjector:
             if face_count == 1:
                 centroid_candidates = np.asarray(centroid_candidates)[:, None]
         for point_index, point in enumerate(points):
+            if task is not None:
+                task.update(point_index)
             if vertex_candidates is None:
                 face_index, closest, barycentric = self._closest_face(point)
             else:
@@ -5989,6 +6051,8 @@ class _SurfaceProjector:
             closest_face_normals[point_index] = self.face_normals[face_index]
             closest_face_indices[point_index] = face_index
             closest_barycentric[point_index] = barycentric
+        if task is not None:
+            task.done()
         return projected, normals, closest_face_normals, closest_face_indices, closest_barycentric
 
     def _closest_face(self, point: np.ndarray) -> tuple[int, np.ndarray, np.ndarray]:
@@ -6245,7 +6309,10 @@ def _capsule_clearance_diagnostics(
     starts = starts if closed else starts[:-1]
     segment_count = len(starts)
     broad_phase_distance = max(float(required_clearance), float(conductor_diameter), 0.0)
+    reporter = ProgressReporter(label="Conductor clearance")
+    reporter.report(None, "Build conductor clearance broad phase", force=True)
     candidates = _segment_bvh_candidate_pairs(starts, ends, broad_phase_distance)
+    task = reporter.task("candidate pairs", len(candidates)) if len(candidates) else None
     segment_lengths = np.linalg.norm(ends - starts, axis=1)
     cumulative = np.concatenate(([0.0], np.cumsum(segment_lengths)))
     total_length = float(cumulative[-1])
@@ -6260,7 +6327,9 @@ def _capsule_clearance_diagnostics(
     violation_count = 0
     intersection_count = 0
     evaluated_count = 0
-    for i, j in candidates:
+    for candidate_index, (i, j) in enumerate(candidates):
+        if task is not None:
+            task.update(candidate_index)
         i = int(i)
         j = int(j)
         if j - i <= 1 or (closed and i == 0 and j == segment_count - 1):
@@ -6289,6 +6358,8 @@ def _capsule_clearance_diagnostics(
         if distance < conductor_diameter:
             intersection_count += 1
     finite_min = float(min_distance) if np.isfinite(min_distance) else 0.0
+    if task is not None:
+        task.done()
     return {
         "sweep_capsule_broad_phase": "bvh",
         "sweep_capsule_candidate_pair_count": int(len(candidates)),

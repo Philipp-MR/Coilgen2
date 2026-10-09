@@ -333,7 +333,9 @@ def test_cancellation_progress_and_explicit_work_budgets(tmp_path):
     )
     assert result.representation == "direct_wire"
     assert calls[0][0] == 0 and calls[-1][0] == 100
-    assert len(calls) > 3 and all(a[0] <= b[0] for a, b in zip(calls, calls[1:]))
+    determinate = [percent for percent, message in calls if percent is not None]
+    assert len(determinate) > 5 and determinate == sorted(determinate)
+    assert any(percent is None and "Reconstruct saved" in message for percent, message in calls)
     with pytest.raises(DesignCancelled):
         sample_slices(record, source, cancel_check=lambda: True)
     checks = 0
@@ -350,6 +352,38 @@ def test_cancellation_progress_and_explicit_work_budgets(tmp_path):
         sample_slices(record, source, resolution=256, offsets_m=np.arange(9) / 100)
     with pytest.raises(ValueError, match="distinct"):
         sample_slices(record, source, offsets_m=(0, 0))
+
+
+def test_sheet_slice_exposes_kernel_progress_before_target_chunk_finishes(monkeypatch):
+    from types import SimpleNamespace
+    from coilgen.application import field_sampling
+    from coilgen.config import CoilGenConfig
+    from coilgen.progress import ProgressReporter
+    import coilgen.physics as physics
+
+    points = np.zeros((16, 3))
+    stream = np.arange(100, dtype=float)
+    part = SimpleNamespace(sensitivity_matrix=None)
+    calls = []
+
+    def sensitivity(parts, target, config):
+        task = ProgressReporter(enabled=False).task("Sheet nodes", len(stream))
+        for index in range(len(stream)):
+            task.advance()
+            if 10 < index < len(stream) - 1:
+                assert any(value is not None and 0 < value < 1 for value in calls)
+        parts[0].sensitivity_matrix = np.ones((3, len(target.coords), len(stream)))
+
+    monkeypatch.setattr(field_sampling, "_sheet_mask", lambda points, part, check: np.ones(len(points), bool))
+    monkeypatch.setattr(physics, "calculate_sensitivity_matrix", sensitivity)
+    values, valid = field_sampling._physical(
+        points, "sheet", (part, stream), CoilGenConfig(progress_flag=False), None, calls.append
+    )
+    np.testing.assert_array_equal(values, np.full((len(points), 3), stream.sum()))
+    assert valid.all() and part.sensitivity_matrix is None
+    determinate = [value for value in calls if value is not None]
+    assert len(determinate) > 10 and determinate == sorted(determinate)
+    assert determinate[-1] == 1
 
 
 def test_artifact_integrity_failure_is_not_display_interpolation(tmp_path, monkeypatch):

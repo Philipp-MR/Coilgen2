@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass, replace
+import json
 from pathlib import Path
 from threading import Event
+import time
 
 import numpy as np
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, Signal
@@ -31,7 +33,7 @@ from PySide6.QtWidgets import (
 
 from ..application.field_analysis import FieldDataset, analyze_harmonics, metric_map, source_catalog
 from ..application.field_sampling import sample_slices
-from ..persistence import atomic_json, atomic_text_writer, json_value
+from ..persistence import atomic_text_writer, json_value
 from ..progress import DesignCancelled
 
 
@@ -65,7 +67,7 @@ class AnalysisState:
 
 
 class _Signals(QObject):
-    progress = Signal(int, str)
+    progress = Signal(object, str)
     finished = Signal(object, str)
 
 
@@ -74,6 +76,7 @@ class _AnalysisTask(QRunnable):
         super().__init__()
         self.operation, self.generation = operation, generation
         self.signals, self.cancel = _Signals(), Event()
+        self._last_update, self._last_percent, self._last_message = 0.0, None, ""
 
     def check(self):
         if self.cancel.is_set():
@@ -81,7 +84,15 @@ class _AnalysisTask(QRunnable):
 
     def report(self, percent, message):
         self.check()
-        self.signals.progress.emit(int(percent), str(message))
+        percent = None if percent is None else float(percent)
+        now, message = time.monotonic(), str(message)
+        changed_kind = (percent is None) != (self._last_percent is None)
+        changed_percent = percent is not None and (
+            self._last_percent is None or percent >= self._last_percent + 1 or percent >= 100
+        )
+        if changed_kind or changed_percent or message != self._last_message or now - self._last_update >= 0.1:
+            self.signals.progress.emit(percent, message)
+            self._last_update, self._last_percent, self._last_message = now, percent, message
 
     def run(self):
         try:
@@ -89,7 +100,9 @@ class _AnalysisTask(QRunnable):
             result = self.operation(self)
             self.check()
         except Exception as exc:
-            self.signals.finished.emit(None, str(exc))
+            self.signals.finished.emit(
+                None, "Cancelled" if isinstance(exc, (DesignCancelled, InterruptedError)) else str(exc)
+            )
         else:
             self.signals.finished.emit(result, "")
 
@@ -296,6 +309,7 @@ class FieldAnalysisDialog(QDialog):
 
     busyChanged = Signal(bool)
     progressChanged = Signal(str)
+    progressDetails = Signal(object)
     closed = Signal()
 
     def __init__(
@@ -561,12 +575,12 @@ class FieldAnalysisDialog(QDialog):
             def operation(task):
                 from ..application.evidence import load_saved_request
 
-                task.report(5, "Read verified field source arrays")
+                task.report(None, "Read verified field source arrays")
                 has_request = any(
                     item.get("name") == "request.json" for item in self.record.metadata.get("artifacts", ())
                 )
                 request = load_saved_request(self.record) if has_request else None
-                sources = source_catalog(self.record, request=request)
+                sources = source_catalog(self.record, request=request, progress=task.report, cancel_check=task.check)
                 task.report(100, "Available field sources loaded")
                 return ("catalog", sources)
 
@@ -714,13 +728,15 @@ class FieldAnalysisDialog(QDialog):
         )
 
         def operation(task):
-            task.report(5, "Calculate native-sample metrics")
+            task.report(0, "Calculate native-sample metrics")
             mapped = metric_map(
                 dataset,
                 component=selection.component,
                 metric=selection.metric,
                 sampling=selection.sampling,
                 normalization=selection.normalization,
+                progress=lambda percent, message: task.report(None if percent is None else 0.05 * percent, message),
+                cancel_check=task.check,
             )
             error = (
                 mapped
@@ -732,12 +748,16 @@ class FieldAnalysisDialog(QDialog):
                         metric="signed_residual",
                         sampling=selection.sampling,
                         normalization=selection.normalization,
+                        progress=lambda percent, message: task.report(
+                            None if percent is None else 5 + 0.05 * percent, message
+                        ),
+                        cancel_check=task.check,
                     )
                     if dataset.target_T is not None
                     else None
                 )
             )
-            task.report(15, "Reuse captured physical slice grid" if reused is not None else "Evaluate slice grid")
+            task.report(10, "Reuse captured physical slice grid" if reused is not None else "Evaluate slice grid")
             slices = (
                 reused
                 if reused is not None
@@ -749,11 +769,21 @@ class FieldAnalysisDialog(QDialog):
                     centre_m=selection.center_m,
                     size_m=selection.size_m,
                     resolution=selection.resolution,
-                    progress=lambda percent, message: task.report(15 + int(0.8 * percent), message),
+                    progress=lambda percent, message: task.report(
+                        None if percent is None else 10 + 0.8 * percent, message
+                    ),
                     cancel_check=task.check,
                 )
             )
-            values = tuple(self._slice_values(dataset, mapped, piece, selection) for piece in slices.slices)
+            values = []
+            for index, piece in enumerate(slices.slices):
+                task.report(None, f"Calculate scalar slice map {index + 1}/{len(slices.slices)}")
+                values.append(self._slice_values(dataset, mapped, piece, selection))
+                task.report(
+                    90 + 10 * (index + 1) / len(slices.slices),
+                    f"Scalar slice map {index + 1}/{len(slices.slices)} complete",
+                )
+            values = tuple(values)
             task.report(100, "Field views ready")
 
             def harmonic_controls(item):
@@ -814,7 +844,7 @@ class FieldAnalysisDialog(QDialog):
             return
 
         def operation(task):
-            task.report(5, "Fit common real solid-harmonic basis")
+            task.report(None, "Fit common real solid-harmonic basis")
             harmonic = analyze_harmonics(
                 state.dataset,
                 component=state.selection.component,
@@ -838,7 +868,7 @@ class FieldAnalysisDialog(QDialog):
         worker = self.worker
         worker.signals.progress.connect(self._progress)
         worker.signals.finished.connect(lambda result, error: self._finished(worker, result, error))
-        self.progress.setValue(0)
+        self.progress.setRange(0, 0)
         self.progress.show()
         self.cancel.show()
         self.refresh.setEnabled(False)
@@ -847,34 +877,47 @@ class FieldAnalysisDialog(QDialog):
         QThreadPool.globalInstance().start(worker)
 
     def _progress(self, percent, message):
-        self.progress.setValue(max(0, min(100, percent)))
+        self.progress.setRange(0, 0 if percent is None else 100)
+        if percent is not None:
+            self.progress.setValue(int(max(0, min(100, percent))))
         self.status.setText(message)
-        self.progressChanged.emit(f"Computing field analysis ({percent}%) · {message}")
+        percentage = "" if percent is None else f" ({int(max(0, min(100, percent)))}%)"
+        self.progressChanged.emit(f"Computing field analysis{percentage} · {message}")
+        self.progressDetails.emit({"percent": percent, "progress_indeterminate": percent is None, "message": message})
 
     def _finished(self, worker, result, error):
         if worker is not self.worker:
             return
         self.worker = None
-        self.progress.hide()
-        self.cancel.hide()
-        self.busyChanged.emit(False)
         if self._close_pending:
+            self.progress.hide()
+            self.cancel.hide()
+            self.busyChanged.emit(False)
             self._finish_close()
             return
         stale = worker.generation != self._generation
         if error and not stale:
-            self.status.setText("Field analysis failed: " + error)
+            self.status.setText(
+                "Field analysis cancelled." if error == "Cancelled" else "Field analysis failed: " + error
+            )
         elif result is not None and not stale:
             kind, value = result
             if kind == "catalog":
                 self._catalog_loaded(value)
             elif kind in {"analysis", "harmonics"}:
                 self.state = value
-                self._render()
+                self._progress(None, "Build captured field plots and tables")
+                try:
+                    self._render()
+                except Exception as exc:
+                    self.status.setText("Field plot publication failed: " + str(exc))
                 if kind == "harmonics":
                     self.tabs.setCurrentIndex(3)
             else:
                 self.status.setText("Saved captured field analysis: " + str(value))
+        self.progress.hide()
+        self.cancel.hide()
+        self.busyChanged.emit(False)
         self._enable(bool(self.datasets))
         if self.datasets:
             self.current_policy.setEnabled(self.source.currentData() + "_at_stream_current" in self.datasets)
@@ -1185,11 +1228,19 @@ class FieldAnalysisDialog(QDialog):
             axis.axhline(0, color="black", linewidth=0.7)
             self.harmonic_plot.draw()
 
-    def export_to(self, path, *, state=None):
+    def export_to(self, path, *, state=None, progress=None, cancel_check=None):
         if state is None and not self._current():
             raise ValueError("Recompute the current controls before exporting their analysis.")
         state = self.state if state is None else state
         path = Path(path)
+
+        def report(percent, message):
+            if cancel_check is not None and cancel_check():
+                raise DesignCancelled("Field analysis export cancelled.")
+            if progress is not None:
+                progress(percent, message)
+
+        report(None, "Prepare captured field analysis export")
         if path.suffix.lower() == ".csv":
             columns = [state.dataset.points_m, state.dataset.field_T]
             header = "x_m,y_m,z_m,Bx_T,By_T,Bz_T"
@@ -1210,8 +1261,18 @@ class FieldAnalysisDialog(QDialog):
                     "percent" if state.selection.normalization != "none" else "T",
                 )
             )
+            values = np.column_stack(columns)
             with atomic_text_writer(path) as output:
-                np.savetxt(output, np.column_stack(columns), delimiter=",", header=header, comments="")
+                for start in range(0, len(values), 4096):
+                    report(99 * start / len(values), f"Write native samples {start:,}/{len(values):,}")
+                    np.savetxt(
+                        output,
+                        values[start : start + 4096],
+                        delimiter=",",
+                        header=header if start == 0 else "",
+                        comments="",
+                    )
+                report(99, "Flush captured CSV export")
         elif path.suffix.lower() == ".json":
             payload = {
                 "schema": "coilgen-field-analysis-v1",
@@ -1225,9 +1286,29 @@ class FieldAnalysisDialog(QDialog):
                 "harmonics": state.harmonics,
                 "display_note": "Native fields and slice fields are SI tesla; normalized metrics are percentages of a global target scale.",
             }
-            atomic_json(path, _portable(payload))
+            portable = {}
+            for name, value in payload.items():
+                report(None, "Serialize captured analysis · " + name.replace("_", " "))
+                portable[name] = _portable(value)
+            # Encoded size is unknown before writing. Report observed bytes rather
+            # than inventing a percentage; checkpoints preserve atomic cancellation.
+            with atomic_text_writer(path) as output:
+                encoder = json.JSONEncoder(allow_nan=False, indent=2)
+                buffered, length, written = [], 0, 0
+                for chunk in encoder.iterencode(portable):
+                    buffered.append(chunk)
+                    length += len(chunk)
+                    if length >= 256 * 1024:
+                        report(None, f"Write captured analysis JSON · {written / 1024**2:.1f} MiB")
+                        text = "".join(buffered)
+                        output.write(text)
+                        written += len(text.encode("utf-8"))
+                        buffered, length = [], 0
+                report(None, "Flush captured JSON export")
+                output.write("".join(buffered) + "\n")
         else:
             raise ValueError("Choose a .json analysis or .csv native-sample export.")
+        report(100, "Captured numerical export complete")
 
     def _choose_export(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -1242,8 +1323,7 @@ class FieldAnalysisDialog(QDialog):
             state = self.state
 
             def operation(task):
-                task.report(5, "Write captured numerical analysis")
-                self.export_to(path, state=state)
+                self.export_to(path, state=state, progress=task.report, cancel_check=task.check)
                 task.report(100, "Analysis export complete")
                 return ("export", path)
 
