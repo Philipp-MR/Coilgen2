@@ -38,6 +38,7 @@ class SphericalHarmonicFit:
     residual_rms: float = float("nan")
     explained_rms_fraction: float = float("nan")
     rank: int = 0
+    singular_values: np.ndarray | None = None
 
 
 def solid_spherical_harmonic_terms(max_order: int) -> tuple[SphericalHarmonicTerm, ...]:
@@ -187,7 +188,7 @@ def fit_spherical_harmonics_many(
         weighted_basis = basis * root_weights
         weighted_values = fit_values * root_weights
 
-    coefficients, _, rank, _ = np.linalg.lstsq(weighted_basis, weighted_values, rcond=rcond)
+    coefficients, _, rank, singular_values = np.linalg.lstsq(weighted_basis, weighted_values, rcond=rcond)
     fitted = basis @ coefficients
     residual = fit_values - fitted
     basis_rms = _weighted_rms_columns(basis, fit_weights)
@@ -209,6 +210,7 @@ def fit_spherical_harmonics_many(
             residual_rms=float(residual_rms),
             explained_rms_fraction=float(1.0 - residual_rms / max(field_rms, 1.0e-30)),
             rank=int(rank),
+            singular_values=np.asarray(singular_values, dtype=float).copy(),
         )
     return fits
 

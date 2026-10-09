@@ -218,6 +218,29 @@ def _project_provenance(request: ResearchRequest) -> dict:
     }
 
 
+def _target_analysis_recipe(request, target):
+    """Retain the executed analytic scale for new-point analysis, without refitting."""
+    if request.requirements is not None:
+        return {}
+    config = request.to_config()
+    if str(config.target_field_definition_file).strip().lower() not in {"", "none"}:
+        return {}
+    diagnostics = getattr(target, "target_diagnostics", {})
+    scale = diagnostics.get("target_gradient_normalization_scale")
+    if scale is None or not np.isfinite(scale):
+        return {}
+    return {
+        "target_recipe": {
+            "field_shape_function": config.field_shape_function,
+            "target_field_units": config.target_field_units,
+            "normalization_scale": float(scale),
+            "normalization_method": diagnostics.get("target_gradient_normalization_method"),
+            "field_component": "Bz",
+            "coordinate_frame": "world",
+        }
+    }
+
+
 def _save_partial_result(request, checkpoint, directory, manifest, digest, started, stage_artifacts=()) -> dict:
     """Incomplete workflows remain inspectable without claiming winding acceptance."""
     state = checkpoint.state
@@ -347,6 +370,7 @@ def _save_partial_result(request, checkpoint, directory, manifest, digest, start
     payload = {
         "name": request.name,
         "config": request.to_dict()["config"],
+        **_target_analysis_recipe(request, state.target_field),
         "summary": summary,
         "constraints": constraints,
         "artifacts": artifacts,
@@ -833,6 +857,7 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
     payload = {
         "name": request.name,
         "config": request.to_dict()["config"],
+        **_target_analysis_recipe(request, result.target_field),
         "summary": summary,
         "constraints": constraints,
         "winding_steps": fabrication.winding_steps if fabrication else [],

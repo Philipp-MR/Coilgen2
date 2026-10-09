@@ -1080,6 +1080,15 @@ class CoilGenWorkbench(QMainWindow):
         self.compute_action = self._action("Compute selected stage", self.compute, "Ctrl+Return")
         self.addAction(self.compute_action)
         view_menu = self.view_menu = self.menuBar().addMenu("View")
+        self.field_analysis_action = self._action(
+            "Detailed field analysis…", self._field_analysis_dialog, icon_name="field-error"
+        )
+        self.field_analysis_action.setEnabled(False)
+        view_menu.addAction(self.field_analysis_action)
+        inspection_menu = getattr(self.viewport, "inspection_menu", None)
+        if inspection_menu is not None:
+            inspection_menu.addSeparator()
+            inspection_menu.addAction(self.field_analysis_action)
         panel_icons = {"model_dock": "model-tree", "settings_dock": "inspector", "evidence_dock": "evidence-panel"}
         for dock in self.findChildren(QDockWidget):
             action = dock.toggleViewAction()
@@ -4877,6 +4886,55 @@ class CoilGenWorkbench(QMainWindow):
                 expected_fingerprint=project.fingerprint,
             )
 
+    def _field_analysis_dialog(self):
+        """Inspect a pinned saved result; analysis never writes the active model."""
+        from .field_analysis import FieldAnalysisDialog
+
+        record = self.runs.get(self._selected_run)
+        if record is None or self._run_verification_error(record):
+            self._error("Select verified computed field evidence to analyze.")
+            return
+        expected = result_metadata_digest({k: v for k, v in record.metadata.items() if k != "job"})
+        key = (str(record.directory), expected)
+
+        def verify(_project):
+            saved = DesignService.load_run(record.directory)
+            actual = result_metadata_digest({k: v for k, v in saved.metadata.items() if k != "job"})
+            if actual != expected:
+                raise ValueError("The selected result changed on disk. Reload its evidence before analyzing it.")
+            return saved
+
+        def display(saved):
+            if not hasattr(self, "_field_analysis_windows"):
+                self._field_analysis_windows = {}
+            previous = self._field_analysis_windows.get(key)
+            if previous is not None:
+                previous.show()
+                previous.raise_()
+                return
+            view_state = self.viewport.view_state() if hasattr(self.viewport, "view_state") else {}
+            initial_source = view_state.get("dataset")
+            if view_state.get("wire_current") == "Original contour current" and isinstance(initial_source, str):
+                for source in ("contour", "routed"):
+                    if initial_source.startswith(source):
+                        initial_source = source + "_at_stream_current"
+                        break
+            dialog = FieldAnalysisDialog(saved, self, initial_source=initial_source)
+            dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            self._field_analysis_windows[key] = dialog
+            label = f"Field analysis · {saved.metadata.get('name', 'saved result')} · {expected[:8]}"
+            dialog.busyChanged.connect(lambda busy: self._research_busy(label, busy))
+            dialog.progressChanged.connect(lambda phase: self.statusBar().showMessage(f"{label}: {phase}"))
+
+            def closed():
+                self._field_analysis_windows.pop(key, None)
+                self._research_busy(label, False)
+
+            dialog.closed.connect(closed)
+            dialog.show()
+
+        self._gradient_task(verify, display, "Verify saved field analysis inputs", retain_receipt=True)
+
     def _research_verified_review(self, key, display, label):
         if self.project is None or not self._apply_document_inputs():
             return
@@ -6026,6 +6084,22 @@ class CoilGenWorkbench(QMainWindow):
 
     def _update_execution_feedback(self):
         self._refresh_computation_indicator()
+        if hasattr(self, "field_analysis_action"):
+            from ..application.field_analysis import field_analysis_available
+
+            record = self.runs.get(self._selected_run)
+            verified = record is not None and not self._run_verification_error(record)
+            cached = getattr(self, "_field_analysis_capability", None)
+            if cached is None or cached[0] is not record:
+                cached = (record, bool(record is not None and field_analysis_available(record)))
+                self._field_analysis_capability = cached
+            available = verified and cached[1]
+            self.field_analysis_action.setEnabled(available)
+            self.field_analysis_action.setToolTip(
+                "Analyze this selected run's saved fields, slice grids, error maps and spherical harmonics."
+                if available
+                else "Select a verified saved run containing computed field samples."
+            )
         if hasattr(self, "research_actions"):
             record = self.runs.get(self._selected_run)
             verified = record is not None and not self._run_verification_error(record)
@@ -6887,6 +6961,8 @@ class CoilGenWorkbench(QMainWindow):
             self._research_close_pending = True
             for dialog in self.findChildren(ArrayStudyDialog):
                 dialog.reject()
+            for dialog in tuple(getattr(self, "_field_analysis_windows", {}).values()):
+                dialog.request_close()
             self.statusBar().showMessage("Cancelling the active research study before closing…")
             event.ignore()
             return
@@ -6894,6 +6970,8 @@ class CoilGenWorkbench(QMainWindow):
             event.ignore()
             return
         self._closing = True
+        for dialog in tuple(getattr(self, "_field_analysis_windows", {}).values()):
+            dialog.request_close()
         scene_editor = getattr(self, "_scene_editor", None)
         if scene_editor is not None:
             scene_editor.reject()

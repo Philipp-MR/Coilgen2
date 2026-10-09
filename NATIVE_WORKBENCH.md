@@ -36,6 +36,54 @@ scientific figures and existing script plotbooks.
 
 ## Scientific workflow
 
+### Detailed saved-field analysis
+
+Select a computed saved run, then open **View → Detailed field analysis…**
+or the same action in the viewport's **Inspect** menu. Target-only preparations
+and failed evidence verification keep the action disabled. Each modeless analysis
+window stays bound to its verified run while the active model or channel changes;
+pending model edits are not applied by opening it.
+
+Choose continuous-sheet, routed/contour, realized-conductor, independent-validation
+or named region/pose samples where those fields were calculated. Recorded winding
+current and original stream-function current are distinct choices when both exist.
+The utility provides:
+
+- A rotatable 3D point cloud in world metres, with Bx, By, Bz, projection along the
+  recorded B0 direction, or field magnitude, plus numerical samples and statistics.
+- Multiple XY, XZ or YZ slices on a regular grid, with common color limits and the
+  target-volume section indicated. Authored spheres, ellipsoids, boxes, cylinders
+  and verified enclosures retain their geometry and registration. An imported
+  sample cloud shows its coverage hull rather than an invented target volume.
+- Desired field, signed component residual, absolute component error and vector
+  residual norm; histograms/profiles and RMS, peak, standard deviation and absolute
+  95th percentile. Equal-sample and saved-weight statistics are explicit. Percent
+  maps use one global desired RMS or peak; desired zero crossings do not create
+  pointwise divisions. A zero desired field requires physical error units.
+- Real solid spherical harmonics for scalar Cartesian components or B0 projection,
+  with explicit center, reference radius and maximum degree. Actual, desired and
+  residual coefficients use one common basis and sampling. Rank, singular values,
+  conditioning and reconstruction error expose unsupported or poorly conditioned
+  coefficients. Field magnitude and vector-error norms are excluded from this fit.
+- PNG plots, CSV sample vectors/metrics and a complete JSON analysis bound to the
+  displayed selection. JSON includes sampling, units, source/current provenance,
+  slice grids, unavailable masks and harmonic diagnostics.
+
+Slices directly reevaluate the saved geometry and unchanged signed currents when
+the source contract is available and reproduces the saved map. Otherwise the
+display explicitly identifies linear interpolation, with blanks outside sample
+support, across large gaps or at source singularities. New native snapshots record
+the executed analytic target normalization, so a new grid does not rescale the
+desired field. Older snapshots without that contract retain descriptive desired
+interpolation. Progress and cancellation remain visible during background work.
+
+These are diagnostic views, not new engineering acceptance tests. Saved weights
+are not assumed to be volume quadrature, and a harmonic fit alone does not verify
+a source-free homogeneous domain, Maxwell consistency or errors between samples.
+The headless `coilgen.application.field_analysis` and `field_sampling` modules
+expose the same operations to scripts without importing Qt or changing the design
+pipeline.
+
 ### Research workflows
 
 **Research studies** hosts the requirements and reviews for unusual designs:
