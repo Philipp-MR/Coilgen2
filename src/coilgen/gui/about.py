@@ -1,7 +1,10 @@
 """Software credits, public project contact, and supplied imprint details."""
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QTabWidget, QVBoxLayout, QWidget
+from importlib.resources import files
+
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFrame, QLabel, QScrollArea, QTabWidget, QVBoxLayout, QWidget
 
 from ..attribution import (
     AUTHOR_CREDIT,
@@ -15,16 +18,20 @@ from ..attribution import (
     PROJECT_URL,
     SOFTWARE_NAME,
 )
+from .branding import LogoLabel
 
 
 class AboutDialog(QDialog):
     def __init__(self, parent=None, *, page="about"):
         super().__init__(parent)
         self.setWindowTitle(f"About {SOFTWARE_NAME}")
-        self.resize(580, 420)
+        self.resize(580, 660)
         layout = QVBoxLayout(self)
+        logo = LogoLabel(self, width=420)
+        logo.setObjectName("about_logo")
+        layout.addWidget(logo, alignment=Qt.AlignmentFlag.AlignHCenter)
         heading = QLabel(SOFTWARE_NAME)
-        heading.setStyleSheet("font-size: 24px; font-weight: 600;")
+        heading.setStyleSheet("font-size: 15px; font-weight: 600;")
         layout.addWidget(heading)
         layout.addWidget(QLabel("Magnetostatic coil design and field analysis."))
         self.tabs = QTabWidget()
@@ -62,6 +69,34 @@ class AboutDialog(QDialog):
         )
         self._link(imprint, CONTACT_EMAIL, f"mailto:{CONTACT_EMAIL}", "impressum_email")
         self._link(imprint, "Public project contact on GitHub", PROJECT_ISSUES_URL, "impressum_project_contact")
+        imprint.addSpacing(12)
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        imprint.addWidget(divider)
+        self._text(imprint, "Acknowledgments", "acknowledgment_heading")
+        logo = QLabel()
+        logo.setObjectName("martinos_acknowledgment_logo")
+        logo.setAccessibleName("Athinoula A. Martinos Center for Biomedical Imaging logo")
+        logo.setStyleSheet("background-color: #152a40; padding: 12px; border-radius: 6px;")
+        pixmap = QPixmap()
+        pixmap.loadFromData(files("coilgen.gui").joinpath("assets/martinos-logo.png").read_bytes())
+        logo.setPixmap(
+            pixmap.scaled(
+                QSize(280, 48), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+            )
+        )
+        imprint.addWidget(logo, alignment=Qt.AlignmentFlag.AlignLeft)
+        self._text(
+            imprint,
+            "With gratitude to the Athinoula A. Martinos Center for Biomedical Imaging community.",
+            "martinos_gratitude",
+        )
+        self._text(
+            imprint,
+            f"Personal acknowledgment by {AUTHOR_NAME}; no institutional endorsement is implied.",
+            "martinos_acknowledgment_scope",
+        )
+        self._link(imprint, "Martinos Center website", "https://www.martinos.org/", "martinos_homepage")
         imprint.addStretch(1)
         pages = {self.tabs.widget(index).objectName(): index for index in range(self.tabs.count())}
         if page not in pages:
@@ -78,9 +113,13 @@ class AboutDialog(QDialog):
         self.setWindowTitle(f"About {SOFTWARE_NAME}" if title == "About" else f"{title} — {SOFTWARE_NAME}")
 
     def _page(self, name, title):
+        scroll = QScrollArea()
+        scroll.setObjectName(name)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
         widget = QWidget()
-        widget.setObjectName(name)
-        self.tabs.addTab(widget, title)
+        scroll.setWidget(widget)
+        self.tabs.addTab(scroll, title)
         return QVBoxLayout(widget)
 
     @staticmethod

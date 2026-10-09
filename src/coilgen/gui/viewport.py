@@ -168,6 +168,33 @@ class _PreviewTask(QRunnable):
         self.signals.finished.emit(self.generation, result)
 
 
+class _SystemSupportTask(QRunnable):
+    """Load other channels' support geometry only; never evaluate their targets."""
+
+    def __init__(self, generation, requests):
+        super().__init__()
+        self.signals = _PreviewSignals()
+        self.generation, self.requests = generation, requests
+
+    def run(self):
+        from ..geometry import load_mesh_from_config
+
+        result = {}
+        for channel_id, identity, config, root in self.requests:
+            try:
+                if str(config.coil_mesh_file).strip().lower() in {"", "none"}:
+                    raise ValueError("Choose a support surface for this channel.")
+                mesh = load_mesh_from_config(config, root)
+                arrays = {"vertices_m": mesh.vertices, "faces": mesh.faces}
+                capability = resolve_dataset(arrays, "support")
+                if not capability.available:
+                    raise ValueError(capability.explanation)
+                result[channel_id] = (identity, arrays, "")
+            except Exception as exc:
+                result[channel_id] = (identity, {}, f"Support unavailable: {type(exc).__name__}: {exc}")
+        self.signals.finished.emit(self.generation, result)
+
+
 class ScientificViewport(QWidget):
     selected = Signal(str)
     point_picked = Signal(object)
@@ -213,6 +240,18 @@ class ScientificViewport(QWidget):
         self._support_identity = None
         self._target_identity = None
         self._model_owner = None
+        self._system_id = None
+        self._system_channels = {}
+        self._system_active_channel = None
+        self._system_identities = {}
+        self._system_supports = {}
+        self._system_support_errors = {}
+        self._system_visibility = {}
+        self._system_generation = 0
+        self._system_worker = None
+        self._pending_system_preview = None
+        self._system_needs_fit = False
+        self.system_mesh_checks = {}
         self._model_complete = False
         self._pick_press = None
         self._pick_dragged = False
@@ -474,6 +513,29 @@ class ScientificViewport(QWidget):
             "Layers", "Visible layers", "visibility", 230
         )
         self.layers_button.setObjectName("viewport_layers_button")
+        (
+            self.system_meshes_button,
+            self.system_meshes_menu,
+            self.system_meshes_panel,
+            self._system_meshes_layout,
+        ) = controls_popup("System meshes", "Channel support meshes", "mesh", 280)
+        self.system_meshes_button.setObjectName("viewport_system_meshes_button")
+        self.system_meshes_button.setToolTip(
+            "Select which channel support meshes are visible in the shared world frame. "
+            "This changes the plot only; channel computation and editing selection are unchanged."
+        )
+        self.system_meshes_button.hide()
+        self.system_meshes_note = QLabel("Support surfaces in the shared SI world frame")
+        self.system_meshes_note.setWordWrap(True)
+        self._system_meshes_layout.addWidget(self.system_meshes_note)
+        system_commands = QHBoxLayout()
+        self.system_show_all = QPushButton("Show all")
+        self.system_hide_all = QPushButton("Hide all")
+        self.system_show_all.clicked.connect(lambda: self._set_all_system_meshes(True))
+        self.system_hide_all.clicked.connect(lambda: self._set_all_system_meshes(False))
+        system_commands.addWidget(self.system_show_all)
+        system_commands.addWidget(self.system_hide_all)
+        self._system_meshes_layout.addLayout(system_commands)
         self.display_button, self.display_menu, self.display_panel, display = controls_popup(
             "Display", "Display and sampling", "settings", 330
         )
@@ -530,6 +592,7 @@ class ScientificViewport(QWidget):
         display.addWidget(self.slice_controls)
         self._popup_controls = {
             self.layers_menu: (self.support_layer, self.roi_layer),
+            self.system_meshes_menu: (self.system_show_all, self.system_hide_all),
             self.display_menu: (self.orthographic, self.edges, self.clip, self.slice_axis, self.slice_position),
         }
         for controls in self._popup_controls.values():
@@ -537,6 +600,7 @@ class ScientificViewport(QWidget):
                 control.installEventFilter(self)
         for menu, first_control in (
             (self.layers_menu, self.support_layer),
+            (self.system_meshes_menu, self.system_show_all),
             (self.display_menu, self.orthographic),
         ):
             menu.aboutToShow.connect(
@@ -563,7 +627,7 @@ class ScientificViewport(QWidget):
         hidden_layout.addWidget(hidden_note, 1)
         self.show_support = QPushButton("Show support")
         self.show_support.setObjectName("viewport_show_support")
-        self.show_support.clicked.connect(lambda: self.support_layer.setChecked(True))
+        self.show_support.clicked.connect(self._show_active_support)
         hidden_layout.addWidget(self.show_support)
         self.hidden_geometry.hide()
         layout.addWidget(self.hidden_geometry)
@@ -660,6 +724,7 @@ class ScientificViewport(QWidget):
 
     def _camera_gesture_finished(self, before):
         if not self._closed and not np.array_equal(before, self.plotter.camera_position):
+            self._system_needs_fit = False
             for pane in (self, self._comparison_peer):
                 if pane is not None and not pane._closed:
                     with QSignalBlocker(pane.view):
@@ -767,6 +832,228 @@ class ScientificViewport(QWidget):
     def _model_dataset(self):
         return "preview_target" if self._capability("preview_target", comparison=False).available else "support"
 
+    def set_assembly_context(self, assembly, active_channel_id=None):
+        """Set independent support overlays; channel selection and physics stay with the caller.
+
+        Call immediately before ``render_project`` when switching the editor.
+        ``None`` or a one-channel assembly removes the system overlays. Meshes
+        are loaded off the UI thread and retained only for matching input intent.
+        """
+        if self._closed:
+            return
+        channels = {channel.id: channel for channel in assembly.channels} if assembly is not None else {}
+        if len(channels) < 2:
+            channels = {}
+            active_channel_id = None
+        elif active_channel_id not in channels:
+            raise ValueError("The displayed channel must belong to the coil system.")
+        system_id = assembly.id if channels else None
+        identities = {
+            id_: (
+                channel.project.id,
+                _preview_identities(None, channel.project.values)[0],
+                str(channel.project.project_root),
+            )
+            for id_, channel in channels.items()
+        }
+        changed = (
+            system_id != self._system_id
+            or identities != self._system_identities
+            or active_channel_id != self._system_active_channel
+        )
+        if system_id != self._system_id:
+            self._system_visibility = {}
+            self._system_supports = {}
+            self._system_support_errors = {}
+            self._system_needs_fit = bool(channels)
+        for id_ in tuple(self._system_supports):
+            if identities.get(id_) != self._system_identities.get(id_):
+                self._system_supports.pop(id_, None)
+        self._system_support_errors = {
+            id_: error
+            for id_, error in self._system_support_errors.items()
+            if identities.get(id_) == self._system_identities.get(id_) and id_ in channels
+        }
+        self._system_visibility = {id_: self._system_visibility.get(id_, True) for id_ in channels}
+        self._system_id, self._system_channels = system_id, channels
+        self._system_active_channel, self._system_identities = active_channel_id, identities
+        self._sync_system_mesh_controls()
+        if not changed:
+            return
+        self._system_generation += 1
+        self._pending_system_preview = None
+        requests = []
+        for id_, channel in channels.items():
+            if id_ == active_channel_id or id_ in self._system_supports or id_ in self._system_support_errors:
+                continue
+            try:
+                requests.append((id_, identities[id_], deepcopy(channel.project.config), channel.project.project_root))
+            except Exception as exc:
+                self._system_support_errors[id_] = f"Support unavailable: {type(exc).__name__}: {exc}"
+        self._sync_system_mesh_controls()
+        if requests:
+            request = self._system_generation, tuple(requests)
+            if self._synchronous_preview:
+                task = _SystemSupportTask(*request)
+                task.signals.finished.connect(self._system_preview_finished)
+                task.run()
+            elif self._system_worker is None:
+                self._start_system_preview(request)
+            else:
+                self._pending_system_preview = request
+
+    def _start_system_preview(self, request):
+        self._system_worker = _SystemSupportTask(*request)
+        self._system_worker.signals.finished.connect(self._system_preview_finished)
+        QThreadPool.globalInstance().start(self._system_worker)
+
+    @Slot(int, object)
+    def _system_preview_finished(self, generation, result):
+        if self._closed:
+            return
+        self._system_worker = None
+        if generation == self._system_generation:
+            for id_, (identity, arrays, error) in result.items():
+                if self._system_identities.get(id_) != identity:
+                    continue
+                if error:
+                    self._system_support_errors[id_] = error
+                else:
+                    self._system_supports[id_] = self._mesh(arrays["vertices_m"], arrays["faces"])
+                    self._system_support_errors.pop(id_, None)
+            self._sync_system_mesh_controls()
+            if self._system_needs_fit:
+                self._first_view = True
+            self._render()
+            active = self._system_channels.get(self._system_active_channel)
+            if self._pending_system_preview is None and active is not None and self._model_owner == active.project.id:
+                self._system_needs_fit = False
+        if self._pending_system_preview is not None:
+            request, self._pending_system_preview = self._pending_system_preview, None
+            self._start_system_preview(request)
+
+    def _sync_system_mesh_controls(self):
+        for id_ in tuple(self.system_mesh_checks):
+            if id_ not in self._system_channels:
+                check = self.system_mesh_checks.pop(id_)
+                self._system_meshes_layout.removeWidget(check)
+                check.deleteLater()
+        for id_, channel in self._system_channels.items():
+            check = self.system_mesh_checks.get(id_)
+            if check is None:
+                check = QCheckBox()
+                check.setObjectName(f"viewport_system_mesh_{id_}")
+                check.setAccessibleName(f"Show support mesh for channel {channel.name}")
+                check.installEventFilter(self)
+                check.toggled.connect(
+                    lambda visible, channel_id=id_: self._set_system_mesh_visible(channel_id, visible)
+                )
+                self.system_mesh_checks[id_] = check
+                self._system_meshes_layout.addWidget(check)
+            active = id_ == self._system_active_channel
+            displayed = id_ == self._displayed_support_channel() and self.dataset.currentData() not in {
+                "support",
+                "preview_target",
+            }
+            displayed_available = displayed and self._displayed_support_available()
+            available = (
+                displayed_available
+                or id_ in self._system_supports
+                or (active and self._model_owner == channel.project.id and self._support is not None)
+            )
+            error = self._system_support_errors.get(id_, "")
+            text = (
+                channel.name
+                + (" · editing" if active else "")
+                + (" · result" if displayed else "")
+                + (" · compute disabled" if not channel.enabled else "")
+            )
+            text += (
+                " · current model unavailable"
+                if error and displayed_available
+                else " · unavailable"
+                if error
+                else " · loading…"
+                if not available
+                else ""
+            )
+            check.setText(text)
+            check.setEnabled(available)
+            check.setToolTip(
+                "The displayed result retains its stored support. Current model: " + error
+                if error and displayed_available
+                else error
+                or "Show this channel's support in world coordinates [m]. "
+                "Visibility does not change its computation setting, field data, winding paths, or editing selection."
+            )
+            with QSignalBlocker(check):
+                check.setChecked(self._system_visibility.get(id_, True))
+        self.system_meshes_button.setVisible(bool(self._system_channels))
+        displayed_channel = self._displayed_support_channel()
+        count = sum(
+            self.support_layer.isChecked()
+            and self._system_visibility.get(id_, True)
+            and (self._displayed_support_available() if id_ == displayed_channel else id_ in self._system_supports)
+            for id_ in self._system_channels
+        )
+        self.system_meshes_button.setText(f"System meshes ({count}/{len(self._system_channels)})")
+        self._popup_controls[self.system_meshes_menu] = (
+            self.system_show_all,
+            self.system_hide_all,
+            *self.system_mesh_checks.values(),
+        )
+        problems = [
+            f"{channel.name}: {self._system_support_errors[id_]}"
+            for id_, channel in self._system_channels.items()
+            if id_ in self._system_support_errors
+        ]
+        self.system_meshes_note.setText(
+            "Support surfaces in the shared SI world frame. Plot visibility is independent of computation."
+            + ("\n" + "\n".join(problems) if problems else "")
+        )
+
+    def _set_system_mesh_visible(self, channel_id, visible):
+        if channel_id not in self._system_channels:
+            return
+        self._system_visibility[channel_id] = bool(visible)
+        self._system_needs_fit = False
+        self._sync_system_mesh_controls()
+        self._render()
+
+    def _set_all_system_meshes(self, visible):
+        self._system_visibility = {id_: bool(visible) for id_ in self._system_channels}
+        self._system_needs_fit = False
+        if visible:
+            with QSignalBlocker(self.support_layer):
+                self.support_layer.setChecked(True)
+        self._sync_system_mesh_controls()
+        self._render()
+
+    def _active_support_visible(self):
+        return self.support_layer.isChecked() and self._system_visibility.get(self._displayed_support_channel(), True)
+
+    def _displayed_support_channel(self):
+        if self.dataset.currentData() in {"support", "preview_target"}:
+            return self._system_active_channel
+        metadata = self._stage_metadata if self._live_stage_preview else self._metadata
+        owner = metadata.get("project_id")
+        if owner is None:
+            return self._system_active_channel
+        return next((id_ for id_, channel in self._system_channels.items() if channel.project.id == owner), None)
+
+    def _displayed_support_available(self):
+        if self.dataset.currentData() in {"support", "preview_target"}:
+            return self._support is not None
+        return self._source_support_available
+
+    def _show_active_support(self):
+        channel_id = self._displayed_support_channel()
+        if channel_id in self._system_visibility:
+            self._system_visibility[channel_id] = True
+            self._sync_system_mesh_controls()
+        self.support_layer.setChecked(True)
+        self._render()
+
     def render_project(self, project):
         from ..application.spatial_scene import SpatialScene
 
@@ -823,6 +1110,9 @@ class ScientificViewport(QWidget):
             # backend worker; any old in-flight result is already invalidated.
             self._pending_preview = None
             _, _, self._preview_error, preflight = _preview_data(config, root)
+            if self._system_active_channel is not None:
+                self._system_support_errors[self._system_active_channel] = self._preview_error
+                self._sync_system_mesh_controls()
             self.preflight_ready.emit(deepcopy(preflight))
             if self.dataset.currentData() in {"support", "preview_target"}:
                 self._render()
@@ -893,6 +1183,20 @@ class ScientificViewport(QWidget):
                 }
                 mesh = None
             self._support = self._mesh(mesh.vertices, mesh.faces) if mesh is not None else None
+            channel_id = self._system_active_channel
+            identity = self._system_identities.get(channel_id)
+            if identity is not None and identity[:2] == (self._model_owner, self._support_identity):
+                if self._support is None:
+                    self._system_supports.pop(channel_id, None)
+                    self._system_support_errors[channel_id] = self._preview_error
+                else:
+                    self._system_supports[channel_id] = self._support
+                    self._system_support_errors.pop(channel_id, None)
+                self._sync_system_mesh_controls()
+                if self._system_needs_fit:
+                    self._first_view = True
+                    if self._system_worker is None and self._pending_system_preview is None:
+                        self._system_needs_fit = False
             self._rebuild_capabilities()
             self._refresh_availability()
             if self.dataset.currentData() == "preview_target" and not self._capability("preview_target").available:
@@ -901,7 +1205,7 @@ class ScientificViewport(QWidget):
             self.preflight_ready.emit(deepcopy(preflight))
             if mesh is None or self._preview_error.startswith("Target preview unavailable:"):
                 self.error.emit(self._preview_error)
-            if self.dataset.currentData() in {"support", "preview_target"}:
+            if self._system_channels or self.dataset.currentData() in {"support", "preview_target"}:
                 self._render()
         if self._pending_preview is not None:
             request, self._pending_preview = self._pending_preview, None
@@ -1029,6 +1333,7 @@ class ScientificViewport(QWidget):
         """Clear project evidence and discard any in-flight preview's eventual result."""
         if self._closed:
             return
+        self.set_assembly_context(None)
         self._preview_generation += 1
         self._pending_preview = None
         self._preview_arrays = {}
@@ -1042,6 +1347,7 @@ class ScientificViewport(QWidget):
         self._first_view = True
         self.inspection_menu.hide()
         self.layers_menu.hide()
+        self.system_meshes_menu.hide()
         self.display_menu.hide()
         if self._comparison is not None:
             self._comparison.close()
@@ -1160,6 +1466,8 @@ class ScientificViewport(QWidget):
             state[name] = getattr(self, name).currentText()
         for name in ("orthographic", "support_layer", "roi_layer", "edges", "clip"):
             state[name] = getattr(self, name).isChecked()
+        if self._system_channels:
+            state["system_mesh_visibility"] = dict(self._system_visibility)
         camera = getattr(self.plotter, "camera", None)
         if camera is not None:
             state["parallel_scale"] = float(camera.parallel_scale)
@@ -1193,6 +1501,11 @@ class ScientificViewport(QWidget):
             }
             if any(not isinstance(value, bool) for value in flags.values()):
                 raise ValueError("Viewport visibility/projection flags must be booleans.")
+            system_visibility = state.get("system_mesh_visibility", self._system_visibility)
+            if not isinstance(system_visibility, dict) or any(
+                not isinstance(id_, str) or not isinstance(visible, bool) for id_, visible in system_visibility.items()
+            ):
+                raise ValueError("Channel mesh visibility must map channel IDs to booleans.")
             position = state.get("slice_position", self.slice_position.value())
             if isinstance(position, bool) or not isinstance(position, int) or not 0 <= position <= 100:
                 raise ValueError("Viewport slice position must be an integer from 0 to 100.")
@@ -1243,6 +1556,11 @@ class ScientificViewport(QWidget):
             getattr(self, name).setCurrentIndex(index)
         for name, value in flags.items():
             getattr(self, name).setChecked(value)
+        self._system_visibility = {
+            id_: system_visibility.get(id_, self._system_visibility.get(id_, True)) for id_ in self._system_channels
+        }
+        self._system_needs_fit = False
+        self._sync_system_mesh_controls()
         self.slice_position.setValue(position)
         self._last_wire_current = self.wire_current.currentIndex()
         del blockers
@@ -1387,8 +1705,11 @@ class ScientificViewport(QWidget):
             return
         dataset = self.dataset.currentText()
         primary = actor_key == self._dataset_actor_key
+        channel = self._system_channels.get(key.removeprefix("system:")) if key.startswith("system:") else None
         layer = (
-            dataset
+            f"{channel.name} support mesh"
+            if channel is not None
+            else dataset
             if primary
             else {"geometry": "Support layer", "target": "Target points layer"}.get(key, "Winding layer")
         )
@@ -1419,7 +1740,7 @@ class ScientificViewport(QWidget):
             text += f" · viewing {dataset}; no field value sampled at this position"
         # Capture source/sample feedback before navigation can change the model
         # preview or primary plot; the click refers to the scene that was picked.
-        if not key.startswith("scene:"):
+        if not key.startswith(("scene:", "system:")):
             self.selected.emit(key)
         self.probe.setText(text)
 
@@ -1538,6 +1859,7 @@ class ScientificViewport(QWidget):
         if self._closed:
             return
         self._refresh_availability()
+        self._sync_system_mesh_controls()
         camera = self.plotter.camera_position
         widgets = getattr(self.plotter, "widgets", self.plotter)
         widgets.clear_plane_widgets()
@@ -1549,7 +1871,7 @@ class ScientificViewport(QWidget):
         self.probe.setText("Probe: —")
         key = self.dataset.currentData()
         available = self._capability(key, comparison=False).available
-        hidden_support = key == "support" and available and not self.support_layer.isChecked()
+        hidden_support = key == "support" and available and not self._active_support_visible()
         self.hidden_geometry.setVisible(hidden_support)
         self._last_valid_dataset = key if available or key in {"support", "preview_target"} else None
         model = key in {"support", "preview_target"}
@@ -1585,6 +1907,7 @@ class ScientificViewport(QWidget):
         caption = "Coordinates [m]"
         mesh = None
         swept_count = 0
+        system_count = 0
         try:
             support = (
                 self._support
@@ -1593,7 +1916,7 @@ class ScientificViewport(QWidget):
                 if self._source_support_available
                 else None
             )
-            if support is not None and self.support_layer.isChecked() and key not in {"stream_function", "support"}:
+            if support is not None and self._active_support_visible() and key not in {"stream_function", "support"}:
                 self._add(
                     support,
                     "geometry",
@@ -1601,6 +1924,22 @@ class ScientificViewport(QWidget):
                     show_edges=self.edges.isChecked(),
                     opacity=0.04 if locating else 0.24 if key == "preview_target" else 0.15,
                 )
+            if self.support_layer.isChecked():
+                colors = ("#4b869f", "#c48a53", "#82985d", "#947aaa", "#579c90")
+                for index, (id_, channel) in enumerate(self._system_channels.items()):
+                    if id_ == self._displayed_support_channel() or not self._system_visibility.get(id_, True):
+                        continue
+                    context_mesh = self._system_supports.get(id_)
+                    if context_mesh is None:
+                        continue
+                    self._add(
+                        context_mesh,
+                        f"system:{channel.id}",
+                        color=colors[index % len(colors)],
+                        show_edges=self.edges.isChecked(),
+                        opacity=0.28 if key == "support" else 0.10,
+                    )
+                    system_count += 1
             points_available = self._model_points_available if model else self._source_points_available
             if self.roi_layer.isChecked() and points_available and key not in {"target", "preview_target"}:
                 if live and self._capability("target", comparison=False).available:
@@ -1619,7 +1958,7 @@ class ScientificViewport(QWidget):
                     points = self.pv.PolyData(np.asarray(arrays["target_points_m"], dtype=float))
                     self._add(points, "target", color="#c5965b", point_size=4, opacity=0.45)
             if key == "support":
-                mesh = self._support if self.support_layer.isChecked() else None
+                mesh = self._support if self._active_support_visible() else None
                 caption += " · support hidden" if hidden_support else " · current model support"
                 options = {"color": "#79949d", "show_edges": self.edges.isChecked(), "opacity": 0.72}
             elif key == "stream_function" and {"vertices_m", "faces", "stream_function_A"} <= arrays.keys():
@@ -1632,6 +1971,9 @@ class ScientificViewport(QWidget):
                 caption += (
                     " · live continuous-sheet solution" if live else " · immutable run / continuous-sheet solution"
                 )
+                if self._system_channels and not self._active_support_visible():
+                    mesh = None
+                    caption += " · active support mesh hidden"
             elif key == "surface_current_density" and available:
                 mesh = self.pv.PolyData(np.asarray(arrays["sheet_current_density_points_m"], dtype=float))
                 mesh["|K| [A/m]"] = np.linalg.norm(arrays["sheet_current_density_A_per_m"], axis=1)
@@ -1750,6 +2092,7 @@ class ScientificViewport(QWidget):
                 "review_electrical",
                 "swept",
                 "support",
+                "stream_function",
             }:
                 caption += " · dataset unavailable"
             if key in {"support", "preview_target"} and self._preview_error:
@@ -1825,8 +2168,26 @@ class ScientificViewport(QWidget):
                 caption = "Cached run · verification failed · " + caption + " · " + self._verification_error
             if self._source_notice:
                 caption += " · " + self._source_notice
+            if self._system_channels:
+                active_visible = self._displayed_support_channel() is not None and (
+                    support is not None
+                    and self._active_support_visible()
+                    or key == "stream_function"
+                    and mesh is not None
+                )
+                visible = system_count + int(active_visible)
+                caption += (
+                    f" · {visible}/{len(self._system_channels)} channel support meshes visible in the SI world frame"
+                )
+                if not model:
+                    caption += " · other channels: current model supports; not part of this run"
+                unavailable = [
+                    channel.name for id_, channel in self._system_channels.items() if id_ in self._system_support_errors
+                ]
+                if unavailable:
+                    caption += " · support unavailable: " + ", ".join(unavailable) + " (see System meshes)"
             self.caption.setText(caption)
-            if self._first_view and (mesh is not None or support is not None or swept_count):
+            if self._first_view and (mesh is not None or support is not None or swept_count or system_count):
                 self._fit_view()
                 self._first_view = False
             else:
@@ -1885,6 +2246,7 @@ class ScientificViewport(QWidget):
             self._closed = True
             self.inspection_menu.hide()
             self.layers_menu.hide()
+            self.system_meshes_menu.hide()
             self.display_menu.hide()
             if self._comparison is not None:
                 self._comparison.close()
@@ -1892,6 +2254,10 @@ class ScientificViewport(QWidget):
             if self._preview_worker is not None:
                 self._preview_worker.signals.finished.disconnect(self._preview_finished)
                 self._preview_worker = None
+            self._pending_system_preview = None
+            if self._system_worker is not None:
+                self._system_worker.signals.finished.disconnect(self._system_preview_finished)
+                self._system_worker = None
             self.plotter.close()
         super().closeEvent(event)
 

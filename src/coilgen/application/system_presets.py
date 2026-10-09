@@ -17,7 +17,10 @@ from .project import ProjectDocument
 from .targets import SolidHarmonicTarget
 
 
-SYSTEM_EXAMPLE_TITLES = {"biplanar_gradient_shim": "Biplanar gradients + second-order shims"}
+SYSTEM_EXAMPLE_TITLES = {
+    "biplanar_gradient_shim": "Biplanar gradients + second-order shims",
+    "cylindrical_xyz_gradient": "Cylindrical XYZ gradient system (Gx, Gy, Gz)",
+}
 SYSTEM_PRESET_NAMES = tuple(SYSTEM_EXAMPLE_TITLES)
 
 BIPLANAR_ROI_RADIUS_M = 0.02
@@ -25,6 +28,11 @@ BIPLANAR_GRADIENT_T_PER_M = 0.02
 BIPLANAR_Z0_FIELD_T = 100e-6
 BIPLANAR_SECOND_ORDER_PEAK_T = 10e-6
 BIPLANAR_PLANE_PITCH_M = 0.006
+
+CYLINDRICAL_LENGTH_M = 0.20
+CYLINDRICAL_SUPPORT_RADII_M = (0.080, 0.086, 0.092)
+CYLINDRICAL_ROI_RADIUS_M = 0.020
+CYLINDRICAL_GRADIENT_T_PER_M = 0.020
 
 # Names are canonical Cartesian Bz modes; gradients supply the complete degree-1
 # basis. Positive XZ/YZ require negative real-Y2,+/-1 coefficients because the
@@ -45,6 +53,25 @@ _MODES = (
 def system_description(kind="biplanar_gradient_shim") -> str:
     if kind not in SYSTEM_EXAMPLE_TITLES:
         raise ValueError(f"Unknown system example {kind!r}; choose {', '.join(SYSTEM_PRESET_NAMES)}.")
+    if kind == "cylindrical_xyz_gradient":
+        return (
+            "Three independently driven Gx, Gy and Gz channels on concentric cylindrical "
+            "supports, all 200 mm long and coaxial with world z. Support radii are "
+            "80, 86 and 92 mm respectively. Each targets Bz = 0.02*x, 0.02*y or "
+            "0.02*z T in the same world-origin 40 mm spherical DSV; B₀ = 3 T along "
+            "world z. Each channel uses 2 × 2 mm copper, 0.1 mm insulation per side, "
+            "18 nΩ·m resistivity, a 6 mm minimum bend radius and 16 contour levels. "
+            "The 1 mm homogenized optimization sheet thickness is separate from the "
+            "physical conductor size. A complete study fits each sheet to 3% RMS, "
+            "checks it against 5% on a distinct grid, extracts contours, connects "
+            "the winding, sweeps conductors and runs strict fabrication review at "
+            "the solved current. This unshielded insert example supplies nominal "
+            "6 mm support spacing, not inter-channel conductor-clearance evidence. "
+            "Routes, feeds, mutual inductance, external stray field, drive current "
+            "and voltage, cooling and duty cycle require system qualification. "
+            "Per-channel checks do not establish a combined hardware pass or "
+            "construction release."
+        )
     return (
         "Nine independently driven channels: Gx, Gy, Gz, Z0 and the five second-order "
         "Bz shims Z2, XZ, YZ, X²−Y² and XY. All use the same world origin, a 40 mm "
@@ -94,14 +121,61 @@ def _target(key, degree, order):
     return SolidHarmonicTarget(2, order, coefficient, BIPLANAR_ROI_RADIUS_M).to_config_overrides()
 
 
+def _cylindrical_xyz_assembly(root: Path) -> ProjectAssembly:
+    base = preset_config("cylinder")
+    _, _, angular, axial, *orientation = base.cylinder_mesh_parameter_list
+    # Match the preset's compensation for the legacy builder's missing end row.
+    length_parameter = CYLINDRICAL_LENGTH_M * (axial + 1) / axial
+    channels = []
+    for axis, radius in zip("xyz", CYLINDRICAL_SUPPORT_RADII_M):
+        name = f"G{axis}"
+        config = replace(
+            base,
+            cylinder_mesh_parameter_list=(length_parameter, radius, angular, axial, *orientation),
+            field_shape_function=axis,
+            target_gradient_axis=axis,
+            target_gradient_strength=CYLINDRICAL_GRADIENT_T_PER_M,
+            target_region_radius=CYLINDRICAL_ROI_RADIUS_M,
+            set_roi_into_mesh_center=False,
+            b_0_direction=(0, 0, 1),
+            symmetry_reduction="off",
+            layout_manufacturing_intent=(
+                "Independent cylindrical gradient channel; inter-channel clearance, "
+                "feeds, stray field and drive qualification remain unresolved."
+            ),
+        )
+        project = ProjectDocument.from_config(config, name=f"Cylindrical {name}", project_root=root).update_study(
+            preset_study("cylinder")
+        )
+        project = project.with_results(
+            project.saved_runs,
+            session={
+                "system_example": {
+                    "kind": "cylindrical_xyz_gradient",
+                    "mode": name,
+                    "target_definition": f"Bz = 0.02*{axis} T; dBz/d{axis} = 20 mT/m",
+                    "coordinate_frame": "world",
+                    "reference_radius_m": CYLINDRICAL_ROI_RADIUS_M,
+                    "nominal_support_radius_m": radius,
+                    "nominal_support_length_m": CYLINDRICAL_LENGTH_M,
+                    "scope": "Independent channel; no combined assembly qualification",
+                }
+            },
+        )
+        channels.append(ChannelDocument(f"g{axis}", name, project))
+    return replace(ProjectAssembly.new(SYSTEM_EXAMPLE_TITLES["cylindrical_xyz_gradient"]), channels=tuple(channels))
+
+
 def system_assembly(kind="biplanar_gradient_shim", *, project_root=None) -> ProjectAssembly:
-    """Return nine owned channels, with explicit targets and full study settings.
+    """Return independent owned channels with explicit targets and full studies.
 
     Changing or computing one channel does not change another channel's model.
     The GUI and original script pipeline consume the same configurations.
     """
     system_description(kind)
     root = Path.cwd() if project_root is None else Path(project_root).expanduser().resolve()
+    if kind == "cylindrical_xyz_gradient":
+        return _cylindrical_xyz_assembly(root)
     base = preset_config("biplanar")
     channels = []
     for index, (key, name, degree, order, polynomial) in enumerate(_MODES):

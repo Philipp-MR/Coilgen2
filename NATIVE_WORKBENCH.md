@@ -7,10 +7,21 @@ include software provenance, separate from authorship of the coil design.
 **Help → Contact / Kontakt…** opens the supplied email, GitHub profile and project
 support links. **Help → Impressum…** shows the project notice. Both are available
 before opening a project. Contact details are documented in [CONTACT.md](CONTACT.md).
+The Impressum includes a separate Martinos Center acknowledgment expressing
+Philipp Amrein's personal gratitude, with the official logo and website link.
 
 The desktop workbench is an optional PySide6/Qt interface to the same Python
 numerical engine used by existing CoilGen scripts. Qt owns the model editor and
 graphics; isolated numerical workers own computation. No browser server is used.
+
+Coil systems show a labeled **Editing channel** selector above the plot. Its
+**Include in system compute** checkbox controls numerical participation.
+The plot's **System meshes** menu independently shows or hides each channel's
+support surface, with **Show all** and **Hide all** actions. Available supports
+are visible together by default in the shared SI world frame. Visibility is
+saved with the view; unavailable geometry is grayed out with its reason.
+Saved results retain their stored support geometry, while any other-channel
+overlays are identified as current model supports.
 
 ## Install and start
 
@@ -293,6 +304,15 @@ external cylinder. Both support meshes and the suppression surface are owned
 inputs embedded in the project JSON. Its sampled external-field budget and
 independent ROI checks are separate evidence; inspect discrete-wire results
 before exporting a shielded design.
+
+**File → Load template → Coil systems → Cylindrical XYZ gradient system (Gx, Gy, Gz)**
+creates the three independent gradient channels on coaxial 200 mm long supports
+of 80, 86 and 92 mm radius. All use the same world-origin 40 mm spherical DSV,
+B₀ along world z, and 20 mT/m Bz gradients. The complete sheet-to-conductor
+studies are already configured. The supports have nominal 6 mm radial spacing;
+routes, feeds, coupling, stray field and combined drive qualification require
+system review. See the [cylindrical XYZ example](examples/cylindrical_xyz_gradient_README.md)
+for conductor settings, field definitions and script usage.
 
 **File → Load template → Coil systems → Biplanar gradients + second-order shims** creates nine
 independently driven channels: Gx/Gy/Gz, uniform Z0 and Z2/XZ/YZ/X²−Y²/XY.

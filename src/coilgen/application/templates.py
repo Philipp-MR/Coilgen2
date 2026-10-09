@@ -126,6 +126,13 @@ TEMPLATE_SPECS = (
         "shim-z2",
     ),
     TemplateSpec(
+        "cylindrical_xyz_gradient",
+        SYSTEM_EXAMPLE_TITLES["cylindrical_xyz_gradient"],
+        "Coil systems",
+        system_description("cylindrical_xyz_gradient"),
+        "support-cylinder",
+    ),
+    TemplateSpec(
         "biplanar_gradient_shim",
         SYSTEM_EXAMPLE_TITLES["biplanar_gradient_shim"],
         "Coil systems",

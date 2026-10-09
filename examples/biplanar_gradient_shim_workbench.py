@@ -14,7 +14,7 @@ from pathlib import Path
 import sys
 
 from coilgen.application import DesignService, RunArchive
-from coilgen.application.system_presets import system_assembly
+from coilgen.application.system_presets import SYSTEM_EXAMPLE_TITLES, system_assembly
 from coilgen.persistence import atomic_json
 
 
@@ -25,15 +25,15 @@ def _emit(message):
     print(str(message).encode(encoding, errors="backslashreplace").decode(encoding), flush=True)
 
 
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=Path("outputs/biplanar_gradient_shim"))
+def main(argv=None, *, kind="biplanar_gradient_shim") -> int:
+    parser = argparse.ArgumentParser(description=f"Create or compute {SYSTEM_EXAMPLE_TITLES[kind]}.")
+    parser.add_argument("--output", type=Path, default=Path("outputs") / kind)
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--gui", action="store_true", help="Open all nine channels in the native workbench")
+    mode.add_argument("--gui", action="store_true", help="Open all channels in the native workbench")
     mode.add_argument(
         "--compute", action="store_true", help="Run independent full studies; embed results after each channel"
     )
-    parser.add_argument("--channels", nargs="+", help="Compute selected channel IDs, e.g. gx z2; default: all nine")
+    parser.add_argument("--channels", nargs="+", help="Compute selected channel IDs, e.g. gx gy; default: all channels")
     parser.add_argument(
         "--stage", choices=("prepared", "sheet", "contours", "routed", "evaluated"), default="evaluated"
     )
@@ -49,7 +49,7 @@ def main(argv=None) -> int:
     if not arguments.compute and (arguments.channels or arguments.no_embed_results or arguments.stage != "evaluated"):
         parser.error("--channels, --stage and --no-embed-results apply to --compute.")
     directory = arguments.output.expanduser().resolve()
-    assembly = system_assembly(project_root=directory)
+    assembly = system_assembly(kind, project_root=directory)
     channel_ids = {channel.id for channel in assembly.channels}
     if arguments.channels and (unknown := set(arguments.channels) - channel_ids):
         parser.error(f"Unknown channels: {', '.join(sorted(unknown))}. Choose {', '.join(sorted(channel_ids))}.")
@@ -60,7 +60,7 @@ def main(argv=None) -> int:
     for channel in assembly.channels:
         DesignService.validate(channel.project).raise_for_errors()
     directory.mkdir(parents=True, exist_ok=False)
-    path = directory / "biplanar_gradient_shim.coilgen.json"
+    path = directory / f"{kind}.coilgen.json"
     assembly.save(path)
     _emit(path)
     if arguments.gui:

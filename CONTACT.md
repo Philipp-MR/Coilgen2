@@ -22,3 +22,11 @@ The desktop GUI exposes **Help → Contact / Kontakt…** and **Help → Impress
 The website links Kontakt and Impressum from its footer. The Impressum contains
 project and contact information; no provider postal address has been supplied,
 so the website notice remains a draft.
+
+Both Impressum pages include a separate acknowledgment expressing Philipp
+Amrein's gratitude to the Athinoula A. Martinos Center for Biomedical Imaging
+community, with a link to its [official website](https://www.martinos.org/).
+The acknowledgment does not assert institutional endorsement, sponsorship or
+ownership. The Martinos logo is third-party material; its inclusion does not
+grant a reuse license. Confirm the applicable logo-use permission before public
+distribution.

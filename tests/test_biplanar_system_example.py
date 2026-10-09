@@ -202,7 +202,7 @@ def test_script_retains_project_and_records_failed_channels_without_invented_res
 
 
 def test_unknown_system_kind_has_actionable_error():
-    assert SYSTEM_PRESET_NAMES == ("biplanar_gradient_shim",)
+    assert SYSTEM_PRESET_NAMES == ("biplanar_gradient_shim", "cylindrical_xyz_gradient")
     with pytest.raises(ValueError, match="choose biplanar_gradient_shim"):
         system_assembly("unknown")
 

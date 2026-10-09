@@ -126,6 +126,7 @@ from .design_progress import ComputationIndicator, DesignProgress
 from .live_preview import LivePreviewController
 from .job_outcomes import JobOutcomeNotice, build_job_outcome
 from .about import AboutDialog
+from .branding import LogoLabel
 
 
 STAGES = (
@@ -405,6 +406,50 @@ class CoilGenWorkbench(QMainWindow):
     def _build_central(self):
         center = self.workspace = QWidget(self)
         layout = QVBoxLayout(center)
+        self.channel_context = QWidget(center)
+        self.channel_context.setObjectName("channel_context")
+        channel_layout = QVBoxLayout(self.channel_context)
+        channel_layout.setContentsMargins(0, 0, 0, 0)
+        channel_layout.setSpacing(4)
+        channel_row = QHBoxLayout()
+        self.channel_label = QLabel("Editing channel", self.channel_context)
+        self.channel_label.setObjectName("editing_channel_label")
+        label_font = self.channel_label.font()
+        label_font.setBold(True)
+        self.channel_label.setFont(label_font)
+        channel_row.addWidget(self.channel_label)
+        self.channel_selector = QComboBox(self.channel_context)
+        self._size_combo(self.channel_selector)
+        self.channel_selector.setObjectName("active_channel")
+        self.channel_selector.setAccessibleName("Editing channel")
+        self.channel_selector.setMinimumWidth(160)
+        self.channel_selector.setMinimumHeight(36)
+        self.channel_selector.setIconSize(QSize(26, 26))
+        self.channel_selector.setToolTip(
+            "Choose the channel to edit and analyze. Each channel uses the shared SI world frame. "
+            "Switching channels keeps the other system supports visible."
+        )
+        self.channel_label.setBuddy(self.channel_selector)
+        self.channel_selector.currentIndexChanged.connect(self._channel_changed)
+        channel_row.addWidget(self.channel_selector, 1)
+        self.channel_overview_button = QToolButton(self.channel_context)
+        self.channel_overview_button.setObjectName("channel_overview_button")
+        self.channel_overview_button.setIcon(icon("channels"))
+        self.channel_overview_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.channel_overview_button.setToolTip("Review all independent channels and their computation status")
+        self.channel_overview_button.clicked.connect(self._channels_dialog)
+        channel_row.addWidget(self.channel_overview_button)
+        channel_layout.addLayout(channel_row)
+        self.channel_enabled = QCheckBox("Include in system compute", self.channel_context)
+        self.channel_enabled.setObjectName("channel_enabled")
+        self.channel_enabled.setToolTip(
+            "Include this channel when computing enabled channels independently. "
+            "This setting does not control mesh visibility in the plot."
+        )
+        self.channel_enabled.toggled.connect(self._channel_enabled_changed)
+        channel_layout.addWidget(self.channel_enabled)
+        self.channel_context.hide()
+        layout.addWidget(self.channel_context)
         self.model_label = QLabel()
         self.model_label.setWordWrap(True)
         self.model_label.setTextFormat(Qt.TextFormat.PlainText)
@@ -474,11 +519,24 @@ class CoilGenWorkbench(QMainWindow):
         self.welcome = QWidget(self)
         self.welcome.setObjectName("empty_workspace")
         welcome = QVBoxLayout(self.welcome)
+        welcome.setContentsMargins(16, 16, 16, 16)
         welcome.addStretch(1)
-        heading = QLabel("CoilGen2", self.welcome)
-        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        heading.setStyleSheet("font-size: 26px; font-weight: 600;")
-        welcome.addWidget(heading)
+        wordmark = QWidget(self.welcome)
+        wordmark_layout = QHBoxLayout(wordmark)
+        wordmark_layout.setContentsMargins(0, 0, 0, 0)
+        wordmark_layout.setSpacing(10)
+        logo = LogoLabel(wordmark, width=390)
+        logo.setObjectName("welcome_logo")
+        wordmark_layout.addWidget(logo)
+        version = QLabel("2", wordmark)
+        version.setObjectName("welcome_version")
+        version.setAccessibleName("CoilGen version 2")
+        version.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        version.setFixedSize(24, 24)
+        version.setStyleSheet("border: 1px solid #bdc6ce; border-radius: 5px; color: #596777; font-weight: 600;")
+        wordmark_layout.addWidget(version, alignment=Qt.AlignmentFlag.AlignVCenter)
+        welcome.addWidget(wordmark, alignment=Qt.AlignmentFlag.AlignHCenter)
+        welcome.addSpacing(24)
         subtitle = QLabel("Create a coil design, open a saved project, or start from a template.", self.welcome)
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setWordWrap(True)
@@ -496,15 +554,22 @@ class CoilGenWorkbench(QMainWindow):
             button.setMaximumWidth(340)
             button.clicked.connect(callback)
             welcome.addWidget(button, alignment=Qt.AlignmentFlag.AlignHCenter)
-        welcome.addSpacing(16)
+        welcome.addStretch(1)
         credits = QLabel(f"{AUTHOR_CREDIT}\n{AUTHOR_ROLE}", self.welcome)
         credits.setObjectName("welcome_author_credit")
-        credits.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        credits.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
+        credit_font = credits.font()
+        credit_font.setPointSizeF(max(8.0, credit_font.pointSizeF() - 1.0))
+        credits.setFont(credit_font)
+        credit_palette = credits.palette()
+        credit_color = credit_palette.color(QPalette.ColorRole.WindowText)
+        credit_color.setAlpha(190)
+        credit_palette.setColor(QPalette.ColorRole.WindowText, credit_color)
+        credits.setPalette(credit_palette)
         credits.setTextFormat(Qt.TextFormat.PlainText)
         credits.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         credits.setWordWrap(True)
         welcome.addWidget(credits)
-        welcome.addStretch(1)
         self.workspace_stack.addWidget(self.welcome)
         self.workspace_stack.addWidget(center)
         central = QWidget(self)
@@ -1037,18 +1102,10 @@ class CoilGenWorkbench(QMainWindow):
         toolbar.setMovable(False)
         toolbar.setIconSize(QSize(20, 20))
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self.channel_selector = QComboBox()
-        self._size_combo(self.channel_selector)
-        self.channel_selector.setMinimumContentsLength(25)
-        self.channel_selector.setMaximumWidth(320)
-        self.channel_selector.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        self.channel_selector.setObjectName("active_channel")
-        self.channel_selector.setToolTip("Independent channel in the shared SI world frame")
-        self.channel_selector.currentIndexChanged.connect(self._channel_changed)
-        self.channel_selector_action = toolbar.addWidget(self.channel_selector)
-        self.channel_enabled = QCheckBox("Enabled")
-        self.channel_enabled.toggled.connect(self._channel_enabled_changed)
-        self.channel_enabled_action = toolbar.addWidget(self.channel_enabled)
+        logo = LogoLabel(toolbar, width=150)
+        logo.setObjectName("toolbar_logo")
+        toolbar.addWidget(logo)
+        toolbar.addSeparator()
         self._fill_channels()
         self.resume_action = self._action("Resume selected run", self.resume_selected_run, icon_name="compute-study")
         self.resume_action.setEnabled(False)
@@ -1241,6 +1298,8 @@ class CoilGenWorkbench(QMainWindow):
         self.undo_stack.clear()
         self.undo_stack.setClean()
         self._fill_channels()
+        if hasattr(self.viewport, "set_assembly_context"):
+            self.viewport.set_assembly_context(None, None)
         if hasattr(self.viewport, "clear_model"):
             self.viewport.clear_model()
         elif hasattr(self.viewport, "clear_run"):
@@ -1253,20 +1312,26 @@ class CoilGenWorkbench(QMainWindow):
             self.channel_selector.clear()
             if self.assembly is None:
                 self.channel_enabled.setChecked(False)
+                self.channel_context.hide()
+                self.channel_overview_button.setText("Channels…")
                 return
             for channel in self.assembly.channels:
                 self.channel_selector.addItem(icon(_target_icon(channel.project.config)), channel.name, channel.id)
                 self.channel_selector.setItemData(
-                    self.channel_selector.count() - 1, channel.name, Qt.ItemDataRole.ToolTipRole
+                    self.channel_selector.count() - 1,
+                    channel.name
+                    + (" · included in system compute" if channel.enabled else " · excluded from system compute"),
+                    Qt.ItemDataRole.ToolTipRole,
                 )
             self.channel_selector.setCurrentIndex(self.channel_selector.findData(self._active_channel_id))
             self.channel_enabled.setChecked(self.assembly.channel(self._active_channel_id).enabled)
-        if hasattr(self, "channel_selector_action"):
-            show_channels = (
-                len(self.assembly.channels) > 1 or not self.assembly.channel(self._active_channel_id).enabled
-            )
-            self.channel_selector_action.setVisible(show_channels)
-            self.channel_enabled_action.setVisible(show_channels)
+        count = len(self.assembly.channels)
+        self.channel_overview_button.setText(f"{count} channel{'s' if count != 1 else ''}…")
+        self.channel_context.setVisible(
+            self._collection_mode
+            or len(self.assembly.channels) > 1
+            or not self.assembly.channel(self._active_channel_id).enabled
+        )
 
     def _set_assembly(self, assembly, selected=None):
         self.assembly = assembly
@@ -1470,6 +1535,8 @@ class CoilGenWorkbench(QMainWindow):
                 + "\n".join(plan.reasons)
                 + "\n\nExisting runs remain immutable. Compute creates a new run."
             )
+        if hasattr(self.viewport, "set_assembly_context"):
+            self.viewport.set_assembly_context(self.assembly, self._active_channel_id)
         if hasattr(self.viewport, "render_project"):
             self.viewport.render_project(project)
         else:
@@ -1712,15 +1779,10 @@ class CoilGenWorkbench(QMainWindow):
         self._adapt_toolbars()
 
     def _adapt_toolbars(self):
-        """Reserve the full Compute caption; optional channels use the remainder."""
+        """Reserve the full Compute caption in the project toolbar."""
         if not hasattr(self, "compute_button"):
             return
         self.compute_button.setMinimumWidth(max(125, self.compute_button.minimumSizeHint().width()))
-        if hasattr(self, "channel_selector"):
-            remaining = (
-                self.width() - self.compute_button.minimumWidth() - self.channel_enabled.sizeHint().width() - 100
-            )
-            self.channel_selector.setMaximumWidth(max(100, min(320, remaining)))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
