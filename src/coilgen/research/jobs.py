@@ -247,6 +247,11 @@ class JobManager:
                 "fabricate": request.fabricate,
                 "kernel_backend": request.kernel_backend,
                 **({"engineering": request.engineering} if request.engineering is not None else {}),
+                **{
+                    key: getattr(request, key)
+                    for key in ("requirements", "scene", "dynamic_analysis", "array_study")
+                    if getattr(request, key) is not None
+                },
                 "completed_stage": None,
                 "completed_stages": [],
             }

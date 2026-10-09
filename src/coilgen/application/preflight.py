@@ -317,6 +317,10 @@ def check_preflight(project, *, validator=None, pipeline_stage=None) -> Prefligh
         )
         return PreflightReport((_input_issue(key, f"Project-owned input cannot be resolved: {exc}"),))
     root = Path(project.project_root)
+    if getattr(project, "study", {}).get("requirements") is not None:
+        from .research_requirements import requirements_validation_config
+
+        config = requirements_validation_config(config)
     prepared_only = stage == "prepared"
     profile_issue = _conductor_profile_issue(config, stage)
     try:

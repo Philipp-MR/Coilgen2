@@ -66,7 +66,12 @@ class DesignService:
         """Shared lightweight checks; does not assemble operators or invoke a solver."""
         from ..config_validation import validate_config
 
-        return validate_config(project.config, project_root=project.project_root)
+        config = project.config
+        if project.study.get("requirements") is not None:
+            from .research_requirements import requirements_validation_config
+
+            config = requirements_validation_config(config)
+        return validate_config(config, project_root=project.project_root)
 
     @classmethod
     def preflight(cls, project: ProjectDocument, *, pipeline_stage=None):

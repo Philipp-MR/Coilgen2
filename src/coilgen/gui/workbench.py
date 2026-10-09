@@ -1006,6 +1006,22 @@ class CoilGenWorkbench(QMainWindow):
         channels_menu.addAction(
             self._action("Compute enabled channels independently", self.compute_channels, icon_name="compute-study")
         )
+        self.research_menu = self.menuBar().addMenu("Research studies")
+        self.research_actions = {}
+        for title, handler, symbol in (
+            ("Named targets, validation and poses…", self._research_requirements_dialog, "target-gradient"),
+            ("Review regional / scenario results…", self._research_requirements_review, "field-error"),
+            ("Queue nominal and robust comparison", self._research_robust_comparison, "compare-designs"),
+            ("Review nominal and robust comparison…", self._research_robust_review, "compare-designs"),
+            ("Spatial scene and route anchors…", self._research_scene_dialog, "mesh"),
+            ("Review spatial constraints…", self._research_scene_review, "constraint"),
+            ("Array currents and cohort design…", self._research_array_dialog, "channels"),
+            ("Circuit references and coupled physics…", self._research_dynamic_dialog, "connected-winding"),
+            ("Review waveform and coupled physics…", self._research_dynamic_review, "field-error"),
+        ):
+            action = self._action(title, handler, icon_name=symbol)
+            self.research_actions[handler.__name__] = action
+            self.research_menu.addAction(action)
         toolbar = self.addToolBar("Project and study")
         toolbar.setObjectName("study_toolbar")
         toolbar.setMovable(False)
@@ -1101,6 +1117,10 @@ class CoilGenWorkbench(QMainWindow):
         self.setWindowModified(not self.undo_stack.isClean() or self._has_input_drafts())
 
     def _set_workspace_active(self, active):
+        if not active:
+            scene_editor = getattr(self, "_scene_editor", None)
+            if scene_editor is not None:
+                scene_editor.reject()
         self.workspace_stack.setCurrentWidget(self.workspace if active else self.welcome)
         self.job_outcomes.set_result_context(active)
         self.findChild(QDockWidget, "model_dock").setVisible(active)
@@ -1110,6 +1130,7 @@ class CoilGenWorkbench(QMainWindow):
         self.findChild(QToolBar, "study_toolbar").setVisible(active)
         self.edit_menu.setEnabled(active)
         self.gradient_menu.setEnabled(active)
+        self.research_menu.setEnabled(active)
         self.channels_menu.setEnabled(active)
         self.view_menu.setEnabled(active)
         for action in self.file_menu.actions():
@@ -1349,6 +1370,9 @@ class CoilGenWorkbench(QMainWindow):
 
     def _set_project(self, project, *, channel_id=None):
         previous = getattr(self, "project", None)
+        scene_editor = getattr(self, "_scene_editor", None)
+        if scene_editor is not None and scene_editor.property("sourceProjectId") != project.id:
+            scene_editor.reject()
         next_channel = channel_id or self._active_channel_id
         key = (project.id, next_channel if self._collection_mode else None)
         if self._history_key is not None and self._history_key != key:
@@ -2684,6 +2708,25 @@ class CoilGenWorkbench(QMainWindow):
             layout.addWidget(terminal_note)
 
     def _build_target_editor(self, config, form, layout, note):
+        requirements = self.project.study.get("requirements")
+        if requirements is not None:
+            note(
+                "Named regional requirements supply this model's registered SI target vectors, independent validation data and finite pose bounds."
+            )
+            for region in requirements["regions"]:
+                note(
+                    f"{region['name']} · {region['component']} · RMS limit {region.get('rms_limit_T')} T · peak limit {region.get('peak_limit_T')} T"
+                )
+            edit = QPushButton("Edit named targets, validation and poses…")
+            edit.clicked.connect(self._research_requirements_dialog)
+            layout.addWidget(edit)
+            restore = QPushButton("Use the single target definition")
+            restore.clicked.connect(
+                lambda: self.apply_inputs(study_changes={"requirements": None}, label="Use single target definition")
+            )
+            layout.addWidget(restore)
+            self._draft_builder = lambda: {}
+            return
         from ..target import _target_gradient_normalization_method
 
         recipe = recognize_solid_harmonic_target(config.field_shape_function)
@@ -3384,7 +3427,13 @@ class CoilGenWorkbench(QMainWindow):
         if target.get("available"):
             from ..target_regions import target_region_summary
 
-            lines.append(target_region_summary(self.project.config))
+            if self.project.study.get("requirements"):
+                lines.append(
+                    "Named regions: "
+                    + ", ".join(region["name"] for region in self.project.study["requirements"]["regions"])
+                )
+            else:
+                lines.append(target_region_summary(self.project.config))
             lines.append(
                 f"Target: {target.get('sample_count')} samples; {target.get('active_sample_count')} active, {target.get('suppressed_count')} suppression."
             )
@@ -4802,22 +4851,388 @@ class CoilGenWorkbench(QMainWindow):
                 "Build gradient support meshes",
             )
 
-    def _gradient_task(self, operation, callback, label):
+    def _gradient_task(self, operation, callback, label, *, retain_receipt=False):
         """Run file verification and engineering analysis off the UI thread."""
         task = DesignStudyTask(operation, self.project)
+        task.retain_receipt = retain_receipt
         if not hasattr(self, "_gradient_tasks"):
             self._gradient_tasks = {}
         self._gradient_tasks[task.signals] = (task, callback, label)
         task.signals.finished.connect(self._gradient_action_finished)
         self.statusBar().showMessage(f"{label}…")
+        self._refresh_computation_indicator()
         QThreadPool.globalInstance().start(task)
+
+    def _research_requirements_dialog(self):
+        from .research_requirements import ResearchRequirementsDialog
+
+        if self.project is None or not self._apply_document_inputs():
+            return
+        project = self.project
+        dialog = ResearchRequirementsDialog(project.study.get("requirements"), self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.apply_inputs(
+                study_changes={"requirements": dialog.result_value},
+                label="Edit named research requirements",
+                expected_fingerprint=project.fingerprint,
+            )
+
+    def _research_verified_review(self, key, display, label):
+        if self.project is None or not self._apply_document_inputs():
+            return
+        record = self.runs.get(self._selected_run)
+        if record is None or self._run_verification_error(record):
+            self._error("Select a verified completed run to review its research evidence.")
+            return
+
+        def verify(_project):
+            saved = DesignService.load_run(record.directory)
+            if key not in saved.metadata:
+                raise ValueError(
+                    "This run contains no evidence for this research study. Apply its inputs and compute the design."
+                )
+            return saved
+
+        self._gradient_task(verify, display, label)
+
+    def _research_requirements_review(self):
+        from .research_requirements import ResearchRequirementsReviewDialog
+
+        self._research_verified_review(
+            "requirements_review",
+            lambda saved: ResearchRequirementsReviewDialog(
+                saved.metadata["requirements_review"], saved.select_arrays(copy=False), self
+            ).exec(),
+            "Verify regional and pose evidence",
+        )
+
+    def _research_robust_comparison(self):
+        from ..application.research_requirements import ResearchRequirements, nominal_requirements
+
+        if self.project is None or not self._apply_document_inputs():
+            return
+        spec = self.project.study.get("requirements")
+        if spec is None or not any(p.membership == "design" for p in ResearchRequirements.from_dict(spec).scenarios):
+            self._error("Define at least one design pose before queueing nominal and robust candidates.")
+            return
+        if self.jobs is None:
+            try:
+                self.jobs = JobManager(self.jobs_directory, RuntimePolicy())
+                self._own_jobs = True
+            except (ValueError, OSError, RuntimeError) as exc:
+                self._error(str(exc))
+                return
+        jobs = self.jobs
+        owner_id = self.project.id
+        self._snapshot_existing_jobs()
+
+        def submit(project):
+            from ..persistence import atomic_json
+            from uuid import uuid4
+
+            nominal = project.duplicate((project.name[:100] + " · nominal")[:120]).update_study(
+                {"requirements": nominal_requirements(spec).to_dict()}
+            )
+            robust = project.duplicate((project.name[:100] + " · robust")[:120])
+            states = []
+            try:
+                for candidate in (nominal, robust):
+                    self.service.preflight(candidate).raise_for_errors()
+                for candidate in (nominal, robust):
+                    states.append(self.service.submit(candidate, jobs))
+                path = self.jobs_directory.parent / "robust_comparison" / f"{uuid4()}.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                atomic_json(
+                    path,
+                    {
+                        "schema": "coilgen-nominal-robust-pair-v1",
+                        "source_project_id": project.id,
+                        "source_fingerprint": project.fingerprint,
+                        "coverage": "same desired datasets and listed poses; nominal excludes additional design-pose bounds",
+                        "candidates": [
+                            {"kind": name, "job_id": state["id"], "project": candidate.to_dict()}
+                            for name, state, candidate in zip(
+                                ("nominal", "robust"), states, (nominal, robust), strict=True
+                            )
+                        ],
+                    },
+                )
+            except Exception:
+                for state in states:
+                    jobs.cancel(state["id"])
+                raise
+            return states, path
+
+        def queued(value):
+            states, path = value
+            self._research_robust_path = path
+            self._research_robust_owner = owner_id
+            self._session_job_ids.update(state["id"] for state in states)
+            self.messages.appendPlainText(
+                f"Queued nominal and robust candidates with common evaluation poses. Comparison manifest: {path}"
+            )
+            self.poll_jobs()
+            self._focus_job(states[0]["id"])
+
+        self._gradient_task(submit, queued, "Queue nominal and robust designs", retain_receipt=True)
+
+    def _research_robust_review(self):
+        from ..application.comparison import compare_runs
+        from .research_review import ResearchComparisonDialog
+
+        if self.project is None or not self._apply_document_inputs():
+            return
+        path = (
+            getattr(self, "_research_robust_path", None)
+            if getattr(self, "_research_robust_owner", None) == self.project.id
+            else None
+        )
+        if path is None:
+            name, _ = QFileDialog.getOpenFileName(
+                self,
+                "Open nominal / robust comparison manifest",
+                str(self.jobs_directory.parent / "robust_comparison"),
+                "Comparison manifest (*.json)",
+            )
+            if not name:
+                return
+            path = Path(name)
+        directory = self.jobs_directory.resolve()
+
+        def review(_project):
+            import re
+
+            value = json.loads(Path(path).read_text(encoding="utf-8"))
+            if value.get("schema") != "coilgen-nominal-robust-pair-v1" or len(value.get("candidates", ())) != 2:
+                raise ValueError("Malformed nominal/robust comparison manifest.")
+            records = []
+            for candidate, kind in zip(value["candidates"], ("nominal", "robust"), strict=True):
+                id_ = candidate.get("job_id")
+                if (
+                    candidate.get("kind") != kind
+                    or not isinstance(id_, str)
+                    or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", id_) is None
+                ):
+                    raise ValueError("Invalid comparison candidate identity.")
+                project = ProjectDocument.from_dict(candidate["project"])
+                saved = DesignService.load_run(directory / id_)
+                if any(
+                    saved.metadata.get(key) != expected
+                    for key, expected in (
+                        ("project_id", project.id),
+                        ("project_revision", project.revision),
+                        ("project_fingerprint", project.fingerprint),
+                    )
+                ):
+                    raise ValueError("Comparison result does not belong to its saved candidate contract.")
+                records.append(saved)
+            return compare_runs(*records), value.get("source_fingerprint", "Unavailable")
+
+        self._gradient_task(
+            review,
+            lambda value: ResearchComparisonDialog(value[0], self, source_fingerprint=value[1]).exec(),
+            "Verify nominal and robust comparison",
+        )
+
+    def _research_scene_dialog(self):
+        from .spatial_scene import SpatialSceneDialog
+        from ..application.spatial_scene import SpatialScene
+
+        if self.project is None or not self._apply_document_inputs():
+            return
+        previous = getattr(self, "_scene_editor", None)
+        if previous is not None:
+            if previous.property("sourceProjectId") == self.project.id:
+                previous.show()
+                previous.raise_()
+                return
+            previous.reject()
+        project = self.project
+        record = self.runs.get(self._selected_run)
+        if record is not None and self._run_verification_error(record):
+            record = None
+
+        def edit(saved):
+            previous = getattr(self, "_scene_editor", None)
+            if previous is not None:
+                if previous.property("sourceProjectId") == project.id:
+                    previous.show()
+                    previous.raise_()
+                    return
+                previous.reject()
+            if saved is not None and saved.metadata.get("project_model_fingerprint") != project.model_fingerprint:
+                raise ValueError("Select winding evidence for the current applied model to bind spatial anchors.")
+            dialog = SpatialSceneDialog(project, saved, self)
+            dialog.setProperty("sourceProjectId", project.id)
+            self._scene_editor = dialog
+            if hasattr(self.viewport, "set_scene"):
+                dialog.sceneChanged.connect(self.viewport.set_scene)
+            if hasattr(self.viewport, "set_point_pick_mode"):
+                dialog.pickRequested.connect(lambda: self.viewport.set_point_pick_mode(True))
+                self.viewport.point_picked.connect(dialog.picked_point)
+
+            def finish(code):
+                if hasattr(self.viewport, "set_point_pick_mode"):
+                    self.viewport.set_point_pick_mode(False)
+                    self.viewport.point_picked.disconnect(dialog.picked_point)
+                if code == QDialog.DialogCode.Accepted:
+                    if self.project is None or self.project.id != dialog.property("sourceProjectId"):
+                        self._error("The spatial scene belongs to another project. Reopen it for the active channel.")
+                    else:
+                        self.apply_inputs(
+                            study_changes={"scene": dialog.result_value},
+                            label="Edit spatial scene and bound anchors",
+                            expected_fingerprint=project.fingerprint,
+                        )
+                if hasattr(self.viewport, "set_scene"):
+                    current = self.project.study.get("scene") if self.project else None
+                    self.viewport.set_scene(SpatialScene.from_dict(current) if current else None)
+                self._scene_editor = None
+                dialog.deleteLater()
+
+            dialog.finished.connect(finish)
+            dialog.show()
+            if hasattr(self.viewport, "set_scene"):
+                self.viewport.set_scene(dialog.scene)
+
+        if record is None:
+            edit(None)
+        else:
+            self._gradient_task(
+                lambda _project: DesignService.load_run(record.directory), edit, "Verify spatial anchor geometry"
+            )
+
+    def _research_scene_review(self):
+        from .research_review import SpatialReviewDialog
+
+        self._research_verified_review(
+            "scene_review",
+            lambda saved: SpatialReviewDialog(saved.metadata["scene_review"], self).exec(),
+            "Verify spatial clearance evidence",
+        )
+
+    def _research_array_dialog(self):
+        from .array_studies import ArrayStudyDialog
+
+        if self.project is None or not self._apply_document_inputs():
+            return
+        project = self.project
+        dialog = ArrayStudyDialog(
+            self.assembly,
+            self,
+            saved_spec=project.study.get("array_study"),
+            run_records=tuple(self.runs.values()),
+            active_project=project,
+        )
+        if hasattr(dialog, "busyChanged"):
+            dialog.busyChanged.connect(lambda busy: self._research_busy("Fit array / synthesize cohort", busy))
+        dialog.generatedProjects.connect(self._research_generated_channels)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.apply_inputs(
+                study_changes={"array_study": dialog.result_value},
+                label="Edit array study contract",
+                expected_fingerprint=project.fingerprint,
+            )
+        self._research_busy("Fit array / synthesize cohort", False)
+
+    def _research_busy(self, label, busy):
+        if not hasattr(self, "_research_active_tasks"):
+            self._research_active_tasks = set()
+        if busy:
+            self._research_active_tasks.add(label)
+        else:
+            self._research_active_tasks.discard(label)
+        self._refresh_computation_indicator()
+        if not self._research_active_tasks and getattr(self, "_research_close_pending", False):
+            self._research_close_pending = False
+            QTimer.singleShot(0, self, self.close)
+
+    def _research_generated_channels(self, projects):
+        if self.assembly is None:
+            return
+        before, after = self.assembly, self.assembly
+        for project in projects:
+            name, counter = project.name, 2
+            while any(channel.name.casefold() == name.casefold() for channel in after.channels):
+                name = f"{project.name[:100]} {counter}"
+                counter += 1
+            after = after.add_channel(project, name=name)
+        if after is not before:
+            self._enter_collection_mode()
+            self.undo_stack.push(AssemblyEdit(self, after, self._active_channel_id, "Add cohort-designed channels"))
+
+    def _research_dynamic_dialog(self):
+        from .dynamic_studies import DynamicStudyDialog
+
+        if self.project is None or not self._apply_document_inputs():
+            return
+        project = self.project
+        record = self.runs.get(self._selected_run)
+        if record is not None and self._run_verification_error(record):
+            record = None
+
+        def edit(saved):
+            if saved is not None and (
+                saved.metadata.get("project_id") != project.id
+                or saved.metadata.get("project_model_fingerprint") != project.model_fingerprint
+            ):
+                raise ValueError("Select evidence for this channel's current applied model to bind circuit references.")
+            dialog = DynamicStudyDialog(project, saved, self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                changes = {"dynamic_analysis": dialog.result_value}
+                engineering = dialog.engineering_value()
+                if engineering is not None:
+                    changes["engineering"] = engineering
+                self.apply_inputs(
+                    study_changes=changes,
+                    label="Edit circuit references and coupled evidence",
+                    expected_fingerprint=project.fingerprint,
+                )
+
+        if record is None:
+            edit(None)
+        else:
+            self._gradient_task(
+                lambda _project: DesignService.load_run(record.directory), edit, "Verify coupled-physics geometry"
+            )
+
+    def _research_dynamic_review(self):
+        from .dynamic_studies import DynamicReviewDialog
+
+        if self.project is None or not self._apply_document_inputs():
+            return
+        record = self.runs.get(self._selected_run)
+        if record is None or self._run_verification_error(record):
+            self._error("Select a verified run with waveform or coupled-physics evidence.")
+            return
+
+        def display(saved):
+            report = saved.metadata.get("dynamic_analysis_review")
+            if report is None and saved.metadata.get("engineering_review"):
+                report = {"engineering_review": saved.metadata["engineering_review"]}
+            if report is None:
+                raise ValueError("This run has no waveform or coupled-physics evidence.")
+            DynamicReviewDialog(report, self).exec()
+
+        self._gradient_task(
+            lambda _project: DesignService.load_run(record.directory),
+            display,
+            "Verify waveform and coupled-physics evidence",
+        )
 
     def _gradient_action_finished(self, value, error):
         task, callback, label = self._gradient_tasks.pop(self.sender())
+        if self._closing:
+            return
         self._refresh_computation_indicator()
         if error:
             self._error(f"{label}: {error}")
-        elif self.project is None or task.project is not self.project or self._has_input_drafts():
+        elif not getattr(task, "retain_receipt", False) and (
+            self.project is None
+            or (task.project.id, task.project.revision, task.project.fingerprint)
+            != (self.project.id, self.project.revision, self.project.fingerprint)
+            or self._has_input_drafts()
+        ):
             self.messages.appendPlainText(
                 f"{label}: the project or draft changed during the operation. Repeat the action on the intended revision; submitted jobs retain their original inputs."
             )
@@ -5603,6 +6018,7 @@ class CoilGenWorkbench(QMainWindow):
             if active:
                 working.append(label)
         working.extend(task[2] for task in getattr(self, "_gradient_tasks", {}).values())
+        working.extend(getattr(self, "_research_active_tasks", ()))
         self.computation_indicator.message.setText(self.statusBar().currentMessage())
         self.computation_indicator.set_activity(
             self._last_job_states, working=working, unavailable=self._last_runtime_error
@@ -5610,6 +6026,29 @@ class CoilGenWorkbench(QMainWindow):
 
     def _update_execution_feedback(self):
         self._refresh_computation_indicator()
+        if hasattr(self, "research_actions"):
+            record = self.runs.get(self._selected_run)
+            verified = record is not None and not self._run_verification_error(record)
+            for handler, key in (
+                ("_research_requirements_review", "requirements_review"),
+                ("_research_scene_review", "scene_review"),
+            ):
+                available = bool(verified and record.metadata.get(key))
+                self.research_actions[handler].setEnabled(available)
+                self.research_actions[handler].setToolTip(
+                    "Review this selected run's verified evidence."
+                    if available
+                    else "Select a verified run computed with these research inputs."
+                )
+            available = bool(
+                verified
+                and (record.metadata.get("dynamic_analysis_review") or record.metadata.get("engineering_review"))
+            )
+            self.research_actions["_research_dynamic_review"].setEnabled(available)
+            spec = self.project.study.get("requirements") if self.project else None
+            self.research_actions["_research_robust_comparison"].setEnabled(
+                bool(spec and any(p["membership"] == "design" for p in spec["scenarios"]))
+            )
         if hasattr(self, "gradient_actions"):
             record = self.runs.get(self._selected_run)
             verified = record is not None and not self._run_verification_error(record)
@@ -6442,10 +6881,22 @@ class CoilGenWorkbench(QMainWindow):
                 QTimer.singleShot(0, self, self._refresh_status_colors)
 
     def closeEvent(self, event):
+        if getattr(self, "_research_active_tasks", None):
+            from .array_studies import ArrayStudyDialog
+
+            self._research_close_pending = True
+            for dialog in self.findChildren(ArrayStudyDialog):
+                dialog.reject()
+            self.statusBar().showMessage("Cancelling the active research study before closing…")
+            event.ignore()
+            return
         if not self._can_discard():
             event.ignore()
             return
         self._closing = True
+        scene_editor = getattr(self, "_scene_editor", None)
+        if scene_editor is not None:
+            scene_editor.reject()
         self._save_session()
         self.evidence.close_all()
         for dialog in self.findChildren(QDialog):

@@ -366,8 +366,11 @@ class RigidTransform:
     translation_m: tuple = (0, 0, 0)
 
     def __post_init__(self):
-        rotation = np.asarray(self.rotation, dtype=float)
-        translation = np.asarray(self.translation_m, dtype=float)
+        raw_rotation, raw_translation = np.asarray(self.rotation), np.asarray(self.translation_m)
+        if raw_rotation.dtype.kind not in "iuf" or raw_translation.dtype.kind not in "iuf":
+            raise ValueError("Rigid registration requires real numeric rotation and translation values.")
+        rotation = np.asarray(raw_rotation, dtype=float)
+        translation = np.asarray(raw_translation, dtype=float)
         if (
             rotation.shape != (3, 3)
             or translation.shape != (3,)

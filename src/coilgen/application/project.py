@@ -80,15 +80,18 @@ def _json_object(pairs):
 def _study(values):
     from ..research.requests import ResearchRequest
 
-    if not isinstance(values, Mapping) or set(values) - (set(_STUDY_DEFAULTS) | {"engineering"}):
+    optional = {"engineering", "requirements", "scene", "dynamic_analysis", "array_study"}
+    if not isinstance(values, Mapping) or set(values) - (set(_STUDY_DEFAULTS) | optional):
         raise ValueError("Unknown or malformed study controls.")
     resolved = {**_STUDY_DEFAULTS, **json_value(values, nonfinite="raise")}
-    if resolved.get("engineering") is None:
-        resolved.pop("engineering", None)
+    for key in optional:
+        if resolved.get(key) is None:
+            resolved.pop(key, None)
     try:
         request = ResearchRequest(name="Study", config={}, **resolved)
-        if "engineering" in resolved:
-            resolved["engineering"] = request.engineering
+        for key in optional:
+            if key in resolved:
+                resolved[key] = getattr(request, key)
     except (TypeError, OverflowError) as exc:
         raise ValueError(f"Invalid study controls: {exc}") from exc
     return resolved
@@ -284,9 +287,10 @@ class ProjectDocument:
             for key, value in self._identity_values.items()
             if key != "geometry_source_path" and config_field_stage(key) is not None
         }
-        encoded = json.dumps(
-            {"config": values, "assets": self._asset_formats}, sort_keys=True, separators=(",", ":"), allow_nan=False
-        ).encode()
+        identity = {"config": values, "assets": self._asset_formats}
+        if self._study.get("requirements") is not None:
+            identity["requirements"] = json_value(self._study["requirements"])
+        encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
         return sha256(encoded).hexdigest()
 
     @property
@@ -432,6 +436,10 @@ class ProjectDocument:
 
         try:
             config = updated.config
+            if updated.study.get("requirements") is not None:
+                from .research_requirements import requirements_validation_config
+
+                config = requirements_validation_config(config)
             report = validate_config(config, project_root=self.project_root)
             if allow_incomplete and str(config.coil_mesh_file).strip().lower() in {"", "none"}:
                 report = ConfigValidationReport(

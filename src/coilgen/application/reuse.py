@@ -10,7 +10,7 @@ import re
 import zipfile
 
 from ..persistence import file_digest
-from ..pipeline_stages import PipelineCheckpoint, PipelineStage, stage_fingerprints
+from ..pipeline_stages import PipelineCheckpoint, PipelineStage
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,7 +80,9 @@ def plan_reuse(project, records, *, threads: int = 1) -> ReusePlan:
         plot_flag=False,
         save_stl_flag=False,
     )
-    current = stage_fingerprints(config, project.project_root)
+    from .research_requirements import requirements_stage_fingerprints
+
+    current = requirements_stage_fingerprints(config, project.project_root, project.study.get("requirements"))
     available, stale, diagnostics = [], set(), []
     seen = set()
     for record in matching:
@@ -129,7 +131,9 @@ def plan_stopped_reuse(project, states, jobs_directory, *, threads: int = 1) -> 
     ]
     if not matching:
         return ReusePlan((), (), ())
-    current = stage_fingerprints(config, project.project_root)
+    from .research_requirements import requirements_stage_fingerprints
+
+    current = requirements_stage_fingerprints(config, project.project_root, project.study.get("requirements"))
     available, stale, diagnostics = [], set(), []
     for state in matching:
         job_id = state.get("id")

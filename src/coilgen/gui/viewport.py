@@ -100,7 +100,7 @@ def _signed_residual_limits(values):
     return -extent, extent
 
 
-def _preview_data(config, root):
+def _preview_data(config, root, requirements=None):
     """Extract backend numpy data only; VTK/Qt rendering stays on the UI thread."""
     from ..geometry import load_mesh_from_config, load_optional_target_mesh, load_secondary_target_mesh
     from ..target import define_target_field
@@ -112,7 +112,13 @@ def _preview_data(config, root):
     mesh = load_mesh_from_config(config, root)
     arrays, message, target = {}, "", None
     imported_target = str(config.target_field_definition_file).strip().lower() not in {"", "none"}
-    if not imported_target and str(config.field_shape_function).strip().lower() in {"", "none"}:
+    if requirements is not None:
+        from ..application.research_requirements import requirements_target
+
+        target = requirements_target(requirements)
+        arrays = {"target_points_m": target.coords, "target_field_T": target.b, "target_suppressed": target.suppressed}
+        message = f"{len(requirements['regions'])} named regions · registered desired vectors in SI · explicit regional bounds"
+    elif not imported_target and str(config.field_shape_function).strip().lower() in {"", "none"}:
         message = "Choose a target field to preview it on this support."
     elif config.target_region_resolution > 40 and config.target_field_definition_file == "none":
         message = "Target preview omitted above resolution 40; computations retain the full grid."
@@ -145,7 +151,12 @@ class _PreviewTask(QRunnable):
 
     def run(self):
         try:
-            result = _preview_data(self.config, self.root)
+            requirements = getattr(self.owner, "study", {}).get("requirements")
+            result = (
+                _preview_data(self.config, self.root)
+                if requirements is None
+                else _preview_data(self.config, self.root, requirements)
+            )
         except Exception as exc:
             message = f"Model preview unavailable: {type(exc).__name__}: {exc}"
             result = (
@@ -159,6 +170,7 @@ class _PreviewTask(QRunnable):
 
 class ScientificViewport(QWidget):
     selected = Signal(str)
+    point_picked = Signal(object)
     error = Signal(str)
     preflight_ready = Signal(dict)
     context_changed = Signal()
@@ -205,6 +217,8 @@ class ScientificViewport(QWidget):
         self._pick_press = None
         self._pick_dragged = False
         self._pending_pick = None
+        self._point_pick_mode = False
+        self._scene = None
         self._navigation_camera = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -754,15 +768,30 @@ class ScientificViewport(QWidget):
         return "preview_target" if self._capability("preview_target", comparison=False).available else "support"
 
     def render_project(self, project):
+        from ..application.spatial_scene import SpatialScene
+
+        self._scene = SpatialScene.from_dict(project.study["scene"]) if project.study.get("scene") else None
         self.render_config(project.config, project.project_root, _owner=project)
+
+    def set_scene(self, scene):
+        self._scene = scene
+        self._render()
+
+    def set_point_pick_mode(self, enabled):
+        self._point_pick_mode = bool(enabled)
+        if enabled:
+            self.probe.setText("Pick a world point for the scene anchor · drag to rotate")
 
     def render_config(self, config, project_root: Path | None = None, *, _owner=None):
         if self._closed:
             return
         support_identity, target_identity = _preview_identities(config, getattr(_owner, "values", None))
+        requirements = getattr(_owner, "study", {}).get("requirements")
+        if requirements is not None:
+            target_identity += json.dumps(requirements, sort_keys=True, separators=(",", ":"))
         owner = getattr(_owner, "id", None)
         has_support = str(config.coil_mesh_file).strip().lower() not in {"", "none"}
-        complete = has_support and _has_target(config)
+        complete = has_support and (_has_target(config) or requirements is not None)
         new_model = owner != self._model_owner
         target_changed = target_identity != self._target_identity
         # Applied target choices reveal their spatial result immediately. Select
@@ -1369,6 +1398,11 @@ class ScientificViewport(QWidget):
         valid_point = point is not None and np.asarray(point).shape == (3,) and np.all(np.isfinite(point))
         if valid_point:
             text += f" at ({point[0]:.6g}, {point[1]:.6g}, {point[2]:.6g}) m"
+            if self._point_pick_mode:
+                self._point_pick_mode = False
+                self.point_picked.emit(np.asarray(point, dtype=float).copy())
+                self.probe.setText(text + " · copied to scene anchor editor")
+                return
         if primary and valid_point and mesh is not None and mesh.n_points:
             index = mesh.find_closest_point(point)
             coordinates = mesh.points[index]
@@ -1385,7 +1419,8 @@ class ScientificViewport(QWidget):
             text += f" · viewing {dataset}; no field value sampled at this position"
         # Capture source/sample feedback before navigation can change the model
         # preview or primary plot; the click refers to the scene that was picked.
-        self.selected.emit(key)
+        if not key.startswith("scene:"):
+            self.selected.emit(key)
         self.probe.setText(text)
 
     def _field_mesh(self, arrays, key):
@@ -1735,6 +1770,33 @@ class ScientificViewport(QWidget):
                     marker, "winding", color="#e87525", line_width=7, point_size=15, render_points_as_spheres=True
                 )
                 caption += f" · highlighted: {issue.location_description}"
+            if self._scene is not None:
+                colors = {
+                    "obstacle": "#c65c57",
+                    "keepout": "#d78b43",
+                    "feed_corridor": "#48a88a",
+                    "conducting_metal": "#8586aa",
+                    "reference": "#999999",
+                }
+                for part in self._scene.parts:
+                    faces = np.column_stack((np.full(len(part.faces), 3), part.faces)).ravel()
+                    scene_mesh = self.pv.PolyData(part.vertices_m, faces)
+                    self._add(
+                        scene_mesh,
+                        f"scene:{part.name}",
+                        color=colors[part.role],
+                        opacity=0.15,
+                        show_edges=True,
+                        pickable=True,
+                    )
+                for anchor in self._scene.anchors:
+                    self._add(
+                        self.pv.PolyData(np.asarray([anchor.point_m])),
+                        f"scene:{anchor.name}",
+                        color="#e87525",
+                        point_size=13,
+                        render_points_as_spheres=True,
+                    )
             if self._actors or widgets.plane_clipped_meshes:
                 self.plotter.show_grid(
                     color="#666666",

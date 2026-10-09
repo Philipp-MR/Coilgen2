@@ -274,6 +274,8 @@ class DriveSpec:
     gradient_efficiency_source: str | None = None
     inductance_matrix: InductanceMatrixSpec | None = None
     thermal: ThermalSpec | None = None
+    repetitions: int = 1
+    rest_s: float = 0.0
 
     def __post_init__(self):
         ids = _body_ids(self.body_ids)
@@ -284,6 +286,20 @@ class DriveSpec:
             if len(values) != len(ids) or np.any(values <= 0):
                 raise ValueError(f"{name} requires one positive limit per body.")
             object.__setattr__(self, name, tuple(float(value) for value in values))
+        if (
+            isinstance(self.repetitions, bool)
+            or not isinstance(self.repetitions, int)
+            or not 1 <= self.repetitions <= 1000
+        ):
+            raise ValueError("Finite waveform repetitions must be an integer from 1 to 1000.")
+        if (
+            isinstance(self.rest_s, bool)
+            or not isinstance(self.rest_s, Real)
+            or not math.isfinite(self.rest_s)
+            or self.rest_s < 0
+        ):
+            raise ValueError("Inter-repetition rest_s must be finite and nonnegative.")
+        object.__setattr__(self, "rest_s", float(self.rest_s))
         waveform = len(self.time_s) > 0 or len(self.currents_A) > 0
         target = self.target_gradient_T_per_m is not None or self.target_slew_T_per_m_per_s is not None
         if waveform == target:
@@ -307,7 +323,20 @@ class DriveSpec:
                 raise ValueError("Waveform mode does not use an inferred gradient efficiency.")
             object.__setattr__(self, "time_s", tuple(float(value) for value in times))
             object.__setattr__(self, "currents_A", tuple(tuple(float(v) for v in row) for row in currents))
+            expanded_count = (len(times) - 1) * self.repetitions + 1 + (self.repetitions - 1 if self.rest_s > 0 else 0)
+            if expanded_count > _MAX_SAMPLES:
+                raise ValueError("Finite waveform repetitions must contain at most 10000 expanded samples.")
+            if self.repetitions > 1 and (np.any(currents[0] != 0) or np.any(currents[-1] != 0)):
+                raise ValueError(
+                    "Repeated pulses require zero current at both endpoints; no instantaneous current jump is inferred."
+                )
+            if self.repetitions > 1:
+                expand_drive_waveform(self)
         else:
+            if self.repetitions != 1 or self.rest_s != 0:
+                raise ValueError("Repetition and rest require an explicit current waveform.")
+            object.__setattr__(self, "time_s", ())
+            object.__setattr__(self, "currents_A", ())
             for name in ("target_gradient_T_per_m", "target_slew_T_per_m_per_s"):
                 object.__setattr__(self, name, _positive(getattr(self, name), name))
             efficiencies = _numeric(self.gradient_efficiencies_T_per_m_per_A, "Gradient efficiencies", dimensions=1)
@@ -338,7 +367,12 @@ class DriveSpec:
         return _from_dict(cls, value)
 
     def to_dict(self):
-        return asdict(self)
+        value = asdict(self)
+        if self.repetitions == 1:
+            value.pop("repetitions")
+        if self.rest_s == 0:
+            value.pop("rest_s")
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,7 +411,29 @@ class GradientEngineeringSpec:
         return _from_dict(cls, value)
 
     def to_dict(self):
-        return json.loads(json.dumps(asdict(self), allow_nan=False))
+        value = asdict(self)
+        if self.drive is not None:
+            value["drive"] = self.drive.to_dict()
+        return json.loads(json.dumps(value, allow_nan=False))
+
+
+def expand_drive_waveform(drive):
+    """Expand the explicitly finite pulse train, retaining zero-current rest intervals."""
+    times, currents = np.asarray(drive.time_s, dtype=float), np.asarray(drive.currents_A, dtype=float)
+    if drive.repetitions == 1:
+        return times, currents
+    duration = times[-1] - times[0]
+    all_times, all_currents = [times], [currents]
+    for index in range(1, drive.repetitions):
+        shifted = times + index * (duration + drive.rest_s)
+        # A positive rest contributes a zero-current segment before the next pulse.
+        start = 0 if drive.rest_s > 0 else 1
+        all_times.append(shifted[start:])
+        all_currents.append(currents[start:])
+    expanded_times, expanded_currents = np.concatenate(all_times), np.vstack(all_currents)
+    if not np.all(np.isfinite(expanded_times)) or np.any(np.diff(expanded_times) <= 0):
+        raise ValueError("Expanded pulse train is outside finite, strictly increasing SI time range.")
+    return expanded_times, expanded_currents
 
 
 def _thermal_waveform(times, currents, resistances, thermal):
@@ -515,7 +571,7 @@ def evaluate_gradient_engineering(
         else:
             matrix_note += " The supplied matrix has no matching verified source/geometry reference."
     if drive.time_s:
-        times, currents = np.asarray(drive.time_s), np.asarray(drive.currents_A)
+        times, currents = expand_drive_waveform(drive)
         duration = times[-1] - times[0]
         slopes = np.diff(currents, axis=0) / np.diff(times)[:, None]
         inductive = slopes @ matrix.T
@@ -535,7 +591,7 @@ def evaluate_gradient_engineering(
         )
         rms = scale * np.sqrt(mean_square)
         power = (np.sqrt(resistance) * rms) ** 2
-        scope = "Piecewise-linear supplied waveform; extrema include both sides of every slope change; duration excludes repetitions."
+        scope = "Finite piecewise-linear supplied waveform; voltage extrema include both sides of every slope change."
         target_metrics = None
         if drive.thermal is not None:
             try:
@@ -545,6 +601,17 @@ def evaluate_gradient_engineering(
                     "available": False,
                     "reason": str(exc) or "Thermal response is outside finite SI reporting range.",
                 }
+        output["waveform"] = {
+            "body_ids": list(drive.body_ids),
+            "time_s": times.tolist(),
+            "currents_A": currents.tolist(),
+            "interval_voltage_start_V": voltages[0].tolist(),
+            "interval_voltage_end_V": voltages[1].tolist(),
+            "repetitions": drive.repetitions,
+            "inter_repetition_rest_s": drive.rest_s,
+            "duration_s": float(duration),
+            "scope": "Constant circuit R and quasistatic L; no eddy-current, skin-effect or spatial temperature prediction.",
+        }
     else:
         reference = verified_efficiency_reference or {}
         matches = (

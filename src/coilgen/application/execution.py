@@ -51,7 +51,10 @@ def matches_active_request(state, project, controls=None):
             state.get(key) == controls[key]
             for key in ("validation_resolution", "design_margin", "fabricate", "kernel_backend")
         )
-        and state.get("engineering") == controls.get("engineering")
+        and all(
+            state.get(key) == controls.get(key)
+            for key in ("engineering", "requirements", "scene", "dynamic_analysis", "array_study")
+        )
     )
 
 

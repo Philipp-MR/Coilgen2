@@ -35,6 +35,10 @@ class ResearchRequest:
     project_id: str = ""
     project_revision: int | None = None
     engineering: Mapping[str, Any] | None = None
+    requirements: Mapping[str, Any] | None = None
+    scene: Mapping[str, Any] | None = None
+    dynamic_analysis: Mapping[str, Any] | None = None
+    array_study: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip() or len(self.name) > 120:
@@ -88,6 +92,18 @@ class ResearchRequest:
             if not self.fabricate or self.pipeline_stage != "evaluated":
                 raise ValueError("Gradient engineering review requires evaluated fabrication review.")
             object.__setattr__(self, "engineering", spec.to_dict())
+        for key, module, name in (
+            ("requirements", "research_requirements", "ResearchRequirements"),
+            ("scene", "spatial_scene", "SpatialScene"),
+            ("dynamic_analysis", "dynamic_studies", "DynamicStudySpec"),
+            ("array_study", "array_studies", "ArrayStudySpec"),
+        ):
+            value = getattr(self, key)
+            if value is not None:
+                from importlib import import_module
+
+                spec_type = getattr(import_module(f"coilgen.application.{module}"), name)
+                object.__setattr__(self, key, spec_type.from_dict(dict(value)).to_dict())
 
     @classmethod
     def from_config(cls, config: CoilGenConfig, *, name: str = "Research design", **controls) -> ResearchRequest:
@@ -115,8 +131,9 @@ class ResearchRequest:
 
     def to_dict(self) -> dict:
         value = json_value(asdict(self))
-        if self.engineering is None:
-            value.pop("engineering")
+        for key in ("engineering", "requirements", "scene", "dynamic_analysis", "array_study"):
+            if getattr(self, key) is None:
+                value.pop(key)
         return value
 
     def to_config(self, *, threads: int = 1) -> CoilGenConfig:
@@ -150,7 +167,12 @@ class ResearchRequest:
             plot_flag=False,
             save_stl_flag=False,
         )
-        validate_config(config).raise_for_errors()
+        validation_config = config
+        if self.requirements is not None:
+            from ..application.research_requirements import requirements_validation_config
+
+            validation_config = requirements_validation_config(config)
+        validate_config(validation_config).raise_for_errors()
         if config.research_physics is not None:
             from .convex import ResearchPhysicsSpec
 

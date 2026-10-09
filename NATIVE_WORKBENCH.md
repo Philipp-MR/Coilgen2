@@ -36,6 +36,50 @@ scientific figures and existing script plotbooks.
 
 ## Scientific workflow
 
+### Research workflows
+
+**Research studies** hosts the requirements and reviews for unusual designs:
+
+| Design task | Authoring and evidence |
+| --- | --- |
+| Opposite gradients in separate ROIs, protected sensors | **Named targets, validation and poses** owns named regions, registered vector maps or analytic targets, independent desired datasets, component selection, separate RMS/peak budgets and fitting weights. Review preserves every region and shows failure locations, suppression and descriptive local gradient tensors. |
+| Beam windows, obstacles, terminal locations | **Spatial scene and route anchors** owns closed imported meshes or boxes with explicit world registration and physical roles. Deliberate 3D picking binds terminals, cut intervals and waypoints to exact winding hashes. The circuit editor can initialize editable feeds from these anchors. |
+| Motion and finite geometric manufacturing tolerances | Define separate design and held-out rigid poses, plus finite support dimension scales about an explicit center. Operators retain common nodal topology. Final wire reviews transform the same recorded paths at unchanged signed currents. **Queue / Review nominal and robust comparison** uses common evaluation datasets and poses. |
+| Multichannel and cohort shim research | **Array currents and cohort design** fits signed channel currents jointly with individual bounds and a simultaneous resistive power budget, on reverified saved winding geometry. It reports residual fields, limiting samples, rank, conditioning and saturation. POD, adaptive sectorization and contour-family studies keep training and held-out cases separate; generated projects require final winding/feed review. |
+| Unusual waveforms, shielding beside conducting structures | Author circuits and import time/current CSV in **Gradient engineering**. Import geometry-bound inductance/efficiency references in **Circuit references and coupled physics**. Review current, voltage and shared RC temperature, including finite pulse repetitions/rest. External complex frequency response, mechanical and spatial thermal records retain their own solver, excitation, material, environment, geometry and sampling contracts. |
+
+These inputs are optional revisioned project study controls (`requirements`,
+`scene`, `array_study`, `dynamic_analysis`). Owned target/map/mesh/table data
+travels with project JSON and worker snapshots; the application modules expose
+the same operations to ordinary Python callers without importing Qt. No-option
+requests retain their existing numerical defaults and serialization.
+
+Named regional field budgets replace the global target-error budget. Existing
+custom research matrices and active gradient/linearity/shield contracts retain
+explicit unknown blockers when their final wire counterparts are unassessed.
+Independent validation uses the supplied desired datasets or held-out poses;
+it never substitutes a legacy analytic grid or refits winding currents.
+Incomplete electrical returns yield descriptive partial-path evidence.
+
+Spatial review checks continuous segments, including modeled lifted returns,
+supplies and drive closure. Its circumscribed conductor envelope is conservative:
+overlap may require closer review, while a pass applies to that envelope and the
+specified faceted exclusions. Available swept facets are checked as well,
+including miter extensions and containment of disconnected solids. NPZ
+`vertices_m` already uses metres. Scene
+constraints gate acceptance of recorded geometry; they do not silently reroute
+the sheet solution or certify an unswept feed. Finite pose/scale scenarios do not
+prove continuous uncertainty coverage or material/cross-section tolerances.
+Scene clearance applies to the recorded world geometry; posed field validation
+does not qualify obstacle clearance in those additional poses.
+
+Coupled-physics imports validate their numerical and source bindings, not the
+accuracy of an external solver. The workbench does not add an eddy-current,
+structural or spatial heat solver. Missing physics stays unassessed; static
+magnetostatic fields, net force/torque and lumped temperature do not establish
+those additional qualifications. Research review actions are disabled when
+their selected run has no verified evidence.
+
 Startup opens an empty welcome screen with **New project**, **Open project** and
 **Load template**. **File → New project…** (Ctrl+N) creates a named design with no
 support or target selected; it can be saved immediately as a self-contained JSON.

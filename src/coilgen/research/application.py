@@ -232,6 +232,14 @@ def _save_partial_result(request, checkpoint, directory, manifest, digest, start
     }
     constraints = _constraint_rows(diagnostics)
     relative = None
+    requirements_review = None
+    if request.requirements is not None:
+        from ..application.research_requirements import evaluate_requirements, named_independent_sheet_validation
+
+        requirements_review, requirement_arrays = evaluate_requirements(
+            state.parts, checkpoint.config, request.requirements, design_margin=request.design_margin
+        )
+        arrays.update(requirement_arrays)
     if checkpoint.stage.index >= PipelineStage.SHEET.index:
         sheet_view = SimpleNamespace(
             input_data=checkpoint.config,
@@ -240,19 +248,24 @@ def _save_partial_result(request, checkpoint, directory, manifest, digest, start
             coil_parts=state.parts,
             regularization_diagnostics=diagnostics,
         )
-        validation = validate_on_independent_grid(
-            sheet_view, resolution=request.validation_resolution, design_margin=request.design_margin
-        )
-        relative = _relative_field_error(
-            state.sf_b_field,
-            state.target_field.b,
-            ~np.asarray(state.target_field.suppressed, bool),
-            checkpoint.config.target_field_component,
-            checkpoint.config.b_0_direction,
-        )
+        if request.requirements is None:
+            validation = validate_on_independent_grid(
+                sheet_view, resolution=request.validation_resolution, design_margin=request.design_margin
+            )
+            relative = _relative_field_error(
+                state.sf_b_field,
+                state.target_field.b,
+                ~np.asarray(state.target_field.suppressed, bool),
+                checkpoint.config.target_field_component,
+                checkpoint.config.b_0_direction,
+            )
+        else:
+            validation = named_independent_sheet_validation(requirements_review, request.requirements)
         constraints.append(
             {
-                "name": "Independent grid field error",
+                "name": "Regional independent sheet validation"
+                if request.requirements is not None
+                else "Independent grid field error",
                 "value": validation.get("value"),
                 "limit": validation.get("limit"),
                 "effective_limit": validation.get("effective_limit"),
@@ -261,18 +274,32 @@ def _save_partial_result(request, checkpoint, directory, manifest, digest, start
                 "scope": "continuous_sheet",
             }
         )
-        if validation["available"]:
+        if validation["available"] and request.requirements is None:
             arrays.update(
                 validation_points_m=validation["points_m"],
                 validation_field_T=validation["field_T"],
                 validation_target_T=validation["target_T"],
             )
+    if requirements_review is not None:
+        from ..application.research_requirements import requirements_constraint_rows
+
+        constraints.extend(requirements_constraint_rows(requirements_review, include_wire=False))
     sheet_passed = (
         bool(diagnostics.get("constrained_solver_contract_met", False))
         and validation.get("passed") is True
         and all(row["passed"] is True for row in constraints)
     )
+    if requirements_review is not None and checkpoint.stage is PipelineStage.ROUTED:
+        constraints.extend(
+            row for row in requirements_constraint_rows(requirements_review) if row["scope"] != "continuous_sheet"
+        )
     values = diagnostics.get("research_physical_values", diagnostics)
+    scene_review = None
+    if request.scene is not None and checkpoint.stage is PipelineStage.ROUTED:
+        from ..application.spatial_scene import SpatialScene, evaluate_spatial_scene
+
+        scene_review = evaluate_spatial_scene(sheet_view, SpatialScene.from_dict(request.scene))
+        constraints.extend(scene_review["checks"])
     scope = {
         PipelineStage.PREPARED: "prepared_geometry",
         PipelineStage.SHEET: "continuous_sheet",
@@ -330,6 +357,8 @@ def _save_partial_result(request, checkpoint, directory, manifest, digest, start
             key: value for key, value in validation.items() if key not in {"points_m", "field_T", "target_T"}
         },
         "pipeline_sweeps": pipeline_sweeps,
+        **({"requirements_review": requirements_review} if requirements_review is not None else {}),
+        **({"scene_review": scene_review} if scene_review is not None else {}),
         "request_sha256": digest,
         "pipeline_stage": checkpoint.stage.value,
         "checkpoint": "pipeline_checkpoint.cgstage",
@@ -442,7 +471,8 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
 
     with geometry_acceleration(request.kernel_backend):
         resumed = PipelineCheckpoint.load(request.resume_checkpoint) if request.resume_checkpoint else None
-        checkpoint = CoilGenPipeline(config, project_root=directory).run_stage(
+        pipeline_controls = {"requirements": request.requirements} if request.requirements is not None else {}
+        checkpoint = CoilGenPipeline(config, project_root=directory, **pipeline_controls).run_stage(
             request.pipeline_stage, resumed, checkpoint_callback=retain_stage
         )
         if resumed is not None and checkpoint.stage is resumed.stage:
@@ -454,19 +484,39 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
     result = checkpoint.result
     pipeline_sweeps = _pipeline_sweep_evidence(result.coil_parts, config)
     diagnostics = result.regularization_diagnostics
-    progress.report(86, "Checking an independent field grid")
-    validation = validate_on_independent_grid(
-        result, resolution=request.validation_resolution, design_margin=request.design_margin
+    progress.report(
+        86,
+        "Checking named regions and physical poses"
+        if request.requirements is not None
+        else "Checking an independent field grid",
     )
+    requirements_review, requirements_arrays = None, {}
+    if request.requirements is not None:
+        from ..application.research_requirements import evaluate_requirements, named_independent_sheet_validation
+
+        requirements_review, requirements_arrays = evaluate_requirements(
+            result.coil_parts, config, request.requirements, design_margin=request.design_margin
+        )
+        validation = named_independent_sheet_validation(requirements_review, request.requirements)
+    else:
+        validation = validate_on_independent_grid(
+            result, resolution=request.validation_resolution, design_margin=request.design_margin
+        )
     mask = ~np.asarray(result.target_field.suppressed, bool)
-    relative = _relative_field_error(
-        result.b_field_opt_sf, result.target_field.b, mask, config.target_field_component, config.b_0_direction
+    relative = (
+        None
+        if request.requirements is not None
+        else _relative_field_error(
+            result.b_field_opt_sf, result.target_field.b, mask, config.target_field_component, config.b_0_direction
+        )
     )
     constraints = _constraint_rows(diagnostics)
     validation_passed = validation.get("passed")
     constraints.append(
         {
-            "name": "Independent grid field error",
+            "name": "Regional independent sheet validation"
+            if request.requirements is not None
+            else "Independent grid field error",
             "value": validation.get("value"),
             "limit": validation.get("limit"),
             "effective_limit": validation.get("effective_limit"),
@@ -475,6 +525,10 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
             "scope": "continuous_sheet",
         }
     )
+    if requirements_review is not None:
+        from ..application.research_requirements import requirements_constraint_rows
+
+        constraints.extend(requirements_constraint_rows(requirements_review, include_wire=False))
     sheet_accepted = bool(diagnostics.get("constrained_solver_contract_met", False)) and all(
         row["passed"] is True for row in constraints
     )
@@ -485,13 +539,17 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         warnings.append(validation["reason"])
     if validation_passed is False:
         warnings.append(
-            "The independent field grid exceeds the requested tolerance; refine the target sampling or design margin."
+            "Named regional validation exceeds a requested physical bound; review its limiting region, samples and pose."
+            if request.requirements is not None
+            else "The independent field grid exceeds the requested tolerance; refine the target sampling or design margin."
         )
     fabrication = None
     fabricated_physics = None
     winding_validation = None
     engineering_review = None
     engineering = None
+    dynamic_analysis_review = None
+    dynamic_analysis = getattr(request, "dynamic_analysis", None)
     if request.engineering is not None:
         from ..gradient_engineering import GradientEngineeringSpec, evaluate_gradient_engineering
 
@@ -525,11 +583,14 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
                 "passed": fabrication.ready,
             }
         )
-        fabricated_physics = validate_fabricated_constraints(result, fabrication, design_margin=request.design_margin)
+        validation_controls = {"check_default_field": False} if request.requirements is not None else {}
+        fabricated_physics = validate_fabricated_constraints(
+            result, fabrication, design_margin=request.design_margin, **validation_controls
+        )
         constraints.extend(fabricated_physics["checks"])
         warnings.extend(fabricated_physics["unknown_reasons"])
         if engineering:
-            if engineering.independent_winding_validation:
+            if engineering.independent_winding_validation and request.requirements is None:
                 progress.report(94, "Checking recorded electrical paths on independent target samples")
                 winding_validation = validate_winding_on_independent_grid(
                     result, fabrication, resolution=request.validation_resolution, design_margin=request.design_margin
@@ -549,7 +610,12 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
                             "reason": winding_validation.get("reason"),
                         }
                     )
-            engineering_review = evaluate_gradient_engineering(engineering, fabrication)
+            circuit_references = {}
+            if dynamic_analysis is not None:
+                from ..application.dynamic_studies import verified_circuit_references
+
+                circuit_references = verified_circuit_references(dynamic_analysis, fabrication, engineering)
+            engineering_review = evaluate_gradient_engineering(engineering, fabrication, **circuit_references)
             drive = engineering_review["drive"]
             if engineering.drive is not None and not drive["available"]:
                 constraints.append(
@@ -614,6 +680,63 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         warnings.append(
             "Continuous-sheet/contour study: routing, terminals and fabrication readiness have not been established."
         )
+    if dynamic_analysis is not None:
+        from ..application.dynamic_studies import review_dynamic_analyses
+
+        dynamic_analysis_review = review_dynamic_analyses(
+            dynamic_analysis, fabrication, engineering, engineering_review
+        )
+        constraints.extend(dynamic_analysis_review["checks"])
+        warnings.extend(reason for item in dynamic_analysis_review["analyses"] for reason in item["reasons"])
+    if request.requirements is not None:
+        if fabrication is not None:
+            bodies = {row["body_id"]: row for row in fabrication.electrical_metrics["bodies"]}
+            plans = fabrication.winding_steps
+            paths_complete = (
+                bool(plans) and len(plans) == len(bodies) and {plan["body_id"] for plan in plans} == set(bodies)
+            )
+            for plan in plans:
+                points = np.asarray(plan["electrical_points_m"])
+                current = bodies.get(plan["body_id"], {}).get("current_A")
+                paths_complete = (
+                    paths_complete
+                    and plan.get("circuit_complete") is True
+                    and points.ndim == 2
+                    and points.shape[1] == 3
+                    and len(points) >= 3
+                    and np.all(np.isfinite(points))
+                )
+                paths_complete = (
+                    paths_complete
+                    and current is not None
+                    and np.isfinite(current)
+                    and np.linalg.norm(points[-1] - points[0]) <= 1e-10
+                )
+            complete_paths = (
+                {plan["body_id"]: (plan["electrical_points_m"], bodies[plan["body_id"]]["current_A"]) for plan in plans}
+                if paths_complete
+                else None
+            )
+            requirements_review, requirements_arrays = evaluate_requirements(
+                result.coil_parts,
+                config,
+                request.requirements,
+                fabrication=fabrication,
+                complete_paths=complete_paths,
+                design_margin=request.design_margin,
+            )
+        from ..application.research_requirements import requirements_constraint_rows
+
+        if not (result.input_data.skip_postprocessing and not request.fabricate):
+            constraints.extend(
+                row for row in requirements_constraint_rows(requirements_review) if row["scope"] != "continuous_sheet"
+            )
+    scene_review = None
+    if request.scene is not None:
+        from ..application.spatial_scene import SpatialScene, evaluate_spatial_scene
+
+        scene_review = evaluate_spatial_scene(result, SpatialScene.from_dict(request.scene), fabrication=fabrication)
+        constraints.extend(scene_review["checks"])
     electrical = fabrication.electrical_metrics["bodies"] if fabrication else []
     # Report a complete circuit inductance only for one fully modeled body;
     # adding self-inductances of separate bodies would omit mutual coupling.
@@ -635,9 +758,13 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         "sheet_physics_scope": "continuous surface current before contouring and routing",
         "relative_field_error": relative,
         "validated_relative_field_error": validation.get("relative_field_error"),
-        "field_source": "continuous sheet; independent grid without refit"
-        if validation["available"]
-        else "continuous sheet; independent validation unavailable",
+        "field_source": validation.get("source")
+        if request.requirements is not None
+        else (
+            "continuous sheet; independent grid without refit"
+            if validation["available"]
+            else "continuous sheet; independent validation unavailable"
+        ),
         "power_w": values.get("sheet_power_W"),
         "energy_j": values.get("energy_J"),
         "max_current_density_a_per_m": values.get(
@@ -666,7 +793,8 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
     arrays = _scientific_arrays(result.coil_parts, result.target_field, result.combined_mesh, result.b_field_opt_sf)
     wire_arrays, wire_evidence = _wire_field_evidence(result)
     arrays.update(wire_arrays)
-    if validation["available"]:
+    arrays.update(requirements_arrays)
+    if validation["available"] and request.requirements is None:
         arrays.update(
             validation_points_m=validation["points_m"],
             validation_field_T=validation["field_T"],
@@ -712,6 +840,8 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         "warnings": warnings,
         "validation": validation_summary,
         "wire_fields": wire_evidence,
+        **({"requirements_review": requirements_review} if requirements_review is not None else {}),
+        **({"scene_review": scene_review} if scene_review is not None else {}),
         "pipeline_sweeps": pipeline_sweeps,
         "fabrication": fabrication.summary() if fabrication else None,
         **(
@@ -724,6 +854,7 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
             else {}
         ),
         **({"engineering_review": engineering_review} if engineering_review else {}),
+        **({"dynamic_analysis_review": dynamic_analysis_review} if dynamic_analysis_review is not None else {}),
         "fabricated_physics": {k: v for k, v in fabricated_physics.items() if k != "field_T"}
         if fabricated_physics
         else None,

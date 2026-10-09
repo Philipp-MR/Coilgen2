@@ -515,7 +515,9 @@ def wire_force_torque(
     return np.sum(force_segments, axis=0), np.sum(torque_segments, axis=0)
 
 
-def validate_fabricated_constraints(result: Any, fabrication: Any, *, design_margin: float = 1.0) -> dict[str, Any]:
+def validate_fabricated_constraints(
+    result: Any, fabrication: Any, *, design_margin: float = 1.0, check_default_field: bool = True
+) -> dict[str, Any]:
     """Recheck final wire fields and uniform-B loads, flag unverifiable contracts.
 
     Arbitrary surface matrices cannot be reused for a routed wire. Their
@@ -536,7 +538,7 @@ def validate_fabricated_constraints(result: Any, fabrication: Any, *, design_mar
             "Custom field/scenario matrices act on the original sheet; post-route validation operators and target coordinates are required."
         )
     if (
-        np.any(result.target_field.suppressed)
+        (check_default_field and np.any(result.target_field.suppressed))
         or config.suppression_field_rms_limit_T > 0
         or config.suppression_field_peak_limit_T > 0
     ):
@@ -601,18 +603,19 @@ def validate_fabricated_constraints(result: Any, fabrication: Any, *, design_mar
         force += f
         torque += t
     if paths_valid:
-        mask = ~np.asarray(result.target_field.suppressed, dtype=bool)
-        check = field_budget_check(
-            result,
-            field[mask],
-            result.target_field.b[mask],
-            weights=np.asarray(result.target_field.weights)[mask],
-            design_margin=design_margin,
-        )
-        if check["verified"]:
-            checks.append({"name": "Fabricated path field error (original current)", **check})
-        else:
-            unknown.append(check["reason"])
+        if check_default_field:
+            mask = ~np.asarray(result.target_field.suppressed, dtype=bool)
+            check = field_budget_check(
+                result,
+                field[mask],
+                result.target_field.b[mask],
+                weights=np.asarray(result.target_field.weights)[mask],
+                design_margin=design_margin,
+            )
+            if check["verified"]:
+                checks.append({"name": "Fabricated path field error (original current)", **check})
+            else:
+                unknown.append(check["reason"])
         if complete_circuits and spec.background_B_per_face_T is None:
             for name, vector, limit, equality, unit in (
                 ("force", force, spec.force_limit_N, spec.force_equality_N, "N"),

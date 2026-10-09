@@ -108,6 +108,10 @@ def compare_runs(left: RunRecord | str | Path, right: RunRecord | str | Path) ->
                         "kernel_backend",
                         "resume_checkpoint",
                         "engineering",
+                        "requirements",
+                        "scene",
+                        "dynamic_analysis",
+                        "array_study",
                     )
                 },
                 "study",
@@ -316,6 +320,44 @@ def compare_runs(left: RunRecord | str | Path, right: RunRecord | str | Path) ->
     if not same_design:
         notes.append(
             "Design target samples, values, weights or selected field components differ; wire error percentages are not a common-grid improvement measure."
+        )
+    regional = tuple(value.get("requirements_review") or {} for value in metadata)
+    regional_rows = tuple(
+        {(r["region"], r["scenario"], r["sampling"], r["scope"]): r for r in value.get("rows", ())}
+        for value in regional
+    )
+    same_regional_contract = bool(regional[0].get("evaluation_contract_sha256")) and regional[0].get(
+        "evaluation_contract_sha256"
+    ) == regional[1].get("evaluation_contract_sha256")
+    for key in sorted(regional_rows[0].keys() | regional_rows[1].keys()):
+        first, second = (rows.get(key) or {} for rows in regional_rows)
+        same = same_regional_contract and all(row.get("available") is True for row in (first, second))
+        for suffix in ("_points_m", "_target_T"):
+            names = tuple(row.get("array_prefix", "") + suffix for row in (first, second))
+            same = (
+                same
+                and all(name in source for source, name in zip(arrays, names, strict=True))
+                and np.array_equal(arrays[0].get(names[0]), arrays[1].get(names[1]))
+            )
+        scopes = tuple(
+            f"{key[3]}; {key[2]}; pose={key[1]}; unchanged recorded design current; feeds included={value.get('external_feeds_included', False)}"
+            for value in regional
+        )
+        same = same and regional[0].get("external_feeds_included") == regional[1].get("external_feeds_included")
+        for title, value in (("RMS", "rms_error_T"), ("Peak", "peak_error_T")):
+            metric(
+                f"Region {key[0]} · {key[1]} · {key[2]} · {key[3]} {title}",
+                "µT",
+                first.get(value),
+                second.get(value),
+                scopes,
+                same,
+                "Named target, pose, field component, bounds, saved sampling or winding current policy differs.",
+                factor=1e6,
+            )
+    if any(regional):
+        notes.append(
+            "Regional comparisons retain every named region and finite pose. Nominal/robust training membership may differ while the evaluation contract stays identical; each winding uses its own unchanged design current."
         )
     if not same_independent:
         notes.append(

@@ -109,9 +109,21 @@ class CoilGenPipeline:
     mutable numerical operations, so one solved sheet can feed multiple studies.
     """
 
-    def __init__(self, config: CoilGenConfig, project_root: Path | None = None):
+    def __init__(self, config: CoilGenConfig, project_root: Path | None = None, *, requirements=None):
         self.config = deepcopy(config)
         self.project_root = (Path(project_root) if project_root is not None else Path.cwd()).resolve()
+        if requirements is not None:
+            from .application.research_requirements import ResearchRequirements
+
+            requirements = ResearchRequirements.from_dict(requirements)
+        self.requirements = requirements
+
+    def stage_fingerprints(self):
+        if self.requirements is None:
+            return stage_fingerprints(self.config, self.project_root)
+        from .application.research_requirements import requirements_stage_fingerprints
+
+        return requirements_stage_fingerprints(self.config, self.project_root, self.requirements)
 
     def run(self) -> CoilGenResult:
         state, _ = self._execute(PipelineStage.EVALUATED)
@@ -127,7 +139,7 @@ class CoilGenPipeline:
         contents or numerical source change. Recompute those stages explicitly.
         """
         selected = PipelineStage(stage)
-        fingerprints = stage_fingerprints(self.config, self.project_root)
+        fingerprints = self.stage_fingerprints()
 
         def completed(boundary, state):
             if checkpoint_callback is not None:
@@ -139,7 +151,12 @@ class CoilGenPipeline:
         return PipelineCheckpoint(selected, state, self.config, self.project_root, fingerprints=fingerprints)
 
     def _execute(self, selected: PipelineStage, checkpoint: PipelineCheckpoint | None = None, completed=None):
-        validate_config(self.config, project_root=self.project_root).raise_for_errors()
+        validation_config = self.config
+        if self.requirements is not None:
+            from .application.research_requirements import requirements_validation_config
+
+            validation_config = requirements_validation_config(self.config)
+        validate_config(validation_config, project_root=self.project_root).raise_for_errors()
         context = _ExecutionContext(self.config)
         state = PipelineState()
         first_stage = 0
@@ -148,7 +165,7 @@ class CoilGenPipeline:
                 raise TypeError("checkpoint must be a PipelineCheckpoint.")
             if selected.index < checkpoint.stage.index:
                 raise ValueError("A checkpoint cannot be rewound; provide an earlier stage artifact.")
-            checkpoint.assert_compatible(self.config, self.project_root)
+            checkpoint.assert_compatible(self.config, self.project_root, fingerprints=self.stage_fingerprints())
             state = deepcopy(checkpoint._state)
             first_stage = checkpoint.stage.index + 1
             context.progress.report(0.0, f"reusing {checkpoint.stage.value} checkpoint", force=True)
@@ -156,7 +173,15 @@ class CoilGenPipeline:
             context.progress.report(0.0, "start", force=True)
         methods = (self._prepare, self._solve_sheet, self._extract_contours, self._route_and_realize, self._evaluate)
         for index in range(first_stage, selected.index + 1):
-            methods[index](state, context)
+            canonical_config = self.config
+            if self.requirements is not None and index > 0:
+                from .application.research_requirements import requirements_evaluation_config
+
+                self.config = requirements_evaluation_config(canonical_config)
+            try:
+                methods[index](state, context)
+            finally:
+                self.config = canonical_config
             if completed is not None:
                 completed(tuple(PipelineStage)[index], state)
         if selected is not PipelineStage.EVALUATED:
@@ -167,7 +192,11 @@ class CoilGenPipeline:
         stage = context.stage
         coil_mesh = load_mesh_from_config(self.config, self.project_root)
         coil_mesh, symmetry_mesh_diagnostics = _prepare_half_mesh_symmetry_if_requested(coil_mesh, self.config)
-        target_mesh = load_optional_target_mesh(self.config.target_mesh_file, self.config, self.project_root)
+        target_mesh = (
+            load_optional_target_mesh(self.config.target_mesh_file, self.config, self.project_root)
+            if self.requirements is None
+            else None
+        )
         stage("loaded meshes")
 
         prepared_meshes = [
@@ -185,16 +214,22 @@ class CoilGenPipeline:
         mesh_quality_diagnostics = _validate_prepared_mesh_quality(prepared_meshes, self.config)
         symmetry_mesh_diagnostics.update(mesh_quality_diagnostics)
         parts = [CoilPart(mesh=mesh) for mesh in prepared_meshes]
-        secondary_target_mesh = load_secondary_target_mesh(
-            self.config,
-            self.project_root,
-            coil_mesh=coil_mesh,
-            coil_meshes=prepared_meshes,
+        secondary_target_mesh = (
+            load_secondary_target_mesh(
+                self.config,
+                self.project_root,
+                coil_mesh=coil_mesh,
+                coil_meshes=prepared_meshes,
+            )
+            if self.requirements is None
+            else None
         )
         suppression_surface_diagnostics = _suppression_surface_diagnostics(secondary_target_mesh)
         stage("prepared coil meshes")
-        target_field = define_target_field(
-            [part.mesh for part in parts], target_mesh, secondary_target_mesh, self.config
+        target_field = (
+            define_target_field([part.mesh for part in parts], target_mesh, secondary_target_mesh, self.config)
+            if self.requirements is None
+            else self._requirements_target()
         )
         stage("defined target field")
 
@@ -213,7 +248,16 @@ class CoilGenPipeline:
             **symmetry_mesh_diagnostics,
         }
 
+    def _requirements_target(self):
+        from .application.research_requirements import requirements_target
+
+        return requirements_target(self.requirements)
+
     def _solve_sheet(self, state: PipelineState, context: _ExecutionContext) -> None:
+        if self.requirements is not None:
+            from .application.research_requirements import prepare_requirement_constraints
+
+            self.config = prepare_requirement_constraints(state.parts, self.config, self.requirements)
         parts = state.parts
         target_field = state.target_field
         combined_mesh = state.combined_mesh

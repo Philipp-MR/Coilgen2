@@ -402,6 +402,9 @@ class CircuitDriveDialog(EngineeringDialog):
             closure, closure_import = _polyline_editor(
                 form, "Explicit drive closure [m] · optional", saved.get("drive_closure_points_m") or ()
             )
+            anchors = QPushButton("Use scene terminal / cut anchors")
+            anchors.clicked.connect(lambda checked=False, body=body_id: self._use_scene_anchors(body))
+            form.addRow(anchors)
             self.circuit_imports[body_id] = (supply_import, return_import, closure_import)
             source = QLineEdit(saved.get("source", f"User-authored feed against verified run {record.directory.name}"))
             self.circuit_sources[body_id] = source
@@ -455,6 +458,26 @@ class CircuitDriveDialog(EngineeringDialog):
             )
         self.waveform.setPlaceholderText("0 0\n0.001 100\n0.002 0")
         self.form.addRow("Time and current waveform [s, A]", self.waveform)
+        self.waveform_import = QPushButton("Import waveform CSV…")
+        self.waveform_import.clicked.connect(self._import_waveform)
+        self.form.addRow(self.waveform_import)
+        units_row = QWidget()
+        units_layout = QHBoxLayout(units_row)
+        self.csv_time_unit, self.csv_current_unit = QComboBox(), QComboBox()
+        self.csv_time_unit.addItems(["s", "ms", "us"])
+        self.csv_current_unit.addItems(["A", "mA"])
+        units_layout.addWidget(self.csv_time_unit)
+        units_layout.addWidget(self.csv_current_unit)
+        self.form.addRow("CSV column units · editable waveform stays [s, A]", units_row)
+        self.repetitions = QSpinBox()
+        self.repetitions.setRange(1, 1000)
+        self.repetitions.setValue(drive.get("repetitions", 1))
+        self.rest_s = _number(drive.get("rest_s", 0))
+        self.form.addRow("Finite pulse repetitions", self.repetitions)
+        self.form.addRow("Zero-current rest between pulses [s]", self.rest_s)
+        self.note(
+            "Repeated pulses require zero current at both endpoints. Heating covers the explicitly finite pulse train and inter-pulse rest."
+        )
         self.limit_controls = []
         self.limit_by_body = {}
         for row in self.body_controls:
@@ -513,6 +536,119 @@ class CircuitDriveDialog(EngineeringDialog):
         control.setValue(float(value))
         return control
 
+    def _import_waveform(self):
+        from ..application.dynamic_studies import import_waveform_csv
+
+        ids = self._drive_body_ids()
+        if not ids:
+            QMessageBox.warning(
+                self, "Select waveform circuits", "Select the circuits to drive before importing their current columns."
+            )
+            return
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Import time_s and ordered body_A columns", "", "Waveform CSV (*.csv)"
+        )
+        if not filename:
+            return
+        try:
+            waveform = import_waveform_csv(
+                filename,
+                ids,
+                time_unit=self.csv_time_unit.currentText(),
+                current_unit=self.csv_current_unit.currentText(),
+            )
+        except (ValueError, OSError, UnicodeError) as exc:
+            QMessageBox.warning(self, "Waveform import failed", str(exc))
+            return
+        self.waveform.setPlainText(
+            "\n".join(
+                " ".join(f"{value:.17g}" for value in [time, *row])
+                for time, row in zip(waveform["time_s"], waveform["currents_A"], strict=True)
+            )
+        )
+        self.source.setText(waveform["source"])
+
+    def _use_scene_anchors(self, body):
+        from ..application.spatial_scene import SpatialScene
+
+        value = json_value(self.project.study.get("scene"))
+        if value is None:
+            QMessageBox.warning(
+                self, "Scene anchors unavailable", "Pick geometry-bound cut and terminal anchors in the scene first."
+            )
+            return
+        anchors = [anchor for anchor in SpatialScene.from_dict(value).anchors if anchor.body_id == body]
+        by_kind = {}
+        try:
+            for anchor in anchors:
+                if anchor.kind == "waypoint":
+                    continue
+                if anchor.expected_path_sha256 != self.current_digests[body]:
+                    raise ValueError(
+                        "Scene anchor references a different winding revision. Pick against this recorded path."
+                    )
+                if anchor.kind in by_kind:
+                    raise ValueError(
+                        "Choose one anchor per terminal/cut role for this body before initializing its circuit."
+                    )
+                by_kind[anchor.kind] = anchor
+            if not {"positive_terminal", "negative_terminal"} <= set(by_kind):
+                raise ValueError(
+                    "Both positive and negative terminal anchors are required to initialize a complete circuit."
+                )
+            row = next(item for item in self.body_controls if item[0] == body)
+            _, _, enabled, polarity, cut, positive, negative, supply, returned, closure = row
+            points = np.asarray(self.body_points[body])
+            if self.body_closed[body]:
+                if "cut" not in by_kind:
+                    raise ValueError("A closed winding requires an explicit cut anchor.")
+                start, direction = points[:-1], np.diff(points, axis=0)
+                denominator = np.einsum("ij,ij->i", direction, direction)
+                fraction = np.clip(
+                    np.einsum("ij,ij->i", np.asarray(by_kind["cut"].point_m) - start, direction) / denominator, 0, 1
+                )
+                distance = np.linalg.norm(start + fraction[:, None] * direction - by_kind["cut"].point_m, axis=1)
+                selected = int(np.argmin(distance))
+                if distance[selected] > by_kind["cut"].tolerance_m:
+                    raise ValueError("Cut anchor lies outside its declared winding tolerance.")
+                unique = points[:-1]
+                retained = unique[[(selected + 1 + index) % len(unique) for index in range(len(unique))]]
+                selected_cut = selected
+            else:
+                if "cut" in by_kind:
+                    raise ValueError("An open winding cannot use a closed-turn cut anchor.")
+                retained = points
+                selected_cut = -1
+            if polarity.currentData() == -1:
+                retained = retained[::-1]
+            positive_point = np.asarray(by_kind["positive_terminal"].point_m)
+            negative_point = np.asarray(by_kind["negative_terminal"].point_m)
+            supply_points, return_points = [positive_point, retained[0]], [retained[-1], negative_point]
+            if (
+                np.linalg.norm(positive_point - retained[0]) <= 1e-12
+                or np.linalg.norm(negative_point - retained[-1]) <= 1e-12
+            ):
+                raise ValueError(
+                    "Terminal anchors need explicit nonzero feed lengths; select their drive positions away from winding endpoints."
+                )
+
+            def text(points):
+                return "\n".join(" ".join(f"{value:.17g}" for value in point) for point in points)
+
+            cut.setValue(selected_cut)
+            supply.setPlainText(text(supply_points))
+            returned.setPlainText(text(return_points))
+            closure.setPlainText(
+                text([negative_point, positive_point]) if np.linalg.norm(negative_point - positive_point) > 1e-9 else ""
+            )
+            positive.setText(by_kind["positive_terminal"].name)
+            negative.setText(by_kind["negative_terminal"].name)
+            self.circuit_sources[body].setText("User-reviewed scene terminal/cut anchors against saved winding")
+            self.rebind_controls[body].setChecked(True)
+            enabled.setChecked(True)
+        except (ValueError, KeyError, StopIteration) as exc:
+            QMessageBox.warning(self, "Scene anchor initialization unavailable", str(exc))
+
     def _drive_body_ids(self):
         selected = {
             row[0] for row in self.body_controls if row[2].isChecked() and self.drive_members[row[0]].isChecked()
@@ -545,6 +681,8 @@ class CircuitDriveDialog(EngineeringDialog):
             self.drive_members[body].setEnabled(defined and active)
         self.drive_mode.setEnabled(active)
         self.waveform.setEnabled(active and self.drive_mode.currentData() == "waveform")
+        for control in (self.waveform_import, self.repetitions, self.rest_s, self.csv_time_unit, self.csv_current_unit):
+            control.setEnabled(active and self.drive_mode.currentData() == "waveform")
         ids = self._drive_body_ids()
         self.waveform_body_label.setText(
             "Current columns after time_s: " + (", ".join(ids) if ids else "select the circuits to drive in their tabs")
@@ -623,6 +761,7 @@ class CircuitDriveDialog(EngineeringDialog):
                 ):
                     drive.pop(key, None)
                 drive.update(time_s=waveform[:, 0].tolist(), currents_A=waveform[:, 1:].tolist())
+                drive.update(repetitions=self.repetitions.value(), rest_s=_values(self.rest_s))
             if not self.retain_mutual.isChecked():
                 drive["inductance_matrix"] = None
             drive["thermal"] = None

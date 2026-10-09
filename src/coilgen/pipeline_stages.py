@@ -273,9 +273,9 @@ class PipelineCheckpoint:
     def diagnostics(self) -> dict[str, Any]:
         return deepcopy(self._state.regularization_diagnostics or self._state.prepared_diagnostics)
 
-    def assert_compatible(self, config: CoilGenConfig, project_root: Path) -> None:
+    def assert_compatible(self, config: CoilGenConfig, project_root: Path, *, fingerprints=None) -> None:
         self._validate_state()
-        current = stage_fingerprints(config, project_root)
+        current = stage_fingerprints(config, project_root) if fingerprints is None else fingerprints
         key = self.stage.value
         if self._fingerprints.get(key) != current[key]:
             try:
