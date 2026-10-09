@@ -16,6 +16,7 @@ from matplotlib.figure import Figure
 from coilgen.application.field_analysis import FieldDataset, analyze_harmonics, metric_map
 from coilgen.application.field_sampling import FieldSlice, SliceCollection
 from coilgen.application.service import RunRecord
+from coilgen.attribution import AUTHOR_NAME, software_attribution
 from coilgen.gui import field_analysis as gui
 
 
@@ -229,6 +230,7 @@ def test_harmonics_exports_and_plot_tables_remain_run_bound(application, record,
     dialog.export_to(path)
     value = json.loads(path.read_text())
     assert value["run_request_sha256"] == "a" * 64
+    assert value["software"] == software_attribution()
     assert value["source"]["key"] == "sheet"
     assert value["selection"]["harmonic_order"] == 2
     assert value["slice_scalar_values"][0][0][0] is None
@@ -241,6 +243,30 @@ def test_harmonics_exports_and_plot_tables_remain_run_bound(application, record,
     assert png.stat().st_size > 1000
     assert record.array("sheet_field_T", copy=False) == pytest.approx(dataset.field_T)
     dialog.reject()
+
+
+def test_actual_field_plot_exports_credit_software_and_preserve_cloud_pixels(application, tmp_path):
+    from PIL import Image
+
+    panel = gui._FigurePanel()
+    try:
+        panel.figure.subplots().plot([0, 1], [2e-6, 3e-6])
+        path = tmp_path / "field.png"
+        panel.save_png(path)
+        with Image.open(path) as image:
+            assert AUTHOR_NAME in image.info["Software"]
+        svg = tmp_path / "field.svg"
+        panel.save_png(svg)
+        assert AUTHOR_NAME in svg.read_text(encoding="utf-8")
+    finally:
+        panel.close()
+    pixels = np.random.default_rng(81).integers(0, 256, size=(5, 8, 4), dtype=np.uint8)
+    cloud = SimpleNamespace(plotter=SimpleNamespace(screenshot=lambda **_kwargs: pixels))
+    path = tmp_path / "cloud.png"
+    gui._PointCloudView.save_png(cloud, path)
+    with Image.open(path) as image:
+        assert AUTHOR_NAME in image.info["Software"]
+        np.testing.assert_array_equal(np.asarray(image), pixels)
 
 
 def test_field_slices_do_not_require_a_valid_desired_field(application, record, dataset):

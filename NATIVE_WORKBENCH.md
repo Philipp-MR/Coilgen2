@@ -1,5 +1,10 @@
 # CoilGen2 native scientific workbench
 
+Created and maintained by **Philipp Amrein — MRI hardware engineer**.
+**Help → About CoilGen2…** shows the software credits, project link and original
+CoilGen publication with all coauthors. Newly generated reports and exports
+include software provenance, separate from authorship of the coil design.
+
 The desktop workbench is an optional PySide6/Qt interface to the same Python
 numerical engine used by existing CoilGen scripts. Qt owns the model editor and
 graphics; isolated numerical workers own computation. No browser server is used.

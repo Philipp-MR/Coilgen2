@@ -11,6 +11,7 @@ import pytest
 
 from coilgen.application import DesignService, ProjectDocument
 from coilgen.application.cad import export_geometry, geometry_catalog
+from coilgen.attribution import software_attribution
 from coilgen.config import CoilGenConfig
 from coilgen.geometry import read_stl
 from coilgen.manufacturing import _save_xyz_polyline_as_step, save_mesh_as_step, save_mesh_as_stl
@@ -115,6 +116,7 @@ def test_mm_stl_scales_saved_triangles_without_altering_result_or_step(tmp_path)
             assert row["export_sha256"] == row["source_sha256"]
             assert row["step_unit_policy"] == "preserved_declared_unit"
     assert package.manifest["project_revision"] == 4
+    assert package.manifest["software"] == software_attribution()
     assert package.manifest["project_model_fingerprint"] == "model-fingerprint"
     assert package.manifest["construction_released"] is False
     assert json.loads(package.manifest_path.read_text()) == package.manifest

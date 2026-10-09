@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from html import escape
+import json
 from pathlib import Path
 
 import numpy as np
 
+from .attribution import AUTHOR_CREDIT, AUTHOR_ROLE, SOFTWARE_NAME, software_attribution
 from .config import CoilGenConfig
 from .models import CoilGenResult, CoilPart, PcbLayout, PcbWirePart
 
@@ -196,6 +198,7 @@ def _save_single_pcb_svg(layout: PcbLayout, path: Path, *, title: str) -> Path:
         '<?xml version="1.0" encoding="UTF-8"?>',
         f'<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="{width_mm:.3f}mm" height="{height_mm:.3f}mm" viewBox="0 0 {width_mm:.3f} {height_mm:.3f}">',
         f"<title>{escape(title)}</title>",
+        f'<metadata id="coilgen-software">{escape(json.dumps(software_attribution(), ensure_ascii=False))}</metadata>',
         '<rect width="100%" height="100%" fill="white"/>',
     ]
     if layout.boundary is not None and len(layout.boundary):
@@ -212,6 +215,8 @@ def _save_single_pcb_svg(layout: PcbLayout, path: Path, *, title: str) -> Path:
 
 def _save_single_pcb_dxf(layout: PcbLayout, path: Path) -> Path:
     lines = [
+        "999",
+        f"{SOFTWARE_NAME} software: {AUTHOR_CREDIT} ({AUTHOR_ROLE}).",
         "0",
         "SECTION",
         "2",

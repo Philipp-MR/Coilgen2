@@ -419,6 +419,7 @@ def _save_partial_result(
             artifact["sha256"] = file_digest(directory / artifact["name"])
     payload = {
         "name": request.name,
+        "software": dict(manifest["software"]),
         "config": request.to_dict()["config"],
         **_target_analysis_recipe(request, state.target_field),
         "summary": summary,
@@ -963,6 +964,7 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
     validation_summary = {k: v for k, v in validation.items() if k not in {"points_m", "field_T", "target_T"}}
     payload = {
         "name": request.name,
+        "software": dict(manifest["software"]),
         "config": request.to_dict()["config"],
         **_target_analysis_recipe(request, result.target_field),
         "summary": summary,

@@ -9,6 +9,7 @@ from typing import Any, Callable, Iterable, Sequence
 
 import numpy as np
 
+from .attribution import software_attribution
 from .basis import current_density_from_basis
 from .config import CoilGenConfig
 from .design_context import EvaluationFeature, normalize_design_context
@@ -2787,6 +2788,11 @@ def _color_ramp(t: float) -> str:
 
 
 def _write(path: str | Path, text: str) -> None:
+    if text.startswith("<svg "):
+        # Scope credits to the generating software, preserving design authorship.
+        end = text.index(">") + 1
+        metadata = escape(json.dumps(software_attribution(), ensure_ascii=False))
+        text = f'{text[:end]}\n<metadata id="coilgen-software">{metadata}</metadata>{text[end:]}'
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text(text, encoding="utf-8")
 

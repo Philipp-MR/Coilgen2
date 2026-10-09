@@ -43,18 +43,26 @@ def test_design_report_schema_has_stable_required_keys_and_sections(tmp_path: Pa
     summary = result_summary_dict(result)
 
     assert summary["report_schema_version"] == REPORT_SCHEMA_VERSION
+    assert summary["software_name"] == "CoilGen2"
+    assert summary["software_creator"] == "Philipp Amrein"
+    assert summary["software_creator_role"] == "MRI hardware engineer"
     summary_validation = validate_summary_schema(summary)
     assert summary_validation.ok, summary_validation.missing_summary_keys
 
     report_path = write_design_report(result, tmp_path / "design_report.md")
     csv_path = write_design_summary_csv(result, tmp_path / "design_summary.csv")
 
-    markdown_validation = validate_markdown_sections(report_path.read_text(encoding="utf-8"))
+    report_text = report_path.read_text(encoding="utf-8")
+    assert "Generated with **CoilGen2**. Created and maintained by Philipp Amrein" in report_text
+    assert "Amrein P, Jia F, Zaitsev M, Littin S." in report_text
+    assert "https://doi.org/10.1002/mrm.29294" in report_text
+    markdown_validation = validate_markdown_sections(report_text)
     assert markdown_validation.ok, markdown_validation.missing_markdown_sections
     csv_text = csv_path.read_text(encoding="utf-8")
     assert "report_schema_version" in csv_text
     assert "current_density_A_per_mm2" in csv_text
     assert "engineering_readiness_status" in csv_text
+    assert "software_creator,Philipp Amrein\n" in csv_text
 
 
 def test_free_design_context_keeps_schema_but_skips_gradient_specific_report(tmp_path: Path) -> None:

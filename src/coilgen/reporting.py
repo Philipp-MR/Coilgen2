@@ -6,6 +6,14 @@ from typing import Any
 
 import numpy as np
 
+from .attribution import (
+    AUTHOR_CREDIT,
+    AUTHOR_ROLE,
+    COILGEN_CITATION,
+    COILGEN_PUBLICATION_URL,
+    SOFTWARE_NAME,
+    software_attribution,
+)
 from .config_validation import ConfigValidationReport, validate_config
 from .evaluation import field_evaluation_current_source
 from .design_context import (
@@ -378,6 +386,7 @@ def result_summary_dict(result: CoilGenResult) -> dict[str, Any]:
         }
     return {
         "report_schema_version": REPORT_SCHEMA_VERSION,
+        **{f"software_{key}": value for key, value in software_attribution().items()},
         "problem_schema_version": str(getattr(config, "problem_schema_version", "")),
         "design_context": design_context.key,
         "design_context_is_mr": bool(design_context.is_mr),
@@ -1845,6 +1854,10 @@ def write_design_report(
     design_context = result_design_context(result)
     lines: list[str] = [
         f"# {title}",
+        "",
+        f"Generated with **{SOFTWARE_NAME}**. {AUTHOR_CREDIT} — {AUTHOR_ROLE}.",
+        "",
+        f"Original CoilGen reference: [{COILGEN_CITATION}]({COILGEN_PUBLICATION_URL})",
         "",
         f"Overall status: **{quality.status}**",
         f"Design context: **{design_context.key}**",

@@ -1,5 +1,6 @@
 """Class-based Python implementation of the CoilGen pipeline."""
 
+from .attribution import AUTHOR_NAME as _AUTHOR_NAME
 from .config import (
     CoilGenConfig,
     ManufacturingSettings,
@@ -531,6 +532,8 @@ from .matplotlib_visualization import (
     plot_wire_path_3d,
     plot_wire_path_sequence_3d,
 )
+
+__author__ = __maintainer__ = _AUTHOR_NAME
 
 __all__ = [
     "plot_gradient_slice_inspector",

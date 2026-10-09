@@ -32,6 +32,7 @@ from coilgen.plot_book import (
     plot_book_rendering,
     unregister_pyplot_figure,
 )
+from coilgen.attribution import AUTHOR_NAME, software_attribution
 
 
 def figure(label=""):
@@ -161,6 +162,12 @@ def test_exports_expand_all_pages_and_record_failures_without_widgets(books, tmp
     paths = book.export_all_pages(tmp_path)
     report = json.loads(book.last_export_manifest.read_text(encoding="utf-8"))
     assert len(paths) == 3
+    assert report["software"] == software_attribution()
+    from PIL import Image
+
+    with Image.open(paths[0]) as image:
+        assert AUTHOR_NAME in image.info["Software"]
+        assert "Author" not in image.info
     assert all(path.is_file() for path in paths)
     assert [row["page_id"] for row in report["pages"]] == ["parts", "parts/2", "missing", "last"]
     assert [row["status"] for row in report["pages"]] == ["exported", "exported", "unavailable", "exported"]
@@ -171,8 +178,32 @@ def test_exports_expand_all_pages_and_record_failures_without_widgets(books, tmp
     assert not book.preload_check.isChecked()
     pdfs = book.export_all_pages(tmp_path, format="pdf")
     assert len(pdfs) == 1 and pdfs[0].read_bytes().startswith(b"%PDF")
+    assert AUTHOR_NAME.encode("utf-16-be") in pdfs[0].read_bytes()
+    assert b"/Author" not in pdfs[0].read_bytes()
     pdf_report = json.loads(book.last_export_manifest.read_text(encoding="utf-8"))
     assert [row["pdf_page"] for row in pdf_report["pages"] if row["status"] == "exported"] == [1, 2, 3]
+
+
+def test_svg_and_raster_fallback_exports_credit_software_and_retain_design_metadata(books, tmp_path):
+    from PIL import Image
+    from coilgen.plot_book import PlotBookPage
+
+    book = ImageMatplotlibPlotBook(
+        figure(),
+        [PlotBookPage("raster", "Raster field", "Field", np.zeros((8, 10, 4), dtype=np.uint8))],
+        title="Researcher's coil design",
+    )
+    books.append(book)
+    book.export_metadata = {"design_author": "Researcher", "units": "T/A"}
+    path = book.export_current_page(tmp_path, format="png")
+    with Image.open(path) as image:
+        assert AUTHOR_NAME in image.info["Software"]
+        assert image.size == (10, 8)
+    svg = book.export_current_page(tmp_path, format="svg")
+    assert AUTHOR_NAME in svg.read_text(encoding="utf-8")
+    manifest = json.loads(book.last_export_manifest.read_text(encoding="utf-8"))
+    assert manifest["software"] == software_attribution()
+    assert manifest["metadata"] == book.export_metadata
 
 
 def test_filtered_exports_do_not_materialize_hidden_pages(books, tmp_path):

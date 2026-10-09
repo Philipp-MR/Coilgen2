@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 
 from ..application.field_analysis import FieldDataset, analyze_harmonics, metric_map, source_catalog
 from ..application.field_sampling import sample_slices
+from ..attribution import AUTHOR_CREDIT, SOFTWARE_NAME, software_attribution
 from ..persistence import atomic_text_writer, json_value
 from ..progress import DesignCancelled
 
@@ -124,7 +125,10 @@ class _FigurePanel(QWidget):
         self.canvas.draw_idle()
 
     def save_png(self, path):
-        self.figure.savefig(path, dpi=180)
+        suffix = Path(path).suffix.lower()
+        key = "Creator" if suffix in {".pdf", ".svg"} else "Software" if suffix in {"", ".png"} else None
+        metadata = None if key is None else {key: f"{SOFTWARE_NAME} — {AUTHOR_CREDIT}"}
+        self.figure.savefig(path, dpi=180, metadata=metadata)
 
 
 class _UnavailablePlot(QLabel):
@@ -184,7 +188,12 @@ class _PointCloudView(QWidget):
         self.plotter.render()
 
     def save_png(self, path):
-        self.plotter.screenshot(str(path))
+        from PIL import Image
+        from PIL.PngImagePlugin import PngInfo
+
+        metadata = PngInfo()
+        metadata.add_text("Software", f"{SOFTWARE_NAME} — {AUTHOR_CREDIT}")
+        Image.fromarray(self.plotter.screenshot(return_img=True)).save(path, pnginfo=metadata)
 
     def set_roi(self, polylines):
         for index, points in enumerate(polylines):
@@ -1276,6 +1285,7 @@ class FieldAnalysisDialog(QDialog):
         elif path.suffix.lower() == ".json":
             payload = {
                 "schema": "coilgen-field-analysis-v1",
+                "software": software_attribution(),
                 "run_request_sha256": self.record.metadata.get("request_sha256"),
                 "run_project_fingerprint": self.record.metadata.get("project_fingerprint"),
                 "selection": state.selection,

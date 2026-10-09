@@ -105,7 +105,7 @@ def numerical_source_digest(package_root: Path) -> str:
     """Conservative engine identity independent of presentation and adapters.
 
     New numerical modules remain included automatically. The small exclusion
-    list contains only entry points, GUI/project editing, plotting and job
+    list contains only software credits, entry points, GUI/project editing, plotting and job
     adapters; the numerical pipeline, config, kernels and validation stay hashed.
     Full-source provenance is still retained separately in run manifests.
     """
@@ -117,6 +117,7 @@ def numerical_source_digest(package_root: Path) -> str:
             "cli.py",
             "__main__.py",
             "__init__.py",
+            "attribution.py",
             "visualization.py",
             "matplotlib_visualization.py",
             "plot_book.py",

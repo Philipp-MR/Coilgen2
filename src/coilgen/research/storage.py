@@ -11,6 +11,7 @@ from typing import Any
 
 import numpy as np
 
+from ..attribution import software_attribution
 from ..persistence import (
     atomic_json as atomic_json,
     file_digest as file_digest,
@@ -116,6 +117,9 @@ def request_identity(request: dict, resolved: dict) -> tuple[str, dict]:
     encoded = json.dumps(
         json_value(identity, nonfinite="raise"), sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode()
+    # Software credits identify the tool that wrote new evidence, not its
+    # numerical inputs. Keep changes to attribution outside the reuse identity.
+    manifest["software"] = software_attribution()
     return sha256(encoded).hexdigest(), manifest
 
 

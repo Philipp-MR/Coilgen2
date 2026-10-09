@@ -20,6 +20,7 @@ from typing import Iterable
 
 import numpy as np
 
+from ..attribution import software_attribution
 from ..geometry import _read_ascii_stl, _read_binary_stl, read_stl
 from ..manufacturing import save_mesh_as_stl
 from ..models import Mesh
@@ -390,6 +391,7 @@ def export_geometry(
                 }
         manifest = {
             "schema": "coilgen-geometry-package-v1",
+            "software": software_attribution(),
             "run_request_sha256": metadata.get("request_sha256"),
             "source_metadata_sha256": metadata.get("metadata_sha256"),
             "project_id": metadata.get("project_id"),

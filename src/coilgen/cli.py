@@ -9,11 +9,17 @@ import multiprocessing
 from pathlib import Path
 import sys
 
+from .attribution import AUTHOR_CREDIT, AUTHOR_ROLE
+
 
 def main(argv=None) -> int:
     from .application.presets import PRESET_NAMES
 
-    parser = argparse.ArgumentParser(prog="coilgen", description="CoilGen2 reproducible scientific projects")
+    parser = argparse.ArgumentParser(
+        prog="coilgen",
+        description="CoilGen2 reproducible scientific projects",
+        epilog=f"{AUTHOR_CREDIT} ({AUTHOR_ROLE}).",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     new = commands.add_parser("new", help="Create an editable generated-data project")
     new.add_argument("--preset", choices=PRESET_NAMES, default="cylinder")

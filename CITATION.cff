@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+message: >-
+  Please cite the original CoilGen publication and record the CoilGen2 software
+  version or commit used for reproducibility.
+type: software
+title: CoilGen2
+authors:
+  - family-names: Amrein
+    given-names: Philipp
+repository-code: https://github.com/Philipp-MR/Coilgen2
+abstract: >-
+  Magnetostatic coil design and field analysis software created and maintained
+  by Philipp Amrein, MRI hardware engineer.
+preferred-citation:
+  type: article
+  title: "CoilGen: Open-source MR coil layout generator"
+  authors:
+    - family-names: Amrein
+      given-names: Philipp
+    - family-names: Jia
+      given-names: Feng
+    - family-names: Zaitsev
+      given-names: Maxim
+    - family-names: Littin
+      given-names: Sebastian
+  journal: Magnetic Resonance in Medicine
+  year: 2022
+  volume: "88"
+  issue: "3"
+  start: "1465"
+  end: "1479"
+  doi: 10.1002/mrm.29294

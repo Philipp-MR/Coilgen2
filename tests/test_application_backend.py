@@ -173,12 +173,15 @@ def test_snapshot_is_portable_and_detached_from_future_revision(tmp_path):
 
 
 def test_exported_script_compiles_and_project_reopens(tmp_path):
+    from coilgen.attribution import AUTHOR_NAME
+
     project = ProjectDocument.new(config=CoilGenConfig(coil_mesh_file="create cylinder mesh"))
     path = project.export_python(tmp_path / "design.py")
     compile(path.read_text(encoding="utf-8"), str(path), "exec")
     reopened = ProjectDocument.load(path.with_suffix(".coilgen.json"))
     assert reopened.fingerprint == project.fingerprint
     assert "run_coilgen" in path.read_text(encoding="utf-8")
+    assert f"Software creator and maintainer: {AUTHOR_NAME}" in path.read_text(encoding="utf-8")
 
 
 def test_dependency_plan_keeps_wire_and_hardware_constraints_upstream():

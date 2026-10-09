@@ -80,6 +80,7 @@ from ..application.design_studies import (
     set_study_notes_batch,
 )
 from ..application.assembly import LEGACY_ASSEMBLY_SCHEMAS
+from ..attribution import AUTHOR_CREDIT, AUTHOR_ROLE, PROJECT_URL, software_attribution
 from ..persistence import atomic_text
 from ..research.jobs import JobManager, RuntimePolicy
 from ..research.storage import result_metadata_digest
@@ -124,6 +125,7 @@ from .conductor_profile import ConductorProfileEditor
 from .design_progress import ComputationIndicator, DesignProgress
 from .live_preview import LivePreviewController
 from .job_outcomes import JobOutcomeNotice, build_job_outcome
+from .about import AboutDialog
 
 
 STAGES = (
@@ -494,6 +496,14 @@ class CoilGenWorkbench(QMainWindow):
             button.setMaximumWidth(340)
             button.clicked.connect(callback)
             welcome.addWidget(button, alignment=Qt.AlignmentFlag.AlignHCenter)
+        welcome.addSpacing(16)
+        credits = QLabel(f"{AUTHOR_CREDIT}\n{AUTHOR_ROLE}", self.welcome)
+        credits.setObjectName("welcome_author_credit")
+        credits.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        credits.setTextFormat(Qt.TextFormat.PlainText)
+        credits.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        credits.setWordWrap(True)
+        welcome.addWidget(credits)
         welcome.addStretch(1)
         self.workspace_stack.addWidget(self.welcome)
         self.workspace_stack.addWidget(center)
@@ -1119,7 +1129,15 @@ class CoilGenWorkbench(QMainWindow):
                 )
             )
             self.evidence_actions[self.evidence.tabText(index)] = action
+        help_menu = self.menuBar().addMenu("Help")
+        self.about_action = self._action("About CoilGen2…", self._about_dialog)
+        help_menu.addAction(self.about_action)
         self._adapt_toolbars()
+
+    def _about_dialog(self):
+        dialog = AboutDialog(self)
+        dialog.exec()
+        dialog.deleteLater()
 
     def _update_title(self, *_args):
         self.setWindowTitle(f"{self.project.name} — CoilGen2[*]" if self.project is not None else "CoilGen2")
@@ -4354,6 +4372,8 @@ class CoilGenWorkbench(QMainWindow):
         self._portable_assembly().save(project_path)
         source = (
             '"""Independent CoilGen2 channels; coupling and assembly checks require separate evaluation."""\n'
+            f"# CoilGen2 software: {AUTHOR_CREDIT} ({AUTHOR_ROLE}).\n"
+            f"# Project: {PROJECT_URL}\n"
             "from pathlib import Path\n"
             "from coilgen.application import DesignService, ProjectAssembly\n\n"
             "if __name__ == '__main__':\n"
@@ -5473,7 +5493,9 @@ class CoilGenWorkbench(QMainWindow):
             )
             from ..persistence import atomic_json
 
-            atomic_json(Path(path).with_suffix(".review.json"), report.to_dict())
+            atomic_json(
+                Path(path).with_suffix(".review.json"), {**report.to_dict(), "software": software_attribution()}
+            )
             return report
 
         def display(report):
@@ -5609,7 +5631,7 @@ class CoilGenWorkbench(QMainWindow):
                 rms_limit_T=inputs["rms_limit_T"],
                 peak_limit_T=inputs["peak_limit_T"],
             )
-            atomic_json(output, report.to_dict())
+            atomic_json(output, {**report.to_dict(), "software": software_attribution()})
             return report
 
         def show(report):
@@ -5655,7 +5677,7 @@ class CoilGenWorkbench(QMainWindow):
                     dialog, "Export measured comparison", "measured-comparison.json", "Comparison archive (*.json)"
                 )
                 if filename:
-                    atomic_json(filename, report.to_dict())
+                    atomic_json(filename, {**report.to_dict(), "software": software_attribution()})
 
             export.clicked.connect(save)
             layout.addWidget(export)

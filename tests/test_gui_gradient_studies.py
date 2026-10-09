@@ -19,6 +19,7 @@ from coilgen.application.gradient_studies import (
 from coilgen.application.presets import preset_config
 from coilgen.application.project import ProjectDocument
 from coilgen.application.service import RunRecord
+from coilgen.attribution import software_attribution
 from coilgen.gui.gradient_tools import ConvergenceDialog, GradientGeometryDialog, MeasuredFieldDialog
 from coilgen.research.jobs import JobManager, RuntimePolicy
 from test_workbench_usability import application as application, windows as windows
@@ -216,6 +217,10 @@ def test_workbench_queues_in_task_and_reconstructs_manifest_without_duplicating_
     window._gradient_convergence_review()
     review, _callback, _label = captured.pop()
     review(window.project)
+    assert json.loads(path.with_suffix(".review.json").read_text(encoding="utf-8")) == {
+        "verified": True,
+        "software": software_attribution(),
+    }
     for candidate, original_candidate in zip(checks, submitted, strict=True):
         assert candidate.project.id == original_candidate.candidate.project.id
         assert candidate.project.revision == original_candidate.candidate.project.revision

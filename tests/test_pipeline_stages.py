@@ -111,10 +111,13 @@ def test_numerical_source_identity_tracks_engine_and_excludes_presentation(tmp_p
     (tmp_path / "gui").mkdir()
     ui = tmp_path / "gui" / "workbench.py"
     engine = tmp_path / "optimization.py"
+    credits = tmp_path / "attribution.py"
     ui.write_text("theme = 'light'\n")
     engine.write_text("objective = 'power'\n")
+    credits.write_text("AUTHOR_NAME = 'Philipp Amrein'\n")
     baseline = numerical_source_digest(tmp_path)
     ui.write_text("theme = 'dark'\n")
+    credits.write_text("AUTHOR_NAME = 'Updated software credits'\n")
     assert numerical_source_digest(tmp_path) == baseline
     engine.write_text("objective = 'minimax'\n")
     assert numerical_source_digest(tmp_path) != baseline
