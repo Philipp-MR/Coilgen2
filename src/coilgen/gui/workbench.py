@@ -1132,10 +1132,14 @@ class CoilGenWorkbench(QMainWindow):
         help_menu = self.menuBar().addMenu("Help")
         self.about_action = self._action("About CoilGen2…", self._about_dialog)
         help_menu.addAction(self.about_action)
+        self.contact_action = self._action("Contact / Kontakt…", lambda: self._about_dialog(page="contact"))
+        help_menu.addAction(self.contact_action)
+        self.impressum_action = self._action("Impressum…", lambda: self._about_dialog(page="impressum"))
+        help_menu.addAction(self.impressum_action)
         self._adapt_toolbars()
 
-    def _about_dialog(self):
-        dialog = AboutDialog(self)
+    def _about_dialog(self, *, page="about"):
+        dialog = AboutDialog(self, page=page)
         dialog.exec()
         dialog.deleteLater()
 
