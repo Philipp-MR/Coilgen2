@@ -1,0 +1,53 @@
+{
+  "description": "Display-only gallery from unchanged solved field and stream-function arrays.",
+  "current_refitted": false,
+  "contours_connected_or_routed": false,
+  "fabrication_validated": false,
+  "cylinder_chart": "Per-triangle periodic unwrap, with seam triangles duplicated and axes clipped to [0, 2\u03c0R].",
+  "residual_normalization": "100 * (computed Bz - requested Bz) / max(abs(requested Bz)); not pointwise relative error.",
+  "source_sha256": {
+    "presentation.py": "2f090f6f86b0617ad4e7df1611dac6955b80c6071c05a40196320646290682cf",
+    "case_0.npz": "dbebe26a93f6a36141cf8e845d62b9d2cf0d32c2e5b2db890ae88c93de892071",
+    "case_1.npz": "b671339522edb14eacc40ab88c0e478ce6072c4169e1089cc54da125649da571"
+  },
+  "cases": [
+    {
+      "name": "Cylindrical Gy",
+      "independent_sample_count": 912,
+      "peak_target_Bz_T": 0.00041250000000000016,
+      "sheet_absolute_residual_peak_target_percent": {
+        "median": 0.7212260725314084,
+        "p95": 4.313723717463261,
+        "maximum": 5.685807465764676
+      },
+      "contour_absolute_residual_peak_target_percent": {
+        "median": 0.6435157734518899,
+        "p95": 4.423127823455516,
+        "maximum": 5.809394621498743
+      }
+    },
+    {
+      "name": "Biplanar Gz",
+      "independent_sample_count": 912,
+      "peak_target_Bz_T": 0.0004124999999999997,
+      "sheet_absolute_residual_peak_target_percent": {
+        "median": 0.9306318014926126,
+        "p95": 2.8410131564927292,
+        "maximum": 3.16805018069092
+      },
+      "contour_absolute_residual_peak_target_percent": {
+        "median": 0.9202250662567103,
+        "p95": 2.865910752161558,
+        "maximum": 3.2190755028861022
+      }
+    }
+  ],
+  "artifact_sha256": {
+    "coil_designs.png": "d8427ede401b11113f979d1832dfcd6b0392375c8dd821ccc55280830f3b27a1",
+    "coil_designs.svg": "6a0b61e09f8f48b4ed03c775ed8d90bdbcd1054c09b2bd5712917bd901085a2b",
+    "stream_function.png": "ec11e2f63b6bc4d0a7b4f06b1852fb00324408bb35cdb3fe8bdea47f867553e6",
+    "stream_function.svg": "eddfa4fe6355decfaacf0a3ce507a11e5801cb67d57bdf04857599506f4cdc6d",
+    "validation_fidelity.png": "5b6dbde0f7ee8e546a4b1c31cd6621eda3445b2d2915fd54e400db49cad27e56",
+    "validation_fidelity.svg": "b079807e128fcb5b3ebddcce3bb7c3a63b0f2bc231c5a277491248ab01028c7a"
+  }
+}

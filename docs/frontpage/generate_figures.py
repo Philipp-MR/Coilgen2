@@ -11,6 +11,7 @@ routing, fabrication acceptance, or hardware safety claim is made.
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import asdict, replace
 from hashlib import sha256
 from importlib.metadata import version
@@ -29,12 +30,6 @@ for variable in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "
     os.environ[variable] = "1"
 os.environ["MPLBACKEND"] = "Agg"
 
-import matplotlib  # noqa: E402
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib import colors  # noqa: E402
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection  # noqa: E402
 import numpy as np  # noqa: E402
 from threadpoolctl import threadpool_limits  # noqa: E402
 
@@ -45,9 +40,6 @@ from coilgen.research.storage import json_value  # noqa: E402
 from coilgen.research.validation import validate_on_independent_grid  # noqa: E402
 
 
-INK = "#142c44"
-MUTED = "#556779"
-ACCENTS = ("#087e8b", "#bd5928")
 NAMES = ("Cylindrical Gy", "Biplanar Gz")
 
 
@@ -193,161 +185,6 @@ def compute_case(config: CoilGenConfig, name: str, index: int) -> tuple[dict, di
     return arrays, metrics
 
 
-def plot_geometry(ax, arrays: dict, metrics: dict, accent: str, title: str) -> None:
-    bound = max(np.max(np.abs(value)) for key, value in arrays.items() if key.endswith("vertices_m")) * 1e3
-    sf_bound = max(np.max(np.abs(value)) for key, value in arrays.items() if key.endswith("stream_function_A"))
-    norm = colors.TwoSlopeNorm(vmin=-sf_bound, vcenter=0, vmax=sf_bound)
-    for index in range(metrics["part_count"]):
-        vertices = arrays[f"part_{index}_vertices_m"] * 1e3
-        faces = arrays[f"part_{index}_faces"]
-        sf = arrays[f"part_{index}_stream_function_A"]
-        face_colors = plt.colormaps["RdBu_r"](norm(np.mean(sf[faces], axis=1)))
-        face_colors[:, 3] = 0.25
-        mesh = Poly3DCollection(vertices[faces], facecolors=face_colors, edgecolors="none", zsort="average")
-        ax.add_collection3d(mesh)
-    for key, value in arrays.items():
-        if "_contour_" in key:
-            ax.plot(*(value * 1e3).T, color=accent, linewidth=1.35, alpha=0.95)
-    theta = np.linspace(0, 2 * np.pi, 100)
-    for plane in range(3):
-        circle = np.zeros((len(theta), 3))
-        circle[:, (plane + 1) % 3] = 45 * np.cos(theta)
-        circle[:, (plane + 2) % 3] = 45 * np.sin(theta)
-        ax.plot(*circle.T, color="#70869a", linewidth=0.6, alpha=0.65)
-    for dimension in "xyz":
-        getattr(ax, f"set_{dimension}lim")(-bound * 1.04, bound * 1.04)
-        getattr(ax, f"set_{dimension}label")(f"{dimension} [mm]", fontsize=9, labelpad=0)
-        axis = getattr(ax, f"{dimension}axis")
-        axis.set_pane_color((0.97, 0.98, 0.99, 0.5))
-        axis._axinfo["grid"]["color"] = (0.82, 0.87, 0.9, 0.5)
-    ax.set_box_aspect((1, 1, 1))
-    ax.view_init(elev=22, azim=-52)
-    ax.set_xticks([-100, 0, 100])
-    ax.set_yticks([-100, 0, 100])
-    ax.tick_params(labelsize=8, pad=0)
-    ax.set_title(title, fontsize=16, fontweight="bold", color=accent, pad=6)
-    ax.text2D(
-        0.5,
-        -0.035,
-        f"{metrics['unconnected_contour_count']} unconnected contours  |  "
-        f"{metrics['triangle_count']} surface triangles",
-        transform=ax.transAxes,
-        ha="center",
-        fontsize=10,
-        color=MUTED,
-    )
-
-
-def save_figure(fig, stem: str) -> None:
-    for extension in ("png", "svg"):
-        path = OUTPUT / f"{stem}.{extension}"
-        fig.savefig(path, dpi=180, facecolor=fig.get_facecolor())
-        if extension == "svg":
-            # Hash canonical Git-checkout bytes on every platform. Matplotlib
-            # uses native text newlines, and its SVG can contain trailing spaces.
-            content = "\n".join(line.rstrip() for line in path.read_text(encoding="utf-8").splitlines()) + "\n"
-            path.write_text(content, encoding="utf-8", newline="\n")
-    plt.close(fig)
-
-
-def plot_figures(cases: list[dict], metrics: list[dict]) -> None:
-    plt.rcParams.update({"font.family": "DejaVu Sans", "text.color": INK, "axes.labelcolor": MUTED})
-    fig = plt.figure(figsize=(13.6, 6.6), facecolor="#ffffff")
-    fig.suptitle("From a target field to surface current patterns", fontsize=23, fontweight="bold", y=0.97)
-    fig.text(
-        0.5,
-        0.89,
-        "Generated supports  /  10 mT/m gradients  /  90 mm spherical target region",
-        ha="center",
-        color=MUTED,
-        fontsize=12,
-    )
-    for index, (arrays, case, accent, title) in enumerate(zip(cases, metrics, ACCENTS, NAMES)):
-        ax = fig.add_axes((0.015 + index * 0.5, 0.115, 0.47, 0.72), projection="3d")
-        plot_geometry(ax, arrays, case, accent, title)
-    fig.text(
-        0.5,
-        0.025,
-        "Color: relative stream function. Lines: extracted iso-current contours. Gray rings: target region.",
-        ha="center",
-        fontsize=10,
-        color=MUTED,
-    )
-    save_figure(fig, "coil_designs")
-
-    fig, axes = plt.subplots(2, 3, figsize=(13.6, 8.5), facecolor="white")
-    fig.subplots_adjust(left=0.075, right=0.92, bottom=0.17, top=0.81, hspace=0.45, wspace=0.28)
-    fig.suptitle("Check the field after discretizing the current sheet", fontsize=22, fontweight="bold", y=0.97)
-    fig.text(
-        0.5,
-        0.91,
-        "Distinct validation samples; original current retained throughout",
-        ha="center",
-        fontsize=12,
-        color=MUTED,
-    )
-    vmax = max(np.max(np.abs(case["target_T"][:, 2])) * 1e3 for case in cases)
-    error_max = max(
-        np.max(np.abs(case[key][:, 2] - case["target_T"][:, 2])) * 1e6
-        for case in cases
-        for key in ("sheet_field_T", "contour_field_T")
-    )
-    for row, (arrays, case, accent, title) in enumerate(zip(cases, metrics, ACCENTS, NAMES)):
-        points = arrays["validation_points_m"]
-        x_slice = np.min(points[points[:, 0] > 0, 0])
-        selected = np.isclose(points[:, 0], x_slice, rtol=0, atol=1e-12)
-        axis = np.unique(points[:, 1])
-        y_index = np.searchsorted(axis, points[selected, 1])
-        z_index = np.searchsorted(axis, points[selected, 2])
-        data = (
-            arrays["target_T"][:, 2] * 1e3,
-            (arrays["sheet_field_T"][:, 2] - arrays["target_T"][:, 2]) * 1e6,
-            (arrays["contour_field_T"][:, 2] - arrays["target_T"][:, 2]) * 1e6,
-        )
-        labels = (
-            "Target Bz [mT]",
-            f"Sheet residual [µT]\n{case['sheet_relative_rms_Bz_error_percent']:.2f}% relative RMS",
-            f"Contour residual [µT]\n{case['contour_relative_rms_Bz_error_percent']:.2f}% relative RMS",
-        )
-        for column, (values, label) in enumerate(zip(data, labels)):
-            ax = axes[row, column]
-            grid = np.full((len(axis), len(axis)), np.nan)
-            grid[z_index, y_index] = values[selected]
-            scale = vmax if column == 0 else error_max
-            image = ax.pcolormesh(
-                axis * 1e3,
-                axis * 1e3,
-                np.ma.masked_invalid(grid),
-                cmap="RdBu_r",
-                vmin=-scale,
-                vmax=scale,
-                shading="nearest",
-                rasterized=True,
-            )
-            ax.set_aspect("equal")
-            ax.set_title(label, fontsize=11, color=INK)
-            ax.set_xlabel("y [mm]", fontsize=10)
-            if column == 0:
-                ax.set_ylabel(f"{title}\nz [mm]", fontsize=11, color=accent)
-            ax.tick_params(labelsize=9)
-            ax.spines[["top", "right"]].set_visible(False)
-            if row == 0 and column in (0, 2):
-                colorbar_ax = fig.add_axes((0.945, 0.58 if column == 0 else 0.22, 0.012, 0.20))
-                bar = fig.colorbar(image, cax=colorbar_ax)
-                bar.set_label("Bz [mT]" if column == 0 else "Residual [µT]", fontsize=10)
-                bar.ax.tick_params(labelsize=8)
-    fig.text(
-        0.5,
-        0.055,
-        "Maps show the x = +3.75 mm validation slice. RMS values use all 912 spherical validation samples.\nResidual = calculated Bz − requested Bz. Contours are unconnected; routing and fabrication are separate design stages.",
-        ha="center",
-        fontsize=10,
-        color=MUTED,
-        linespacing=1.5,
-    )
-    save_figure(fig, "field_validation")
-
-
 def source_digest() -> str:
     digest = sha256()
     for path in sorted((ROOT / "src" / "coilgen").rglob("*.py")):
@@ -356,13 +193,59 @@ def source_digest() -> str:
     return digest.hexdigest()
 
 
+def load_saved_cases() -> tuple[list[dict], list[dict], str]:
+    """Reuse verified numerical evidence without changing the solved designs."""
+    metadata = json.loads((OUTPUT / "metrics.json").read_text(encoding="utf-8"))
+    if metadata["source_tree_sha256"] != source_digest():
+        raise RuntimeError("Numerical source changed. Recompute without --reuse-data.")
+    if len(metadata["cases"]) != len(NAMES):
+        raise RuntimeError("Saved case count differs from the configured demonstrations.")
+    cases = []
+    for index, (config, case) in enumerate(zip(configurations(), metadata["cases"])):
+        if json_value(asdict(config)) != case["config"]:
+            raise RuntimeError(f"Case {index}: configuration changed. Recompute without --reuse-data.")
+        path = OUTPUT / f"case_{index}.npz"
+        if sha256(path.read_bytes()).hexdigest() != metadata["artifact_sha256"][path.name]:
+            raise RuntimeError(f"Case {index}: saved array checksum differs from its evidence.")
+        with np.load(path, allow_pickle=False) as archive:
+            arrays = {key: archive[key] for key in archive.files}
+        if not all(np.all(np.isfinite(value)) for value in arrays.values()):
+            raise RuntimeError(f"Case {index}: saved arrays contain nonfinite values.")
+        for kind in ("sheet", "contour"):
+            observed = 100 * relative_rms(arrays[f"{kind}_field_T"], arrays["target_T"])
+            if not np.isclose(observed, case[f"{kind}_relative_rms_Bz_error_percent"], rtol=1e-12, atol=1e-12):
+                raise RuntimeError(f"Case {index}: saved {kind} field does not reproduce the recorded metric.")
+        cases.append(arrays)
+    revision = metadata.get("numerical_data_revision", metadata["git_revision"])
+    print(f"Reusing verified solved designs from {revision}; evaluating the dense field maps afresh.", flush=True)
+    return cases, metadata["cases"], revision
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--reuse-data",
+        action="store_true",
+        help="Render verified saved solutions and reevaluate dense field maps without repeating optimization.",
+    )
+    args = parser.parse_args()
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     with threadpool_limits(limits=1):
-        computed = [
-            compute_case(config, name, index) for index, (config, name) in enumerate(zip(configurations(), NAMES))
-        ]
-        cases, metrics = zip(*computed)
-        plot_figures(list(cases), list(metrics))
+        if args.reuse_data:
+            cases, metrics, data_revision = load_saved_cases()
+        else:
+            computed = [
+                compute_case(config, name, index) for index, (config, name) in enumerate(zip(configurations(), NAMES))
+            ]
+            cases, metrics = map(list, zip(*computed))
+            data_revision = revision
+        from presentation import render_all
+        from field_maps import compute_and_render
+        from swept_bodies import render_all as render_swept_bodies
+
+        render_all(cases, metrics)
+        compute_and_render(cases, metrics)
+        render_swept_bodies(cases, metrics)
     metadata = {
         "description": "Generated magnetostatic demonstration; not routed or fabrication-validated hardware.",
         "error_definition": "100 * sqrt(sum((Bz - Bz_target)^2) / sum(Bz_target^2)); equal validation weights",
@@ -371,9 +254,15 @@ def main() -> None:
         "independent_quadrature_or_mesh_convergence": False,
         "routed": False,
         "fabrication_validated": False,
-        "git_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+        "git_revision": revision,
+        "numerical_data_revision": data_revision,
+        "optimization_recomputed": not args.reuse_data,
         "source_tree_sha256": source_digest(),
         "generator_sha256": sha256(Path(__file__).read_bytes()).hexdigest(),
+        "figure_source_sha256": {
+            name: sha256((OUTPUT / name).read_bytes()).hexdigest()
+            for name in ("presentation.py", "field_maps.py", "swept_bodies.py")
+        },
         "python_version": platform.python_version(),
         "dependencies": {
             package: version(package)
@@ -384,10 +273,11 @@ def main() -> None:
             path.name: sha256(path.read_bytes()).hexdigest()
             for path in sorted(OUTPUT.glob("*"))
             if path.suffix in (".npz", ".png", ".svg")
+            or path.name in ("presentation.json", "field_maps.json", "swept_bodies.json")
         },
     }
     (OUTPUT / "metrics.json").write_text(
-        json.dumps(json_value(metadata), indent=2, allow_nan=False) + "\n", encoding="utf-8"
+        json.dumps(json_value(metadata), indent=2, allow_nan=False) + "\n", encoding="utf-8", newline="\n"
     )
     print(f"Saved numerical evidence and figures in {OUTPUT}", flush=True)
 

@@ -4,3 +4,4 @@
 
 # Preserve recorded checksums for generated numerical figures on Windows.
 docs/frontpage/*.svg text eol=lf
+docs/frontpage/*.json text eol=lf

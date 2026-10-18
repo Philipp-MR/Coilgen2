@@ -6,9 +6,16 @@
   "independent_quadrature_or_mesh_convergence": false,
   "routed": false,
   "fabrication_validated": false,
-  "git_revision": "ff789eef7975786963bb5a35b7af684ba81bb4af",
+  "git_revision": "9eef3808dc4c1cb4ad79b9509ea60606646a8313",
+  "numerical_data_revision": "ff789eef7975786963bb5a35b7af684ba81bb4af",
+  "optimization_recomputed": false,
   "source_tree_sha256": "b236e533f404b36085c70e78d60f34c801c370a7373bc691180aab512fab3159",
-  "generator_sha256": "86414ec46300780c9f7864ac85b28828f5813676a467a85cb909f9aaddadef69",
+  "generator_sha256": "80ba9226e7f956f7681b9e4c9a0739688bf0de24f8284484d8207b5078e3aa65",
+  "figure_source_sha256": {
+    "presentation.py": "2f090f6f86b0617ad4e7df1611dac6955b80c6071c05a40196320646290682cf",
+    "field_maps.py": "ae35dd2b1a540602471df434acf513a2bde0475a1b6f10e3e3350cdfdfa30c55",
+    "swept_bodies.py": "7d9b8ac4b35030229735ffc45b1008808def2ce2e7ac6a0d8d8b8ad562743dce"
+  },
   "python_version": "3.12.14",
   "dependencies": {
     "numpy": "2.5.1",
@@ -1373,9 +1380,20 @@
   "artifact_sha256": {
     "case_0.npz": "dbebe26a93f6a36141cf8e845d62b9d2cf0d32c2e5b2db890ae88c93de892071",
     "case_1.npz": "b671339522edb14eacc40ab88c0e478ce6072c4169e1089cc54da125649da571",
-    "coil_designs.png": "3a76e04aa42cbae2d1077cb76cd039da30298e5262a57495bdf007060b600b0a",
-    "coil_designs.svg": "aeaa40b5770326ac3f051c822abc338e80018dc4cbeccb8a3cd6fdc18354dfc0",
-    "field_validation.png": "e6e092fe1243fe0fc44307b75e3017f9a2330a6abf2a03aa5903bc07d11f29f5",
-    "field_validation.svg": "c2e06f3dbcf79cd41fc0e875b3f91eedea7a042dbb4083e72d6e8f13a5a831d2"
+    "coil_designs.png": "d8427ede401b11113f979d1832dfcd6b0392375c8dd821ccc55280830f3b27a1",
+    "coil_designs.svg": "6a0b61e09f8f48b4ed03c775ed8d90bdbcd1054c09b2bd5712917bd901085a2b",
+    "field_maps.json": "7e4cf2051dae5fa3b1826dd4be133ee1a70e4edeaf2e6ca04c68701c7c05d63e",
+    "field_maps.npz": "b4740347a9ea435f288c2883897fce59b08a2fc0b75216e83207596d1dc3eaff",
+    "field_validation.png": "e6db1030f58a0400a880136d55fbfc66983709277fd5514ac44babe2f0eb17c0",
+    "field_validation.svg": "4a6ba70270567e8dd5d822cd3b52a3cbb54b4858ff6c8acfe6e40d9fd2e3f534",
+    "presentation.json": "d03a679abff95f14d1113cddfd4d702b4711c2cafc0c2d0625ade315bf88e4a8",
+    "stream_function.png": "ec11e2f63b6bc4d0a7b4f06b1852fb00324408bb35cdb3fe8bdea47f867553e6",
+    "stream_function.svg": "eddfa4fe6355decfaacf0a3ce507a11e5801cb67d57bdf04857599506f4cdc6d",
+    "swept_bodies.json": "757489c90aecf8dcbe1f0b6b8e4347fff4aab626f8113ae390c4adfeb99c8f17",
+    "swept_bodies.npz": "fdf35bd026a5db17da212bea7c5a7e92dcbf39e63bd8649c370413ded576682e",
+    "swept_bodies.png": "21844fdebc555799032efc26ac6cb4bbcc0242ec6f59409547cbbdccc4ff461e",
+    "swept_bodies.svg": "2847740a908a3e683273f7beaa198c8d42c56c12f229dff20122976351a20a50",
+    "validation_fidelity.png": "5b6dbde0f7ee8e546a4b1c31cd6621eda3445b2d2915fd54e400db49cad27e56",
+    "validation_fidelity.svg": "b079807e128fcb5b3ebddcce3bb7c3a63b0f2bc231c5a277491248ab01028c7a"
   }
 }

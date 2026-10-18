@@ -14,10 +14,22 @@ python docs/frontpage/generate_figures.py
 ```
 
 The script uses one numerical thread, a headless Matplotlib backend and strict
-CVXPY constrained optimization. It recomputes both cases and writes the PNG/SVG
-figures, compressed numerical arrays and JSON evidence next to the script.
+CVXPY constrained optimization. It recomputes both cases, evaluates the dense
+field maps, builds illustrative swept conductor bodies, and writes high-resolution
+PNG/SVG figures, compressed numerical arrays and JSON evidence next to the script.
 Small solver/library differences can change the last reported digits; use the
 recorded dependency versions when comparing a specific figure revision.
+
+To retain the exact saved numerical designs while regenerating the gallery:
+
+```bash
+python docs/frontpage/generate_figures.py --reuse-data
+```
+
+This mode checks the numerical source fingerprint, case configurations, array
+checksums and recorded RMS errors before reuse. The dense maps are still
+evaluated afresh. The original numerical revision and current rendering sources
+are recorded separately; no optimization or display-time current fit is made.
 
 ## What was computed
 
@@ -50,15 +62,57 @@ to these examples and does not imply that discretization generally improves
 a field. A field constraint enforced on the design grid need not hold on new
 samples; the solve reserves margin explicitly.
 
-The field map panels show actual samples in the `x = +3.75 mm` slice, with no
-interpolation. Target panels share one color scale; all residual panels share
-another. The geometry colors show relative stream function separately for each
-case. Exact stream-function values in amperes are available in the array files.
+The field maps evaluate the actual sheet and contour fields at 7,845 points
+on a 101 × 101 grid inside the central `x = 0` circular cross-section. Neither
+field is interpolated. Before that evaluation, the reconstructed sheet and
+contour operators must reproduce all 912 saved volume samples to roundoff.
+Field panels share one color scale; all residual panels share another. The
+reported relative RMS errors continue to use the separate full-volume grid.
+
+The current-distribution atlas shows the physical piecewise-linear stream
+function in amperes. Cylinder triangles crossing the angular seam are unwrapped
+locally and duplicated across the periodic chart boundary. The biplanar maps
+retain their actual sheet positions and signs. Color scales differ by geometry.
+
+The fidelity figure compares requested and calculated Bz at all 912 volume
+samples, their signed residual distributions, and empirical cumulative absolute
+errors. Distribution and coverage axes divide by the peak absolute target Bz
+for that design; they do not divide pointwise by a target that crosses zero.
+Those percentages differ from the relative RMS norm used in the table above.
+
+The swept-body illustration uses the public conductor sweep on each original
+closed contour, with a **0.9 mm radius**, 16-sided circular profile. The bodies
+are mounted outside the support with a nominal 0.9 mm centerline offset along
+its normal and remain independent loops. Actual projection and displacement
+diagnostics are retained with the body meshes. The field figures evaluate
+the original thin-wire paths, not the displaced body centroids.
+The close-up shows the resulting triangular surface
+and cross-section; surface shading represents geometry, not current or field.
+The selected conductor size is illustrative and does not establish clearance,
+electrical connections, manufacturability or fabrication acceptance.
+
+All **68** swept boundaries are watertight with positive signed volume and
+zero open or nonmanifold edges. This does not establish geometric validity:
+four planar bodies have local self-intersections, and 64 bodies fail at least
+one per-body manufacturing diagnostic, including unresolved frame sampling.
+Those failures are retained in `swept_bodies.json`; no loops or failed checks
+are hidden. Between-body clearance and a complete fabrication review were
+not performed. These are illustrative outputs of the sweep stage, not
+released conductor designs.
 
 ## Files
 
 - [generate_figures.py](generate_figures.py): complete configurations,
   computation, validation and figure generation.
+- [presentation.py](presentation.py), [presentation.json](presentation.json):
+  geometry, stream-function and full-volume fidelity plots, with input hashes
+  and derived residual statistics.
+- [field_maps.py](field_maps.py), [field_maps.json](field_maps.json),
+  [field_maps.npz](field_maps.npz): actual dense sheet/contour evaluation,
+  roundoff reconstruction checks, points and SI fields.
+- [swept_bodies.py](swept_bodies.py), [swept_bodies.json](swept_bodies.json),
+  [swept_bodies.npz](swept_bodies.npz): conductor sweep inputs, triangle bodies
+  and rendering provenance.
 - [metrics.json](metrics.json): executed configurations and mesh bounds, solver status, field
   errors, current values, dependency versions, source fingerprint and artifact
   checksums. The source fingerprint identifies the working tree used for the
@@ -70,7 +124,14 @@ case. Exact stream-function values in amperes are available in the array files.
 - [coil_designs.png](coil_designs.png), [coil_designs.svg](coil_designs.svg):
   generated supports and iso-current contours.
 - [field_validation.png](field_validation.png), [field_validation.svg](field_validation.svg):
-  target and residual maps with full-volume error metrics.
+  densely evaluated central-plane fields and residuals, labeled separately
+  from the full-volume error metrics.
+- [stream_function.png](stream_function.png), [stream_function.svg](stream_function.svg):
+  physical stream functions on the periodic cylinder chart and both planar supports.
+- [validation_fidelity.png](validation_fidelity.png), [validation_fidelity.svg](validation_fidelity.svg):
+  full-volume field agreement, residual distributions and error coverage.
+- [swept_bodies.png](swept_bodies.png), [swept_bodies.svg](swept_bodies.svg):
+  shaded conductor-boundary meshes and enlarged geometric details.
 
 ## Interpretation limits
 
@@ -79,9 +140,10 @@ order-three sheet quadrature and support mesh. This is not a mesh or quadrature
 convergence study. The contour field uses the analytical straight-segment
 thin-wire Biot–Savart kernel, at the original contour current.
 
-The illustrated contours are **unconnected**, with postprocessing, conductor
-sweeps and inductance calculation deliberately skipped. They do not represent
-a completed electrical circuit or fabrication-validated winding. Routing,
+The optimized examples deliberately skip routing, conductor sweeps and
+inductance calculation. The separate swept-body gallery subsequently sweeps
+their **unconnected** loops as an illustration, without a fabrication review.
+They do not represent a completed electrical circuit or fabrication-validated winding. Routing,
 feeds, return conductors, conductor cross section and downstream engineering
 can change the final field. Refer to [physical assumptions](../PHYSICAL_ASSUMPTIONS.md)
 and [result interpretation](../RESULT_INTERPRETATION.md) before using a design.

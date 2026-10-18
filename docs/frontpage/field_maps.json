@@ -1,0 +1,102 @@
+{
+  "description": "Direct dense-plane fields of the saved front-page current patterns; no new solve or current fit.",
+  "grid": {
+    "axis_count": 101,
+    "axis_spacing_m": 0.000899999999999998,
+    "x_m": 0.0,
+    "roi_radius_m": 0.045,
+    "evaluated_point_count_per_case": 7845
+  },
+  "array_order": "meshgrid(axis_m, axis_m, indexing='xy'); field rows match inside_roi boolean selection",
+  "interpolation": false,
+  "current_refitted": false,
+  "sheet_quadrature_order": 3,
+  "sheet_evaluation": "Core calculate_sensitivity_matrix using rebuilt original mesh basis and saved stream function; blocks of 512 points.",
+  "contour_evaluation": "Core analytical straight-segment Biot-Savart kernel with original signed contour current; 16 MiB chunk budget.",
+  "mesh_or_quadrature_convergence_study": false,
+  "routed": false,
+  "fabrication_validated": false,
+  "source_tree_sha256": "b236e533f404b36085c70e78d60f34c801c370a7373bc691180aab512fab3159",
+  "generator_sha256": "ae35dd2b1a540602471df434acf513a2bde0475a1b6f10e3e3350cdfdfa30c55",
+  "python_version": "3.12.14",
+  "dependencies": {
+    "numpy": "2.5.1",
+    "matplotlib": "3.11.1",
+    "threadpoolctl": "3.6.0"
+  },
+  "cases": [
+    {
+      "name": "Cylindrical Gy",
+      "input_file": "case_0.npz",
+      "input_sha256": "dbebe26a93f6a36141cf8e845d62b9d2cf0d32c2e5b2db890ae88c93de892071",
+      "saved_vector_field_reproduction": {
+        "sheet": {
+          "relative_L2_difference": 0.0,
+          "maximum_absolute_difference_T": 0.0,
+          "passed": true
+        },
+        "contours": {
+          "relative_L2_difference": 0.0,
+          "maximum_absolute_difference_T": 0.0,
+          "passed": true
+        }
+      },
+      "target_expression_SI": "Bz = 0.01 y T",
+      "original_signed_contour_currents_A": [
+        25.490822331277073
+      ],
+      "saved_contour_multiplicities_verified_by_vector_field_reproduction": true,
+      "volume_validation_sample_count": 912,
+      "volume_sheet_relative_rms_Bz_error_percent": 3.4035363081050733,
+      "volume_contour_relative_rms_Bz_error_percent": 3.3812354202288377,
+      "dense_plane_sheet_peak_absolute_residual_uT": 30.06846926115246,
+      "dense_plane_contour_peak_absolute_residual_uT": 30.32797086255525
+    },
+    {
+      "name": "Biplanar Gz",
+      "input_file": "case_1.npz",
+      "input_sha256": "b671339522edb14eacc40ab88c0e478ce6072c4169e1089cc54da125649da571",
+      "saved_vector_field_reproduction": {
+        "sheet": {
+          "relative_L2_difference": 0.0,
+          "maximum_absolute_difference_T": 0.0,
+          "passed": true
+        },
+        "contours": {
+          "relative_L2_difference": 0.0,
+          "maximum_absolute_difference_T": 0.0,
+          "passed": true
+        }
+      },
+      "target_expression_SI": "Bz = 0.01 z T",
+      "original_signed_contour_currents_A": [
+        10.705278557376822,
+        10.705278557376822
+      ],
+      "saved_contour_multiplicities_verified_by_vector_field_reproduction": true,
+      "volume_validation_sample_count": 912,
+      "volume_sheet_relative_rms_Bz_error_percent": 3.0144064054800643,
+      "volume_contour_relative_rms_Bz_error_percent": 2.959151619801498,
+      "dense_plane_sheet_peak_absolute_residual_uT": 16.242171223460726,
+      "dense_plane_contour_peak_absolute_residual_uT": 16.305513769244527
+    }
+  ],
+  "rendering": {
+    "shared_field_scale_mT": [
+      -0.5,
+      0.5
+    ],
+    "shared_residual_scale_uT": [
+      -35.0,
+      35.0
+    ],
+    "field_or_residual_color_clipping": false,
+    "svg_text": "Embedded vector glyph paths",
+    "png_dpi": 280
+  },
+  "artifact_sha256": {
+    "field_maps.npz": "b4740347a9ea435f288c2883897fce59b08a2fc0b75216e83207596d1dc3eaff",
+    "field_validation.png": "e6db1030f58a0400a880136d55fbfc66983709277fd5514ac44babe2f0eb17c0",
+    "field_validation.svg": "4a6ba70270567e8dd5d822cd3b52a3cbb54b4858ff6c8acfe6e40d9fd2e3f534"
+  }
+}
