@@ -23,7 +23,7 @@ from ..object_registry import (
     is_in_memory_target_key,
 )
 from ..persistence import atomic_json, atomic_text, json_value
-from .assets import InputAsset, mesh_asset, target_asset
+from .assets import InputAsset, mesh_asset, project_reference_path, target_asset
 
 
 PROJECT_SCHEMA = "coilgen-project-v2"
@@ -578,9 +578,9 @@ class ProjectDocument:
                 "stream_function",
             }:
                 raise ValueError("Unsupported project input asset kind.")
-            location = (root / descriptor["path"]).resolve()
-            if Path(descriptor["path"]).is_absolute() or not location.is_relative_to(root):
-                raise ValueError("Project asset path must stay inside the project directory.")
+            location = project_reference_path(
+                root, descriptor["path"], error="Project asset path must stay inside the project directory."
+            )
             asset = InputAsset.from_file(location, kind=descriptor["kind"])
             if id_ != asset.id or id_ != descriptor["sha256"]:
                 raise ValueError(f"Project input integrity check failed: {location}")

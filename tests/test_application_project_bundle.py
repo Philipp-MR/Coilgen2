@@ -3,13 +3,14 @@
 from copy import deepcopy
 from hashlib import sha256
 import json
+from pathlib import PurePosixPath
 import shutil
 
 import numpy as np
 import pytest
 
 from coilgen.application import DesignService, ProjectAssembly, ProjectDocument
-from coilgen.application.assets import InputAsset, mesh_asset, target_asset
+from coilgen.application.assets import InputAsset, mesh_asset, project_reference_path, target_asset
 from coilgen.application.bundles import RunArchive
 from coilgen.application.project import PROJECT_SCHEMA
 from coilgen.application.assembly import ASSEMBLY_SCHEMA
@@ -18,6 +19,20 @@ from coilgen.persistence import atomic_json, file_digest
 from coilgen.target import load_target_field_definition
 
 from test_application_backend import _config, _mesh, _target
+
+
+_UNSAFE_LEGACY_REFERENCES = (
+    "../outside.npz",
+    r"..\outside.npz",
+    "C:/outside/input.npz",
+    r"C:\outside\input.npz",
+    "C:input.npz",
+    r"\outside\input.npz",
+    r"\\server\share\input.npz",
+    "//server/share/input.npz",
+    r"\\?\C:\outside\input.npz",
+    "/outside/input.npz",
+)
 
 
 def _legacy_project(project, path):
@@ -208,7 +223,7 @@ def test_legacy_project_and_collection_import_resave_as_single_file(tmp_path):
     assert ProjectAssembly.load(migrated).fingerprint == old_assembly.fingerprint
 
 
-@pytest.mark.parametrize("reference", ["../outside.npz", "C:/outside/input.npz"])
+@pytest.mark.parametrize("reference", _UNSAFE_LEGACY_REFERENCES)
 def test_legacy_asset_paths_cannot_escape_project_directory(tmp_path, reference):
     project = ProjectDocument.from_config(_config())
     path = tmp_path / "legacy" / "project.json"
@@ -217,6 +232,72 @@ def test_legacy_asset_paths_cannot_escape_project_directory(tmp_path, reference)
     atomic_json(path, value)
     with pytest.raises(ValueError, match="inside the project directory"):
         ProjectDocument.load(path)
+
+
+@pytest.mark.parametrize("reference", [value for value in _UNSAFE_LEGACY_REFERENCES if "\\" in value or ":" in value])
+def test_windows_legacy_references_are_rejected_even_when_posix_considers_them_relative(tmp_path, reference):
+    assert not PurePosixPath(reference).is_absolute()
+    with pytest.raises(ValueError, match="inside the project directory"):
+        project_reference_path(tmp_path, reference, error="Reference must stay inside the project directory.")
+
+
+@pytest.mark.parametrize("separator", ["/", "\\"])
+@pytest.mark.parametrize("prefix", ["", "./", "old-assets/../"])
+def test_safe_legacy_asset_references_preserve_relative_directory_meaning(tmp_path, separator, prefix):
+    project = ProjectDocument.from_config(_config())
+    path = tmp_path / "legacy" / "project.json"
+    value = _legacy_project(project, path)
+    for descriptor in value["assets"].values():
+        descriptor["path"] = (prefix + descriptor["path"]).replace("/", separator)
+    atomic_json(path, value)
+
+    loaded = ProjectDocument.load(path)
+
+    assert loaded.fingerprint == project.fingerprint
+    assert loaded._assets == project._assets
+
+
+@pytest.mark.parametrize("reference", _UNSAFE_LEGACY_REFERENCES)
+def test_legacy_collection_project_references_cannot_escape_directory(tmp_path, reference):
+    value = {
+        "schema": "coilgen-independent-channels-v1",
+        "id": "assembly-id",
+        "name": "Legacy channel",
+        "revision": 1,
+        "units": "SI",
+        "coordinate_frame": "world",
+        "channels": [{"id": "channel-id", "name": "A", "enabled": True, "project": reference, "sha256": "0" * 64}],
+    }
+
+    with pytest.raises(ValueError, match="inside the collection directory"):
+        ProjectAssembly.from_dict(value, project_root=tmp_path)
+
+
+@pytest.mark.parametrize("separator", ["/", "\\"])
+def test_legacy_collection_preserves_safe_relative_subdirectory_references(tmp_path, separator):
+    project = ProjectDocument.from_config(_config())
+    path = project.save(tmp_path / "channels" / "project.json")
+    value = {
+        "schema": "coilgen-independent-channels-v1",
+        "id": "assembly-id",
+        "name": "Legacy channel",
+        "revision": 1,
+        "units": "SI",
+        "coordinate_frame": "world",
+        "channels": [
+            {
+                "id": "channel-id",
+                "name": "A",
+                "enabled": True,
+                "project": "channels/project.json".replace("/", separator),
+                "sha256": file_digest(path),
+            }
+        ],
+    }
+
+    loaded = ProjectAssembly.from_dict(value, project_root=tmp_path)
+
+    assert loaded.channels[0].project.fingerprint == project.fingerprint
 
 
 def test_inline_assets_reject_bad_base64_digest_and_external_path_descriptors():

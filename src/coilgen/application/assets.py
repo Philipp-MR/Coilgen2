@@ -8,13 +8,27 @@ from hashlib import sha256
 from io import BytesIO
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import uuid
 
 import numpy as np
 
 from ..models import Mesh, TargetField
 from ..persistence import file_digest, json_value
+
+
+def project_reference_path(root: Path, reference: str, *, error: str) -> Path:
+    """Resolve a contained legacy reference using both platforms' path rules."""
+    # Native POSIX Path treats C:/..., C:relative and Windows UNC/rooted paths
+    # as relative filenames. Reject their anchors before native resolution.
+    if not reference or PureWindowsPath(reference).anchor or PurePosixPath(reference).is_absolute():
+        raise ValueError(error)
+    # Legacy Windows-relative references must retain their directory meaning
+    # when the project is moved to POSIX, including traversal containment.
+    location = (root / reference.replace("\\", "/")).resolve()
+    if not location.is_relative_to(root):
+        raise ValueError(error)
+    return location
 
 
 @dataclass(frozen=True, slots=True)

@@ -32,6 +32,8 @@ jobs:
             tests: tests/test_field_sampling.py
           - name: native-workbench
             tests: tests/test_native_workbench.py
+          - name: native-workbench-qt611
+            tests: tests/test_native_workbench.py
           - name: qt-runtime
             tests: ""
     name: ${{ matrix.name }}
@@ -47,6 +49,9 @@ jobs:
           sudo apt-get install -y libegl1 libgl1 libopengl0
       - name: Install dependencies
         run: python -m pip install -e ".[dev,gui,plot-qt]"
+      - name: Compare the locally verified Qt binding
+        if: matrix.name == 'native-workbench-qt611'
+        run: python -m pip install "PySide6-Essentials==6.11.2"
       - name: Focused regression diagnostics
         if: matrix.tests != ''
         env:

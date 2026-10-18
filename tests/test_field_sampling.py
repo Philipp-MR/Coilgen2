@@ -121,7 +121,18 @@ def test_interpolation_never_extrapolates_or_fills_off_plane(tmp_path):
     assert not result.slices[1].available_mask.any()
     assert not result.slices[1].target_valid_mask.any()
     assert np.isnan(result.slices[0].field_T[0, 0]).all()
-    np.testing.assert_allclose(result.slices[0].field_T[2, 3], [0.1, 0, 0.1], atol=1e-17)
+    selected = result.slices[0]
+    coordinates = selected.coordinates_m[selected.available_mask]
+    expected = np.column_stack((coordinates[:, :2], coordinates[:, 0] + coordinates[:, 1]))
+    # Equivalent in-plane SVD bases and barycentric sums differ by roundoff
+    # across BLAS/Qhull versions, including components whose true value is zero.
+    epsilon = np.finfo(float).eps
+    np.testing.assert_allclose(
+        selected.field_T[selected.available_mask],
+        expected,
+        rtol=32 * epsilon,
+        atol=32 * epsilon * np.max(np.abs(field)),
+    )
     assert not result.provenance["independent_validation_claim"]
     assert not result.provenance["interpolation_extrapolation"]
 

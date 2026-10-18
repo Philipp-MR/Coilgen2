@@ -15,6 +15,7 @@ from typing import Iterable
 from uuid import uuid4
 
 from ..persistence import atomic_json, file_digest
+from .assets import project_reference_path
 from .project import PROJECT_SCHEMA, ProjectDocument, _json_object, _portable_identifier
 
 
@@ -232,9 +233,9 @@ class ProjectAssembly:
             else:
                 if not isinstance(item["project"], str):
                     raise ValueError("Malformed channel project path.")
-                location = (root / item["project"]).resolve()
-                if Path(item["project"]).is_absolute() or not location.is_relative_to(root):
-                    raise ValueError("Channel project path must stay inside the collection directory.")
+                location = project_reference_path(
+                    root, item["project"], error="Channel project path must stay inside the collection directory."
+                )
                 if file_digest(location) != item["sha256"]:
                     raise ValueError("Channel project integrity check failed.")
                 project = ProjectDocument.load(location)
