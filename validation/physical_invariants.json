@@ -1,9 +1,9 @@
 {
   "passed": true,
-  "created_utc": "2026-10-18T17:05:59.751145+00:00",
+  "created_utc": "2026-10-18T17:24:00.947795+00:00",
   "python": "3.12.14",
   "numpy": "2.5.1",
-  "numerical_source_sha256": "40eae6bf79729fedadd12d97eb4ee38b9b5b4a51ec44d36ee9de1f9d54abc365",
+  "numerical_source_sha256": "8156b8d8c39a9924d9331e56e30753d9c51caf5ba0bd067dce7a70f1c23381f8",
   "scope": "Independent analytic field checks, finite-wire conditioning, P1 sheet gauge/current and SI scaling. No optimized-mesh convergence or hardware qualification is asserted.",
   "circular_loop_refinement": {
     "cases": [

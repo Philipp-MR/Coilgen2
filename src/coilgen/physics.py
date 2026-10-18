@@ -265,7 +265,8 @@ def biot_savart_wire_path(
         chunk_size,
         len(target_coords),
         max_chunk_memory_mb=max_chunk_memory_mb,
-        bytes_per_pair=160,
+        # Include the rationalized exterior-endpoint intermediates.
+        bytes_per_pair=192,
     )
     ranges = chunk_ranges(len(segment_starts), effective_chunk_size)
     work_size = len(segment_starts) * len(target_coords)
