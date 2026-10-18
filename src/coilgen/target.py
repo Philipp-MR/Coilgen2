@@ -106,6 +106,11 @@ def define_target_field(
             # Move the origin-centred ROI to the mesh, preserving that frame.
             target_points = target_points + all_vertices.mean(axis=0)
 
+    if len(target_points) == 0:
+        raise ValueError(
+            "Generated DSV target region contains no sample points. "
+            "Increase target_region_resolution or adjust the target region geometry/radius."
+        )
     target_points = _unique_rows_stable(target_points)
     target_b = np.zeros((len(target_points), 3), dtype=float)
     target_b[:, 2] = evaluate_field_expression(config.field_shape_function, target_points)

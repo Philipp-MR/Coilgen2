@@ -18,6 +18,34 @@ def planar_mesh():
     return Mesh(vertices, faces, boundaries=[np.array([0, 1, 2, 3, 0])])
 
 
+@pytest.mark.parametrize("resolution", [1, 2, 4])
+@pytest.mark.parametrize("radius_m", [0.001, 0.03, 2.0])
+@pytest.mark.parametrize("center_on_support", [False, True])
+def test_empty_generated_dsv_requires_more_sampling_or_a_different_region(resolution, radius_m, center_on_support):
+    mesh = planar_mesh()
+    mesh.vertices += [0.1, -0.07, 0.03]
+    config = CoilGenConfig(
+        target_region_resolution=resolution,
+        target_region_radius=radius_m,
+        set_roi_into_mesh_center=center_on_support,
+        field_shape_function="y",
+    )
+
+    with pytest.raises(ValueError, match="DSV.*no sample points.*target_region_resolution.*adjust the target region"):
+        define_target_field([mesh], None, None, config)
+
+
+@pytest.mark.parametrize("resolution", [1, 2, 4])
+def test_secondary_suppression_points_cannot_replace_an_empty_generated_dsv(resolution):
+    config = CoilGenConfig(target_region_resolution=resolution, target_region_radius=0.03)
+    support = planar_mesh()
+    secondary = replace(support, vertices=support.vertices + [0, 0, 0.1])
+    assert len(secondary.vertices) > 0
+
+    with pytest.raises(ValueError, match="DSV.*no sample points.*target_region_resolution"):
+        define_target_field([support], None, secondary, config)
+
+
 def test_generated_roi_translates_with_mesh_and_expression_uses_world_coordinates():
     mesh = planar_mesh()
     delta = np.array([0.1, -0.07, 0.03])
