@@ -51,4 +51,4 @@ jobs:
       - name: Run regression suite
         env:
           MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
-        run: python -m pytest -q
+        run: python -X faulthandler -m pytest -vv --capture=tee-sys --tb=short --durations=20
