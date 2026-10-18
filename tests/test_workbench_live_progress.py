@@ -87,7 +87,8 @@ def window(application, tmp_path):
 def _wait(predicate):
     limit = time.monotonic() + 3
     while not predicate() and time.monotonic() < limit:
-        QTest.qWait(5)
+        QCoreApplication.processEvents()
+        time.sleep(0.005)
     assert predicate()
 
 
@@ -187,6 +188,7 @@ def test_final_verification_does_not_override_paused_plot(window):
     window.service.load_run = Mock(return_value=_record(window, state))
     window.jobs.states[0].update(status="completed", stage="Complete", progress=1.0)
     window.poll_jobs()
+    _wait(lambda: state["id"] in window.runs)
     assert state["id"] in window.runs
     assert window.viewport.displayed is None
     assert window.viewport.stage_preview_metadata["pipeline_stage"] == "sheet"
@@ -201,6 +203,7 @@ def test_verified_final_result_exits_live_scope(window):
     window.service.load_run = Mock(return_value=_record(window, state))
     window.jobs.states[0].update(status="completed", stage="Complete", progress=1.0)
     window.poll_jobs()
+    _wait(lambda: state["id"] in window.runs)
     assert window.live_preview.job_id is None
     assert window.viewport.stage_preview_metadata is None
     assert window._selected_run == state["id"]
@@ -232,6 +235,7 @@ def test_verification_failure_retains_last_preview_and_separate_failed_status(wi
     window.service.load_run = Mock(side_effect=ValueError("Broken final checksum"))
     window.jobs.states[0].update(status="completed", stage="Complete", progress=1.0)
     window.poll_jobs()
+    _wait(lambda: bool(window._run_verification_error(state["id"])))
     assert window.viewport.stage_preview_metadata["pipeline_stage"] == "sheet"
     assert not window.runs
     assert "verification failed" in window.design_progress.snapshot.activity.lower()

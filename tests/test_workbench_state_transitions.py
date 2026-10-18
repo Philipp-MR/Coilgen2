@@ -4,6 +4,7 @@ from unittest.mock import Mock
 
 import test_workbench_usability as usability
 import test_stopped_checkpoint_recovery as recovery
+from test_workbench_completed_run_loading import wait as wait_for
 
 from coilgen.application.reuse import ReusableStage, ReusePlan
 from coilgen.application.service import RunRecord
@@ -32,6 +33,7 @@ def test_old_completion_preserves_applied_new_revision_plot(windows):
     window.service.load_run = Mock(return_value=saved)
     window.jobs.states[0].update(status="completed", stage="Complete", progress=1.0)
     window.poll_jobs()
+    wait_for(lambda: not window._run_load_tasks)
     assert state["id"] in window.runs
     assert window._selected_run is None
     assert window.viewport.displayed is None
@@ -55,7 +57,9 @@ def test_downstream_edit_shows_verified_reusable_stages_without_rechecking_archi
     window = windows(project, directory=root)
     window.jobs.states.append(state)
     window.poll_jobs()
+    wait_for(lambda: not window._stopped_reuse_tasks)
     window.apply_config({"levels": project.config.levels + 1})
+    wait_for(lambda: not window._stopped_reuse_tasks)
     assert window.design_progress.snapshot.stages[0].status == "reusable"
     assert window.design_progress.snapshot.stages[1].status == "reusable"
     assert window.design_progress.snapshot.stages[2].status == "waiting"
@@ -77,6 +81,7 @@ def test_known_integrity_failure_remains_failed_with_cached_arrays(windows):
     window.service.load_run = Mock(return_value=record(window, state))
     window.jobs.states[0].update(status="completed", stage="Complete", progress=1.0)
     window.poll_jobs()
+    wait_for(lambda: not window._run_load_tasks)
     window.service.load_run.side_effect = ValueError("Artifact checksum changed")
     assert not window.view_results()
     assert "verification failed" in window.execution_label.text()
@@ -106,6 +111,7 @@ def test_stopped_job_can_resume_verified_boundary_without_creating_result(window
     window.jobs.states.append(state)
     window.poll_jobs()
     window._focus_job(state["id"], open_window=False)
+    wait_for(lambda: not window._stopped_reuse_tasks)
     assert not window.runs
     assert window._selected_run is None
     assert window.resume_action.isEnabled()

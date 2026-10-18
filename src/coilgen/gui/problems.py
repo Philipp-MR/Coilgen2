@@ -3,7 +3,9 @@
 from PySide6.QtCore import QEvent, QSize, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QPushButton,
     QTableWidget,
@@ -54,12 +56,24 @@ class ProblemsPanel(QWidget):
         self.summary.setObjectName("problem_summary")
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
+        groups = QHBoxLayout()
+        groups.addWidget(QLabel("Recorded scope / body"))
+        self.group_filter = QComboBox(self)
+        self.group_filter.setObjectName("problem_group_filter")
+        self.group_filter.setToolTip(
+            "Inspect one saved scope/body group without combining distinct engineering checks."
+        )
+        self.group_filter.addItem("All recorded groups", None)
+        self.group_filter.currentIndexChanged.connect(self._apply_filter)
+        groups.addWidget(self.group_filter, 1)
+        layout.addLayout(groups)
         self.table = QTableWidget(0, 4)
         self.table.setObjectName("problems_table")
         self.table.setHorizontalHeaderLabels(["Problem", "Geometry / body", "Value / limit", "Location"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setWordWrap(True)
         self.table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.table)
         self.details = QLabel("No run selected.")
@@ -126,13 +140,59 @@ class ProblemsPanel(QWidget):
                     )
                 item.setToolTip(issue.explanation)
                 self.table.setItem(row, column, item)
-        self.table.resizeColumnsToContents()
+        previous = self.group_filter.currentData()
+        self.group_filter.blockSignals(True)
+        self.group_filter.clear()
+        self.group_filter.addItem(f"All recorded groups ({len(self.issues)})", None)
+        groups = {}
+        for issue in self.issues:
+            key = (issue.scope, issue.body_id)
+            groups[key] = groups.get(key, 0) + 1
+        for key, count in groups.items():
+            label = " / ".join(value.replace("_", " ") for value in key if value) or "Run"
+            self.group_filter.addItem(f"{label} ({count})", key)
+        self.group_filter.setCurrentIndex(max(0, self.group_filter.findData(previous)))
+        self.group_filter.blockSignals(False)
+        self._responsive_columns()
         if self.issues:
             self.table.selectRow(0)
         else:
             self.details.setText("No recorded problems." if record is not None else "No run selected.")
         self._selected()
+        self._apply_filter()
         self._refresh_colors()
+
+    def _apply_filter(self, *_args):
+        if not hasattr(self, "table"):
+            return
+        selected = self.group_filter.currentData()
+        visible = []
+        for row, issue in enumerate(self.issues):
+            show = selected is None or selected == (issue.scope, issue.body_id)
+            self.table.setRowHidden(row, not show)
+            if show:
+                visible.append(row)
+        if self.table.currentRow() not in visible:
+            if visible:
+                self.table.selectRow(visible[0])
+            else:
+                self.table.setCurrentCell(-1, -1)
+                self._selected()
+
+    def _responsive_columns(self):
+        available = max(500, self.table.viewport().width())
+        header = self.table.horizontalHeader()
+        for column, share, minimum in ((0, 0.40, 180), (1, 0.29, 145), (2, 0.17, 90), (3, 0.14, 90)):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+            self.table.setColumnWidth(column, max(minimum, int(available * share)))
+        self.table.resizeRowsToContents()
+        for row in range(self.table.rowCount()):
+            self.table.setRowHeight(row, min(100, self.table.rowHeight(row)))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "table"):
+            self._responsive_columns()
 
     def _issue(self):
         row = self.table.currentRow()

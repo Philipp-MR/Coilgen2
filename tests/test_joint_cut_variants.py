@@ -374,6 +374,7 @@ def test_identical_geometry_with_changed_side_label_is_not_a_new_context(monkeyp
 @pytest.mark.parametrize("maximum,expected", [(0, 0), (1, 1), (2, 2), (10, 2)])
 def test_cut_candidate_budget_is_bounded(maximum, expected):
     case = _case()
+    case.config = replace(case.config, joint_group_routing_selection_policy="physical")
     result = cuts.propose_joint_cut_variants(case.part, case.config, maximum_candidates=maximum)
     assert len(result.variants) == expected
     assert len(result.diagnostics["attempts"]) <= min(maximum, 2)

@@ -6,6 +6,7 @@ All numerical computation executes through the same process runtime as scripts.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 import json
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -50,7 +52,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..application import ASSEMBLY_SCHEMA, DesignService, ProjectAssembly, ProjectDocument, dependency_plan
+from ..application import DesignService, ProjectAssembly, ProjectDocument, dependency_plan
 from ..application.templates import TEMPLATE_SPECS, template_assembly, template_spec
 from ..application.acceptance import (
     field_acceptance_slack_T,
@@ -68,7 +70,8 @@ from ..application.execution import (
     plan_execution,
     run_actions,
 )
-from ..application.history import HistoryEntry, RunHistoryStore
+from ..application.history import RunHistoryStore
+from ..application.service import RunRecord
 from ..application.diagnostics import run_verdicts
 from ..application.bundles import RunArchive
 from ..application.design_studies import (
@@ -79,9 +82,8 @@ from ..application.design_studies import (
     set_study_notes,
     set_study_notes_batch,
 )
-from ..application.assembly import LEGACY_ASSEMBLY_SCHEMAS
 from ..attribution import AUTHOR_CREDIT, AUTHOR_ROLE, PROJECT_URL, software_attribution
-from ..persistence import atomic_text
+from ..persistence import atomic_text, json_value
 from ..research.jobs import JobManager, RuntimePolicy
 from ..research.storage import result_metadata_digest
 from .viewport import create_viewport
@@ -122,8 +124,19 @@ from .workspace_windows import EvidenceWindows, PanelWindow
 from .view_context import ViewContextHeader, build_view_context
 from .conductor_preview import ConductorPreview
 from .conductor_profile import ConductorProfileEditor
-from .design_progress import ComputationIndicator, DesignProgress
+from .design_progress import ComputationIndicator
+from .activity_feedback import ComputationFeedback
+from .design_plan import build_design_plan
+from .design_plan_panel import DesignPlanPanel
 from .live_preview import LivePreviewController
+from .run_loading import CompletedRunLoadTask, StoppedReuseTask
+from .run_metadata import read_run_metadata
+from .results_overview import ResultsOverviewPanel
+from .optimization_summary import (
+    build_optimization_summary,
+    normalize_field_budget_metric,
+    normalize_optimization_method,
+)
 from .job_outcomes import JobOutcomeNotice, build_job_outcome
 from .about import AboutDialog
 from .branding import LogoLabel
@@ -197,6 +210,8 @@ CONTROL_FIELDS = {
     "return_path_lift": "skip_normal_shift",
     "normal_shift_mm": "normal_shift_length",
     "min_wire_distance_mm": "min_wire_distance_m",
+    "contour_segment_mm": "contour_resample_target_segment_length",
+    "contour_displacement_mm": "contour_smoothing_max_displacement",
 }
 
 
@@ -317,6 +332,12 @@ class CoilGenWorkbench(QMainWindow):
         self._observed_job_statuses = {}
         self._notified_job_outcomes = set()
         self._loaded_ids = set()
+        self._run_load_tasks = {}
+        self._stopped_reuse_tasks = {}
+        self._history_alias_generation = 0
+        self._history_alias_edits = {}
+        self._source_verification_generations = {}
+        self._reuse_generation = 0
         self._selected_run = None
         self._draft_controls = {}
         self._focused_sections = []
@@ -330,6 +351,7 @@ class CoilGenWorkbench(QMainWindow):
         self._draft_error = ""
         self.preflight_label = None
         self._reuse_plan = ReusePlan((), (), ())
+        self._channel_reuse_plans = {}
         self._preflight = None
         self._full_fabrication = False
         self._fabrication_preferences = {}
@@ -339,6 +361,12 @@ class CoilGenWorkbench(QMainWindow):
         self._design_node = "material"
         self._last_runtime_error = None
         self._submitting = False
+        self._foreground_work = {}
+        self._project_open_task = None
+        self._project_open_generation = 0
+        self._prepared_project_history = None
+        self._prepared_project_reuse = None
+        self._restoring_project_view = False
         self._expression_targets = {}
         self._expression_editor_fingerprint = None
         self._guidance_readiness_key = None
@@ -371,10 +399,14 @@ class CoilGenWorkbench(QMainWindow):
         self._build_evidence_windows()
         self._build_actions()
         self.computation_indicator = ComputationIndicator(self)
+        self.activity_feedback = ComputationFeedback(self, self.computation_indicator)
         self.statusBar().addPermanentWidget(self.computation_indicator, 1)
         self.statusBar().messageChanged.connect(self._refresh_computation_indicator)
         self.live_preview.preview_ready.connect(self._show_live_preview)
         self.live_preview.changed.connect(self._refresh_design_progress)
+        self.live_preview.changed.connect(self._refresh_computation_indicator)
+        if hasattr(self.viewport, "activity_changed"):
+            self.viewport.activity_changed.connect(self._refresh_computation_indicator)
         for name in ("dataset", "inspection_task"):
             control = getattr(self.viewport, name, None)
             if control is not None:
@@ -466,6 +498,9 @@ class CoilGenWorkbench(QMainWindow):
         self.view_context.history_requested.connect(lambda: self._open_evidence(self.history_panel))
         self.view_context.model_requested.connect(self._view_applied_model)
         layout.addWidget(self.view_context)
+        self.results_overview = ResultsOverviewPanel(center)
+        self.results_overview.action_requested.connect(self._results_action)
+        layout.addWidget(self.results_overview)
         if hasattr(self.viewport, "context_changed"):
             self.viewport.context_changed.connect(self._refresh_view_context)
         else:
@@ -491,29 +526,48 @@ class CoilGenWorkbench(QMainWindow):
         self.design_overview.expand_button.setChecked(True)
         self.design_brief.expand_button.setChecked(True)
         self.overview_window = PanelWindow("Design status — CoilGen2", self.design_overview, self, size=(860, 640))
-        destinations = QHBoxLayout()
+        destinations = QWidget(self)
+        destinations_layout = QVBoxLayout(destinations)
+        destinations_layout.setContentsMargins(8, 0, 8, 8)
         self.design_status_label = QLabel("Prepare your coil model")
         self.design_status_label.setObjectName("compact_design_status")
         self.design_status_label.setWordWrap(True)
-        destinations.addWidget(self.design_status_label, 1)
+        destinations_layout.addWidget(self.design_status_label)
+        review_actions = QHBoxLayout()
         self.guidance_action_button = QPushButton(self)
         self.guidance_action_button.setObjectName("compact_guidance_action")
         self.guidance_action_button.clicked.connect(self._trigger_guidance_action)
-        destinations.addWidget(self.guidance_action_button)
+        review_actions.addWidget(self.guidance_action_button)
         self.modeling_notes_button = QPushButton(self)
         self.modeling_notes_button.setObjectName("modeling_notes_button")
         self.modeling_notes_button.setIcon(icon("information"))
         self.modeling_notes_button.clicked.connect(self.modeling_notes_window.open_panel)
         self.modeling_notes_button.hide()
-        destinations.addWidget(self.modeling_notes_button)
-        layout.addLayout(destinations)
+        review_actions.addWidget(self.modeling_notes_button)
+        destinations_layout.addLayout(review_actions)
         self.output_scope_label = QLabel()
         self.output_scope_label.setObjectName("requested_outputs")
         self.output_scope_label.setWordWrap(True)
         self.output_scope_label.hide()
-        self.design_progress = DesignProgress(self)
+        self.design_progress = DesignPlanPanel(self)
         self.design_progress.follow_requested.connect(self._set_live_follow)
-        layout.addWidget(self.design_progress)
+        self.design_progress.channel_requested.connect(self._inspect_plan_channel)
+        self.design_progress.job_requested.connect(self._focus_job)
+        self.design_progress.compute_channels_requested.connect(self.compute_channels)
+        self.design_progress.action_requested.connect(self._plan_action)
+        plan_content = QWidget(self)
+        plan_layout = QVBoxLayout(plan_content)
+        plan_layout.setContentsMargins(0, 0, 0, 0)
+        plan_layout.addWidget(self.design_progress, 1)
+        plan_layout.addWidget(destinations)
+        self.design_plan_dock = QDockWidget("Design plan", self)
+        self.design_plan_dock.setObjectName("design_plan_dock")
+        self.design_plan_dock.setAllowedAreas(
+            Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea
+        )
+        self.design_plan_dock.setWidget(plan_content)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.design_plan_dock)
+        self.resizeDocks([self.design_plan_dock], [310], Qt.Orientation.Horizontal)
         layout.addWidget(self.viewport, 1)
         self.workspace_stack = QStackedWidget(self)
         self.welcome = QWidget(self)
@@ -521,21 +575,9 @@ class CoilGenWorkbench(QMainWindow):
         welcome = QVBoxLayout(self.welcome)
         welcome.setContentsMargins(16, 16, 16, 16)
         welcome.addStretch(1)
-        wordmark = QWidget(self.welcome)
-        wordmark_layout = QHBoxLayout(wordmark)
-        wordmark_layout.setContentsMargins(0, 0, 0, 0)
-        wordmark_layout.setSpacing(10)
-        logo = LogoLabel(wordmark, width=390)
+        logo = LogoLabel(self.welcome, width=390)
         logo.setObjectName("welcome_logo")
-        wordmark_layout.addWidget(logo)
-        version = QLabel("2", wordmark)
-        version.setObjectName("welcome_version")
-        version.setAccessibleName("CoilGen version 2")
-        version.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        version.setFixedSize(24, 24)
-        version.setStyleSheet("border: 1px solid #bdc6ce; border-radius: 5px; color: #596777; font-weight: 600;")
-        wordmark_layout.addWidget(version, alignment=Qt.AlignmentFlag.AlignVCenter)
-        welcome.addWidget(wordmark, alignment=Qt.AlignmentFlag.AlignHCenter)
+        welcome.addWidget(logo, alignment=Qt.AlignmentFlag.AlignHCenter)
         welcome.addSpacing(24)
         subtitle = QLabel("Create a coil design, open a saved project, or start from a template.", self.welcome)
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -623,14 +665,103 @@ class CoilGenWorkbench(QMainWindow):
         model.setExpanded(True)
         study.setExpanded(True)
         self.tree_items["results"].setExpanded(True)
+        self.result_tree_items = {}
+        for key, label, symbol in (
+            ("metrics", "Field results and metrics", "field-error"),
+            ("slices", "Field slices", "target-map"),
+            ("errors", "Error distribution", "field-error"),
+            ("harmonics", "Spherical harmonics", "stream-function"),
+            ("coil", "Coil properties", "resistance"),
+            ("checks", "Engineering checks", "constraint"),
+        ):
+            item = QTreeWidgetItem([label, "Not computed"])
+            item.setIcon(0, icon(symbol))
+            item.setData(0, Qt.ItemDataRole.UserRole, "result:" + key)
+            self.tree_items["results"].insertChild(self.tree_items["results"].childCount() - 1, item)
+            self.result_tree_items[key] = item
         self.tree.currentItemChanged.connect(self._node_changed)
-        self.tree.itemClicked.connect(lambda *_: self._show_dock("settings_dock"))
-        self.tree.itemActivated.connect(lambda *_: self._show_dock("settings_dock"))
+        self.tree.itemClicked.connect(self._open_tree_item)
+        self.tree.itemActivated.connect(self._open_tree_item)
         dock = QDockWidget("Model Builder", self)
         dock.setObjectName("model_dock")
         dock.setWidget(self.tree)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
         self.resizeDocks([dock], [280], Qt.Orientation.Horizontal)
+
+    def _open_tree_item(self, item, *_args):
+        key = item.data(0, Qt.ItemDataRole.UserRole) or ""
+        if key.startswith("result:"):
+            self._results_action(key.partition(":")[2])
+        else:
+            self._show_dock("settings_dock")
+
+    def _refresh_results_overview(self):
+        if not hasattr(self, "results_overview"):
+            return
+        record = self.runs.get(self._selected_run) if self.project is not None else None
+        error = self._run_verification_error(record) if record is not None else ""
+        key = (id(record), id(self.project), error)
+        if getattr(self, "_results_overview_key", None) == key:
+            return
+        self._results_overview_key = key
+        stale = False
+        if record is not None:
+            metadata = read_run_metadata(record)
+            owner = metadata.get("project_id")
+            fingerprint = metadata.get("project_fingerprint")
+            stale = bool(
+                (owner and owner != self.project.id) or (fingerprint and fingerprint != self.project.fingerprint)
+            )
+        self.results_overview.set_record(record, source_error=error, stale=stale)
+
+    def _results_action(self, action):
+        record = self.runs.get(self._selected_run)
+        if record is None or self._run_verification_error(record):
+            self._error("Select verified computed results to inspect their fields and checks.")
+            return
+        if action == "checks":
+            self._refresh_guidance()
+            self._open_evidence(self.acceptance_panel)
+            return
+        if action == "coil":
+            self._field_analysis_dialog(view="coil")
+            return
+        if action == "routing":
+            self._routing_analysis_dialog()
+            return
+        if not self.field_analysis_action.isEnabled():
+            self._error("This run contains no available computed field samples.")
+            return
+        self._refresh_results_overview()
+        source = self.results_overview.source_key
+        if (
+            action == "field"
+            and self.results_overview.component in {"Bx", "By", "Bz"}
+            and hasattr(self.viewport, "restore_view_state")
+        ):
+            dataset = {
+                "routed": "routed_residual",
+                "routed_at_stream_current": "routed_residual",
+                "contour": "contour_residual",
+                "contour_at_stream_current": "contour_residual",
+                "fabricated": "fabricated",
+                "winding_validation": "winding_validation_residual",
+                "validation": "validation",
+                "sheet": "sheet",
+            }.get(source)
+            if dataset is not None:
+                self._pause_live_follow()
+                if hasattr(self.viewport, "clear_stage_preview"):
+                    self.viewport.clear_stage_preview()
+                view = {"dataset": dataset, "component": self.results_overview.component, "units": "µT"}
+                if source.endswith("_at_stream_current"):
+                    view["wire_current"] = "Original contour current"
+                elif source in {"routed", "contour"}:
+                    view["wire_current"] = "Stored evaluation"
+                if self.viewport.restore_view_state(view) is not False:
+                    self._refresh_view_context()
+                    return
+        self._field_analysis_dialog(view=action, source=source)
 
     def _view_applied_model(self):
         self._pause_live_follow()
@@ -643,7 +774,18 @@ class CoilGenWorkbench(QMainWindow):
 
     def _set_live_follow(self, following):
         if following:
-            self.live_preview.resume()
+            worker = getattr(self.design_progress, "worker_channel", None)
+            state = self.states.get(worker.job_id, {}) if worker is not None else self.live_preview.state
+            if worker is not None and worker.channel_id != self._active_channel_id:
+                self._inspect_plan_channel(worker.channel_id)
+                if worker.channel_id != self._active_channel_id:
+                    self._refresh_design_progress()
+                    return
+            if not self._last_runtime_error and self._live_owner_matches(state):
+                if state.get("id") != self.live_preview.job_id:
+                    self._begin_live_follow(state)
+                else:
+                    self.live_preview.resume()
         else:
             self.live_preview.pause()
 
@@ -683,13 +825,13 @@ class CoilGenWorkbench(QMainWindow):
         source_id = state.get("id") if state else self._selected_run
         verification = "failed" if self._run_verification_error(source_id) else None
         record = self.runs.get(state.get("id")) if state else self.runs.get(self._selected_run)
-        if record is not None and self._live_owner_matches(record.metadata):
-            boundary = record.metadata.get("pipeline_stage")
+        if record is not None and self._live_owner_matches(read_run_metadata(record)):
+            boundary = read_run_metadata(record).get("pipeline_stage")
             keys = tuple(key for _label, key in STAGES)
             if boundary in keys:
                 completed = keys[: keys.index(boundary) + 1]
             if not state:
-                state = {**self.states.get(self._selected_run, {}), **record.metadata, "status": "completed"}
+                state = {**self.states.get(self._selected_run, {}), **read_run_metadata(record), "status": "completed"}
             if verification != "failed":
                 verification = "verified"
         elif state.get("status") == "completed" and verification is None:
@@ -715,12 +857,70 @@ class CoilGenWorkbench(QMainWindow):
             following=self.live_preview.following,
             pending=self._has_input_drafts(),
             verification=verification,
+            active_stage=state.get("active_stage"),
             unavailable=self._last_runtime_error,
         )
+        self._refresh_design_plan()
         if self.live_preview.error:
             self.design_progress.setToolTip("Live preview unavailable: " + self.live_preview.error)
         else:
             self.design_progress.setToolTip(self.output_scope_label.toolTip())
+
+    def _refresh_design_plan(self):
+        if self.assembly is None or not hasattr(self, "stage_selector"):
+            return
+        if getattr(self, "_reuse_plan_fingerprint", None) == self.project.fingerprint:
+            self._channel_reuse_plans[self._active_channel_id] = (self.project.fingerprint, self._reuse_plan)
+        reuse = {}
+        for channel in self.assembly.channels:
+            cached = self._channel_reuse_plans.get(channel.id)
+            if cached is not None and cached[0] == channel.project.fingerprint:
+                plan = cached[1]
+                reuse[channel.id] = replace(
+                    plan,
+                    available=tuple(
+                        entry for entry in plan.available if not self._source_health.error(entry.run_directory)
+                    ),
+                )
+        records = {archive.id: archive for channel in self.assembly.channels for archive in channel.project.saved_runs}
+        records.update(self.runs)
+        errors = {
+            id_: error for id_ in self.states.keys() | self.runs.keys() if (error := self._run_verification_error(id_))
+        }
+        self.design_progress.set_plan(
+            build_design_plan(
+                self.assembly,
+                active_channel_id=self._active_channel_id,
+                states=self.states,
+                records=records,
+                reuse_plans=reuse,
+                verification_errors=errors,
+                requested_stage=self.stage_selector.currentData(),
+                pending_channel_ids=(self._active_channel_id,) if self._has_input_drafts() else (),
+                runtime_unavailable=self._last_runtime_error,
+            )
+        )
+        self.design_progress.set_following(
+            self.live_preview.following,
+            job_id=self.live_preview.job_id,
+        )
+        self.design_progress.compute_channels_button.setEnabled(
+            any(channel.enabled for channel in self.assembly.channels)
+            and not self._submitting
+            and not self._last_runtime_error
+        )
+
+    def _inspect_plan_channel(self, channel_id):
+        # Inspecting progress changes the editor through its normal draft guard.
+        # It never opens a settings window or starts computation.
+        index = self.channel_selector.findData(channel_id)
+        if index >= 0:
+            self.channel_selector.setCurrentIndex(index)
+
+    def _plan_action(self, action):
+        page = {"jobs": self.jobs_table, "review": self.acceptance_panel, "plan": self.recompute}.get(action)
+        if page is not None:
+            self._open_evidence(page)
 
     def _refresh_view_context(self, *_args):
         if not hasattr(self, "view_context") or self.project is None:
@@ -767,6 +967,7 @@ class CoilGenWorkbench(QMainWindow):
                 + "\nModel/study compatibility compares saved parameters. Checkpoint reuse also verifies engine source, dependencies and saved artifact integrity; inspect Study or Recompute plan.",
             )
         self.view_context.set_context(context)
+        self._refresh_results_overview()
         self._refresh_design_progress()
 
     def _build_settings_dock(self):
@@ -908,6 +1109,8 @@ class CoilGenWorkbench(QMainWindow):
         self.history_panel.clear_baseline_requested.connect(self.clear_design_baseline)
         self.history_panel.variant_requested.connect(self._create_history_variant)
         self.history_panel.notes_changed.connect(self._save_design_notes)
+        self.history_panel.hypothesis.textChanged.connect(self._invalidate_project_open)
+        self.history_panel.rationale.textChanged.connect(self._invalidate_project_open)
         self.evidence.addTab(self.history_panel, "Project history")
         if self._history_error:
             self.messages.appendPlainText(self._history_error)
@@ -1152,11 +1355,32 @@ class CoilGenWorkbench(QMainWindow):
         )
         self.field_analysis_action.setEnabled(False)
         view_menu.addAction(self.field_analysis_action)
+        self.routing_analysis_action = self._action(
+            "Inspect interconnections…", self._routing_analysis_dialog, icon_name="connected-winding"
+        )
+        self.routing_analysis_action.setEnabled(False)
+        view_menu.addAction(self.routing_analysis_action)
+        self.field_results_button = QPushButton("Coil results", self)
+        self.field_results_button.setObjectName("field_results_button")
+        self.field_results_button.setIcon(icon("field-error"))
+        self.field_results_button.setMinimumHeight(38)
+        self.field_results_button.setAccessibleName("Open coil properties, field metrics and slices")
+        self._refresh_results_button_style()
+        self.field_results_button.clicked.connect(
+            lambda: self._results_action("metrics" if self.field_analysis_action.isEnabled() else "coil")
+        )
+        toolbar.insertWidget(toolbar.actions()[-1], self.field_results_button)
         inspection_menu = getattr(self.viewport, "inspection_menu", None)
         if inspection_menu is not None:
             inspection_menu.addSeparator()
             inspection_menu.addAction(self.field_analysis_action)
-        panel_icons = {"model_dock": "model-tree", "settings_dock": "inspector", "evidence_dock": "evidence-panel"}
+            inspection_menu.addAction(self.routing_analysis_action)
+        panel_icons = {
+            "model_dock": "model-tree",
+            "settings_dock": "inspector",
+            "evidence_dock": "evidence-panel",
+            "design_plan_dock": "compute-study",
+        }
         for dock in self.findChildren(QDockWidget):
             action = dock.toggleViewAction()
             action.setIcon(icon(panel_icons[dock.objectName()]))
@@ -1214,6 +1438,7 @@ class CoilGenWorkbench(QMainWindow):
         self.findChild(QDockWidget, "model_dock").setVisible(active)
         if not active:
             self.findChild(QDockWidget, "settings_dock").hide()
+            self.design_plan_dock.hide()
         self.tree.setEnabled(active)
         self.findChild(QToolBar, "study_toolbar").setVisible(active)
         self.edit_menu.setEnabled(active)
@@ -1251,6 +1476,7 @@ class CoilGenWorkbench(QMainWindow):
         return True
 
     def _clear_project(self):
+        self._invalidate_project_open()
         self._save_session()
         self.live_preview.stop()
         self._discard_project_editors()
@@ -1283,6 +1509,7 @@ class CoilGenWorkbench(QMainWindow):
         self._selected_run = None
         self._preflight = None
         self._reuse_plan = ReusePlan((), (), ())
+        self._channel_reuse_plans.clear()
         self._guidance_readiness_key = None
         self._guidance_readiness = None
         self._expression_targets.clear()
@@ -1465,6 +1692,7 @@ class CoilGenWorkbench(QMainWindow):
         return True
 
     def _set_project(self, project, *, channel_id=None):
+        self._invalidate_project_open()
         previous = getattr(self, "project", None)
         scene_editor = getattr(self, "_scene_editor", None)
         if scene_editor is not None and scene_editor.property("sourceProjectId") != project.id:
@@ -1480,6 +1708,10 @@ class CoilGenWorkbench(QMainWindow):
             self.assembly = self.assembly.update_channel(channel.id, project=project)
         self._fill_channels()
         self.project = project
+        if self._prepared_project_reuse is not None:
+            self._reuse_generation += 1
+            self._reuse_plan = self._prepared_project_reuse
+            self._reuse_plan_fingerprint = project.fingerprint
         if self.live_preview.job_id and not self._live_owner_matches(self.live_preview.state):
             self.live_preview.stop()
             if hasattr(self.viewport, "clear_stage_preview"):
@@ -1545,7 +1777,7 @@ class CoilGenWorkbench(QMainWindow):
         self._update_result_state()
         if self._history_key != key:
             self._restore_history(key)
-        self._refresh_stage_status()
+        self._refresh_stage_status(refresh_reuse=self._prepared_project_reuse is None)
         self._refresh_history_panel()
 
     def _stage_changed(self, *_args):
@@ -1667,6 +1899,7 @@ class CoilGenWorkbench(QMainWindow):
         ]
         for panel in ("model", "settings"):
             view[f"{panel}_panel_visible"] = not self.findChild(QDockWidget, f"{panel}_dock").isHidden()
+        view["design_plan_panel_visible"] = not self.design_plan_dock.isHidden()
         view["evidence_panel_visible"] = self.evidence.any_open()
         return view
 
@@ -1692,6 +1925,9 @@ class CoilGenWorkbench(QMainWindow):
             for panel in ("model", "settings"):
                 requested = view.get(f"{panel}_panel_visible", panel == "model") is True
                 self.findChild(QDockWidget, f"{panel}_dock").setVisible(requested)
+            self.design_plan_dock.setVisible(
+                self.project is not None and view.get("design_plan_panel_visible", True) is True
+            )
             if view.get("evidence_panel_visible") is True:
                 for index in visible or [selected]:
                     self.evidence.open_page(self.evidence.widget(index))
@@ -1784,6 +2020,16 @@ class CoilGenWorkbench(QMainWindow):
             return
         self.compute_button.setMinimumWidth(max(125, self.compute_button.minimumSizeHint().width()))
 
+    def _refresh_results_button_style(self):
+        accent = tone_color("info", self.palette()).name()
+        disabled = self.palette().color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText).name()
+        background = self.palette().color(QPalette.ColorRole.AlternateBase).name()
+        self.field_results_button.setStyleSheet(
+            f"QPushButton {{ border: 1px solid {accent}; border-radius: 5px; padding: 8px 14px; "
+            f"color: {accent}; font-weight: 600; }} QPushButton:hover {{ background: {background}; }} "
+            f"QPushButton:disabled {{ color: {disabled}; border-color: {disabled}; }}"
+        )
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._adapt_toolbars()
@@ -1808,6 +2054,11 @@ class CoilGenWorkbench(QMainWindow):
         key = item.data(0, Qt.ItemDataRole.UserRole)
         if key is None:
             return
+        if key.startswith("result:"):
+            return  # Saved-result inspection leaves pending model inputs untouched.
+        if self._restoring_project_view:
+            self._current_node = item
+            return  # Build only the final restored settings page after installation.
         if key in {"model", "study"}:
             self.select_node("geometry" if key == "model" else f"stage:{self.stage_selector.currentData()}")
             return
@@ -2171,18 +2422,102 @@ class CoilGenWorkbench(QMainWindow):
             )
         elif key == "optimization":
             native_objective = "Native objective (see below)"
+            primary_keys = (
+                "sf_opt_method",
+                "stream_function_cost_function",
+                "constrained_quadratic_objective_mode",
+                "optimization_solver",
+                "optimization_solver_residual_tolerance",
+                "constrained_optimization_solver",
+                "constrained_optimization_tolerance",
+                "constrained_optimization_max_iterations",
+                "constrained_optimization_threads",
+                "constrained_optimization_verbose",
+                "constrained_quadratic_fallback_policy",
+                "regularization_selection_method",
+                "tikonov_reg_factor",
+                "stream_function_smoothness_factor",
+                "stream_function_basis",
+                "target_error_constraint_metric",
+                "target_error_tolerance_percent",
+                "target_error_tolerance_absolute_T",
+                "target_error_rms_limit_T",
+                "target_error_std_limit_T",
+            )
+            snapshot = QGroupBox("Cost function and solver")
+            snapshot.setObjectName("optimization_summary")
+            snapshot_layout = QVBoxLayout(snapshot)
+            summary_title, summary_equation, summary_solver = QLabel(), QLabel(), QLabel()
+            for label, object_name in (
+                (summary_title, "optimization_summary_title"),
+                (summary_equation, "optimization_cost_equation"),
+                (summary_solver, "optimization_solver_summary"),
+            ):
+                label.setObjectName(object_name)
+                label.setWordWrap(True)
+                label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+                label.setTextFormat(Qt.TextFormat.PlainText)
+                label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                snapshot_layout.addWidget(label)
+            summary_title.setStyleSheet("font-weight: 600")
+            summary_equation.setStyleSheet("font-size: 14px")
+            all_parameters = QPushButton("All optimization parameters…")
+            all_parameters.setObjectName("all_optimization_parameters")
+            all_parameters.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            all_parameters.setIcon(icon("settings"))
+            all_parameters.setToolTip(
+                "Edit every optimization parameter, objective weight, constraint and solver option."
+            )
+            all_parameters.clicked.connect(lambda: self._advanced_dialog(focus="optimization"))
+            snapshot_layout.addWidget(all_parameters)
+            # Keep the mathematical objective visible above the decision cards.
+            layout.insertWidget(layout.count() - 1, snapshot)
             objective = (
                 native_objective
                 if config.research_physics is None
                 else config.research_physics.get("objective", "power")
             )
-            self._combo(form, "objective", "Physical objective", ["power", "minimax", "magnetic_energy"], objective)
+            self._combo(
+                form,
+                "objective",
+                "Objective family",
+                [native_objective, "power", "minimax", "magnetic_energy", "mixture"],
+                objective,
+            )
             self._draft_controls["objective"].setToolTip(
-                "power: minimum sheet Joule loss [W]. minimax: minimum peak surface current density [A/m]. magnetic_energy: minimum stored magnetic energy [J]."
+                "Native preserves the implemented matrix cost. Power minimizes sheet Joule loss [W]; minimax minimizes peak K [A/m]; magnetic energy minimizes stored energy [J]. Mixture uses editable dimensionless weights and physical reference scales in All optimization parameters."
             )
             effective_method = "constrained_quadratic" if config.research_physics is not None else config.sf_opt_method
             self._combo(
-                form, "sf_opt_method", "Solver formulation", ["constrained_quadratic", "tikhonov"], effective_method
+                form,
+                "sf_opt_method",
+                "Solver formulation",
+                ["constrained_quadratic", "tikhonov", "target_error_constrained_efficiency"],
+                effective_method,
+            )
+            self._combo(
+                form,
+                "stream_function_cost_function",
+                "Native cost implementation",
+                ["field_error_plus_resistance", "standard", "least_squares_plus_resistance"],
+                config.stream_function_cost_function,
+            )
+            self._draft_controls["stream_function_cost_function"].setToolTip(
+                "These names are aliases of the implemented soft residual plus matrix regularizer. The displayed equation describes the effective selected formulation; physical objectives override this native cost."
+            )
+            self._combo(
+                form,
+                "constrained_quadratic_objective_mode",
+                "Native constrained objective",
+                ["balanced", "smoothness_priority", "minimax_current_density"],
+                config.constrained_quadratic_objective_mode,
+            )
+            self._combo(
+                form,
+                "regularization_selection_method",
+                "Regularization selection",
+                ["auto", "fixed", "l_curve"],
+                config.regularization_selection_method,
             )
             self._number(
                 form, "tikonov_reg_factor", "Tikhonov regularization factor", config.tikonov_reg_factor, "", 1e-12, 1e15
@@ -2194,28 +2529,97 @@ class CoilGenWorkbench(QMainWindow):
 
             def selected_physics():
                 if (
-                    self._value("sf_opt_method") != "constrained_quadratic"
+                    normalize_optimization_method(self._value("sf_opt_method")) != "constrained_quadratic"
                     or self._value("objective") == native_objective
                 ):
                     return None
                 return {**(config.research_physics or {}), "objective": self._value("objective")}
 
             def show_mode(_text=None):
-                method = self._raw_value("sf_opt_method")
+                method = normalize_optimization_method(self._raw_value("sf_opt_method"))
                 tikhonov = method == "tikhonov"
+                physical = selected_physics() is not None
                 self._draft_controls["objective"].setEnabled(method == "constrained_quadratic")
-                self._draft_controls["tikonov_reg_factor"].setEnabled(tikhonov)
+                self._draft_controls["tikonov_reg_factor"].setEnabled(method != "constrained_quadratic")
+                self._draft_controls["regularization_selection_method"].setEnabled(tikhonov and not physical)
+                self._draft_controls["stream_function_cost_function"].setEnabled(not physical)
+                self._draft_controls["constrained_quadratic_objective_mode"].setEnabled(
+                    method == "constrained_quadratic" and not physical
+                )
+                for name in ("optimization_solver", "optimization_solver_residual_tolerance"):
+                    if name in self._draft_controls:
+                        self._draft_controls[name].setEnabled(not physical)
+                for name in (
+                    "constrained_optimization_solver",
+                    "constrained_optimization_tolerance",
+                    "constrained_optimization_max_iterations",
+                    "constrained_optimization_threads",
+                    "constrained_optimization_verbose",
+                    "constrained_quadratic_fallback_policy",
+                ):
+                    if name in self._draft_controls:
+                        self._draft_controls[name].setEnabled(
+                            method == "constrained_quadratic"
+                            and (
+                                name
+                                not in {"constrained_optimization_verbose", "constrained_quadratic_fallback_policy"}
+                                or not physical
+                            )
+                        )
+                if "stream_function_smoothness_factor" in self._draft_controls:
+                    self._draft_controls["stream_function_smoothness_factor"].setEnabled(not physical)
+                metric = normalize_field_budget_metric(
+                    self._value("target_error_constraint_metric")
+                    if "target_error_constraint_metric" in self._draft_controls
+                    else config.target_error_constraint_metric
+                )
+                explicit_key = "target_error_" + metric + "_limit_T"
+                explicit = (
+                    self._value(explicit_key)
+                    if explicit_key in self._draft_controls
+                    else getattr(config, explicit_key, 0)
+                )
+                default_budgets = not physical or selected_physics().get("include_default_field_constraints", True)
+                for name in ("target_error_constraint_metric", "target_error_rms_limit_T", "target_error_std_limit_T"):
+                    if name in self._draft_controls:
+                        self._draft_controls[name].setEnabled(default_budgets)
+                for name in ("target_error_tolerance_percent", "target_error_tolerance_absolute_T"):
+                    if name in self._draft_controls:
+                        self._draft_controls[name].setEnabled(
+                            default_budgets and not (metric in {"rms", "std"} and explicit > 0)
+                        )
+                overrides = {name: self._value(name) for name in primary_keys if name in self._draft_controls}
+                overrides["research_physics"] = selected_physics()
+                if "current_limit" in self._draft_controls:
+                    overrides["surface_current_density_limit_A_per_m"] = self._value("current_limit")
+                if "acceptance_slack" in self._changed_controls:
+                    candidate = replace(config, **overrides)
+                    overrides.update(
+                        field_acceptance_slack_overrides(candidate, self._value("acceptance_slack") * 1e-9)
+                    )
+                description = build_optimization_summary(config, overrides if self._changed_controls else None)
+                summary_title.setText(description.title + (" · pending draft" if self._changed_controls else ""))
+                summary_equation.setText(description.equation)
+                summary_solver.setText(description.solver_text)
+                snapshot.setToolTip("\n".join((*description.terms, *description.notes)))
                 if tikhonov:
                     message = "Tikhonov fits a soft field residual with regularization. Field budgets are checked after solving. Physical force/torque, power/energy, field or scenario constraints must be explicitly removed in Advanced settings before switching. The hardware-limit policy can reject or rescale the solution; inspect independent validation."
                 elif method == "constrained_quadratic" and self._raw_value("objective") == native_objective:
-                    message = f"Native quadratic objective: mode={config.constrained_quadratic_objective_mode!r}; cost function={config.stream_function_cost_function!r}. Existing objective weights and regularization remain active; no research physical objective is configured. Selecting a physical objective switches to the physical convex solver. Full controls are available in Advanced settings."
+                    message = f"Native quadratic objective: mode={self._value('constrained_quadratic_objective_mode')!r}; cost function={self._value('stream_function_cost_function')!r}. Configured native quadratic penalties remain active; the Tikhonov factor is used only by a requested scan fallback; no research physical objective is configured. Selecting a physical objective switches to the physical convex solver. Full controls are available in All optimization parameters."
                 elif method == "constrained_quadratic":
-                    message = "The physical convex solver enforces the field budget and configured physical bounds while minimizing the selected objective. Solver feasibility and independent field validation are reported separately. Magnetic energy is in joules; Joule power is in watts; peak surface current is in A/m."
+                    budgets = (
+                        "configured default field budgets and explicit physical/scenario bounds"
+                        if selected_physics().get("include_default_field_constraints", True)
+                        else "explicit physical/scenario bounds; default native field budgets are disabled"
+                    )
+                    message = f"The physical convex solver uses {budgets} while minimizing the selected objective. Solver feasibility and independent field validation are reported separately. Magnetic energy is in joules; Joule power is in watts; peak surface current is in A/m."
+                elif method == "target_error_constrained_efficiency":
+                    message = "The native field-budget search selects a feasible regularized candidate with the lowest configured resistance norm. It is a factor search, rather than a direct conic optimality certificate. Factor range, candidate count and retry controls are editable in All optimization parameters."
                 else:
                     message = f"The imported formulation {method!r} remains active. Its controls are available in Advanced settings. Choose constrained_quadratic to configure physical convex objectives."
                 mode_info.setText(message)
                 if "acceptance_slack" in self._draft_controls:
-                    candidate = replace(config, research_physics=selected_physics(), sf_opt_method=method)
+                    candidate = replace(config, **overrides)
                     if "acceptance_slack" not in self._changed_controls:
                         allowance = field_acceptance_slack_T(candidate) * 1e9
                         widget = self._draft_controls["acceptance_slack"]
@@ -2248,8 +2652,8 @@ class CoilGenWorkbench(QMainWindow):
                 "Relative field budget",
                 config.target_error_tolerance_percent,
                 " %",
-                0.000001,
-                1000,
+                0,
+                99.999999,
             )
             self._number(
                 form,
@@ -2260,6 +2664,112 @@ class CoilGenWorkbench(QMainWindow):
                 0,
                 1e12,
             )
+
+            self._combo(
+                form,
+                "target_error_constraint_metric",
+                "Field-budget metric",
+                ["norm", "rms", "std"],
+                config.target_error_constraint_metric,
+            )
+            for name, label in (
+                ("target_error_tolerance_absolute_T", "Absolute field budget"),
+                ("target_error_rms_limit_T", "Explicit RMS limit (0 = use relative/absolute budget)"),
+                ("target_error_std_limit_T", "Explicit STD limit (0 = use relative/absolute budget)"),
+            ):
+                self._number(form, name, label, getattr(config, name), " T", 0, 1e9)
+                self._draft_controls[name].setToolTip(
+                    "Field budget in tesla, distinct from numerical acceptance slack. A positive explicit RMS/STD limit overrides the relative and absolute budgets for that metric. STD does not constrain the mean/DC offset."
+                )
+            self._combo(
+                form,
+                "optimization_solver",
+                "Linear solve policy",
+                ["auto", "solve", "pinv"],
+                config.optimization_solver,
+            )
+            self._number(
+                form,
+                "optimization_solver_residual_tolerance",
+                "Linear solve residual tolerance",
+                config.optimization_solver_residual_tolerance,
+                "",
+                0,
+                1,
+            )
+            self._combo(
+                form,
+                "constrained_optimization_solver",
+                "Conic solver backend",
+                ["auto", "clarabel", "ecos", "scs"],
+                config.constrained_optimization_solver,
+            )
+            self._number(
+                form,
+                "constrained_optimization_tolerance",
+                "Conic solver tolerance",
+                config.constrained_optimization_tolerance,
+                "",
+                1e-18,
+                1,
+            )
+            self._integer(
+                form,
+                "constrained_optimization_max_iterations",
+                "Maximum solver iterations",
+                config.constrained_optimization_max_iterations,
+                1,
+                2147483647,
+            )
+            self._integer(
+                form,
+                "constrained_optimization_threads",
+                "Solver thread request (0 = default)",
+                config.constrained_optimization_threads,
+                0,
+                4096,
+            )
+            self._check(
+                form,
+                "constrained_optimization_verbose",
+                "Verbose solver output",
+                config.constrained_optimization_verbose,
+            )
+            self._combo(
+                form,
+                "constrained_quadratic_fallback_policy",
+                "Conic failure policy",
+                ["target_error_scan", "strict"],
+                config.constrained_quadratic_fallback_policy,
+            )
+            self._number(
+                form,
+                "stream_function_smoothness_factor",
+                "Native smoothness penalty",
+                config.stream_function_smoothness_factor,
+                "",
+                0,
+                1e15,
+            )
+            self._combo(
+                form,
+                "stream_function_basis",
+                "Stream-function basis",
+                ["vertex", "cotangent_spectral_lowpass"],
+                config.stream_function_basis,
+            )
+            for name in (
+                "optimization_solver_residual_tolerance",
+                "constrained_optimization_tolerance",
+                "target_error_tolerance_absolute_T",
+                "target_error_rms_limit_T",
+                "target_error_std_limit_T",
+            ):
+                control = self._draft_controls[name]
+                with QSignalBlocker(control):
+                    control.setDecimals(18)
+                    control.setValue(getattr(config, name))
+                self._widget_initial[name] = self._raw_value(name)
             self._draft_fields["acceptance_slack"] = (
                 "research_physics",
                 "target_error_constraint_acceptance_absolute_T",
@@ -2286,7 +2796,11 @@ class CoilGenWorkbench(QMainWindow):
                 if objective != native_objective:
                     physics["objective"] = objective
                 method = self._value("sf_opt_method")
-                if method == "tikhonov" and "sf_opt_method" in self._changed_controls:
+                if (
+                    selected_physics() is None
+                    and config.research_physics is not None
+                    and ("sf_opt_method" in self._changed_controls or "objective" in self._changed_controls)
+                ):
                     constrained = [
                         name
                         for name in (
@@ -2302,11 +2816,17 @@ class CoilGenWorkbench(QMainWindow):
                     constrained.extend(name for name in ("field_constraints", "scenarios") if physics.get(name))
                     if constrained:
                         raise ValueError(
-                            "Tikhonov does not enforce these research constraints: "
+                            (
+                                "Tikhonov"
+                                if normalize_optimization_method(method) == "tikhonov"
+                                else "The selected native formulation"
+                            )
+                            + " does not enforce these research constraints: "
                             + ", ".join(constrained)
                             + ". Explicitly remove them in Advanced settings before switching formulations; the current model is unchanged."
                         )
                 changes = {
+                    **{name: self._value(name) for name in primary_keys},
                     "research_physics": selected_physics(),
                     "sf_opt_method": method,
                     "tikonov_reg_factor": self._value("tikonov_reg_factor"),
@@ -2319,8 +2839,21 @@ class CoilGenWorkbench(QMainWindow):
                 return changes
 
             self._draft_builder = optimization_changes
+            for name in primary_keys:
+                control = self._draft_controls[name]
+                signal = (
+                    control.currentTextChanged
+                    if isinstance(control, QComboBox)
+                    else control.toggled
+                    if isinstance(control, QCheckBox)
+                    else control.valueChanged
+                )
+                if name != "sf_opt_method":
+                    signal.connect(show_mode)
+            self._draft_controls["current_limit"].valueChanged.connect(show_mode)
+            show_mode()
             note(
-                f"Error metric: {config.target_error_constraint_metric}; fallback policy: {config.constrained_quadratic_fallback_policy}. Zero surface-current limit disables that bound. Force/torque, scenarios, regularization, basis and solver controls are in Advanced settings."
+                "All optimization parameters exposes every native optimization setting and nested physical objective/constraint setting. Inactive primary controls retain their values and can be edited there for a later formulation. Zero removes only the explicit surface-current bound; configured wire-current and spacing limits can still derive a K bound."
             )
         elif key == "winding":
             circuit = CircuitSelector()
@@ -2355,6 +2888,101 @@ class CoilGenWorkbench(QMainWindow):
             )
             self._draft_controls["min_wire_distance_mm"].setToolTip(
                 "Minimum centerline distance in engineering contouring. Zero uses the general minimum turn spacing. This is not an edge-to-edge copper clearance."
+            )
+            self._combo(
+                form,
+                "contour_path_regularization_mode",
+                "Contour processing",
+                ["off", "parameterized_bspline", "resample"],
+                config.contour_path_regularization_mode,
+            )
+            self._combo(
+                form,
+                "contour_smoothing_scale_mode",
+                "Smoothing scale",
+                ["mesh_coupled", "legacy"],
+                config.contour_smoothing_scale_mode,
+            )
+            self._number(
+                form,
+                "contour_smoothing_mesh_gain",
+                "Mesh-scale amplitude retained",
+                config.contour_smoothing_mesh_gain,
+                "",
+                1e-6,
+                1 - 1e-6,
+            )
+            self._draft_controls["contour_smoothing_mesh_gain"].setToolTip(
+                "Amplitude retained at the local mesh wavelength. Smaller values smooth more strongly. "
+                "The backend reduces smoothing when necessary to retain valid surface topology."
+            )
+            self._number(
+                form,
+                "contour_smoothing_factor",
+                "Legacy smoothing strength",
+                config.contour_smoothing_factor,
+                "",
+                0,
+                1,
+            )
+            self._draft_controls["contour_smoothing_factor"].setToolTip(
+                "Legacy dimensionless B-spline fit strength. Zero disables this scale mode. "
+                "Mesh-coupled smoothing provides a mesh-relative alternative."
+            )
+            self._number(
+                form,
+                "contour_displacement_mm",
+                "Maximum path displacement",
+                config.contour_smoothing_max_displacement * 1e3,
+                " mm",
+                0,
+                10000,
+            )
+            self._draft_controls["contour_displacement_mm"].setToolTip(
+                "Maximum permitted displacement from each original contour. Zero disables this optional cap."
+            )
+            self._number(
+                form,
+                "contour_segment_mm",
+                "Target segment length",
+                config.contour_resample_target_segment_length * 1e3,
+                " mm",
+                0,
+                10000,
+            )
+            self._draft_controls["contour_segment_mm"].setToolTip(
+                "Requested physical sampling interval; smaller values increase geometry size and computation. "
+                "Zero uses automatic mesh-relative sampling during smoothing and disables resampling-only mode."
+            )
+            self._check(
+                form,
+                "contour_smoothing_preserve_min_turn_distance",
+                "Preserve centerline spacing",
+                config.contour_smoothing_preserve_min_turn_distance,
+            )
+            self._draft_controls["contour_smoothing_preserve_min_turn_distance"].setToolTip(
+                "Reject proposed contour changes that violate the backend's minimum centerline-spacing guard. "
+                "Physical conductor clearance and field accuracy still require evaluation."
+            )
+            contour_info = QLabel(
+                "Smoothing changes closed contour paths before cutting and interconnection. "
+                "Paths retain surface provenance and contour current; the field is evaluated again. "
+                "Resampling only adds points and does not round corners; with connected routing it is deferred."
+            )
+            contour_info.setObjectName("contour_smoothing_scope")
+            contour_info.setWordWrap(True)
+            layout.addWidget(contour_info)
+
+            def enable_contour_smoothing(mode):
+                if (
+                    mode == "parameterized_bspline"
+                    and self._raw_value("contour_smoothing_scale_mode") == "legacy"
+                    and self._raw_value("contour_smoothing_factor") == 0
+                ):
+                    self._draft_controls["contour_smoothing_scale_mode"].setCurrentText("mesh_coupled")
+
+            self._draft_controls["contour_path_regularization_mode"].currentTextChanged.connect(
+                enable_contour_smoothing
             )
             self._number(
                 form,
@@ -2413,6 +3041,15 @@ class CoilGenWorkbench(QMainWindow):
                 "contour_discretization_method": self._value("contour_discretization_method"),
                 "max_wire_current_A": self._value("max_wire_current_A"),
                 "min_wire_distance_m": self._value("min_wire_distance_mm") * 1e-3,
+                "contour_path_regularization_mode": self._value("contour_path_regularization_mode"),
+                "contour_smoothing_scale_mode": self._value("contour_smoothing_scale_mode"),
+                "contour_smoothing_mesh_gain": self._value("contour_smoothing_mesh_gain"),
+                "contour_smoothing_factor": self._value("contour_smoothing_factor"),
+                "contour_resample_target_segment_length": self._value("contour_segment_mm") * 1e-3,
+                "contour_smoothing_max_displacement": self._value("contour_displacement_mm") * 1e-3,
+                "contour_smoothing_preserve_min_turn_distance": self._value(
+                    "contour_smoothing_preserve_min_turn_distance"
+                ),
                 "min_turn_distance": self._value("min_turn_distance") / 1000,
                 "sweep_min_bend_radius": self._value("min_bend") / 1000,
                 "skip_sweep": not self._value("sweep"),
@@ -2511,7 +3148,11 @@ class CoilGenWorkbench(QMainWindow):
             if key == "winding":
                 record = self.runs.get(self._selected_run)
                 engineering_button.setEnabled(
-                    bool(record and record.metadata.get("winding_steps") and not self._run_verification_error(record))
+                    bool(
+                        record
+                        and read_run_metadata(record).get("winding_steps")
+                        and not self._run_verification_error(record)
+                    )
                 )
                 engineering_button.setToolTip("Requires a verified Fabrication review for the applied numerical model.")
             layout.addWidget(engineering_button)
@@ -3416,6 +4057,7 @@ class CoilGenWorkbench(QMainWindow):
             widget.lineEdit().textEdited.connect(mark_numeric_edit)
 
     def _mark_draft_dirty(self, key):
+        self._invalidate_project_open()
         widget = self._draft_controls[key]
         pending_text = isinstance(widget, QAbstractSpinBox) and widget.lineEdit().isModified()
         if pending_text or self._raw_value(key) != self._widget_initial[key]:
@@ -3640,13 +4282,15 @@ class CoilGenWorkbench(QMainWindow):
             self.statusBar().showMessage("Independent-validation run controls updated", 5000)
         return True
 
-    def _advanced_dialog(self):
+    def _advanced_dialog(self, *, focus=None):
         if self.project is None:
             return
         from .expert_settings import ExpertSettingsDialog
 
         existing = getattr(self, "expert_window", None)
         if existing is not None:
+            if focus == "optimization":
+                existing.focus_optimization()
             existing.show()
             existing.raise_()
             return
@@ -3684,6 +4328,8 @@ class CoilGenWorkbench(QMainWindow):
         reload_button.clicked.connect(self._reload_expert)
         self.expert_window.layout().addWidget(reload_button)
         self.expert_window.setModal(False)
+        if focus == "optimization":
+            self.expert_window.focus_optimization()
         self.expert_window.show()
         self.expert_window.raise_()
 
@@ -3742,6 +4388,7 @@ class CoilGenWorkbench(QMainWindow):
         return "Advanced edits pending"
 
     def _refresh_input_drafts(self, *_args):
+        self._invalidate_project_open()
         self._update_title()
         self._refresh_guidance()
 
@@ -3779,6 +4426,7 @@ class CoilGenWorkbench(QMainWindow):
         if self.project is None:
             return
         if refresh_reuse:
+            self._reuse_generation += 1
             threads = getattr(getattr(self.jobs, "policy", None), "threads_per_worker", 1)
             try:
                 records = [record for record in self.runs.values() if not self._run_verification_error(record)]
@@ -3840,10 +4488,10 @@ class CoilGenWorkbench(QMainWindow):
                 matching = [
                     record
                     for record in self.runs.values()
-                    if record.metadata.get("project_fingerprint") == self.project.fingerprint
+                    if read_run_metadata(record).get("project_fingerprint") == self.project.fingerprint
                 ]
                 if matching:
-                    metadata = matching[-1].metadata
+                    metadata = read_run_metadata(matching[-1])
                     verdict = metadata.get("summary", {}).get("accepted")
                     checks = run_verdicts(metadata)
                     status = (
@@ -3856,6 +4504,12 @@ class CoilGenWorkbench(QMainWindow):
                     tooltip += f"\nSheet: {checks['sheet']}; pipeline sweeps: {checks['sweeps']}; fabrication review: {checks['fabrication']}."
                 else:
                     status = "Review needed"
+            if status == "Stale":
+                tooltip += (
+                    "\nSaved checkpoint fingerprint differs from the current source, inputs, requirements, "
+                    "dependencies or worker controls. Recompute this boundary to obtain compatible evidence. "
+                    "Its verified saved result remains available for inspection."
+                )
             item.setText(1, status)
             badge = (
                 None
@@ -3923,10 +4577,11 @@ class CoilGenWorkbench(QMainWindow):
             self.messages.appendPlainText(f"Session could not be saved: {exc}")
 
     def _restore_history(self, key):
+        from .project_loading import prepare_history
+
         panel_view = {}
         self._restore_panel_layout(panel_view)
         self._history_key = key
-        self._history_entries = ()
         self._selected_run = None
         self.checks_table.setRowCount(0)
         self.wire_fields_table.setRowCount(0)
@@ -3936,100 +4591,69 @@ class CoilGenWorkbench(QMainWindow):
         if hasattr(self.viewport, "clear_run"):
             self.viewport.clear_run()
         self.problems_panel.set_run(None)
-        embedded_ids = {}
-        embedded_entries = []
-        diagnostics = []
-        for archive in self.project.saved_runs:
-            try:
-                record = archive.materialize(self.jobs_directory.parent / "embedded-runs")
-                self.runs[archive.id] = record
-                embedded_ids[archive.id] = archive.id
-                entry = HistoryEntry(
-                    archive.id,
-                    key[0],
-                    key[1],
-                    archive.alias,
-                    record.directory,
-                    record.metadata["request_sha256"],
-                    record,
+        prepared = self._prepared_project_history
+        self._prepared_project_history = None
+        if prepared is None or prepared.key != key:
+            prepared = prepare_history(self.project, key, self.history, self.jobs_directory.parent / "embedded-runs")
+        diagnostics = list(prepared.diagnostics)
+        self._history_entries = prepared.entries
+        for id_, record in tuple(self.runs.items()):
+            if record.directory in prepared.unavailable_directories:
+                self.runs.pop(id_)
+        self.runs.update(prepared.records)
+        self._history_ids.update(prepared.ids)
+
+        def restore_view(view):
+            if view.get("source") == "run" and self._selected_run not in self.runs:
+                message = (
+                    "Saved result view unavailable: its recorded run could not be restored. Showing the applied model."
                 )
-                if self.history is not None:
-                    try:
-                        entry = self.history.add_run(key[0], record, channel_id=key[1], alias=archive.alias)
-                        self.history.rename_run(entry.id, archive.alias)
-                        embedded_ids[archive.id] = entry.id
-                    except (OSError, ValueError, TypeError, RuntimeError) as exc:
-                        diagnostics.append(f"Local history cache unavailable; embedded evidence is restored: {exc}")
-                self._history_ids[entry.id] = embedded_ids[archive.id]
-                embedded_entries.append(entry)
-            except (OSError, ValueError, TypeError, RuntimeError) as exc:
-                message = f"Embedded run {archive.alias!r} could not be restored: {exc}"
-                diagnostics.append(message)
-                embedded_entries.append(
-                    HistoryEntry(
-                        archive.id,
-                        key[0],
-                        key[1],
-                        archive.alias,
-                        self.jobs_directory.parent / "embedded-runs" / archive.id,
-                        archive.metadata["request_sha256"],
-                        diagnostic=message,
-                    )
-                )
+                if message not in diagnostics:
+                    diagnostics.append(message)
+                return
+            if hasattr(self.viewport, "restore_view_state"):
+                self.viewport.restore_view_state(view)
+
         if self.history is not None:
             try:
-                self._history_entries = self.history.restore(key[0], channel_id=key[1])
-                verified = {entry.id: entry for entry in self._history_entries if entry.verified}
-                unavailable = {entry.directory for entry in self._history_entries if not entry.verified}
-                for id_, record in list(self.runs.items()):
-                    if record.directory in unavailable:
-                        self.runs.pop(id_)
-                for entry in self._history_entries:
-                    if entry.verified:
-                        self.runs[entry.id] = entry.run
-                        self._history_ids[entry.id] = entry.id
-                session = self.history.session(key[0], channel_id=key[1])
+                session = json_value(prepared.session)
                 selected = session.get("selected_id")
-                if selected in verified:
+                verified = {entry.id for entry in self._history_entries if entry.verified}
+                if selected in verified and self._history_ids.get(selected) in self.runs:
                     self.show_run(self._history_ids[selected])
                 view = session.get("view_state", {})
                 view = view if isinstance(view, dict) else {}
-                if hasattr(self.viewport, "restore_view_state"):
-                    self.viewport.restore_view_state(view)
+                restore_view(view)
                 self.select_node(view.get("model_node", "geometry"))
                 panel_view = view
             except (OSError, ValueError, TypeError, RuntimeError) as exc:
                 diagnostics.append(f"History could not be restored: {exc}")
-        present = {entry.id for entry in self._history_entries}
-        self._history_entries += tuple(entry for entry in embedded_entries if entry.id not in present)
         if self.project.saved_runs or self.project.session:
             session = self.project.session
             selected = session.get(
                 "selected_run_id", self.project.saved_runs[-1].id if self.project.saved_runs else None
             )
-            selected_id = embedded_ids.get(selected)
-            if selected_id in self.runs:
+            selected_id = prepared.embedded_ids.get(selected)
+            if selected_id in self.runs and selected_id != self._selected_run:
                 self.show_run(selected_id)
             if "view_state" in session:
                 view = session["view_state"]
                 view = view if isinstance(view, dict) else {}
-                if hasattr(self.viewport, "restore_view_state"):
-                    self.viewport.restore_view_state(view)
+                restore_view(view)
                 self.select_node(view.get("model_node", "results" if self.project.saved_runs else "geometry"))
                 panel_view = view
             elif selected_id in self.runs:
                 self.select_node("results")
-        self._restore_diagnostics[key] = tuple(diagnostics)
-        self._refresh_history_panel()
         self._fill_runs()
         self._update_result_state()
         self._node_changed(self._current_node)
         if key in self._panel_views:
             panel_view = self._panel_views[key]
-            if hasattr(self.viewport, "restore_view_state"):
-                self.viewport.restore_view_state(panel_view)
+            restore_view(panel_view)
             self.select_node(panel_view.get("model_node", "geometry"))
         self._restore_panel_layout(panel_view)
+        self._restore_diagnostics[key] = tuple(diagnostics)
+        self._refresh_history_panel()
         for message in diagnostics:
             self.messages.appendPlainText(message)
 
@@ -4173,7 +4797,8 @@ class CoilGenWorkbench(QMainWindow):
                 self._error("Saved evidence failed verification. Reopen and verify its source before using this check.")
                 return
             owner = (
-                record.metadata.get("project_id") or (record.metadata.get("job") or {}).get("project_id")
+                read_run_metadata(record).get("project_id")
+                or (read_run_metadata(record).get("job") or {}).get("project_id")
                 if record is not None
                 else None
             )
@@ -4231,12 +4856,15 @@ class CoilGenWorkbench(QMainWindow):
     def _rename_history(self, id_, alias):
         if self.history is None:
             return
+        self._invalidate_project_open()
         try:
             self.history.rename_run(id_, alias)
+            self._history_alias_generation += 1
+            self._history_alias_edits[id_] = (self._history_alias_generation, alias.strip())
             self._history_entries = self.history.restore(self._history_key[0], channel_id=self._history_key[1])
             self._refresh_history_panel()
             self.history_panel.select_record(id_)
-        except (OSError, ValueError, TypeError) as exc:
+        except (OSError, ValueError, TypeError, RuntimeError) as exc:
             self._error(f"Cannot rename run display: {exc}")
 
     def _compare_runs(self, left, right):
@@ -4260,18 +4888,20 @@ class CoilGenWorkbench(QMainWindow):
             raise ValueError(
                 "Correct pending settings, or apply/discard the retained Advanced settings draft before saving."
             )
-        portable = self._portable_assembly()
-        self.project_path = Path(
-            portable.save(path)
-            if self._collection_mode or len(self.assembly.channels) > 1
-            else portable.channel(self._active_channel_id).project.save(path)
-        )
-        self.assembly = portable
-        self.project = portable.channel(self._active_channel_id).project
-        self.undo_stack.setClean()
-        self._save_session()
-        self.statusBar().showMessage(f"Saved {self.project_path}", 5000)
-        return self.project_path
+        with self._visible_work("Saving project and results"):
+            portable = self._portable_assembly()
+            options = {"progress": self._portable_progress} if Path(path).suffix.lower() == ".coilgen" else {}
+            self.project_path = Path(
+                portable.save(path, **options)
+                if self._collection_mode or len(self.assembly.channels) > 1
+                else portable.channel(self._active_channel_id).project.save(path, **options)
+            )
+            self.assembly = portable
+            self.project = portable.channel(self._active_channel_id).project
+            self.undo_stack.setClean()
+            self._save_session()
+            self.statusBar().showMessage(f"Saved {self.project_path}", 5000)
+            return self.project_path
 
     def _portable_assembly(self):
         """Embed all available completed evidence, retaining per-channel ownership."""
@@ -4297,9 +4927,9 @@ class CoilGenWorkbench(QMainWindow):
                     for id_, record in self.runs.items()
                     if not self._run_verification_error(record)
                     and (
-                        record.metadata.get("project_id") == project.id
+                        read_run_metadata(record).get("project_id") == project.id
                         or (
-                            not record.metadata.get("project_id")
+                            not read_run_metadata(record).get("project_id")
                             and project.id == self.project.id
                             and id_ == self._selected_run
                         )
@@ -4309,7 +4939,7 @@ class CoilGenWorkbench(QMainWindow):
             saved = {archive.id: archive for archive in project.saved_runs}
             paths = {}
             for directory, record in records.items():
-                metadata = {key: value for key, value in record.metadata.items() if key != "job"}
+                metadata = {key: value for key, value in read_run_metadata(record).items() if key != "job"}
                 previous = next(
                     (
                         archive
@@ -4356,18 +4986,19 @@ class CoilGenWorkbench(QMainWindow):
         return replace(self.assembly, channels=tuple(channels))
 
     def open_project(self, path):
-        value = json.loads(Path(path).read_text(encoding="utf-8"))
-        if not isinstance(value, dict):
-            raise ValueError("Project file must contain a JSON object.")
-        schema = value.get("schema")
-        assembly = ProjectAssembly.load(path) if schema in {ASSEMBLY_SCHEMA, *LEGACY_ASSEMBLY_SCHEMAS} else None
-        if assembly is not None and not assembly.channels:
-            raise ValueError(
-                "This collection has no channels. Add a channel in Python before opening it in the workbench."
-            )
-        project = None if assembly is not None else ProjectDocument.load(path)
-        # The file is valid before discarding the previous owner's editor.
-        # A discarded expert draft must not block the newly opened project.
+        self._invalidate_project_open()
+        with self._visible_work("Opening project and verifying embedded results"):
+            return self._open_project(path)
+
+    def _open_project(self, path):
+        from .project_loading import load_document
+
+        return self._install_project(load_document(path, progress=self._portable_progress), path)
+
+    def _install_project(self, document, path, *, prepared_history=None, prepared_reuse=None, readiness=None):
+        assembly = document if isinstance(document, ProjectAssembly) else None
+        project = document if isinstance(document, ProjectDocument) else None
+        # Validation precedes discarding the previous owner's editor.
         self._discard_project_editors()
         self._draft_dirty = False
         self.undo_stack.clear()
@@ -4375,10 +5006,113 @@ class CoilGenWorkbench(QMainWindow):
         self._history_key = None
         self._panel_views.clear()
         self._collection_mode = assembly is not None
-        self._set_assembly(assembly or ProjectAssembly.new(project.name, (project,)))
+        self._prepared_project_history = prepared_history
+        self._prepared_project_reuse = prepared_reuse
+        self._restoring_project_view = prepared_history is not None
+        if readiness is not None:
+            active = assembly.channel(self._saved_active_channel(assembly)).project if assembly else project
+            self._guidance_readiness_key = (active.fingerprint, active.study["pipeline_stage"])
+            self._guidance_readiness = readiness
+        try:
+            self._set_assembly(assembly or ProjectAssembly.new(project.name, (project,)))
+        finally:
+            self._prepared_project_history = None
+            self._prepared_project_reuse = None
+            self._restoring_project_view = False
+        if prepared_history is not None:
+            self._node_changed(self._current_node or self.tree.currentItem())
         self.undo_stack.setClean()
         self.statusBar().showMessage(f"Opened {self.project.name} · revision {self.project.revision}", 7000)
-        return assembly or project
+        return document
+
+    def _invalidate_project_open(self, *_args):
+        task = self._project_open_task
+        if task is None:
+            return
+        self._project_open_generation += 1
+        self._project_open_task = None
+        self._foreground_work.pop(task, None)
+        task.cancel()
+        self._project_open_cancel.hide()
+        self._refresh_computation_indicator()
+        self.statusBar().showMessage("Project opening cancelled; current work is retained.", 7000)
+
+    def _start_project_open(self, path):
+        from .project_loading import ProjectOpenTask
+
+        self._invalidate_project_open()
+        if self._closing:
+            return None
+        self._project_open_generation += 1
+        token = self._project_open_generation
+        task = ProjectOpenTask(
+            path,
+            self.jobs_directory.parent / "embedded-runs",
+            history=self.history,
+            token=token,
+            jobs_directory=self.jobs_directory,
+            states=tuple(state for id_, state in self.states.items() if not self._run_verification_error(id_)),
+            records=tuple(record for record in self.runs.values() if not self._run_verification_error(record)),
+            threads=getattr(getattr(self.jobs, "policy", None), "threads_per_worker", 1),
+        )
+        task.verification_generations = dict(self._source_verification_generations)
+        self._project_open_task = task
+        task.signals.progress.connect(self._project_open_progress)
+        task.signals.finished.connect(self._project_open_ready)
+        if not hasattr(self, "_project_open_cancel"):
+            self._project_open_cancel = QToolButton(self)
+            self._project_open_cancel.setText("Cancel opening")
+            self._project_open_cancel.clicked.connect(self._invalidate_project_open)
+            self.statusBar().addPermanentWidget(self._project_open_cancel)
+        self._project_open_cancel.show()
+        self._foreground_work[task] = f"Opening {Path(path).name} · verifying saved evidence"
+        self._refresh_computation_indicator()
+        QThreadPool.globalInstance().start(task)
+        return task
+
+    def _project_open_progress(self, token, message):
+        task = self._project_open_task
+        if task is None or self._closing or token != self._project_open_generation:
+            return
+        self._foreground_work[task] = "Opening project · " + message
+        self.statusBar().showMessage(message)
+        self._refresh_computation_indicator()
+
+    def _project_open_ready(self, token, result, error):
+        task = self._project_open_task
+        if task is None or self._closing or token != self._project_open_generation:
+            return
+        self._project_open_task = None
+        self._foreground_work.pop(task, None)
+        self._project_open_cancel.hide()
+        self._refresh_computation_indicator()
+        if error:
+            if error != "Cancelled":
+                self._error(f"Cannot open project: {error}")
+            return
+        with self._visible_work("Restoring verified project view"):
+            try:
+                reuse = result.reuse
+                if reuse is not None:
+                    reuse = replace(
+                        reuse,
+                        available=tuple(
+                            entry
+                            for entry in reuse.available
+                            if not self._source_health.known_error(entry.run_directory)
+                            and self._source_verification_generations.get(entry.run_directory, 0)
+                            == task.verification_generations.get(entry.run_directory, 0)
+                        ),
+                    )
+                self._install_project(
+                    result.document,
+                    result.path,
+                    prepared_history=result.history,
+                    prepared_reuse=reuse,
+                    readiness=result.readiness,
+                )
+            except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+                self._error(f"Cannot restore project view: {exc}")
 
     def new_project(self, kind=None, *, name="New coil design", project=None, discard_checked=False):
         """Create an unconfigured document; explicit legacy kinds load templates."""
@@ -4424,31 +5158,49 @@ class CoilGenWorkbench(QMainWindow):
         )
         return assembly
 
-    def export_python(self, path):
+    def export_python(self, path, *, compact=False, include_results=False):
         """Export a script plus owned project assets, avoiding duplicated inputs."""
         if not self._apply_document_inputs():
             raise ValueError("Correct the pending settings before exporting.")
-        return self._portable_assembly().channel(self._active_channel_id).project.export_python(path)
+        with self._visible_work("Exporting project and Python inputs"):
+            project = (
+                self._portable_assembly().channel(self._active_channel_id).project
+                if include_results
+                else self.project.inputs_only()
+            )
+            options = {"compact": compact, "include_results": include_results} if compact or include_results else {}
+            return project.export_python(path, **options)
 
-    def export_assembly_python(self, path):
+    def export_assembly_python(self, path, *, compact=False, include_results=False):
         if not self._apply_document_inputs():
             raise ValueError("Correct pending settings before exporting.")
-        path = Path(path)
-        project_path = path.with_suffix(".coilgen-assembly.json")
-        self._portable_assembly().save(project_path)
-        source = (
-            '"""Independent CoilGen2 channels; coupling and assembly checks require separate evaluation."""\n'
-            f"# CoilGen2 software: {AUTHOR_CREDIT} ({AUTHOR_ROLE}).\n"
-            f"# Project: {PROJECT_URL}\n"
-            "from pathlib import Path\n"
-            "from coilgen.application import DesignService, ProjectAssembly\n\n"
-            "if __name__ == '__main__':\n"
-            f"    project = ProjectAssembly.load(Path(__file__).with_name({project_path.name!r}))\n"
-            "    results = DesignService.run_assembly(project, Path(__file__).with_suffix('') / 'runs')\n"
-            "    print(results)\n"
-        )
-        atomic_text(path, source)
-        return path
+        with self._visible_work("Exporting channel system and Python inputs"):
+            path = Path(path)
+            project_path = path.with_suffix(".coilgen" if compact else ".coilgen-assembly.json")
+            assembly = (
+                self._portable_assembly()
+                if include_results
+                else replace(
+                    self.assembly,
+                    channels=tuple(
+                        replace(channel, project=channel.project.inputs_only()) for channel in self.assembly.channels
+                    ),
+                )
+            )
+            assembly.save(project_path, **({"progress": self._portable_progress} if compact else {}))
+            source = (
+                '"""Independent CoilGen2 channels; coupling and assembly checks require separate evaluation."""\n'
+                f"# CoilGen2 software: {AUTHOR_CREDIT} ({AUTHOR_ROLE}).\n"
+                f"# Project: {PROJECT_URL}\n"
+                "from pathlib import Path\n"
+                "from coilgen.application import DesignService, ProjectAssembly\n\n"
+                "if __name__ == '__main__':\n"
+                f"    project = ProjectAssembly.load(Path(__file__).with_name({project_path.name!r}))\n"
+                "    results = DesignService.run_assembly(project, Path(__file__).with_suffix('') / 'runs')\n"
+                "    print(results)\n"
+            )
+            atomic_text(path, source)
+            return path
 
     def _can_discard(self):
         if self.project is None:
@@ -4477,10 +5229,11 @@ class CoilGenWorkbench(QMainWindow):
     def _open_dialog(self):
         if not self._can_discard():
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Open CoilGen project", "", "CoilGen project (*.json)")
+        self._invalidate_project_open()
+        path, _ = QFileDialog.getOpenFileName(self, "Open CoilGen project", "", "CoilGen project (*.json *.coilgen)")
         if path:
             try:
-                self.open_project(path)
+                self._start_project_open(path)
             except (ValueError, TypeError, OSError, KeyError) as exc:
                 self._error(f"Cannot open project: {exc}")
 
@@ -4490,12 +5243,21 @@ class CoilGenWorkbench(QMainWindow):
             return False
         path = None if save_as else self.project_path
         if path is None:
-            name, _ = QFileDialog.getSaveFileName(
-                self, "Save CoilGen project", f"{self.project.name}.coilgen.json", "CoilGen project (*.json)"
+            name, selected_filter = QFileDialog.getSaveFileName(
+                self,
+                "Save CoilGen project",
+                f"{self.project.name}.coilgen.json",
+                "CoilGen JSON (*.json);;Compact CoilGen bundle (*.coilgen)",
             )
             if not name:
                 return False
             path = Path(name)
+            if "Compact" in selected_filter and path.suffix.lower() != ".coilgen":
+                path = (
+                    path.with_suffix("")
+                    if path.name.lower().endswith(".coilgen.json")
+                    else path.with_suffix(".coilgen")
+                )
         try:
             self.save_project(path)
             return True
@@ -4504,23 +5266,29 @@ class CoilGenWorkbench(QMainWindow):
             return False
 
     def _export_dialog(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export reproducible script", "coilgen_design.py", "Python script (*.py)"
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export reproducible script",
+            "coilgen_design.py",
+            "Python with compact inputs (*.py);;Python with JSON inputs (*.py)",
         )
         if path:
             try:
-                self.export_python(path)
+                self.export_python(path, compact="compact" in selected_filter)
                 self.statusBar().showMessage(f"Exported {path} and owned project inputs", 5000)
             except (ValueError, TypeError, OSError) as exc:
                 self._error(f"Cannot export script: {exc}")
 
     def _export_assembly_dialog(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export independent channels", "coilgen_channels.py", "Python script (*.py)"
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export independent channels",
+            "coilgen_channels.py",
+            "Python with compact inputs (*.py);;Python with JSON inputs (*.py)",
         )
         if path:
             try:
-                self.export_assembly_python(path)
+                self.export_assembly_python(path, compact="compact" in selected_filter)
                 self.statusBar().showMessage("Exported independent channels and owned project inputs", 5000)
             except (ValueError, TypeError, OSError) as exc:
                 self._error(f"Cannot export channels: {exc}")
@@ -4717,7 +5485,7 @@ class CoilGenWorkbench(QMainWindow):
         if record is None:
             self.statusBar().showMessage("Select a completed run before exporting artifacts.", 5000)
             return
-        source_name = record.metadata.get("name", record.directory.name)
+        source_name = read_run_metadata(record).get("name", record.directory.name)
         receipt = ExportReceiptPanel(retry=True)
         window = PanelWindow(f"Run artifact export — {source_name}", receipt, self, size=(620, 240))
 
@@ -4815,6 +5583,14 @@ class CoilGenWorkbench(QMainWindow):
             error,
         )
         if not refresh and key == getattr(self, "_resume_capability_key", None):
+            if key == getattr(self, "_resume_capability_pending_key", None):
+                self._start_stopped_reuse_load(state, key)
+            return self._resume_capability_plan
+        if not refresh and stopped and not error:
+            self._resume_capability_key = key
+            self._resume_capability_pending_key = key
+            self._resume_capability_plan = ReusePlan((), (), ("Verifying stopped checkpoint evidence…",))
+            self._start_stopped_reuse_load(state, key)
             return self._resume_capability_plan
         try:
             if error:
@@ -4834,7 +5610,65 @@ class CoilGenWorkbench(QMainWindow):
         except (ValueError, TypeError, OSError, RuntimeError, KeyError) as exc:
             plan = ReusePlan((), (), (str(exc),))
         self._resume_capability_key, self._resume_capability_plan = key, plan
+        self._resume_capability_pending_key = None
         return plan
+
+    def _start_stopped_reuse_load(self, state, key=None):
+        if self._stopped_reuse_tasks or self.project is None or self._closing:
+            return
+        threads = getattr(getattr(self.jobs, "policy", None), "threads_per_worker", 1)
+        if key is None:
+            key = (
+                self.project.fingerprint,
+                self.stage_selector.currentData(),
+                threads,
+                state["id"],
+                id(None),
+                state.get("status"),
+                tuple(state.get("completed_stages", ())),
+                self._run_verification_error(state["id"]),
+            )
+        if key[-1]:
+            return
+        task = StoppedReuseTask(
+            self.project,
+            tuple(record for record in self.runs.values() if not self._run_verification_error(record)),
+            tuple(item for id_, item in self.states.items() if not self._run_verification_error(id_)),
+            self.jobs_directory,
+            threads,
+            state,
+            key,
+        )
+        self._reuse_generation += 1
+        task.reuse_generation = self._reuse_generation
+        task.verification_generations = dict(self._source_verification_generations)
+        self._stopped_reuse_tasks[state["id"]] = task
+        task.signals.finished.connect(self._stopped_reuse_loaded)
+        QThreadPool.globalInstance().start(task)
+
+    def _stopped_reuse_loaded(self, id_, result, error):
+        task = self._stopped_reuse_tasks.pop(id_, None)
+        if task is None or self._closing or self.project is None:
+            return
+        state = self.states.get(id_, {})
+        current = (
+            self.project.id == task.project.id
+            and self.project.fingerprint == task.project.fingerprint
+            and state.get("status") == task.selected_state.get("status")
+            and tuple(state.get("completed_stages", ())) == tuple(task.selected_state.get("completed_stages", ()))
+            and self._reuse_generation == task.reuse_generation
+            and self._source_verification_generations == task.verification_generations
+        )
+        if current:
+            all_reuse, selected_reuse = result if not error else (ReusePlan((), (), (error,)),) * 2
+            self._reuse_plan = all_reuse
+            self._reuse_plan_fingerprint = task.project.fingerprint
+            self._resume_capability_key, self._resume_capability_plan = task.key, selected_reuse
+            self._resume_capability_pending_key = None
+        elif getattr(self, "_resume_capability_key", None) == task.key:
+            self._resume_capability_key = None
+        self._refresh_stage_status(refresh_reuse=False)
+        self._update_execution_feedback()
 
     def compute(self, _checked=False, *, resume_checkpoint=None):
         if self.project is None:
@@ -4858,6 +5692,7 @@ class CoilGenWorkbench(QMainWindow):
             existing = self.states.get(plan.active_job_id)
             if existing is not None and resume_checkpoint is None and not isinstance(self.service, DesignService):
                 self._begin_live_follow(existing)
+                self.design_plan_dock.show()
                 self._focus_job(existing["id"], open_window=False)
                 self.statusBar().showMessage(
                     f"This revision is already {existing['status']}; showing its design progress.", 10000
@@ -4890,6 +5725,7 @@ class CoilGenWorkbench(QMainWindow):
             if not reused:
                 self._session_job_ids.add(state["id"])
             self._begin_live_follow(state)
+            self.design_plan_dock.show()
             self.statusBar().showMessage(
                 f"This revision is already {state['status']}; showing its design progress."
                 if reused
@@ -4963,6 +5799,7 @@ class CoilGenWorkbench(QMainWindow):
         self.statusBar().showMessage(f"{label}…")
         self._refresh_computation_indicator()
         QThreadPool.globalInstance().start(task)
+        return task
 
     def _research_requirements_dialog(self):
         from .research_requirements import ResearchRequirementsDialog
@@ -4978,7 +5815,72 @@ class CoilGenWorkbench(QMainWindow):
                 expected_fingerprint=project.fingerprint,
             )
 
-    def _field_analysis_dialog(self):
+    def _routing_analysis_dialog(self):
+        """Verify and pin routing geometry off-thread, independently of editing."""
+        from ..application.evidence import verify_record
+        from ..application.routing_analysis import analyze_routes, routing_analysis_available
+        from .routing_analysis import RoutingAnalysisDialog
+
+        record = self.runs.get(self._selected_run)
+        if record is None or self._run_verification_error(record) or not routing_analysis_available(record):
+            self._error("Select a verified saved run containing routed conductor geometry.")
+            return
+        digest = result_metadata_digest({k: v for k, v in read_run_metadata(record).items() if k != "job"})
+        key = (str(record.directory), digest)
+        windows = getattr(self, "_routing_analysis_windows", None)
+        if windows is None:
+            windows = self._routing_analysis_windows = {}
+        if key in windows:
+            windows[key].show()
+            windows[key].raise_()
+            return
+        pending = getattr(self, "_routing_analysis_requests", None)
+        if pending is None:
+            pending = self._routing_analysis_requests = set()
+        if key in pending:
+            return
+        pending.add(key)
+        directory = record.directory.resolve()
+        generation = self._source_verification_generations.get(directory, 0)
+        source_id = self._selected_run
+        integrity_verified = False
+
+        def verify(_project):
+            nonlocal integrity_verified
+            saved = verify_record(record)
+            integrity_verified = True
+            return analyze_routes(saved)
+
+        def display(analysis):
+            pending.discard(key)
+            if self._closing or self._source_verification_generations.get(directory, 0) != generation:
+                return
+            dialog = RoutingAnalysisDialog(analysis, self)
+            dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            windows[key] = dialog
+            dialog.destroyed.connect(lambda: windows.pop(key, None))
+            dialog.show()
+
+        task = self._gradient_task(verify, display, "Verify and inspect saved interconnections", retain_receipt=True)
+        if task is not None:
+
+            def finished(_value, error):
+                pending.discard(key)
+                if (
+                    error
+                    and not integrity_verified
+                    and not self._closing
+                    and self._source_verification_generations.get(directory, 0) == generation
+                ):
+                    self._mark_run_verification_error(source_id, error, directory=record.directory)
+                    self._refresh_results_overview()
+                    self._update_execution_feedback()
+
+            task.signals.finished.connect(finished)
+        else:
+            pending.discard(key)
+
+    def _field_analysis_dialog(self, *, view=None, source=None):
         """Inspect a pinned saved result; analysis never writes the active model."""
         from .field_analysis import FieldAnalysisDialog
 
@@ -4986,35 +5888,69 @@ class CoilGenWorkbench(QMainWindow):
         if record is None or self._run_verification_error(record):
             self._error("Select verified computed field evidence to analyze.")
             return
-        expected = result_metadata_digest({k: v for k, v in record.metadata.items() if k != "job"})
-        key = (str(record.directory), expected)
+        request_key = (str(record.directory), id(record))
+        directory = record.directory.resolve()
+        verification_generation = self._source_verification_generations.get(directory, 0)
+        expected = None
+        view_state = self.viewport.view_state() if hasattr(self.viewport, "view_state") else {}
+        initial_source = source or view_state.get("dataset")
+        if (
+            source is None
+            and view_state.get("wire_current") == "Original contour current"
+            and isinstance(initial_source, str)
+        ):
+            for kind in ("contour", "routed"):
+                if initial_source.startswith(kind):
+                    initial_source = kind + "_at_stream_current"
+                    break
+        requests = getattr(self, "_field_analysis_requests", None)
+        if requests is None:
+            requests = self._field_analysis_requests = {}
+        pending = request_key in requests
+        requests[request_key] = (view, initial_source, source is not None)
+        if pending:
+            return  # Repeated page choices share verification and keep the latest request.
 
         def verify(_project):
+            nonlocal expected
+            expected = result_metadata_digest({k: v for k, v in read_run_metadata(record).items() if k != "job"})
             saved = DesignService.load_run(record.directory)
-            actual = result_metadata_digest({k: v for k, v in saved.metadata.items() if k != "job"})
+            actual = result_metadata_digest({k: v for k, v in read_run_metadata(saved).items() if k != "job"})
             if actual != expected:
                 raise ValueError("The selected result changed on disk. Reload its evidence before analyzing it.")
             return saved
 
         def display(saved):
+            selected_view, selected_source, explicit_source = requests.pop(
+                request_key, (view, initial_source, source is not None)
+            )
+            if self._source_verification_generations.get(directory, 0) != verification_generation:
+                return  # A newer explicit verification owns this source's health.
+            # The verifier supplies this digest off-thread. The fallback permits
+            # injected synchronous services without changing snapshot identity.
+            digest = expected or result_metadata_digest(
+                {k: v for k, v in read_run_metadata(record).items() if k != "job"}
+            )
+            key = (str(record.directory), digest)
             if not hasattr(self, "_field_analysis_windows"):
                 self._field_analysis_windows = {}
             previous = self._field_analysis_windows.get(key)
             if previous is not None:
+                if selected_view is not None:
+                    if explicit_source:
+                        previous.focus_view(selected_view, source=selected_source)
+                    else:
+                        previous.focus_view(selected_view)
                 previous.show()
                 previous.raise_()
                 return
-            view_state = self.viewport.view_state() if hasattr(self.viewport, "view_state") else {}
-            initial_source = view_state.get("dataset")
-            if view_state.get("wire_current") == "Original contour current" and isinstance(initial_source, str):
-                for source in ("contour", "routed"):
-                    if initial_source.startswith(source):
-                        initial_source = source + "_at_stream_current"
-                        break
-            dialog = FieldAnalysisDialog(saved, self, initial_source=initial_source)
+            options = {"initial_source": selected_source}
+            if selected_view is not None:
+                options["initial_view"] = selected_view
+            dialog = FieldAnalysisDialog(saved, self, **options)
             dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
             self._field_analysis_windows[key] = dialog
-            label = f"Field analysis · {saved.metadata.get('name', 'saved result')} · {expected[:8]}"
+            label = f"Coil results · {read_run_metadata(saved).get('name', 'saved result')} · {digest[:8]}"
             dialog.busyChanged.connect(lambda busy: self._research_busy(label, busy, key=key))
             dialog.progressChanged.connect(lambda phase: self.statusBar().showMessage(f"{label}: {phase}"))
             dialog.progressDetails.connect(lambda event: self._research_progress(label, event, key=key))
@@ -5026,7 +5962,29 @@ class CoilGenWorkbench(QMainWindow):
             dialog.closed.connect(closed)
             dialog.show()
 
-        self._gradient_task(verify, display, "Verify saved field analysis inputs", retain_receipt=True)
+        task = self._gradient_task(verify, display, "Verify saved field analysis inputs", retain_receipt=True)
+        if task is not None:
+            if not hasattr(self, "_field_analysis_verifications"):
+                self._field_analysis_verifications = {}
+            self._field_analysis_verifications[task.signals] = (
+                request_key,
+                self._selected_run,
+                record,
+                verification_generation,
+            )
+            task.signals.finished.connect(self._field_analysis_verification_finished)
+
+    def _field_analysis_verification_finished(self, _value, error):
+        binding = self._field_analysis_verifications.pop(self.sender(), None)
+        if binding is None:
+            return
+        key, source_id, record, verification_generation = binding
+        self._field_analysis_requests.pop(key, None)
+        current = self._source_verification_generations.get(record.directory.resolve(), 0)
+        if error and not self._closing and current == verification_generation:
+            self._mark_run_verification_error(source_id, error, directory=record.directory)
+            self._refresh_results_overview()
+            self._update_execution_feedback()
 
     def _research_verified_review(self, key, display, label):
         if self.project is None or not self._apply_document_inputs():
@@ -5776,11 +6734,16 @@ class CoilGenWorkbench(QMainWindow):
         if self.assembly is None:
             self.statusBar().showMessage("Create or open a project before computing.", 5000)
             return None
+        if self._submitting:
+            return None
         if not self._check_expert_draft():
             return None
         if not self.apply_settings():
             self._report_compute_draft_error()
             return None
+        self._submitting = True
+        self._update_execution_feedback()
+        self.computation_indicator.repaint()
         try:
             enabled = [channel for channel in self.assembly.channels if channel.enabled]
             if not enabled:
@@ -5809,6 +6772,7 @@ class CoilGenWorkbench(QMainWindow):
             states = self.service.submit_assembly(self.assembly, self.jobs)
             self._session_job_ids.update(state["id"] for state in states.values())
             self.states.update({state["id"]: state for state in states.values()})
+            self.design_plan_dock.show()
             active_state = next((state for state in states.values() if self._live_owner_matches(state)), None)
             if active_state is not None:
                 self._begin_live_follow(active_state)
@@ -5822,6 +6786,9 @@ class CoilGenWorkbench(QMainWindow):
         except (ValueError, TypeError, OSError, RuntimeError, KeyError) as exc:
             self._error(f"Cannot submit channels: {exc}")
             return None
+        finally:
+            self._submitting = False
+            self._update_execution_feedback()
 
     def poll_jobs(self):
         if self.jobs is None:
@@ -5841,35 +6808,31 @@ class CoilGenWorkbench(QMainWindow):
             self._snapshot_existing_jobs(states)
             merged_states = []
             stopped_changed = False
+            stopped_states = []
             for state in states:
                 previous = self.states.get(state["id"], {})
                 # A test/legacy runtime may omit service annotations; preserve them.
+                recovered_write = "persistence_error" not in state
                 state = {**previous, **state}
+                if recovered_write:
+                    state.pop("persistence_error", None)
                 self.states[state["id"]] = state
-                stopped_changed |= state.get("status") in {"failed", "cancelled", "interrupted"} and state.get(
+                changed = state.get("status") in {"failed", "cancelled", "interrupted"} and state.get(
                     "status"
                 ) != previous.get("status")
+                stopped_changed |= changed
+                if changed:
+                    stopped_states.append(state)
                 merged_states.append(state)
                 if state["status"] == "completed" and state["id"] not in self._loaded_ids:
-                    self._loading_job_id = state["id"]
-                    self._update_execution_feedback()
-                    self.execution_label.repaint()
-                    self.execution_progress.repaint()
-                    try:
-                        self.load_run(self.jobs.directory / state["id"], id_=state["id"], select=None)
-                        self._loaded_ids.add(state["id"])
-                        self._clear_run_verification_error(self.runs[state["id"]], id_=state["id"])
-                    except (ValueError, TypeError, OSError, RuntimeError, KeyError) as exc:
-                        self._loaded_ids.add(state["id"])
-                        self._mark_run_verification_error(state["id"], exc, directory=self.jobs.directory / state["id"])
-                        self._error(f"Completed run could not be verified: {exc}", open_window=False)
-                    finally:
-                        self._loading_job_id = None
+                    self._start_completed_run_load(state)
                 if state["id"] == self.live_preview.job_id:
                     self.live_preview.refresh(state)
             self._fill_jobs(merged_states)
             self._record_job_outcomes(merged_states)
-            self._refresh_stage_status(refresh_reuse=stopped_changed)
+            if stopped_changed:
+                self._start_stopped_reuse_load(stopped_states[-1])
+            self._refresh_stage_status(refresh_reuse=False)
             self._last_runtime_error = None
             self._refresh_channel_overview()
             self._update_execution_feedback()
@@ -5880,10 +6843,89 @@ class CoilGenWorkbench(QMainWindow):
                 self._last_runtime_error = message
             self._update_execution_feedback()
 
+    def _start_completed_run_load(self, state):
+        id_ = state["id"]
+        if self._run_load_tasks or self.assembly is None or self._closing:
+            return
+        scopes = {
+            channel.project.id: (channel.project.id, channel.id if self._collection_mode else None)
+            for channel in self.assembly.channels
+        }
+        # Jobs from a replaced project stay in the runtime; loading them must
+        # not populate the new project's history or change its selected view.
+        if state.get("project_id") not in scopes:
+            return
+        task = CompletedRunLoadTask(
+            state,
+            self.jobs.directory / id_,
+            self.service.load_run,
+            assembly_id=self.assembly.id,
+            scopes=scopes,
+            history=self.history,
+            reuse_inputs=(
+                self.project,
+                tuple(record for record in self.runs.values() if not self._run_verification_error(record)),
+                tuple(state for id_, state in self.states.items() if not self._run_verification_error(id_)),
+                self.jobs_directory,
+                getattr(getattr(self.jobs, "policy", None), "threads_per_worker", 1),
+            ),
+        )
+        self._run_load_tasks[id_] = task
+        task.history_alias_generation = self._history_alias_generation
+        task.reuse_generation = self._reuse_generation
+        task.verification_generation = self._source_verification_generations.get(task.directory.resolve(), 0)
+        self._loading_job_id = id_
+        task.signals.finished.connect(self._completed_run_loaded)
+        QThreadPool.globalInstance().start(task)
+
+    def _completed_run_loaded(self, id_, result, error):
+        task = self._run_load_tasks.pop(id_, None)
+        self._loading_job_id = next(iter(self._run_load_tasks), None)
+        if task is None or self._closing or self.assembly is None or self.assembly.id != task.assembly_id:
+            return
+        owner = task.state.get("project_id")
+        if not any(channel.project.id == owner for channel in self.assembly.channels):
+            return
+        self._loaded_ids.add(id_)
+        if self._source_verification_generations.get(task.directory.resolve(), 0) != task.verification_generation:
+            # A later explicit check of these files outranks this older snapshot.
+            self._record_job_outcomes((self.states.get(id_, task.state),))
+            self._update_execution_feedback()
+            return
+        if error:
+            self._mark_run_verification_error(id_, error, directory=task.directory)
+            self._error(f"Completed run could not be verified: {error}", open_window=False)
+        else:
+            record, history_result, reuse = result
+            project = task.reuse_inputs[0]
+            selected_reuse = None
+            if self.project.id == project.id and self.project.fingerprint == project.fingerprint:
+                all_reuse, selected_reuse = reuse
+                if self._reuse_generation == task.reuse_generation:
+                    self._reuse_plan = all_reuse
+                    self._reuse_plan_fingerprint = project.fingerprint
+            try:
+                self._register_loaded_run(
+                    record,
+                    id_=id_,
+                    select=None,
+                    history_result=history_result,
+                    selected_reuse=selected_reuse,
+                    history_alias_generation=task.history_alias_generation,
+                )
+            except (ValueError, TypeError, OSError, RuntimeError, KeyError) as exc:
+                self._mark_run_verification_error(id_, exc, directory=task.directory)
+                self._error(f"Completed run could not be registered: {exc}", open_window=False)
+        self._record_job_outcomes((self.states.get(id_, task.state),))
+        self._refresh_stage_status(refresh_reuse=False)
+        self._update_execution_feedback()
+
     def _record_job_outcomes(self, states):
         unresolved = {outcome.job_id: outcome for outcome in self.job_outcomes.outcomes}
         for state in states:
             id_, status = state["id"], state.get("status")
+            if id_ in self._run_load_tasks:
+                continue  # Evidence verification has not produced an outcome yet.
             previous = self._observed_job_statuses.get(id_)
             self._observed_job_statuses[id_] = status
             if status not in {"completed", "failed", "cancelled", "interrupted"}:
@@ -6132,11 +7174,14 @@ class CoilGenWorkbench(QMainWindow):
     def _run_verification_directory(self, source):
         record = source if hasattr(source, "directory") else self.runs.get(source)
         if record is not None:
+            if isinstance(record, RunRecord):
+                return record.directory
             return Path(record.directory).expanduser().resolve()
         path = getattr(self, "_run_verification_paths", {}).get(source)
         if path is None and source in self.states:
             directory = getattr(self.jobs, "directory", self.jobs_directory)
             path = (Path(directory) / source).expanduser().resolve()
+            self._run_verification_paths[source] = path
         return path
 
     def _mark_run_verification_error(self, id_, error, *, directory=None):
@@ -6147,6 +7192,7 @@ class CoilGenWorkbench(QMainWindow):
         )
         if path is not None:
             self._run_verification_paths[id_] = path
+            self._source_verification_generations[path] = self._source_verification_generations.get(path, 0) + 1
             self._source_health.mark_failed(path, error)
 
     def _run_verification_error(self, source):
@@ -6157,11 +7203,12 @@ class CoilGenWorkbench(QMainWindow):
         if direct:
             if path is not None:
                 self._run_verification_paths[source] = path
-                self._source_health.mark_failed(path, direct)
+                if self._source_health.known_error(path) != direct:
+                    self._source_health.mark_failed(path, direct)
             return direct
         if path is None:
             return ""
-        error = self._source_health.error(path)
+        error = self._source_health.known_error(path)
         if not error:
             for id_, detail in errors.items():
                 if self._run_verification_directory(id_) == path:
@@ -6186,6 +7233,7 @@ class CoilGenWorkbench(QMainWindow):
         for alias in aliases:
             self._job_verification_errors.pop(alias, None)
         if path is not None:
+            self._source_verification_generations[path] = self._source_verification_generations.get(path, 0) + 1
             self._source_health.mark_verified(source if hasattr(source, "directory") else path)
 
     def _view_results_id(self):
@@ -6213,12 +7261,15 @@ class CoilGenWorkbench(QMainWindow):
         local_progress = getattr(self, "_local_progress", {})
         for active, label in (
             (self._submitting, "Submitting study"),
-            (self._loading_job_id is not None, "Verifying completed results"),
+            (self._loading_job_id is not None and not self._foreground_work, "Verifying completed results"),
+            (bool(self._stopped_reuse_tasks), "Verifying stopped checkpoints"),
             (self._geometry_export_task, "Exporting conductor geometry"),
             (self._artifact_export_task, "Exporting saved artifacts"),
             (self._design_study_task, self._design_study_task_label),
             (self._saved_settings_task is not None, "Verifying saved settings"),
             (getattr(self.viewport, "_preview_worker", None) is not None, "Preparing model preview"),
+            (getattr(self.viewport, "_system_worker", None) is not None, "Preparing system support meshes"),
+            (self.live_preview.working, "Loading recorded stage preview"),
         ):
             if active:
                 working.append(local_progress.get(getattr(active, "signals", None), label))
@@ -6227,13 +7278,46 @@ class CoilGenWorkbench(QMainWindow):
         working.extend(
             local_progress.get(key, labels.get(key, key)) for key in getattr(self, "_research_active_tasks", ())
         )
+        working.extend(self._foreground_work.values())
         self.computation_indicator.message.setText(self.statusBar().currentMessage())
-        self.computation_indicator.set_activity(
+        self.activity_feedback.set_activity(
             self._last_job_states, working=working, unavailable=self._last_runtime_error
         )
 
+    @contextmanager
+    def _visible_work(self, label):
+        """Paint an honest busy state before a synchronous file/GUI operation."""
+        key = next(iter(self._foreground_work), None) or object()
+        previous = self._foreground_work.get(key)
+        self._foreground_work[key] = label
+        try:
+            self._refresh_computation_indicator()
+            self.computation_indicator.repaint()
+            for indicator in tuple(self.activity_feedback.indicators.values()):
+                if indicator.isVisible():
+                    indicator.repaint()
+            yield
+        finally:
+            if previous is None:
+                self._foreground_work.pop(key, None)
+            else:
+                self._foreground_work[key] = previous
+            self._refresh_computation_indicator()
+
+    def _portable_progress(self, completed, total, label):
+        """Paint byte progress without dispatching desktop input or nested actions."""
+        message = f"{label} · {completed / 1024**2:.1f} / {total / 1024**2:.1f} MiB" if total > 0 else label
+        key = next(iter(self._foreground_work), None)
+        if key is not None:
+            self._foreground_work[key] = message
+        self.statusBar().showMessage(message)
+        self._refresh_computation_indicator()
+        self.statusBar().repaint()
+        self.computation_indicator.repaint()
+
     def _update_execution_feedback(self):
         self._refresh_computation_indicator()
+        self._refresh_design_plan()
         if hasattr(self, "field_analysis_action"):
             from ..application.field_analysis import field_analysis_available
 
@@ -6245,11 +7329,32 @@ class CoilGenWorkbench(QMainWindow):
                 self._field_analysis_capability = cached
             available = verified and cached[1]
             self.field_analysis_action.setEnabled(available)
+            if hasattr(self, "routing_analysis_action"):
+                from ..application.routing_analysis import routing_analysis_available
+
+                self.routing_analysis_action.setEnabled(bool(verified and routing_analysis_available(record)))
+                self.routing_analysis_action.setToolTip(
+                    "Inspect this run's exact routes, physical developed support, conductor heights and saved clearance/bend witnesses."
+                )
             self.field_analysis_action.setToolTip(
                 "Analyze this selected run's saved fields, slice grids, error maps and spherical harmonics."
                 if available
                 else "Select a verified saved run containing computed field samples."
             )
+            self._refresh_results_overview()
+            self.results_overview.set_analysis_available(available)
+            self.field_results_button.setEnabled(
+                bool(verified and (available or self.results_overview.has_coil_statistics))
+            )
+            self.field_results_button.setToolTip(
+                "Review saved coil properties, field metrics, slices, errors and harmonics."
+                if self.field_results_button.isEnabled()
+                else "Compute or select verified saved coil results."
+            )
+            for name, item in self.result_tree_items.items():
+                enabled = bool(verified) if name in {"coil", "checks"} else available
+                item.setDisabled(not enabled)
+                item.setText(1, "Available" if enabled else "Unverified" if record is not None else "Not computed")
         if hasattr(self, "research_actions"):
             record = self.runs.get(self._selected_run)
             verified = record is not None and not self._run_verification_error(record)
@@ -6257,7 +7362,7 @@ class CoilGenWorkbench(QMainWindow):
                 ("_research_requirements_review", "requirements_review"),
                 ("_research_scene_review", "scene_review"),
             ):
-                available = bool(verified and record.metadata.get(key))
+                available = bool(verified and read_run_metadata(record).get(key))
                 self.research_actions[handler].setEnabled(available)
                 self.research_actions[handler].setToolTip(
                     "Review this selected run's verified evidence."
@@ -6266,7 +7371,10 @@ class CoilGenWorkbench(QMainWindow):
                 )
             available = bool(
                 verified
-                and (record.metadata.get("dynamic_analysis_review") or record.metadata.get("engineering_review"))
+                and (
+                    read_run_metadata(record).get("dynamic_analysis_review")
+                    or read_run_metadata(record).get("engineering_review")
+                )
             )
             self.research_actions["_research_dynamic_review"].setEnabled(available)
             spec = self.project.study.get("requirements") if self.project else None
@@ -6277,14 +7385,14 @@ class CoilGenWorkbench(QMainWindow):
             record = self.runs.get(self._selected_run)
             verified = record is not None and not self._run_verification_error(record)
             self.gradient_actions["_gradient_circuit_dialog"].setEnabled(
-                bool(verified and record.metadata.get("winding_steps"))
+                bool(verified and read_run_metadata(record).get("winding_steps"))
             )
             self.gradient_actions["_gradient_measured_dialog"].setEnabled(
                 bool(
                     verified
                     and (
-                        record.metadata.get("winding_steps")
-                        or (record.metadata.get("wire_fields") or {}).get("routed", {}).get("available")
+                        read_run_metadata(record).get("winding_steps")
+                        or (read_run_metadata(record).get("wire_fields") or {}).get("routed", {}).get("available")
                     )
                 )
             )
@@ -6367,6 +7475,8 @@ class CoilGenWorkbench(QMainWindow):
                 else "No project open",
             )
         name = state.get("name", "")
+        if state.get("persistence_error"):
+            text += " · job state not saved; retrying"
         revision = state.get("project_revision")
         prefix = f"{name} · " if name else ""
         if revision is not None:
@@ -6379,7 +7489,11 @@ class CoilGenWorkbench(QMainWindow):
             prefix += origin + (f" · submitted {submitted.text}" if submitted.timestamp is not None else "") + " · "
         self.execution_label.setText(prefix + text)
         self.execution_label.setToolTip(
-            self._run_verification_error(id_) or state.get("error") or state.get("stage") or text
+            self._run_verification_error(id_)
+            or state.get("error")
+            or state.get("persistence_error")
+            or state.get("stage")
+            or text
         )
         status = state.get("status")
         busy = (
@@ -6388,7 +7502,7 @@ class CoilGenWorkbench(QMainWindow):
             or (
                 not self._last_runtime_error
                 and status in {"running", "cancelling"}
-                and (progress is None or status == "cancelling")
+                and (progress is None or state.get("progress_indeterminate") or status == "cancelling")
             )
         )
         self.execution_progress.setRange(0, 0 if busy else 100)
@@ -6410,7 +7524,9 @@ class CoilGenWorkbench(QMainWindow):
             "error"
             if status == "failed" or self._run_verification_error(id_)
             else "warning"
-            if self._last_runtime_error or status in {"cancelling", "cancelled", "interrupted"}
+            if self._last_runtime_error
+            or state.get("persistence_error")
+            or status in {"cancelling", "cancelled", "interrupted"}
             else "info"
             if state or self._submitting or self._loading_job_id is not None
             else "neutral",
@@ -6647,11 +7763,11 @@ class CoilGenWorkbench(QMainWindow):
                     return
             elif key == "continue_full":
                 record = self.runs.get(self._selected_run)
-                stage = record.metadata.get("pipeline_stage") if record is not None else None
-                if stage not in CONTINUATION_STAGES or record.metadata.get("project_id") != self.project.id:
+                stage = read_run_metadata(record).get("pipeline_stage") if record is not None else None
+                if stage not in CONTINUATION_STAGES or read_run_metadata(record).get("project_id") != self.project.id:
                     self._error("Select an owned completed study boundary to continue.")
                     return
-                if record.metadata.get("project_fingerprint") != self.project.fingerprint:
+                if read_run_metadata(record).get("project_fingerprint") != self.project.fingerprint:
                     self._error("The model changed; recompute the selected boundary before continuing this result.")
                     return
                 if not self.apply_study({"pipeline_stage": CONTINUATION_STAGES[stage][0]}):
@@ -6689,7 +7805,10 @@ class CoilGenWorkbench(QMainWindow):
         return export_geometry(record, directory, names, unit=unit, project=project)
 
     def _owns_export_run(self, record):
-        owner = record.metadata.get("project_id", (record.metadata.get("job") or {}).get("project_id")) or None
+        owner = (
+            read_run_metadata(record).get("project_id", (read_run_metadata(record).get("job") or {}).get("project_id"))
+            or None
+        )
         return owner is None or owner in {channel.project.id for channel in self.assembly.channels}
 
     def _export_companion(self, record):
@@ -6757,7 +7876,7 @@ class CoilGenWorkbench(QMainWindow):
         if task is None:
             return
         feedback = task.feedback_state
-        source_name = task.record.metadata.get("name", task.record.directory.name)
+        source_name = read_run_metadata(task.record).get("name", task.record.directory.name)
         if error:
             if task.verification_error:
                 owner_id = (
@@ -6813,23 +7932,50 @@ class CoilGenWorkbench(QMainWindow):
                 self._error(f"Cannot cancel job: {exc}")
 
     def load_run(self, path, *, id_=None, select=True, expected_record=None):
+        with self._visible_work("Verifying saved result · " + Path(path).name):
+            return self._load_run(path, id_=id_, select=select, expected_record=expected_record)
+
+    def _load_run(self, path, *, id_=None, select=True, expected_record=None):
         try:
             record = self.service.load_run(path)
             if expected_record is not None:
-                old = {key: value for key, value in expected_record.metadata.items() if key != "job"}
-                current = {key: value for key, value in record.metadata.items() if key != "job"}
+                old = {key: value for key, value in read_run_metadata(expected_record).items() if key != "job"}
+                current = {key: value for key, value in read_run_metadata(record).items() if key != "job"}
                 if result_metadata_digest(old) != result_metadata_digest(current):
                     raise ValueError("Saved run metadata changed after selection. Reopen and verify the run.")
         except (ValueError, TypeError, OSError, RuntimeError, KeyError) as exc:
             self._mark_run_verification_error(id_ or str(Path(path).expanduser().resolve()), exc, directory=path)
             raise
+        return self._register_loaded_run(record, id_=id_, select=select)
+
+    def _register_loaded_run(
+        self, record, *, id_=None, select=True, history_result=None, selected_reuse=None, history_alias_generation=None
+    ):
+        """Register an already verified immutable record on the GUI thread."""
         id_ = id_ or str(record.directory)
         self._clear_run_verification_error(record, id_=id_)
         self.runs[id_] = record
-        owner = record.metadata.get("project_id")
+        owner = read_run_metadata(record).get("project_id")
         channel = next((channel for channel in self.assembly.channels if channel.project.id == owner), None)
         scope = (owner, channel.id if self._collection_mode else None) if channel is not None else None
-        if self.history is not None and scope is not None:
+        if history_result is not None:
+            loaded_scope, entry, entries, diagnostic = history_result
+            if loaded_scope == scope and entry is not None:
+                self._history_ids[entry.id] = id_
+                if scope == self._history_key:
+                    if history_alias_generation is not None:
+                        entries = tuple(
+                            replace(item, alias=self._history_alias_edits[item.id][1])
+                            if item.id in self._history_alias_edits
+                            and self._history_alias_edits[item.id][0] > history_alias_generation
+                            else item
+                            for item in entries
+                        )
+                    self._history_entries = entries
+                    self._refresh_history_panel()
+            if diagnostic:
+                self.messages.appendPlainText(f"Run history link could not be saved: {diagnostic}")
+        elif self.history is not None and scope is not None:
             try:
                 entry = self.history.add_run(scope[0], record, channel_id=scope[1])
                 self._history_ids[entry.id] = id_
@@ -6844,12 +7990,27 @@ class CoilGenWorkbench(QMainWindow):
                 self.live_preview.following
                 and self.live_preview.job_id == id_
                 and self._live_owner_matches(followed)
-                and self._live_owner_matches(record.metadata)
+                and self._live_owner_matches(read_run_metadata(record))
             )
         self._fill_runs()
         if select:
+            if selected_reuse is not None:
+                # Capability display uses the exact plan verified by the loader;
+                # choosing Resume still re-verifies mutable files before use.
+                threads = getattr(getattr(self.jobs, "policy", None), "threads_per_worker", 1)
+                self._resume_capability_key = (
+                    self.project.fingerprint,
+                    self.stage_selector.currentData(),
+                    threads,
+                    id_,
+                    id(record),
+                    None,
+                    (),
+                    self._run_verification_error(id_),
+                )
+                self._resume_capability_plan = selected_reuse
             self.show_run(id_)
-        self._refresh_stage_status()
+        self._refresh_stage_status(refresh_reuse=history_result is None)
         if select:
             self._save_session()
         return record
@@ -6858,11 +8019,11 @@ class CoilGenWorkbench(QMainWindow):
         records = [
             (id_, record)
             for id_, record in self.runs.items()
-            if record.metadata.get("project_id") in {None, self.project.id} or id_ == self._selected_run
+            if read_run_metadata(record).get("project_id") in {None, self.project.id} or id_ == self._selected_run
         ]
         self.runs_table.setRowCount(len(records))
         for row, (id_, record) in enumerate(records):
-            metadata = record.metadata
+            metadata = read_run_metadata(record)
             summary = metadata.get("summary", {})
             state = self.states.get(id_, {})
             error = summary.get("validated_relative_field_error")
@@ -6914,6 +8075,10 @@ class CoilGenWorkbench(QMainWindow):
             self._inspect_saved_settings(record, node)
 
     def show_run(self, id_):
+        with self._visible_work("Loading result geometry and review data"):
+            return self._show_run(id_)
+
+    def _show_run(self, id_):
         if self.live_preview.job_id != id_ and self.live_preview.state.get("status") in {
             "queued",
             "running",
@@ -6924,11 +8089,13 @@ class CoilGenWorkbench(QMainWindow):
             self.live_preview.stop()
         self._selected_run = id_
         record = self.runs[id_]
-        metadata = record.metadata
+        metadata = read_run_metadata(record)
         self.problems_panel.set_run(record, diagnostic=self._run_verification_error(id_))
         self._problems_health_key = (id(record), self._run_verification_error(id_))
         run_arrays = record.select_arrays(copy=False) if hasattr(record, "select_arrays") else record.arrays
-        self.viewport.display_run(run_arrays, metadata=metadata)
+        # The viewport owns a detached mutable display snapshot; borrowed
+        # MappingProxy metadata remains confined to read-only presentation.
+        self.viewport.display_run(run_arrays, metadata=record.metadata)
         wire_fields = metadata.get("wire_fields", {})
         self.wire_fields_table.setRowCount(len(wire_fields))
         for row, (kind, evidence) in enumerate(wire_fields.items()):
@@ -7021,7 +8188,7 @@ class CoilGenWorkbench(QMainWindow):
             self._update_execution_feedback()
             return
         record = self.runs[self._selected_run]
-        metadata = record.metadata
+        metadata = read_run_metadata(record)
         verdicts = run_verdicts(metadata)
         state = self.states.get(self._selected_run, {})
         fingerprint = metadata.get(
@@ -7075,6 +8242,7 @@ class CoilGenWorkbench(QMainWindow):
     def _refresh_status_colors(self):
         if not hasattr(self, "execution_label"):
             return
+        self._refresh_results_button_style()
         self._update_result_state()
         self._refresh_stage_status(refresh_reuse=False)
         self._fill_jobs(self._last_job_states)
@@ -7123,6 +8291,7 @@ class CoilGenWorkbench(QMainWindow):
             event.ignore()
             return
         self._closing = True
+        self._invalidate_project_open()
         for dialog in tuple(getattr(self, "_field_analysis_windows", {}).values()):
             dialog.request_close()
         scene_editor = getattr(self, "_scene_editor", None)
@@ -7138,4 +8307,5 @@ class CoilGenWorkbench(QMainWindow):
         if self._own_jobs and self.jobs is not None:
             self.jobs.close()
         self.viewport.close()
+        self.activity_feedback.close()
         super().closeEvent(event)

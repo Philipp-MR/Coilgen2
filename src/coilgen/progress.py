@@ -41,6 +41,8 @@ def update_work_progress(state: dict, event: dict, *, completion_limit: float = 
         state["progress_" + key] = item if isinstance(item, int) and not isinstance(item, bool) and item >= 0 else None
     if event.get("active_stage") in {stage.value for stage in PipelineStage}:
         state["active_stage"] = event["active_stage"]
+    if isinstance(event.get("operation"), str) and event["operation"].strip():
+        state["progress_operation"] = event["operation"][:256]
 
 
 class ProgressRelay:
@@ -61,6 +63,7 @@ class ProgressRelay:
             event.get("active_stage"),
             event.get("scope_label"),
             event.get("label"),
+            event.get("operation"),
             event.get("progress_indeterminate"),
         )
         overall = event.get("overall_percent")
@@ -90,6 +93,7 @@ class ProgressRelay:
             event.get("active_stage"),
             event.get("scope_label"),
             event.get("label"),
+            event.get("operation"),
             event.get("progress_indeterminate"),
         )
         self.emit(event)
@@ -119,6 +123,7 @@ def progress_scope(
     label: str | None = None,
     stage: str | None = None,
     overall: bool = False,
+    operation: str | None = None,
 ) -> Iterator[None]:
     """Map nested completed work into one explicit portion of an operation.
 
@@ -164,6 +169,10 @@ def progress_scope(
         }
         if label is not None:
             result["scope_label"] = label
+        if operation is not None:
+            result["operation"] = operation
+        elif message:
+            result.setdefault("operation", message)
         if stage is not None:
             result["active_stage"] = stage
         if overall:

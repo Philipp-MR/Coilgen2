@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+from threading import RLock
 from uuid import uuid4
 from zipfile import BadZipFile
 
@@ -73,13 +74,19 @@ class RunHistoryStore:
 
     def __init__(self, path: str | Path):
         self.path = Path(path).expanduser().resolve()
+        self._mutation_lock = RLock()
         self._read()
 
     def _read(self):
         if not self.path.exists():
             return {"schema": HISTORY_SCHEMA, "records": [], "sessions": {}}
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object)
+            # A Windows read handle can prevent atomic replacement. The shared
+            # store's reader must finish its short manifest read before a GUI
+            # writer replaces it; artifact verification uses the detached data.
+            with self._mutation_lock:
+                text = self.path.read_text(encoding="utf-8")
+            data = json.loads(text, object_pairs_hook=_unique_object)
             json_value(data, nonfinite="raise")
             if not isinstance(data, dict) or data.get("schema") != HISTORY_SCHEMA:
                 raise ValueError("Unsupported run-history schema.")
@@ -107,7 +114,10 @@ class RunHistoryStore:
             raise ValueError(f"Cannot read run history {self.path}: {exc}") from exc
 
     def _mutate(self, change):
-        with DirectoryOwner(self.path.parent, filename=f".{self.path.name}.lock"):
+        # A background completed-run loader shares this store with GUI alias
+        # and session edits. Serialize their short writes before taking the
+        # nonblocking OS lock; other runtime owners remain independent.
+        with self._mutation_lock, DirectoryOwner(self.path.parent, filename=f".{self.path.name}.lock"):
             data = self._read()
             result = change(data)
             json_value(data, nonfinite="raise")

@@ -232,13 +232,16 @@ def print_result_summary(result, *, title: str = "CoilGen run") -> None:
         regularization_selection_report,
         result_performance_table_rows,
         result_quality_status,
+        result_summary_dict,
         symmetry_summary_dict,
     )
 
     quality = result_quality_status(result)
+    summary = result_summary_dict(result)
     symmetry = symmetry_summary_dict(result)
     print(title)
-    print(f"status: {quality.status}")
+    print(f"execution status: {summary['execution_status']}")
+    print(f"engineering acceptance: {quality.status} (reported checks only)")
     for message in quality.failures:
         print(f"  FAIL: {message}")
     for message in quality.warnings:
@@ -286,11 +289,14 @@ def print_result_summary(result, *, title: str = "CoilGen run") -> None:
         print(f"coil length part 1: {result.coil_lengths[0]:.6g} m")
         if len(result.coil_lengths) > 1:
             print(f"coil length total: {float(sum(result.coil_lengths)):.6g} m")
-    if result.resistance is not None and len(result.resistance):
+    electrical_calculation_disabled = bool(getattr(result.input_data, "skip_inductance_calculation", False))
+    if electrical_calculation_disabled:
+        print("coil resistance and inductance: unavailable (calculation disabled)")
+    elif result.resistance is not None and len(result.resistance):
         print(f"coil resistance part 1: {result.resistance[0]:.6g} ohm")
         if len(result.resistance) > 1:
             print(f"coil resistance total: {float(sum(result.resistance)):.6g} ohm")
-    if result.inductance_matrix is not None and result.inductance_matrix.size:
+    if not electrical_calculation_disabled and result.inductance_matrix is not None and result.inductance_matrix.size:
         inductance = result.inductance_matrix
         same_current = float(inductance.sum())
         print(f"coil inductance part 1 self: {inductance[0, 0]:.6g} H")

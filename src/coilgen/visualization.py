@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
+from textwrap import wrap
 from typing import Any, Callable, Iterable, Sequence
 
 import numpy as np
@@ -1220,7 +1221,7 @@ def save_field_error_map(
         result.target_field.coords[:, axes],
         scalar_map.values,
         path,
-        title=_scalar_map_svg_title("DSV Target-Point Absolute Bz Error Map", scalar_map, _projection_title(axes)),
+        title=_scalar_map_svg_title("DSV Target-Point Signed Bz Difference", scalar_map, _projection_title(axes)),
         style=style,
         scalar_label=scalar_map.label_with_unit,
         axis_labels=_coordinate_axis_labels(axes),
@@ -1241,7 +1242,7 @@ def save_field_error_map_isometric(
         _isometric_projection(result.target_field.coords),
         scalar_map.values,
         path,
-        title=_scalar_map_svg_title("DSV Target-Point Absolute Bz Error Map", scalar_map, "Isometric View"),
+        title=_scalar_map_svg_title("DSV Target-Point Signed Bz Difference", scalar_map, "Isometric View"),
         style=style,
         scalar_label=scalar_map.label_with_unit,
         axis_labels=None,
@@ -1996,17 +1997,39 @@ def _save_point_scalar_view(
     values = np.asarray(values, dtype=float)
     if len(points) != len(values):
         raise ValueError("Point scalar values must match point count.")
-    finite = np.isfinite(values)
+    finite = np.isfinite(values) & np.all(np.isfinite(points), axis=1)
     if not np.any(finite):
         raise ValueError(f"{scalar_label} has no finite values.")
     vmin, vmax = _finite_min_max(values[finite])
     scene = _SvgScene.from_points(points[finite], style, title=title)
+    scene.footer_height = 100
+    scene.header_height = 28
+    scene.elements.append(
+        f'<text x="{style.margin}" y="{style.margin + 14}" font-family="Arial, sans-serif" font-size="12" '
+        f'fill="{style.text_color}">n={int(np.count_nonzero(finite))} finite samples; '
+        "sample envelope only; no interpolation</text>"
+    )
+    if np.count_nonzero(finite) >= 3:
+        from scipy.spatial import ConvexHull, QhullError
+
+        try:
+            hull = ConvexHull(points[finite])
+        except QhullError:
+            pass
+        else:
+            envelope = points[finite][hull.vertices]
+            scene.polyline(
+                np.vstack((envelope, envelope[0])), stroke="#94a3b8", stroke_width=1.0, stroke_dasharray="4,4"
+            )
+    scene.axes()
     if axis_labels is not None:
         scene.axis_labels(*axis_labels)
+    else:
+        scene.isometric_axis_triad()
     for point, value in zip(points[finite], values[finite]):
         color = _color_ramp(_normalize(float(value), vmin, vmax))
         scene.circle_at(point, radius=4.0, fill=color, stroke="#111827", stroke_width=0.35, opacity=0.9)
-    _draw_scalar_legend(scene, scalar_label, vmin, vmax)
+    scene.elements.extend(_svg_diverging_colorbar(style, y=style.height - 68, vmin=vmin, vmax=vmax, label=scalar_label))
     _write(path, scene.finish())
     return Path(path)
 
@@ -2044,10 +2067,16 @@ def _save_horizontal_bar_chart(
     if not rows:
         raise ValueError(f"{title} has no finite rows.")
     width = style.width
-    height = max(style.height, 96 + 30 * len(rows))
+    display_rows = [(_metric_label_with_unit(label).replace("_", " "), value) for label, value in rows]
+    label_width = min(max(210, int(width * 0.48)), max(210, width - 260))
+    characters = max(18, int((label_width - style.margin - 12) / 6.6))
+    wrapped_rows = [(wrap(label, width=characters) or [label], value) for label, value in display_rows]
+    height = max(style.height, 96 + sum(max(30, 16 * len(lines) + 10) for lines, _ in wrapped_rows))
     label_x = style.margin
-    bar_x = min(300, max(210, width // 3))
-    bar_w = width - bar_x - style.margin
+    bar_x = label_width
+    # Reserve a separate numeric-value column beyond the largest bar.
+    value_width = 90
+    bar_w = max(24, width - bar_x - style.margin - value_width)
     top = style.margin + 34
     max_abs = max(max(abs(value) for _, value in rows), 1e-30)
     elements = [
@@ -2055,18 +2084,20 @@ def _save_horizontal_bar_chart(
         f'<rect width="100%" height="100%" fill="{style.background}"/>',
         f'<text x="{style.margin}" y="{style.margin - 12}" font-family="Arial, sans-serif" font-size="16" fill="{style.text_color}">{escape(title)}</text>',
     ]
-    for row_ind, (label, value) in enumerate(rows):
-        y = top + row_ind * 30
+    y = top
+    for label_lines, value in wrapped_rows:
         length = max(1.0, abs(value) / max_abs * bar_w)
         color = _color_ramp(0.5 + 0.5 * np.sign(value) * min(abs(value) / max_abs, 1.0))
-        display_label = _metric_label_with_unit(label)
-        elements.append(
-            f'<text x="{label_x}" y="{y + 14}" font-family="Arial, sans-serif" font-size="12" fill="{style.text_color}">{escape(_short_metric_label(display_label))}</text>'
-        )
+        for line_ind, line in enumerate(label_lines):
+            elements.append(
+                f'<text x="{label_x}" y="{y + 14 + 16 * line_ind}" font-family="Arial, sans-serif" font-size="12" '
+                f'fill="{style.text_color}">{escape(line)}</text>'
+            )
         elements.append(f'<rect x="{bar_x}" y="{y}" width="{length:.3f}" height="18" fill="{color}" opacity="0.88"/>')
         elements.append(
-            f'<text x="{bar_x + length + 8:.3f}" y="{y + 14}" font-family="Arial, sans-serif" font-size="12" fill="{style.text_color}">{value:.4g}</text>'
+            f'<text x="{bar_x + bar_w + 12:.3f}" y="{y + 14}" font-family="Arial, sans-serif" font-size="12" fill="{style.text_color}">{value:.4g}</text>'
         )
+        y += max(30, 16 * len(label_lines) + 10)
     elements.append("</svg>")
     _write(path, "\n".join(elements))
     return Path(path)
@@ -2649,12 +2680,12 @@ def _svg_diverging_colorbar(
     vmax: float,
     label: str,
 ) -> list[str]:
-    x0 = style.margin + 120
-    width = style.width - 2 * style.margin - 240
+    x0 = style.margin
+    width = style.width - 2 * style.margin
     height = 14.0
     steps = 72
     elements = [
-        f'<text x="{style.margin}" y="{y + 11:.3f}" font-family="Arial, sans-serif" font-size="12" fill="{style.text_color}">{escape(label)}</text>'
+        f'<text x="{style.margin}" y="{y - 10:.3f}" font-family="Arial, sans-serif" font-size="12" fill="{style.text_color}">{escape(label)}</text>'
     ]
     for index in range(steps):
         x = x0 + width * index / steps
@@ -2664,7 +2695,7 @@ def _svg_diverging_colorbar(
     elements.append(
         f'<rect x="{x0:.3f}" y="{y:.3f}" width="{width:.3f}" height="{height:.3f}" fill="none" stroke="#334155" stroke-width="0.8"/>'
     )
-    for value, anchor, dx in ((vmin, "start", 0.0), (0.0, "middle", width / 2), (vmax, "end", width)):
+    for value, anchor, dx in ((vmin, "start", 0.0), ((vmin + vmax) / 2, "middle", width / 2), (vmax, "end", width)):
         elements.append(
             f'<text x="{x0 + dx:.3f}" y="{y + height + 17:.3f}" text-anchor="{anchor}" font-family="Arial, sans-serif" font-size="11" fill="{style.text_color}">{value:.4g}</text>'
         )
@@ -2803,6 +2834,8 @@ class _SvgScene:
         self.style = style
         self.elements: list[str] = []
         self.title = title
+        self.footer_height = 72
+        self.header_height = 0
 
     @classmethod
     def from_points(cls, points: np.ndarray, style: SvgStyle, title: str) -> "_SvgScene":
@@ -2840,14 +2873,14 @@ class _SvgScene:
         xmin, xmax, ymin, ymax = self.bounds
         style = self.style
         draw_w = style.width - 2 * style.margin
-        draw_h = style.height - 2 * style.margin
+        draw_h = max(style.height - 2 * style.margin - self.footer_height - self.header_height, 1)
         scale = min(draw_w / (xmax - xmin), draw_h / (ymax - ymin))
         used_w = (xmax - xmin) * scale
         used_h = (ymax - ymin) * scale
         offset_x = style.margin + (draw_w - used_w) / 2
         offset_y = style.margin + (draw_h - used_h) / 2
         x = offset_x + (points[:, 0] - xmin) * scale
-        y = style.height - (offset_y + (points[:, 1] - ymin) * scale)
+        y = style.height - self.footer_height - (offset_y + (points[:, 1] - ymin) * scale)
         return np.column_stack((x, y))
 
     def polyline(
@@ -2944,22 +2977,45 @@ class _SvgScene:
             f'text-anchor="middle" fill="{self.style.text_color}" transform="rotate(-90 14 {self.style.height / 2:.3f})">{escape(y_label)}</text>'
         )
 
+    def isometric_axis_triad(self) -> None:
+        """Show the world-coordinate orientation of the fixed projection."""
+        origin = np.array([self.style.width - self.style.margin - 70, self.style.margin + 62], dtype=float)
+        endpoints = _isometric_projection(np.eye(3)) * np.array([36.0, -36.0]) + origin
+        for label, color, endpoint in zip(("x", "y", "z"), ("#dc2626", "#16a34a", "#2563eb"), endpoints):
+            self.elements.append(
+                f'<line x1="{origin[0]:.3f}" y1="{origin[1]:.3f}" x2="{endpoint[0]:.3f}" y2="{endpoint[1]:.3f}" '
+                f'stroke="{color}" stroke-width="2"/>'
+            )
+            self.elements.append(
+                f'<text x="{endpoint[0]:.3f}" y="{endpoint[1] - 5:.3f}" font-family="Arial, sans-serif" '
+                f'font-size="12" text-anchor="middle" fill="{color}">{label}</text>'
+            )
+
     def legend(self, items: Sequence[tuple[str, str]]) -> None:
         if not items:
             return
         x = self.style.margin
-        item_width = 120
-        columns = max(1, (self.style.width - 2 * self.style.margin) // item_width)
+        available = self.style.width - 2 * self.style.margin
+        desired_width = max(160, min(320, 40 + max(len(label) for label, _ in items) * 7))
+        columns = max(1, min(len(items), available // desired_width))
+        item_width = available / columns
+        characters = max(8, int((item_width - 40) / 7))
+        wrapped = [(wrap(label, width=characters) or [label], color) for label, color in items]
         rows = (len(items) + columns - 1) // columns
-        first_y = self.style.height - self.style.margin - (rows - 1) * 18 + 16
-        for ind, (label, color) in enumerate(items):
+        row_heights = [
+            18 * max(len(lines) for lines, _ in wrapped[row * columns : (row + 1) * columns]) + 6 for row in range(rows)
+        ]
+        first_y = self.style.height - self.style.margin - sum(row_heights) + 12
+        for ind, (lines, color) in enumerate(wrapped):
             row = ind // columns
             col = ind % columns
             dx = col * item_width
-            y = first_y + row * 18
+            y = first_y + sum(row_heights[:row])
             self.elements.append(
                 f'<line x1="{x + dx}" y1="{y}" x2="{x + dx + 24}" y2="{y}" stroke="{color}" stroke-width="3"/>'
             )
-            self.elements.append(
-                f'<text x="{x + dx + 32}" y="{y + 4}" font-family="Arial, sans-serif" font-size="12" fill="{self.style.text_color}">{escape(label)}</text>'
-            )
+            for line_ind, line in enumerate(lines):
+                self.elements.append(
+                    f'<text x="{x + dx + 32}" y="{y + 4 + 18 * line_ind}" font-family="Arial, sans-serif" '
+                    f'font-size="12" fill="{self.style.text_color}">{escape(line)}</text>'
+                )

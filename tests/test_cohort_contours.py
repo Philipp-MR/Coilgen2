@@ -19,6 +19,7 @@ from coilgen.cohort_contours import (
 )
 from coilgen.cohort_shim import CohortFitOptions, PopulationShimDataset, RigidTransform, ShimScenario
 from coilgen.models import ContourLine, ContourSparsificationResult
+from coilgen.cohort_contours import _canonical_surjections, _stirling_partition_count
 
 
 def _closed_triangle(x: float = 0.0) -> np.ndarray:
@@ -197,3 +198,41 @@ def test_exact_six_family_four_channel_search_is_complete_and_disjoint(monkeypat
             exported_families.extend(payload["assigned_family_indices"].tolist())
             assert not bool(payload["routing_validated"])
     assert sorted(exported_families) == list(range(6))
+
+
+@pytest.mark.parametrize("family_count", range(1, 9))
+def test_exact_partition_count_matches_enumeration(family_count) -> None:
+    for channels in range(1, family_count + 1):
+        assert _stirling_partition_count(family_count, channels) == sum(
+            1 for _ in _canonical_surjections(family_count, channels)
+        )
+
+
+def test_large_dictionary_guard_runs_before_fields_or_partition_enumeration(monkeypatch) -> None:
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("An over-budget search must stop before field evaluation or enumeration")
+
+    monkeypatch.setattr("coilgen.cohort_contours.evaluate_contour_family_fields", unexpected)
+    monkeypatch.setattr("coilgen.cohort_contours._canonical_surjections", unexpected)
+    exact_count = 907413148520234062433363985673077391360
+    with pytest.raises(ValueError, match=str(exact_count)):
+        design_contour_dictionary_channels(_dataset(np.zeros((1, 5))), _dictionary(46))
+
+
+def test_guard_includes_asymmetric_power_channel_labelings(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "coilgen.cohort_contours.evaluate_contour_family_fields",
+        lambda *_args, **_kwargs: pytest.fail("Power channel labelings must be counted before fields"),
+    )
+    # S(4, 3) * 2^(4-3) * 3! = 72; symmetry cannot remove unequal-resistance labelings.
+    with pytest.raises(ValueError, match="72 candidates"):
+        design_contour_dictionary_channels(
+            _dataset(np.zeros((1, 5))),
+            _dictionary(4),
+            ContourChannelOptions(
+                channel_count=3,
+                channel_resistance_ohm=(1.0, 2.0, 3.0),
+                total_power_limit_W=1.0,
+                maximum_candidate_count=71,
+            ),
+        )

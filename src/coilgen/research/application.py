@@ -13,6 +13,7 @@ from ..pipeline_stages import PipelineCheckpoint, PipelineStage
 from ..progress import DesignCancelled, ProgressReporter, progress_scope
 from ..reporting import write_design_report
 from ..scientific_arrays import scientific_arrays as _scientific_arrays
+from ..scientific_arrays import fabrication_frame_arrays, routing_evidence
 from ..application.stage_preview import MANIFEST_NAME as STAGE_PREVIEW_MANIFEST, publish_stage_preview
 from .requests import ResearchRequest
 from .storage import (
@@ -278,7 +279,9 @@ def _save_partial_result(
     state = checkpoint.state
     work_ranges = _design_work_ranges(request) if work_ranges is None else work_ranges
     diagnostics = checkpoint.diagnostics
-    arrays = _scientific_arrays(state.parts, state.target_field, state.combined_mesh, state.sf_b_field)
+    arrays = _scientific_arrays(
+        state.parts, state.target_field, state.combined_mesh, state.sf_b_field, include_routing=True
+    )
     pipeline_sweeps = _pipeline_sweep_evidence(state.parts, checkpoint.config)
     validation = {
         "available": False,
@@ -432,6 +435,7 @@ def _save_partial_result(
             key: value for key, value in validation.items() if key not in {"points_m", "field_T", "target_T"}
         },
         "pipeline_sweeps": pipeline_sweeps,
+        "routing": routing_evidence(state.parts),
         **({"requirements_review": requirements_review} if requirements_review is not None else {}),
         **({"scene_review": scene_review} if scene_review is not None else {}),
         "request_sha256": digest,
@@ -899,7 +903,9 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         "elapsed_seconds": time.perf_counter() - started,
     }
     array_file = directory / "scientific_result.npz"
-    arrays = _scientific_arrays(result.coil_parts, result.target_field, result.combined_mesh, result.b_field_opt_sf)
+    arrays = _scientific_arrays(
+        result.coil_parts, result.target_field, result.combined_mesh, result.b_field_opt_sf, include_routing=True
+    )
     with progress_scope(
         *work_ranges["wire_evidence"], "Retaining evaluated wire-field maps and current provenance", overall=True
     ):
@@ -929,6 +935,8 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         # pipeline uses an analytic surface. Keep both physical datasets.
         for index, record in enumerate(fabrication.paths):
             arrays[f"review_conductor_{index}_points_m"] = record.points_m
+            if getattr(record, "path", None) is not None:
+                arrays.update(fabrication_frame_arrays(f"review_conductor_{index}", record.path))
         for index, plan in enumerate(fabrication.winding_steps):
             if plan.get("electrical_points_m") is not None:
                 arrays[f"review_electrical_{index}_points_m"] = np.asarray(plan["electrical_points_m"], dtype=float)
@@ -977,6 +985,7 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         **({"requirements_review": requirements_review} if requirements_review is not None else {}),
         **({"scene_review": scene_review} if scene_review is not None else {}),
         "pipeline_sweeps": pipeline_sweeps,
+        "routing": routing_evidence(result.coil_parts),
         "fabrication": fabrication.summary() if fabrication else None,
         **(
             {

@@ -70,6 +70,18 @@ def _stage(report, key):
     return next(row for row in report.stages if row.key == key)
 
 
+def test_independent_grid_scope_states_saved_quadrature_order_and_missing_convergence():
+    metadata = {
+        "pipeline_stage": "evaluated",
+        "validation": {"point_count": 3112, "field_quadrature_order": 2, "independent_quadrature_check": False},
+        "constraints": [{"name": "Independent grid field error", "scope": "continuous_sheet", "passed": True}],
+    }
+    check = _check(acceptance_report(metadata), "constraint:0")
+    assert check.status == "Passed"
+    assert "3112 samples" in check.scope and "quadrature order 2" in check.scope
+    assert "mesh/quadrature convergence unverified" in check.scope
+
+
 def test_no_record_and_sparse_record_do_not_establish_passes():
     assert all(stage.status == "Not run" for stage in acceptance_report().stages)
     report = acceptance_report({})

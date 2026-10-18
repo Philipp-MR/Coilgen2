@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
@@ -48,8 +49,14 @@ def _record_completed_boundary(state: dict, event: dict) -> None:
 
 def _record_progress(state: dict, event: dict) -> None:
     """Separate allocated overall work, local work and scientific evidence."""
+    previous = (state.get("active_stage"), state.get("progress_operation"))
     _record_completed_boundary(state, event)
     update_work_progress(state, event)
+    now = _now()
+    state["last_progress_at"] = now
+    current = (state.get("active_stage"), state.get("progress_operation"))
+    if current != previous or not state.get("operation_started_at"):
+        state["operation_started_at"] = now
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +131,8 @@ class JobManager:
         self._lock = threading.RLock()
         self._states: dict[str, dict] = {}
         self._active: dict[str, tuple] = {}
+        self._observations: dict[str, float] = {}
+        self._pending_state_writes: set[str] = set()
         self._stop = threading.Event()
         for path in self.directory.glob("*/job.json"):
             try:
@@ -332,13 +341,71 @@ class JobManager:
         state["updated_at"] = _now()
         atomic_json(self.directory / state["id"] / "job.json", state)
 
+    def _save_monitored(self, state: dict) -> None:
+        """Keep draining worker events when durable state is temporarily blocked."""
+        state.pop("persistence_error", None)
+        try:
+            self._save(state)
+        except OSError as exc:
+            state["persistence_error"] = f"{type(exc).__name__}: {exc}"
+            self._pending_state_writes.add(state["id"])
+        else:
+            self._pending_state_writes.discard(state["id"])
+
+    @contextmanager
+    def _outside_state_lock(self):
+        """Let queries/cancellation proceed during monitor-owned blocking I/O.
+
+        Only the monitor calls this while owning the state lock once. On return
+        it rechecks shutdown/cancellation before publishing a terminal state.
+        """
+        self._lock.release()
+        try:
+            yield
+        finally:
+            self._lock.acquire()
+
+    def _verify_worker_result(self, id_, entry):
+        state = self._states[id_]
+        state.update(stage="Verifying saved evidence", progress_indeterminate=True)
+        self._save_monitored(state)
+        with self._outside_state_lock():
+            valid = self._verified_completion(id_) is not None
+        if self._stop.is_set() or self._active.get(id_) is not entry:
+            return False
+        # A cancellation requested during hashing still belongs to this job;
+        # the saved result cannot override it with a completed status.
+        if entry[2].is_set():
+            state.update(status="cancelled", stage="Cancelled")
+        elif valid:
+            state.update(status="completed", stage="Complete", progress=1.0, progress_indeterminate=False)
+        else:
+            state.update(
+                status="failed",
+                stage="Invalid completion evidence",
+                error="Worker result failed its submitted identity or evidence integrity check.",
+            )
+        self._save_monitored(state)
+        return True
+
     def _monitor(self) -> None:
         while not self._stop.wait(0.10):
             with self._lock:
+                # Terminal jobs remain pending until their latest outcome is
+                # durably saved, even after their process has been reaped.
+                for id_ in tuple(self._pending_state_writes):
+                    self._save_monitored(self._states[id_])
                 for id_, entry in list(self._active.items()):
                     process, events, cancel, started = entry
                     state = self._states[id_]
                     changed = False
+                    observed = time.monotonic()
+                    state.update(worker_alive=process.is_alive(), worker_observed_at=_now())
+                    # Process liveness is independent of real numerical updates.
+                    # Persist it at most once a second when the worker is silent.
+                    if observed - self._observations.get(id_, started) >= 1:
+                        self._observations[id_] = observed
+                        changed = True
                     try:
                         while True:
                             if state.get("ipc_error"):
@@ -350,7 +417,7 @@ class JobManager:
                                 # can break this channel. Keep supervising the
                                 # process/result and other jobs independently.
                                 state["ipc_error"] = f"{type(exc).__name__}: {exc}"
-                                self._save(state)
+                                self._save_monitored(state)
                                 break
                             kind = event["kind"]
                             if kind == "progress" and state["status"] != "cancelling":
@@ -361,33 +428,20 @@ class JobManager:
                                 if cancel.is_set():
                                     state.update(status="cancelled", stage="Cancelled")
                                 else:
-                                    state.update(stage="Verifying saved evidence", progress_indeterminate=True)
-                                    self._save(state)
-                                    if self._verified_completion(id_) is not None:
-                                        state.update(
-                                            status="completed",
-                                            stage="Complete",
-                                            progress=1.0,
-                                            progress_indeterminate=False,
-                                        )
-                                    else:
-                                        state.update(
-                                            status="failed",
-                                            stage="Invalid completion evidence",
-                                            error="Worker result failed its submitted identity or evidence integrity check.",
-                                        )
-                                self._save(state)
+                                    if not self._verify_worker_result(id_, entry):
+                                        return
+                                self._save_monitored(state)
                                 changed = False
                             elif kind in {"failed", "cancelled"}:
                                 state.update(status=kind, stage=kind.capitalize(), error=event.get("error"))
-                                self._save(state)
+                                self._save_monitored(state)
                                 changed = False
                     except queue.Empty:
                         pass
                     if changed:
                         # Coalesce routine updates into one durable write per poll;
                         # numerical workers never wait for each progress JSON write.
-                        self._save(state)
+                        self._save_monitored(state)
                     timed_out = time.monotonic() - started > self.policy.timeout_seconds
                     force_cancel = state["status"] == "cancelling" and time.monotonic() - state["cancel_time"] > 1.0
                     if (
@@ -395,42 +449,44 @@ class JobManager:
                         and state["status"] in {"running", "cancelling"}
                         and (timed_out or force_cancel)
                     ):
-                        process.terminate()
-                        process.join(timeout=2)
-                        if process.is_alive():
-                            process.kill()
+                        with self._outside_state_lock():
+                            process.terminate()
                             process.join(timeout=2)
+                            if process.is_alive():
+                                process.kill()
+                                process.join(timeout=2)
+                        if self._stop.is_set() or self._active.get(id_) is not entry:
+                            return
                         state.update(
                             status="failed" if timed_out else "cancelled",
                             stage="Time limit exceeded" if timed_out else "Cancelled",
                             error=f"Worker exceeded {self.policy.timeout_seconds:g} s." if timed_out else None,
+                            worker_alive=process.is_alive(),
+                            worker_observed_at=_now(),
                         )
-                        self._save(state)
+                        self._save_monitored(state)
                     if not process.is_alive():
                         process.join(timeout=0.1)
                         if state["status"] in {"running", "cancelling"}:
                             # The queue feeder can trail the atomic result. A clean
                             # exit plus a valid result is evidence; a crash is not.
-                            completed = (
-                                process.exitcode == 0
-                                and not cancel.is_set()
-                                and self._verified_completion(id_) is not None
-                            )
-                            status = "cancelled" if cancel.is_set() else "completed" if completed else "failed"
-                            state.update(
-                                status=status,
-                                stage=status.capitalize(),
-                                progress=1.0 if completed else state["progress"],
-                                progress_indeterminate=False
-                                if completed
-                                else state.get("progress_indeterminate", False),
-                                error=None
-                                if cancel.is_set() or completed
-                                else f"Worker exited without a result (exit {process.exitcode}).",
-                            )
-                            self._save(state)
+                            if process.exitcode == 0 and not cancel.is_set():
+                                if not self._verify_worker_result(id_, entry):
+                                    return
+                            else:
+                                status = "cancelled" if cancel.is_set() else "failed"
+                                state.update(
+                                    status=status,
+                                    stage=status.capitalize(),
+                                    error=None
+                                    if cancel.is_set()
+                                    else f"Worker exited without a result (exit {process.exitcode}).",
+                                )
+                        state.update(worker_alive=False, worker_observed_at=_now())
+                        self._save_monitored(state)
                         events.close()
                         del self._active[id_]
+                        self._observations.pop(id_, None)
                 for id_, state in self._states.items():
                     if len(self._active) >= self.policy.max_workers:
                         break
@@ -450,11 +506,18 @@ class JobManager:
                         state.update(
                             status="failed", stage="Worker could not start", error=f"{type(exc).__name__}: {exc}"
                         )
-                        self._save(state)
+                        self._save_monitored(state)
                         continue
                     self._active[id_] = (process, events, cancel, time.monotonic())
-                    state.update(status="running", stage="Starting isolated worker")
-                    self._save(state)
+                    state.update(
+                        status="running",
+                        stage="Starting isolated worker",
+                        started_at=_now(),
+                        worker_alive=process.is_alive(),
+                        worker_observed_at=_now(),
+                        progress_indeterminate=True,
+                    )
+                    self._save_monitored(state)
 
     def close(self) -> None:
         self._stop.set()
@@ -469,13 +532,19 @@ class JobManager:
                     process.kill()
                     process.join(timeout=2)
                 events.close()
-                self._states[id_].update(status="interrupted", stage="Runtime stopped")
-                self._save(self._states[id_])
+                state = self._states[id_]
+                state.update(worker_alive=False, worker_observed_at=_now())
+                if state["status"] in {"queued", "running", "cancelling"}:
+                    state.update(status="interrupted", stage="Runtime stopped")
+                self._save_monitored(self._states[id_])
             self._active.clear()
+            self._observations.clear()
             for state in self._states.values():
                 if state["status"] == "queued":
                     state.update(status="interrupted", stage="Runtime stopped before execution")
-                    self._save(state)
+                    self._save_monitored(state)
+            for id_ in tuple(self._pending_state_writes):
+                self._save_monitored(self._states[id_])
             self._owner.close()
 
     def __enter__(self):

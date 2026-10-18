@@ -327,6 +327,11 @@ class ProjectDocument:
             _session=self._session if session is None else session,
         )
 
+    def inputs_only(self) -> ProjectDocument:
+        """Keep owned inputs and design decisions without result/view payloads."""
+        session = {key: value for key, value in self._session.items() if key == "design_study"}
+        return self.with_results((), session=session)
+
     def update_study(self, changes: Mapping[str, Any]) -> ProjectDocument:
         if not isinstance(changes, Mapping):
             raise TypeError("Study changes must be a mapping.")
@@ -498,8 +503,13 @@ class ProjectDocument:
             _session=self._session,
         )
 
-    def save(self, path: str | Path) -> Path:
+    def save(self, path: str | Path, *, progress=None) -> Path:
+        """Save inline JSON, or exact binary evidence for the ``.coilgen`` extension."""
         path = Path(path).expanduser().resolve()
+        if path.suffix.lower() == ".coilgen":
+            from .portable import save_bundle
+
+            return save_bundle(self, path, progress=progress)
         atomic_json(path, self.to_dict())
         return path
 
@@ -518,8 +528,15 @@ class ProjectDocument:
         }
 
     @classmethod
-    def load(cls, path: str | Path) -> ProjectDocument:
+    def load(cls, path: str | Path, *, progress=None) -> ProjectDocument:
         path = Path(path).expanduser().resolve()
+        from .portable import is_bundle, load_bundle
+
+        if is_bundle(path):
+            document = load_bundle(path, progress=progress)
+            if not isinstance(document, cls):
+                raise ValueError("Compact file contains an independent-channel assembly, not a single project.")
+            return document
         value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_json_object)
         return cls.from_dict(value, project_root=path.parent)
 
@@ -609,11 +626,15 @@ class ProjectDocument:
         config.output_directory = directory
         return ResearchRequest.from_config(config, name=self.name, **controls)
 
-    def export_script(self, path: str | Path) -> Path:
-        """Export a directly runnable script plus its portable project inputs."""
+    def export_script(self, path: str | Path, *, compact=False, include_results=False) -> Path:
+        """Export a runnable script and inputs; saved results are optional.
+
+        A fresh solve needs the owned model and study, not prior result archives.
+        Use ``include_results=True`` to publish a complete evidence companion.
+        """
         path = Path(path).expanduser().resolve()
-        project_path = path.with_suffix(".coilgen.json")
-        self.save(project_path)
+        project_path = path.with_suffix(".coilgen" if compact else ".coilgen.json")
+        (self if include_results else self.inputs_only()).save(project_path)
         text = (
             '"""Reproducible CoilGen2 design exported from a project revision.\n\n'
             f"Generated with {SOFTWARE_NAME}.\n"

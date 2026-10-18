@@ -207,6 +207,16 @@ def _cylinder_chart(projector, *, maximum_vertices=100000, maximum_sides=2048):
     )
 
 
+def _developable_chart(projector, **limits):
+    """Retain uniform-cylinder behavior; otherwise verify the actual frustum."""
+    try:
+        return _cylinder_chart(projector, **limits)
+    except ValueError:
+        from .developed_frustum import frustum_chart
+
+        return frustum_chart(projector, **limits)
+
+
 def _split_facets(chart, points, parameters, fractions, maximum_samples, *, surface_only=False):
     """Split chart-polyline intervals at every exact polygon-edge crossing."""
     sections, times, source = [points[0]], [parameters[0]], [fractions[0]]
@@ -724,7 +734,31 @@ def generate_cylindrical_transition_curves(
     try:
         if cylinder_chart_error is not None:
             raise ValueError(cylinder_chart_error)
-        chart = cylinder_chart if cylinder_chart is not None else _cylinder_chart(projector)
+        chart = cylinder_chart if cylinder_chart is not None else _developable_chart(projector)
+        from .developed_frustum import FrustumChart
+
+        if isinstance(chart, FrustumChart):
+            from .joint_frustum_curves import generate_frustum_transition_curves
+
+            return generate_frustum_transition_curves(
+                source,
+                *tangents,
+                chart,
+                maximum_height_m=maximum_height_m,
+                minimum_radius_m=minimum_radius_m,
+                maximum_segment_length_m=maximum_segment_length_m,
+                chord_tolerance_m=chord_tolerance_m,
+                maximum_tangent_angle_deg=maximum_tangent_angle_deg,
+                maximum_candidates=maximum_candidates,
+                b0_direction=b0_direction,
+                b0_weight=b0_weight,
+                clearance_score_cap_m=clearance_score_cap_m,
+                maximum_samples=maximum_samples,
+                lift_sign=lift_sign,
+                shape_trial_budget=shape_trial_budget,
+                shape_trials_reserved=shape_trials_reserved,
+                search_level=search_level,
+            )
         developed, _sides = chart.locate(source[[0, -1]])
         # Shortest perimeter displacement is the useful compact spiral join.
         developed[-1, 0] = developed[0, 0] + (

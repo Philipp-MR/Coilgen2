@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QSize
 from ..application.diagnostics import run_verdicts
 from .colors import apply_tone
 from .icons import icon
+from .run_metadata import read_run_metadata
 
 
 _TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
@@ -54,7 +55,7 @@ def build_job_outcome(state, record=None, verification_error=""):
     id_ = state.get("id")
     if not isinstance(id_, str) or not id_.strip():
         raise ValueError("An outcome requires its recorded job ID.")
-    metadata = getattr(record, "metadata", {}) if record is not None else {}
+    metadata = read_run_metadata(record)
     name = _text(state.get("name")) or _text(metadata.get("name")) or "Coil design"
     channel = _text(state.get("channel_name")) or _text(metadata.get("channel_name"))
     if channel and channel != name:

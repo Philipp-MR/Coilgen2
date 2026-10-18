@@ -6,6 +6,11 @@ from PySide6.QtWidgets import QAbstractSpinBox, QCheckBox, QComboBox, QFormLayou
 
 from ..engineering_limits import engineering_contouring_enabled, max_wire_current_A, min_wire_distance_m
 from .focused_editors import FocusedFormSection, control_form
+from .optimization_summary import (
+    normalize_field_budget_metric,
+    normalize_optimization_method,
+    optimization_field_budget_text,
+)
 
 
 GRAPHICAL_SETTINGS = {
@@ -20,11 +25,21 @@ GRAPHICAL_SETTINGS = {
             "Tikhonov fit",
             "Fit a soft field residual with regularization. Existing hard research constraints must be removed explicitly.",
         ),
+        "target_error_constrained_efficiency": (
+            "regularisation",
+            "Field-budget search",
+            "Select a regularized candidate meeting the configured field budget; search effort and fallback policies are adjustable.",
+        ),
     },
     "objective": {
         "power": ("power-loss", "Joule power", "Minimize sheet Joule loss in watts."),
         "minimax": ("current-density", "Peak sheet current", "Minimize peak surface current density in A/m."),
         "magnetic_energy": ("inductance", "Magnetic energy", "Minimize stored magnetic energy in joules."),
+        "mixture": (
+            "stream-function",
+            "Weighted physical objectives",
+            "Combine physical objectives with explicit weights and reference scales in All optimization parameters.",
+        ),
         "Native objective (see below)": (
             "stream-function",
             "Native objective",
@@ -56,6 +71,27 @@ GRAPHICAL_SETTINGS = {
             "Automatic policy",
             "Use current/spacing contouring when both engineering limits are configured; otherwise use level count.",
         ),
+    },
+    "contour_path_regularization_mode": {
+        "off": ("contours", "Keep original contours", "Retain the extracted contour paths."),
+        "parameterized_bspline": (
+            "contours",
+            "Smooth on surface",
+            "Fit periodic B-splines before cutting and interconnection.",
+        ),
+        "resample": (
+            "contours",
+            "Resample only",
+            "Change sampling without rounding corners; deferred for connected routing.",
+        ),
+    },
+    "contour_smoothing_scale_mode": {
+        "mesh_coupled": (
+            "mesh",
+            "Mesh-coupled",
+            "Control retained amplitude at the local mesh wavelength.",
+        ),
+        "legacy": ("contours", "Legacy strength", "Use the saved dimensionless B-spline fit strength."),
     },
 }
 
@@ -384,6 +420,29 @@ def build_settings_sequence(window, page, form, layout):
         )
         controls["min_turn_distance"].valueChanged.connect(contour.refresh_summary)
         controls["min_turn_distance"].lineEdit().textEdited.connect(contour.refresh_summary)
+        sequence.add(
+            "Contour smoothing",
+            (
+                "contour_path_regularization_mode",
+                "contour_smoothing_scale_mode",
+                "contour_smoothing_mesh_gain",
+                "contour_smoothing_factor",
+                "contour_displacement_mm",
+                "contour_segment_mm",
+                "contour_smoothing_preserve_min_turn_distance",
+            ),
+            "contours",
+            summary=lambda: (
+                sequence.text("contour_path_regularization_mode")
+                + (
+                    " · " + sequence.text("contour_smoothing_scale_mode")
+                    if window._raw_value("contour_path_regularization_mode") == "parameterized_bspline"
+                    else ""
+                )
+            ),
+            extras=_extras(layout, "contour_smoothing_scope"),
+            size=(660, 480),
+        )
         sequence.add("Clearance and bend limits", ("min_turn_distance", "min_bend"), "wire-spacing")
         sequence.add(
             "Conductor solids",
@@ -394,17 +453,46 @@ def build_settings_sequence(window, page, form, layout):
     elif page == "optimization":
         sequence.add(
             "Solve strategy",
-            ("sf_opt_method", "objective"),
+            ("sf_opt_method", "objective", "stream_function_cost_function", "constrained_quadratic_objective_mode"),
             "stream-function",
             extras=_extras(layout, "optimization_mode_info"),
-            size=(620, 340),
+            size=(660, 500),
         )
         sequence.add(
             "Field and current limits",
-            ("target_error_tolerance_percent", "current_limit"),
+            (
+                "target_error_constraint_metric",
+                "target_error_tolerance_percent",
+                "target_error_tolerance_absolute_T",
+                "target_error_rms_limit_T",
+                "target_error_std_limit_T",
+                "current_limit",
+            ),
             "constraint",
             summary=lambda: (
-                f"Field budget {sequence.text('target_error_tolerance_percent')} · "
+                optimization_field_budget_text(
+                    config,
+                    {
+                        **{
+                            key: window._value(key)
+                            for key in (
+                                "sf_opt_method",
+                                "target_error_constraint_metric",
+                                "target_error_tolerance_percent",
+                                "target_error_tolerance_absolute_T",
+                                "target_error_rms_limit_T",
+                                "target_error_std_limit_T",
+                            )
+                        },
+                        "research_physics": (
+                            {**(config.research_physics or {}), "objective": window._value("objective")}
+                            if normalize_optimization_method(window._value("sf_opt_method")) == "constrained_quadratic"
+                            and window._value("objective") != "Native objective (see below)"
+                            else None
+                        ),
+                    },
+                )
+                + " · "
                 + (
                     f"K ≤ {sequence.text('current_limit')}"
                     if window._value("current_limit") > 0
@@ -413,19 +501,47 @@ def build_settings_sequence(window, page, form, layout):
             ),
         )
         sequence.add(
+            "Solver configuration",
+            (
+                "optimization_solver",
+                "optimization_solver_residual_tolerance",
+                "constrained_optimization_solver",
+                "constrained_optimization_tolerance",
+                "constrained_optimization_max_iterations",
+                "constrained_optimization_threads",
+                "constrained_optimization_verbose",
+                "constrained_quadratic_fallback_policy",
+            ),
+            "settings",
+            summary=lambda: (
+                f"{sequence.text('constrained_optimization_solver')} · tolerance {sequence.text('constrained_optimization_tolerance')} · "
+                f"{sequence.text('constrained_optimization_max_iterations')} iterations"
+                if normalize_optimization_method(window._raw_value("sf_opt_method")) == "constrained_quadratic"
+                else f"Linear policy {sequence.text('optimization_solver')} · residual tolerance {sequence.text('optimization_solver_residual_tolerance')}"
+            ),
+            size=(660, 570),
+        )
+        controls["sf_opt_method"].currentTextChanged.connect(sequence.sections[-1].refresh_summary)
+        sequence.add(
             "Numerical settings",
-            ("tikonov_reg_factor", "acceptance_slack"),
+            (
+                "regularization_selection_method",
+                "tikonov_reg_factor",
+                "stream_function_smoothness_factor",
+                "stream_function_basis",
+                "acceptance_slack",
+            ),
             "regularisation",
             extras=_extras(layout, "acceptance_policy_info"),
             summary=lambda: (
                 f"Acceptance slack {sequence.text('acceptance_slack')}"
                 + (
                     f" · Tikhonov factor {sequence.text('tikonov_reg_factor')}"
-                    if window._raw_value("sf_opt_method") == "tikhonov"
+                    if normalize_optimization_method(window._raw_value("sf_opt_method")) != "constrained_quadratic"
                     else ""
                 )
             ),
-            size=(620, 300),
+            size=(660, 540),
         )
         controls["sf_opt_method"].currentTextChanged.connect(sequence.sections[-1].refresh_summary)
     elif page == "validation":
@@ -488,11 +604,32 @@ def _configure_visibility(sequence, page):
     if page == "optimization":
 
         def strategy(*_args):
-            tikhonov = window._raw_value("sf_opt_method") == "tikhonov"
-            visible("objective", not tikhonov)
-            visible("tikonov_reg_factor", tikhonov)
+            method = normalize_optimization_method(window._raw_value("sf_opt_method"))
+            visible("objective", method == "constrained_quadratic")
+            visible("tikonov_reg_factor", method != "constrained_quadratic")
+            for name in (
+                "stream_function_cost_function",
+                "constrained_quadratic_objective_mode",
+                "regularization_selection_method",
+                "stream_function_smoothness_factor",
+                "optimization_solver",
+                "optimization_solver_residual_tolerance",
+                "constrained_optimization_solver",
+                "constrained_optimization_tolerance",
+                "constrained_optimization_max_iterations",
+                "constrained_optimization_threads",
+                "constrained_optimization_verbose",
+                "constrained_quadratic_fallback_policy",
+            ):
+                visible(name, controls[name].isEnabled())
+            metric = normalize_field_budget_metric(window._raw_value("target_error_constraint_metric"))
+            visible("target_error_rms_limit_T", metric == "rms" and controls["target_error_rms_limit_T"].isEnabled())
+            visible("target_error_std_limit_T", metric == "std" and controls["target_error_std_limit_T"].isEnabled())
+            window._settings_decisions["Field and current limits"].refresh_summary()
 
         controls["sf_opt_method"].currentTextChanged.connect(strategy)
+        controls["objective"].currentTextChanged.connect(strategy)
+        controls["target_error_constraint_metric"].currentTextChanged.connect(strategy)
         strategy()
     elif page == "winding":
 
@@ -521,6 +658,24 @@ def _configure_visibility(sequence, page):
             signal = control.currentTextChanged if isinstance(control, QComboBox) else control.valueChanged
             signal.connect(contour_policy)
         contour_policy()
+
+        def contour_smoothing(*_args):
+            from ..contours import _normalise_contour_path_regularization_mode
+            from ..contour_smoothing import _normalise_scale_mode
+
+            mode = _normalise_contour_path_regularization_mode(window._raw_value("contour_path_regularization_mode"))
+            smoothing = mode == "parameterized_bspline"
+            mesh = _normalise_scale_mode(window._raw_value("contour_smoothing_scale_mode")) == "mesh_coupled"
+            visible("contour_smoothing_scale_mode", smoothing)
+            visible("contour_smoothing_mesh_gain", smoothing and mesh)
+            visible("contour_smoothing_factor", smoothing and not mesh)
+            visible("contour_displacement_mm", smoothing)
+            visible("contour_smoothing_preserve_min_turn_distance", smoothing)
+            visible("contour_segment_mm", mode != "off")
+
+        controls["contour_path_regularization_mode"].currentTextChanged.connect(contour_smoothing)
+        controls["contour_smoothing_scale_mode"].currentTextChanged.connect(contour_smoothing)
+        contour_smoothing()
     elif page == "material":
 
         def lift(*_args):

@@ -135,7 +135,7 @@ class AcceptancePanel(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setWordWrap(False)
+        self.table.setWordWrap(True)
         self.table.setMinimumHeight(100)
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
@@ -213,7 +213,7 @@ class AcceptancePanel(QWidget):
         identity = self.report.identity
         identity_tooltip = identity
         if record is not None:
-            submitted = run_timestamp(metadata)
+            submitted = run_timestamp(record)
             identity += "\nSubmitted: " + (submitted.text if submitted.timestamp is not None else "date unrecorded")
             identity_tooltip += "\nRecorded job submission time. " + submitted.tooltip
         self.identity.setText(identity)
@@ -293,7 +293,7 @@ class AcceptancePanel(QWidget):
         return self.report.checks[row] if 0 <= row < len(self.report.checks) else None
 
     def _issue(self, check):
-        if check is None or check.status not in {"Failed", "Unverified", "Not designed"}:
+        if self._diagnostic or check is None or check.status not in {"Failed", "Unverified", "Not designed"}:
             return None
         matching = [issue for issue in self.issues if check.issue_key and issue.key == check.issue_key]
         if not matching and check.stage == "physical":
@@ -319,6 +319,15 @@ class AcceptancePanel(QWidget):
             matching = [issue for issue in self.issues if issue.scope == "continuous_sheet"]
         errors = [issue for issue in matching if issue.severity == "error"]
         matching = errors or matching
+        if self._record is not None:
+            from pathlib import Path
+
+            matching = [
+                issue
+                for issue in matching
+                if not issue.run_directory
+                or Path(issue.run_directory).resolve() == Path(self._record.directory).resolve()
+            ]
         return next((issue for issue in matching if issue.locatable), matching[0] if matching else None)
 
     def _selected(self):
@@ -478,7 +487,7 @@ class AcceptancePanel(QWidget):
 
     def _locate(self):
         issue = self._issue(self._check())
-        if issue is not None and issue.locatable:
+        if issue is not None and issue.locatable and self.locate.isEnabled():
             self.witness_requested.emit(issue)
 
     def _settings(self):
@@ -498,21 +507,24 @@ class AcceptancePanel(QWidget):
             QTimer.singleShot(0, self, self._reveal_selection)
 
     def _responsive_columns(self):
-        """Keep the engineering decision visible; scope and margin stay in selected details."""
-        compact = self.width() < 1000
-        self.table.setColumnHidden(3, compact)
-        self.table.setColumnHidden(5, compact)
+        """Keep evaluation scope visible at desktop and smaller window sizes."""
         header = self.table.horizontalHeader()
-        header.setStretchLastSection(not compact)
-        header.setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch if compact else QHeaderView.ResizeMode.Interactive
-        )
-        for column in (1, 2, 4):
+        header.setStretchLastSection(True)
+        available = max(580, self.table.viewport().width())
+        for column, share, minimum in (
+            (0, 0.26, 150),
+            (1, 0.105, 70),
+            (2, 0.105, 70),
+            (3, 0.105, 70),
+            (4, 0.105, 75),
+            (5, 0.32, 170),
+        ):
+            self.table.setColumnHidden(column, False)
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
-            self.table.setColumnWidth(column, 110)
-        if not compact:
-            self.table.setColumnWidth(0, 340)
-            self.table.setColumnWidth(3, 100)
+            self.table.setColumnWidth(column, max(minimum, int(available * share)))
+        self.table.resizeRowsToContents()
+        for row in range(self.table.rowCount()):
+            self.table.setRowHeight(row, min(110, self.table.rowHeight(row)))
 
     def _reveal_selection(self):
         row = self.table.currentRow()

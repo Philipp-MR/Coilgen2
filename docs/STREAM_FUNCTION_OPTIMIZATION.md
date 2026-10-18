@@ -190,7 +190,7 @@ remain. Repository Ruff checks pass.
 
 ### Generated-cylinder comparison
 
-The reproducible [comparison example](examples/optimization_minimax_comparison.py)
+The reproducible [comparison example](../examples/optimization_minimax_comparison.py)
 uses a 20 mT/m transverse gradient, a 60 mm spherical ROI, 544 mesh vertices,
 1024 faces, 481 unknowns and 81 fitting points. Clarabel solved both objectives
 at the same 3% fitted relative L2 field-error budget, with no post-solve scaling.

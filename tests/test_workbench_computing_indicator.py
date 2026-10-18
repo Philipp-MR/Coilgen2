@@ -1,11 +1,32 @@
 """The bottom-left activity indicator follows workers, not viewed evidence."""
 
+from threading import Event
+
 import pytest
 
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QEventLoop, QPoint, QTimer
 from PySide6.QtWidgets import QDockWidget
 
 from test_workbench_usability import application as application, windows as windows
+
+
+def wait_until(predicate, timeout_ms=3000):
+    """Deliver queued Qt callbacks until a bounded asynchronous condition holds."""
+    if predicate():
+        return
+    loop = QEventLoop()
+    poll, deadline = QTimer(), QTimer()
+    poll.timeout.connect(lambda: loop.quit() if predicate() else None)
+    deadline.setSingleShot(True)
+    deadline.timeout.connect(loop.quit)
+    poll.start(5)
+    deadline.start(timeout_ms)
+    try:
+        loop.exec()
+    finally:
+        poll.stop()
+        deadline.stop()
+    assert predicate(), "Asynchronous workbench condition did not settle before the deadline"
 
 
 def publish(window, *, status="running", progress=0.45, **fields):
@@ -81,8 +102,50 @@ def test_terminal_worker_state_clears_computing_indicator(windows, status):
     window = windows()
     publish(window)
     publish(window, status=status, progress=1.0)
+    wait_until(lambda: not window._stopped_reuse_tasks and window.computation_indicator.isHidden())
     assert window.computation_indicator.isHidden()
     assert window.computation_indicator.label.text() == ""
+
+
+@pytest.mark.parametrize("status,tone", [("failed", "error"), ("cancelled", "warning"), ("interrupted", "warning")])
+def test_stopped_checkpoint_verification_is_busy_without_restarting_execution(windows, monkeypatch, status, tone):
+    from coilgen.application import execution, reuse
+
+    window = windows()
+    indicator = window.computation_indicator
+    entered, release = Event(), Event()
+    empty_plan = reuse.ReusePlan((), (), ())
+
+    def verify_checkpoint(*_args, **_kwargs):
+        entered.set()
+        if not release.wait(10):
+            raise TimeoutError("Test did not release background checkpoint verification")
+        return empty_plan
+
+    monkeypatch.setattr(execution, "execution_reuse", lambda *_args, **_kwargs: empty_plan)
+    monkeypatch.setattr(reuse, "plan_stopped_reuse", verify_checkpoint)
+    try:
+        publish(window, status=status, progress=None)
+        window._focus_job("worker", open_window=False)
+        wait_until(entered.is_set)
+        assert indicator.label.text() == "Working…" and not indicator.isHidden()
+        assert "Verifying stopped checkpoints" in indicator.toolTip()
+        assert indicator.progress.minimum() == indicator.progress.maximum() == 0
+        assert window.states["worker"]["status"] == status
+        assert window.execution_progress.maximum() == 100 and window.execution_progress.format() == "Unreported"
+        assert window.execution_label.property("semanticTone") == tone
+        heartbeat = []
+        QTimer.singleShot(0, lambda: heartbeat.append(True))
+        wait_until(lambda: bool(heartbeat))
+        assert not release.is_set()
+    finally:
+        release.set()
+        wait_until(lambda: not window._stopped_reuse_tasks)
+    wait_until(indicator.isHidden)
+    assert indicator.label.text() == ""
+    assert window.states["worker"]["status"] == status
+    assert window.execution_progress.maximum() == 100 and window.execution_progress.format() == "Unreported"
+    assert window.execution_label.property("semanticTone") == tone
 
 
 @pytest.mark.parametrize("progress", [None, float("nan"), float("inf"), True, "0.45", -0.2, 1.2])
@@ -151,17 +214,34 @@ def test_local_field_work_reports_percent_phase_and_unknown_factorization(window
     assert indicator.isHidden()
 
 
-def test_opaque_worker_keeps_completed_work_floor_and_shows_busy_activity(windows):
+def test_opaque_worker_reports_unknown_activity_then_measured_operation_progress(windows):
     window = windows()
-    publish(window, progress=0.45, progress_indeterminate=True, phase_progress=None, stage="Sparse factorization")
+    publish(
+        window,
+        progress=0.45,
+        progress_kind="allocated_work",
+        progress_indeterminate=True,
+        phase_progress=None,
+        stage="Sparse factorization",
+    )
     indicator = window.computation_indicator
-    assert indicator.label.text() == "Computing (45%)" and indicator.progress.maximum() == 0
+    # Allocated work is retained as evidence, but is not a measured operation percentage.
+    assert indicator.label.text() == "Computing…" and indicator.progress.maximum() == 0
+    assert "45%" not in indicator.label.text() and "45%" not in indicator.details_label.text()
+    assert "Sparse factorization" in indicator.details_label.text()
     assert "current operation has no measurable work total" in indicator.toolTip()
     publish(
-        window, progress=0.46, progress_indeterminate=False, phase_progress=0.3, progress_completed=3, progress_total=10
+        window,
+        progress=0.46,
+        progress_kind="allocated_work",
+        progress_indeterminate=False,
+        phase_progress=0.3,
+        progress_completed=3,
+        progress_total=10,
     )
-    assert indicator.label.text() == "Computing (46%)" and indicator.progress.value() == 46
-    assert "current operation 30% (3/10 work units)" in indicator.toolTip()
+    assert indicator.label.text() == "Operation 30%" and indicator.progress.value() == 30
+    assert "operation 30%" in indicator.toolTip() and "3/10 work units" in indicator.toolTip()
+    assert "allocated work 46%" in indicator.tasks_menu.actions()[0].text()
 
 
 def test_nearly_finished_local_work_cannot_round_to_100_percent(windows):

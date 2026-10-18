@@ -10,7 +10,6 @@ permissions:
 env:
   MPLBACKEND: Agg
   QT_QPA_PLATFORM: offscreen
-  MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
   OPENBLAS_NUM_THREADS: "1"
   MKL_NUM_THREADS: "1"
   OMP_NUM_THREADS: "1"
@@ -45,4 +44,6 @@ jobs:
       - name: Check source formatting
         run: python -m ruff format --check src tests projects
       - name: Run regression suite
+        env:
+          MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
         run: python -m pytest -q

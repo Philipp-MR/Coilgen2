@@ -14,14 +14,15 @@ endorsement, sponsorship, or ownership of CoilGen2 is represented.
 This is third-party institutional artwork, separate from any license for
 CoilGen2 source code. No permission to reuse the logo is asserted here.
 
-## CoilGen wordmark
+## CoilGen squared wordmark
 
-`coilgen-logo.png` is the selected CoilGen wordmark with a transparent
-background, edited with the built-in imagegen tool on 2026-10-09. The copper
-coil symbol and black lettering retain the selected design. The GUI adds its
-version badge separately; the image contains only the wordmark.
+`coilgen-logo.png` is the CoilGen² wordmark with a transparent background.
+The selected CoilGen design was edited with the built-in imagegen tool on
+2026-10-09, then updated with a small raised “2” on 2026-10-17. The copper coil
+symbol and black italic lettering retain the selected design.
 
-Image edit prompt: remove the white background, including negative spaces,
-preserve the copper cylindrical winding symbol and exact black italic
-“CoilGen” lettering, retain colors and proportions, and trim excessive outer
-margin. No redesign, additional text, badge, border, glow or shadow.
+Current image edit prompt: add a small black superscript numeral 2 immediately
+to the upper right of the final n, reading “CoilGen²”, like a mathematical
+squared exponent. Use a compatible bold italic style and preserve the copper
+cylindrical winding symbol, existing lettering and transparent background.
+No badge, shadow, glow or additional words.

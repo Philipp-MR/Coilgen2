@@ -72,6 +72,9 @@ def test_shape_trial_admission_precedes_any_geometry_work(monkeypatch):
         "transition_count": count,
         "shape_trial_upper_bound": count * shapes._TRANSITION_TRIALS,
         "maximum_shape_trials": shapes.JointShapeLimits().maximum_shape_trials,
+        "infeasibility_proven": False,
+        "work_budget_exhausted": True,
+        "search_failure_scope": "work_budget_admission",
     }
     assert not result.candidates
 
@@ -295,7 +298,7 @@ def test_transition_shortlist_keeps_full_height_needed_to_clear_another_return(m
     higher_jump = curve(0.006, jumps=2)
     monkeypatch.setattr(evaluator, "jump_count", lambda value: value.jumps)
     shortlisted = evaluator._shortlist([*half_height, full_height, higher_jump, lower_jump])
-    assert len(shortlisted) == 16
+    assert len(shortlisted) == 32  # Both regular and physical guide branches stay represented.
     assert shortlisted[0] is lower_jump
     assert any(value is full_height for value in shortlisted)
     assert [value.jumps for value in shortlisted] == sorted(value.jumps for value in shortlisted)
@@ -308,6 +311,25 @@ def test_transition_shortlist_keeps_full_height_needed_to_clear_another_return(m
     assert len(result) == 1
     assert shortlisted[result[0][0][0]] is full_height
     assert result[0][1] == pytest.approx(0.0035)
+
+
+def test_regular_combination_ranking_uses_bend_distribution_and_keeps_alternatives():
+    theta = np.linspace(0, np.pi / 2, 65)
+    gentle = SimpleNamespace(points=np.column_stack((np.cos(theta), np.sin(theta), np.zeros_like(theta))))
+    corner = SimpleNamespace(points=np.array([[1.0, 0, 0], [1, 1, 0], [0, 1, 0]]))
+    # The two candidates have the same endpoints and no protected obstacles;
+    # the more distributed bend is preferred without erasing the other family.
+    result = shapes._rank_curve_combinations(
+        [[corner, gentle]],
+        np.empty((0, 2, 3)),
+        0.1,
+        0,
+        2,
+        b0_direction=[1, 0, 0],
+        b0_weight=10.0,
+        selection_policy="regular",
+    )
+    assert [state[0] for state in result] == [(1,), (0,)]
 
 
 def test_complete_feasible_families_survive_same_axial_count_with_three_slots():
@@ -532,6 +554,7 @@ def test_scoring_exclusion_follows_connectivity_not_geometric_proximity():
 
 def test_skip_normal_shift_forbids_added_arch_height_and_support_offset(monkeypatch):
     case = make_group_routing_case("facing_corridor")
+    case.config.joint_group_routing_selection_policy = "physical"
     case.config.skip_normal_shift = True
     proposal = propose_joint_group_routes(case.part, case.config).candidates[0]
     heights, offsets = [], []
@@ -553,6 +576,7 @@ def test_skip_normal_shift_forbids_added_arch_height_and_support_offset(monkeypa
 
 def test_ephemeral_proposal_cache_preserves_geometry_and_rechecks_support(monkeypatch):
     case = make_group_routing_case("facing_corridor")
+    case.config.joint_group_routing_selection_policy = "physical"
     proposal = propose_joint_group_routes(case.part, case.config).candidates[0]
     generated, checked = [], []
 
@@ -693,8 +717,11 @@ def test_progressive_real_route_still_requires_full_body_and_fixed_current_field
 
 @pytest.fixture(scope="module")
 def qualified_evaluated_route():
-    """Independent physical seed from the same whole-transition graph as production."""
+    """Frozen physical seed for the historical pointwise field-budget regression."""
     case = make_group_routing_case("facing_corridor")
+    # The dedicated 1 um perturbation below was chosen against this physical
+    # profile. Default-regular manufacture/field certification uses qualified_route.
+    case = replace(case, config=replace(case.config, joint_group_routing_selection_policy="physical"))
     evaluator = shapes.JointTransitionEvaluator(case.part, case.config)
     proposal = propose_joint_group_routes(
         case.part,
@@ -786,10 +813,22 @@ def test_default_field_budget_rejects_jump_first_shapes_outside_fixed_current_bu
     attempts = selected.joint_route_diagnostics["attempts"]
     assert attempts and not any(attempt["selected"] for attempt in attempts)
     assert selected.joint_route_diagnostics["baseline_routing_metrics"]["jump_count"] == 2
+    field_rejections = 0
     for attempt in attempts:
-        assert "pointwise_field_delta_budget" in attempt["reasons"], attempt
         validation = attempt["validation"]
-        assert validation["route_maximum_pointwise_vector_delta_t_per_a"] > validation["route_maximum_delta_t_per_a"]
+        if validation["route_maximum_pointwise_vector_delta_t_per_a"] > validation["route_maximum_delta_t_per_a"]:
+            assert "pointwise_field_delta_budget" in attempt["reasons"], attempt
+            field_rejections += 1
+        else:
+            # A near-incumbent alternative can pass the field gate while still
+            # failing the unchanged objective/manufacturing improvement gate.
+            assert attempt["reasons"] == ["no_routing_objective_or_manufacturing_improvement"], attempt
+            assert attempt["routing_metrics"] is not None
+            assert (
+                validation["physical_maximum_pointwise_vector_delta_t_per_a"]
+                <= validation["physical_maximum_delta_t_per_a"]
+            )
+    assert field_rejections > 0
     actual = {(tuple(a), tuple(b)) for a, b in zip(selected.wire_path.v[:-1], selected.wire_path.v[1:])}
     assert all((tuple(a), tuple(b)) in actual for a, b in candidate.protected_segments.values())
     np.testing.assert_array_equal(baseline.wire_path.v, original_points)

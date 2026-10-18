@@ -243,10 +243,20 @@ class SourceHealth:
 
     def report(self, source) -> VerificationReport:
         directory = source_directory(source)
-        return self._reports.get(directory, VerificationReport(directory, "unverified"))
+        report = self._reports.get(directory)
+        return report if report is not None else VerificationReport(directory, "unverified")
 
     def error(self, source) -> str:
         return self.report(source).error
+
+    def known_error(self, canonical_directory: Path) -> str:
+        """Read recorded health for a captured identity without filesystem I/O.
+
+        This passive display lookup performs no verification and cannot clear
+        failures. Explicit load/check/mark operations still resolve their source.
+        """
+        report = self._reports.get(canonical_directory)
+        return report.error if report is not None else ""
 
     def mark_failed(self, source, error) -> VerificationReport:
         report = VerificationReport(source_directory(source), "failed", str(error))
@@ -257,7 +267,9 @@ class SourceHealth:
         """Record an explicit successful load/check; never infer from a view."""
         directory = source_directory(source)
         if report is None:
-            metadata = getattr(source, "metadata", {})
+            metadata = getattr(source, "metadata_view", None)
+            if metadata is None:
+                metadata = getattr(source, "metadata", {})
             report = VerificationReport(
                 directory,
                 "verified",

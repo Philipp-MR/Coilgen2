@@ -10,6 +10,7 @@ import json
 import math
 import os
 from pathlib import Path
+import time
 from typing import Any, Iterator, TextIO
 import uuid
 
@@ -54,7 +55,19 @@ def atomic_text_writer(path: str | Path, *, newline: str = "\n") -> Iterator[Tex
             yield output
             output.flush()
             os.fsync(output.fileno())
-        os.replace(temporary, path)
+        # Windows readers and background scanners can briefly deny replacement.
+        # Retry only its sharing/access errors; retain atomic replacement and
+        # propagate a persistent denial without touching the previous file.
+        delays = iter((0.01, 0.02, 0.04, 0.08, 0.16))
+        while True:
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError as exc:
+                delay = next(delays, None)
+                if getattr(exc, "winerror", None) not in {5, 32, 33} or delay is None:
+                    raise
+                time.sleep(delay)
     finally:
         temporary.unlink(missing_ok=True)
 

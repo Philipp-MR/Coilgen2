@@ -64,7 +64,16 @@ def _full_contour_signature(part):
 
 
 def _cut_signature(part):
-    return tuple(tuple((loop.v.shape, loop.v.tobytes()) for loop in group.opened_loops) for group in part.groups)
+    # Equal ports can have different reserved return lanes. Deduplicate the
+    # complete seed context so those homotopies still reach joint shaping.
+    openings = tuple(tuple((loop.v.shape, loop.v.tobytes()) for loop in group.opened_loops) for group in part.groups)
+    connections = tuple(
+        tuple(
+            (points.shape, points.tobytes()) for points in (group.spiral_in_v, group.spiral_out_v, group.return_path_v)
+        )
+        for group in part.connected_groups
+    )
+    return openings, connections
 
 
 def _baseline_signature(part):
@@ -202,7 +211,7 @@ def prepare_joint_group_context(part, config):
     return context
 
 
-def propose_joint_cut_variants(part, config, *, maximum_candidates=2):
+def _propose_high_low_variants(part, config, *, maximum_candidates=2):
     """Propose at most two alternate high/low rail contexts without adoption.
 
     First flip every unforced group opening, then flip the worst-score
@@ -347,4 +356,88 @@ def propose_joint_cut_variants(part, config, *, maximum_candidates=2):
         )
     result.diagnostics["candidate_count"] = len(result.variants)
     result.reasons = () if result.variants else tuple(sorted(rejected or {"no_alternative_cut_context"}))
+    return result
+
+
+def propose_joint_cut_variants(part, config, *, maximum_candidates=2, failure_witnesses=()):
+    """Retain historical rails and add bounded shared-corridor port contexts.
+
+    New contexts require regular selection, explicit cut-search permission and
+    a nonzero port budget. Forced cuts and baseline physical state remain exact.
+    The actual removal span and continuous seam shift are recorded for every
+    contour. No context is adopted without complete physical and field checks.
+    """
+    from .routing_objective import routing_selection_policy
+    from .routing_ports import propose_routing_port_plans, audit_shared_corridor_reservations
+
+    if isinstance(maximum_candidates, bool) or not isinstance(maximum_candidates, int) or maximum_candidates < 0:
+        raise ValueError("maximum_candidates must be a nonnegative integer.")
+    result = _propose_high_low_variants(part, config, maximum_candidates=min(maximum_candidates, 2))
+    if (
+        maximum_candidates <= 2
+        or routing_selection_policy(config) != "regular"
+        or not config.joint_group_routing_search_cuts
+    ):
+        return result
+    budget = min(maximum_candidates, int(config.joint_group_routing_port_search_count))
+    if budget <= len(result.variants):
+        return result
+    try:
+        source = prepare_joint_group_context(part, config)
+    except ValueError as error:
+        result.diagnostics["port_search_unavailable"] = str(error)
+        return result
+    result.diagnostics.update(maximum_candidates=budget, bounded_directed_port_search=True)
+    seen = {_cut_signature(part), *(_cut_signature(context) for context in result.variants)}
+    plans = propose_routing_port_plans(source, config, maximum_candidates=budget, failure_witnesses=failure_witnesses)
+    added = []
+    for plan in plans:
+        if len(result.variants) >= budget:
+            break
+        context = _isolated_context(source)
+        signature = _baseline_signature(context)
+        original_groups, original_connections = list(context.groups), list(context.connected_groups)
+        context.groups = deepcopy(context.groups)
+        changed = tuple(sorted(plan.groups))
+        attempt = {"name": plan.name, "changed_group_indices": list(changed), "port_plan": plan.diagnostics}
+        try:
+            interconnect_within_groups(
+                [context], replace(config, progress_flag=False), open_singletons=True, cut_plan=plan
+            )
+            for index in range(len(context.groups)):
+                if index not in changed:
+                    context.groups[index] = original_groups[index]
+                    context.connected_groups[index] = original_connections[index]
+            reasons = _context_reasons(source, context, changed)
+            if _baseline_signature(context) != signature:
+                reasons = (*reasons, "baseline_geometry_or_state_changed")
+            if not reasons and _cut_signature(context) in seen:
+                reasons = ("duplicate_cut_geometry",)
+        except (ValueError, FloatingPointError) as error:
+            reasons = ("directed_port_context_unavailable",)
+            attempt["detail"] = str(error)
+        attempt["reasons"] = list(reasons)
+        result.diagnostics["attempts"].append(attempt)
+        if reasons:
+            continue
+        seen.add(_cut_signature(context))
+        context.topology_diagnostics["joint_port_plan"] = plan.diagnostics
+        reservation = audit_shared_corridor_reservations(context, config)
+        context.topology_diagnostics["joint_port_plan"]["reservation_audit"] = reservation
+        record = {"name": plan.name, "changed_group_indices": list(changed), "port_plan": plan.diagnostics}
+        key = (
+            not reservation["completed"],
+            reservation.get("intersection_pair_count", float("inf")),
+            reservation.get("clearance_pair_count", float("inf")),
+            plan.name,
+        )
+        added.append((key, context, record))
+    for _key, context, record in sorted(added, key=lambda row: row[0]):
+        if len(result.variants) >= budget:
+            break
+        result.variants.append(context)
+        result.diagnostics["variants"].append(record)
+    result.diagnostics["candidate_count"] = len(result.variants)
+    if result.variants:
+        result.reasons = ()
     return result

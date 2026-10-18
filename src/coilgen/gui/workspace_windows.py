@@ -96,7 +96,10 @@ class EvidenceWindows(QTabWidget):
             if index < 0:
                 raise ValueError("Unknown evidence window.")
             window = PanelWindow(
-                self.tabText(index) + " — CoilGen2", self._contents.get(page, page), self.parentWidget()
+                self.tabText(index) + " — CoilGen2",
+                self._contents.get(page, page),
+                self.parentWidget(),
+                size=(1200, 740) if self.tabText(index) in {"Design acceptance", "Problems"} else (960, 680),
             )
             window.setWindowIcon(self.tabIcon(index))
             window.closed.connect(self._window_closed)

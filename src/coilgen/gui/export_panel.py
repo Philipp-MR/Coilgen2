@@ -496,9 +496,9 @@ class GeometryExportTask(QRunnable):
         from ..application.cad import export_geometry
         from ..application.evidence import EvidenceIntegrityError
         from ..progress import progress_context
-        from .design_tasks import ProgressSignalRelay
+        from .design_tasks import ProgressSignalRelay, deliver_task_signal
 
-        relay = ProgressSignalRelay(self.signals.progress.emit)
+        relay = ProgressSignalRelay(lambda event: deliver_task_signal(self.signals, "progress", event))
         try:
             with progress_context(relay.report):
                 package = export_geometry(self.record, self.directory, self.names, unit=self.unit, project=self.project)
@@ -506,10 +506,10 @@ class GeometryExportTask(QRunnable):
             if isinstance(exc, EvidenceIntegrityError):
                 self.verification_error = str(exc)
             relay.flush()
-            self.signals.finished.emit(None, f"{type(exc).__name__}: {exc}")
+            deliver_task_signal(self.signals, "finished", None, f"{type(exc).__name__}: {exc}")
         else:
             relay.flush()
-            self.signals.finished.emit(package, "")
+            deliver_task_signal(self.signals, "finished", package, "")
 
 
 def _detached_record(record):
@@ -644,9 +644,9 @@ class ArtifactExportTask(QRunnable):
 
     def run(self):
         from ..progress import progress_context
-        from .design_tasks import ProgressSignalRelay
+        from .design_tasks import ProgressSignalRelay, deliver_task_signal
 
-        relay = ProgressSignalRelay(self.signals.progress.emit)
+        relay = ProgressSignalRelay(lambda event: deliver_task_signal(self.signals, "progress", event))
         try:
             with progress_context(relay.report):
                 paths = export_verified_artifacts(self.record, self.directory, loader=self.loader)
@@ -654,7 +654,7 @@ class ArtifactExportTask(QRunnable):
             if isinstance(exc, ArtifactVerificationError):
                 self.verification_error = str(exc)
             relay.flush()
-            self.signals.finished.emit(None, f"{type(exc).__name__}: {exc}")
+            deliver_task_signal(self.signals, "finished", None, f"{type(exc).__name__}: {exc}")
         else:
             relay.flush()
-            self.signals.finished.emit(paths, "")
+            deliver_task_signal(self.signals, "finished", paths, "")

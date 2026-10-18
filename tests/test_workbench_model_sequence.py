@@ -39,7 +39,15 @@ def test_model_study_results_tree_has_predictable_operation_order(windows):
         "stage:evaluated",
     )
     assert _key(results) == "results"
-    assert _children(results) == ("export",)
+    assert _children(results) == (
+        "result:metrics",
+        "result:slices",
+        "result:errors",
+        "result:harmonics",
+        "result:coil",
+        "result:checks",
+        "export",
+    )
     assert tuple(window.stage_items) == ("prepared", "sheet", "contours", "routed", "evaluated")
 
 

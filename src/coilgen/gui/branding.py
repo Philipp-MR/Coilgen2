@@ -1,4 +1,4 @@
-"""Shared presentation of the selected CoilGen wordmark."""
+"""Shared presentation of the CoilGen squared wordmark."""
 
 from importlib.resources import files
 
@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QLabel, QSizePolicy
 
 
 class LogoLabel(QLabel):
-    """Keep the original logo sharp and proportional at each display size."""
+    """Keep the shared wordmark sharp and proportional at each display size."""
 
     def __init__(self, parent=None, *, width=420):
         super().__init__(parent)
@@ -26,7 +26,7 @@ class LogoLabel(QLabel):
                 self._logo = self._logo.copy(bounds)
         self._preferred_width = width
         self.setObjectName("coilgen_logo")
-        self.setAccessibleName("CoilGen logo with cylindrical coil winding")
+        self.setAccessibleName("CoilGen squared (CoilGen2) logo with cylindrical coil winding")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.setMaximumWidth(width)
@@ -42,7 +42,7 @@ class LogoLabel(QLabel):
 
     def _update_pixmap(self):
         if self._logo.isNull():
-            self.setText("CoilGen")
+            self.setText("CoilGen\N{SUPERSCRIPT TWO}")
             return
         ratio = self.devicePixelRatioF()
         size = QSize(round(self.width() * ratio), round(self.height() * ratio))

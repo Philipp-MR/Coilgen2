@@ -119,6 +119,24 @@ def test_standalone_results_identity_uses_only_original_recorded_submission_date
     assert record.metadata == {key: value for key, value in before.items() if key != "job"}
 
 
+@pytest.mark.parametrize("identity", ("project_id", "request_sha256"))
+def test_explicitly_mismatched_live_job_never_supplies_result_timestamp(identity):
+    metadata = {
+        "project_id": "owner",
+        "request_sha256": "request",
+        "job": {"project_id": "owner", "request_sha256": "request", "created_at": "2026-10-04T16:32:10Z"},
+    }
+    before = copy.deepcopy(metadata)
+    assert run_timestamp(metadata).timestamp is not None
+    metadata["job"][identity] = "another-result"
+    assert run_timestamp(metadata).timestamp is None
+    record = SimpleNamespace(metadata=metadata, execution_times={"created_at": "2026-10-03T15:22:00Z"})
+    assert run_timestamp(record).timestamp == run_timestamp({"job": {"created_at": "2026-10-03T15:22:00Z"}}).timestamp
+    metadata["job"].pop(identity)
+    assert run_timestamp(metadata).timestamp is not None
+    assert metadata == {**before, "job": {key: value for key, value in before["job"].items() if key != identity}}
+
+
 def test_current_and_electrical_summary_never_merges_refit_with_original(panels):
     record = acceptance_record()
     record.metadata["wire_fields"] = {
@@ -268,15 +286,15 @@ def test_compact_results_preserve_status_scope_margin_and_full_saved_checks(pane
     for _ in range(4):
         application.processEvents()
     assert panel.table.horizontalScrollBar().maximum() == 0
-    assert all(not panel.table.isColumnHidden(column) for column in (0, 1, 2, 4))
-    assert panel.table.isColumnHidden(3) and panel.table.isColumnHidden(5)
+    assert all(not panel.table.isColumnHidden(column) for column in range(6))
     row = next(
         row for row, check in enumerate(panel.report.checks) if check.key == "body:Strict review:body1:clearance"
     )
     panel.table.selectRow(row)
     assert "Recorded margin: -2 mm" in panel.details.text()
     assert panel.report.checks[row].scope in panel.details.text()
-    assert panel.table.item(row, 3).text() == "-2 mm"  # Hidden presentation column retains its exact saved quantity.
+    assert panel.table.item(row, 3).text() == "-2 mm"
+    assert panel.table.item(row, 5).text() == panel.report.checks[row].scope
     panel.resize(1200, 620)
     application.processEvents()
     assert not panel.table.isColumnHidden(3) and not panel.table.isColumnHidden(5)

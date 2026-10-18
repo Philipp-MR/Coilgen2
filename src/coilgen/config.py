@@ -238,6 +238,11 @@ class RoutingSettings:
     routing_circuit_scope: str
     joint_group_routing: bool
     joint_group_routing_search_mode: str
+    joint_group_routing_selection_policy: str
+    joint_group_routing_regular_field_tolerance_rel: float
+    joint_group_routing_port_search_count: int
+    joint_group_routing_cut_span_max_factor: float
+    joint_group_routing_seam_search_extent_rel: float
     joint_group_routing_field_acceptance: str
     joint_group_routing_clearance_m: float | None
     joint_group_routing_max_field_change_rel: float
@@ -601,6 +606,17 @@ class CoilGenConfig:
     # Cheap circuit ranking followed by staged curve generation. Thorough keeps
     # the wider eager transition search for comparison and difficult cases.
     joint_group_routing_search_mode: str = "progressive"
+    # Regular ranks only independently validated geometry, under the unchanged
+    # field gates and an additional baseline-anchored longitudinal RMS tolerance.
+    # Physical reproduces the historical jumps/field RMS/length selection.
+    joint_group_routing_selection_policy: str = "regular"
+    # Whole-coil extra longitudinal RMS / peak active DSV target. Each eligible
+    # part receives an equal share; zero forbids any RMS increase for regularity.
+    joint_group_routing_regular_field_tolerance_rel: float = 0.001
+    # Bounded alternate attachment contexts; no physical acceptance limit is relaxed.
+    joint_group_routing_port_search_count: int = 8
+    joint_group_routing_cut_span_max_factor: float = 4.0
+    joint_group_routing_seam_search_extent_rel: float = 0.1
     # Absolute qualification by default. Explicit non_regression permits only
     # inherited failures that do not worsen; budget_only allows measured scalar
     # failures subject to the hard routing delta budgets. All failures are reported.
@@ -613,7 +629,7 @@ class CoilGenConfig:
     # Optional pointwise B0-component change with the same target/current scaling.
     joint_group_routing_max_longitudinal_field_change_rel: float | None = None
     joint_group_routing_max_candidates: int = 6
-    # Search guide only; final selection uses jumps, longitudinal field RMS, length.
+    # Search guide only; final selection follows the explicit selection policy.
     joint_group_routing_b0_weight: float = 1.0
     # Reopen the same directed contours on alternate, unforced cut rails.
     joint_group_routing_search_cuts: bool = True

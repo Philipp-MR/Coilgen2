@@ -5,6 +5,15 @@ from dataclasses import dataclass
 import numpy as np
 
 from .models import ContourLine, Mesh
+from .progress import DesignCancelled, ProgressReporter
+
+
+_MAX_TOPOLOGY_CELL_REFERENCES = 250_000
+_MAX_TOPOLOGY_PAIR_CANDIDATES = 2_000_000
+
+
+class _TopologyWorkLimit(RuntimeError):
+    """A candidate cannot be certified within the bounded topology workspace."""
 
 
 @dataclass(frozen=True)
@@ -54,6 +63,9 @@ class MeshContourBSplineSmoother:
         self.mesh = mesh
         self.patch_rings = max(int(patch_rings), 1)
         self._face_neighbors = _face_neighbors(mesh.faces)
+        # The support is immutable during a contour batch. Detect its metric
+        # once, rather than rebuilding the whole-mesh boundary for every loop.
+        self._cylinder_frame = _circular_cylinder_frame(mesh)
 
     def smooth(
         self,
@@ -74,8 +86,12 @@ class MeshContourBSplineSmoother:
             return _unchanged(contour, "missing_surface_provenance")
         if len(points) < 4:
             return _unchanged(contour, "insufficient_contour_points")
+        if not np.all(np.isfinite(points)):
+            return _unchanged(contour, "nonfinite_contour_points")
         if not _is_closed(points):
             return _unchanged(contour, "contour_not_closed")
+        if not _valid_surface_provenance(self.mesh, contour):
+            return _unchanged(contour, "invalid_surface_provenance")
         factor = float(smoothing_factor)
         scale_mode = _normalise_scale_mode(scale_mode)
         requested_mesh_gain = float(mesh_gain)
@@ -85,11 +101,20 @@ class MeshContourBSplineSmoother:
             not np.isfinite(requested_mesh_gain) or requested_mesh_gain <= 0.0 or requested_mesh_gain >= 1.0
         ):
             return _unchanged(contour, "mesh_coupled_smoothing_disabled")
+        try:
+            displacement_limit = float(max_displacement_m)
+        except (TypeError, ValueError):
+            return _unchanged(contour, "invalid_displacement_limit")
+        if not np.isfinite(displacement_limit) or displacement_limit < 0.0:
+            return _unchanged(contour, "invalid_displacement_limit")
 
+        _report_smoothing_activity("parameterizing contour support")
         try:
             chart = self._build_chart(contour)
             contour_uv = _contour_uv(chart, contour)
             parameters = _closed_arclength_parameter(points)
+        except DesignCancelled:
+            raise
         except (ValueError, RuntimeError, np.linalg.LinAlgError) as exc:
             return _unchanged(contour, f"parameterization_failed:{type(exc).__name__}")
 
@@ -114,16 +139,15 @@ class MeshContourBSplineSmoother:
             parameters,
             factor,
             sample_count,
-            max(float(max_displacement_m), 0.0),
+            displacement_limit,
             scale_mode=scale_mode,
             mesh_scale_m=mesh_scale,
             mesh_gain=requested_mesh_gain,
             work_samples_per_mesh_length=max(int(work_samples_per_mesh_length), 4),
         )
-        if result is None:
-            return _unchanged(contour, "fitted_curve_left_parameterized_patch")
-
-        smoothed, displacement, applied_mesh_gain, work_sample_count = result
+        smoothed, displacement, applied_mesh_gain, work_sample_count, reason = result
+        if smoothed is None:
+            return _unchanged(contour, reason)
         return ParameterizedContourSmoothingResult(
             contour=smoothed,
             applied=True,
@@ -147,12 +171,19 @@ class MeshContourBSplineSmoother:
         if len(seed_faces) == 0:
             raise ValueError("Contour has no crossed faces.")
         for ring_count in range(self.patch_rings, 0, -1):
+            _report_smoothing_activity("constructing contour surface chart")
             patch_faces = _expanded_face_patch(seed_faces, self._face_neighbors, ring_count)
-            cylindrical_chart = _cylindrical_surface_chart(self.mesh, patch_faces)
+            cylindrical_chart = (
+                _cylindrical_surface_chart(self.mesh, patch_faces, self._cylinder_frame)
+                if self._cylinder_frame is not None
+                else None
+            )
             if cylindrical_chart is not None:
                 return cylindrical_chart
             try:
                 return _harmonic_surface_chart(self.mesh, patch_faces)
+            except DesignCancelled:
+                raise
             except (ValueError, RuntimeError, np.linalg.LinAlgError):
                 continue
         raise ValueError("No valid local harmonic chart could be constructed.")
@@ -171,7 +202,7 @@ class MeshContourBSplineSmoother:
         mesh_scale_m: float,
         mesh_gain: float,
         work_samples_per_mesh_length: int,
-    ) -> tuple[ContourLine, float, float, int] | None:
+    ) -> tuple[ContourLine | None, float, float, int, str]:
         dense_count = int(np.clip(max(16 * sample_count, 512), 512, 32768))
         dense_u = np.linspace(0.0, 1.0, dense_count + 1)
         original_points = np.asarray(contour.v, dtype=float)
@@ -182,33 +213,57 @@ class MeshContourBSplineSmoother:
         else:
             fit_values = [smoothing_factor * np.power(0.5, index) for index in range(8)]
             fit_values.append(0.0)
+        rejection_reason = "spline_fit_failed"
         for fit_value in fit_values:
-            if scale_mode == "mesh_coupled":
-                applied_mesh_gain = float(fit_value)
-                fit_data = _mesh_coupled_periodic_bspline(
-                    contour_uv,
-                    parameters,
-                    original_length_m=original_length,
-                    mesh_scale_m=mesh_scale_m,
-                    mesh_gain=applied_mesh_gain,
-                    work_samples_per_mesh_length=work_samples_per_mesh_length,
-                )
-            else:
-                applied_mesh_gain = 1.0
-                fit_data = (*_periodic_bspline(contour_uv, parameters, float(fit_value)), 0)
-            fit, _fitted_parameters, translation, work_sample_count = fit_data
-            fit = (fit, _fitted_parameters, translation)
-            candidate_dense = _evaluate_bspline(fit, dense_u)
-            if _polyline_self_intersects(candidate_dense):
+            _report_smoothing_activity("fitting contour spline")
+            try:
+                if scale_mode == "mesh_coupled":
+                    applied_mesh_gain = float(fit_value)
+                    fit_data = _mesh_coupled_periodic_bspline(
+                        contour_uv,
+                        parameters,
+                        original_length_m=original_length,
+                        mesh_scale_m=mesh_scale_m,
+                        mesh_gain=applied_mesh_gain,
+                        work_samples_per_mesh_length=work_samples_per_mesh_length,
+                    )
+                else:
+                    applied_mesh_gain = 1.0
+                    fit_data = (*_periodic_bspline(contour_uv, parameters, float(fit_value)), 0)
+                fit, _fitted_parameters, translation, work_sample_count = fit_data
+                fit = (fit, _fitted_parameters, translation)
+                candidate_dense = _evaluate_bspline(fit, dense_u)
+            except DesignCancelled:
+                raise
+            except (ValueError, RuntimeError, FloatingPointError, np.linalg.LinAlgError):
+                # Ill-conditioned fits must leave a usable original contour,
+                # not abort the entire design or insert invalid coordinates.
+                rejection_reason = "spline_fit_failed"
+                continue
+            if not np.all(np.isfinite(candidate_dense)):
+                rejection_reason = "nonfinite_fitted_curve"
+                continue
+            if _reverses_closed_orientation(contour_uv, candidate_dense):
+                rejection_reason = "fitted_curve_reversed_circulation"
+                continue
+            try:
+                intersects = _polyline_self_intersects(candidate_dense)
+            except _TopologyWorkLimit:
+                rejection_reason = "topology_check_work_limit_exceeded"
+                continue
+            if intersects:
+                rejection_reason = "fitted_curve_self_intersects"
                 continue
             mapped_dense = _map_uv_points(chart, candidate_dense)
             if mapped_dense is None:
+                rejection_reason = "fitted_curve_left_parameterized_patch"
                 continue
             dense_lengths = np.linalg.norm(np.diff(mapped_dense, axis=0), axis=1)
             cumulative = np.concatenate(([0.0], np.cumsum(dense_lengths)))
             total_length = float(cumulative[-1])
             if total_length <= 1.0e-14:
-                return None
+                rejection_reason = "fitted_curve_zero_length"
+                continue
             sample_arclength = np.linspace(0.0, total_length, sample_count + 1)
             sample_u = np.interp(sample_arclength, cumulative, dense_u)
             sample_uv = _evaluate_bspline(fit, sample_u)
@@ -219,14 +274,24 @@ class MeshContourBSplineSmoother:
                 target_segment_length_m=total_length / max(sample_count, 1),
             )
             if candidate is None:
+                rejection_reason = "fitted_curve_trace_failed"
                 continue
             if _has_disconnected_face_passages(candidate.segment_faces):
+                rejection_reason = "fitted_curve_repeated_face_passages"
                 continue
             displacement = _max_point_to_polyline_distance(candidate.v[:-1], original_points)
+            if max_displacement_m > 0.0:
+                # The reverse direction also protects small original features
+                # from being cut away by an otherwise nearby fitted curve.
+                displacement = max(
+                    displacement,
+                    _max_point_to_polyline_distance(original_points[:-1], candidate.v),
+                )
             if max_displacement_m > 0.0 and displacement > max_displacement_m * (1.0 + 1.0e-6):
+                rejection_reason = "displacement_limit_exceeded"
                 continue
-            return candidate, displacement, float(applied_mesh_gain), int(work_sample_count)
-        return None
+            return candidate, displacement, float(applied_mesh_gain), int(work_sample_count), "applied"
+        return None, 0.0, 1.0, 0, rejection_reason
 
 
 def smooth_contour_on_parameterized_mesh(
@@ -260,6 +325,12 @@ def _unchanged(contour: ContourLine, reason: str) -> ParameterizedContourSmoothi
     return ParameterizedContourSmoothingResult(contour=contour, applied=False, reason=reason)
 
 
+def _report_smoothing_activity(message: str) -> None:
+    # ProgressReporter also observes the worker's cooperative cancellation
+    # context, even when console progress is disabled.
+    ProgressReporter(label="Contour smoothing").report(None, message)
+
+
 def _has_surface_provenance(contour: ContourLine) -> bool:
     return (
         contour.segment_faces is not None
@@ -267,6 +338,24 @@ def _has_surface_provenance(contour: ContourLine) -> bool:
         and len(contour.segment_faces) == len(contour.v) - 1
         and np.asarray(contour.segment_barycentric).shape == (len(contour.v) - 1, 2, 3)
     )
+
+
+def _valid_surface_provenance(mesh: Mesh, contour: ContourLine) -> bool:
+    """Validate segment geometry before using face indices as array offsets."""
+
+    faces = np.asarray(contour.segment_faces, dtype=np.int64)
+    barycentric = np.asarray(contour.segment_barycentric, dtype=float)
+    if np.any(faces < 0) or np.any(faces >= len(mesh.faces)) or not np.all(np.isfinite(barycentric)):
+        return False
+    if np.any(barycentric < -1.0e-8) or np.any(barycentric > 1.0 + 1.0e-8):
+        return False
+    if not np.allclose(np.sum(barycentric, axis=2), 1.0, rtol=0.0, atol=1.0e-8):
+        return False
+    triangles = mesh.vertices[mesh.faces[faces]]
+    reconstructed = np.einsum("nki,nij->nkj", barycentric, triangles)
+    endpoints = np.stack((contour.v[:-1], contour.v[1:]), axis=1)
+    scale = max(float(np.linalg.norm(np.ptp(contour.v, axis=0))), 1.0e-6)
+    return bool(np.all(np.isfinite(triangles)) and np.max(np.abs(reconstructed - endpoints)) <= 1.0e-8 * scale)
 
 
 def _is_closed(points: np.ndarray) -> bool:
@@ -377,18 +466,19 @@ def _harmonic_surface_chart(mesh: Mesh, global_faces: np.ndarray) -> _SurfaceCha
     )
 
 
-def _cylindrical_surface_chart(mesh: Mesh, global_faces: np.ndarray) -> _SurfaceChart | None:
+def _cylindrical_surface_chart(
+    mesh: Mesh,
+    global_faces: np.ndarray,
+    frame: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float],
+) -> _SurfaceChart | None:
     """Return an exact unwrapped chart for a triangulated circular cylinder.
 
     The chart uses axial distance and radius-scaled azimuth, so a smooth curve
-    in 2D remains intrinsically smooth after mapping back.  Five periodic tiles
+    in 2D remains intrinsically smooth after mapping back. Three periodic tiles
     allow both contractible gradient loops and contours that wind once around
     the cylinder to cross the angular seam without a discontinuity.
     """
 
-    frame = _circular_cylinder_frame(mesh)
-    if frame is None:
-        return None
     center, axis, first_radial, second_radial, radius = frame
     relative = np.asarray(mesh.vertices, dtype=float) - center
     axial = relative @ axis
@@ -621,21 +711,38 @@ def _solve_uniform_harmonic_map(
     if len(interior) == 0:
         return uv
 
+    try:
+        from scipy.sparse import coo_matrix  # type: ignore
+        from scipy.sparse.linalg import spsolve  # type: ignore
+    except ImportError as exc:  # pragma: no cover - also required for the spline
+        raise RuntimeError("Parameterized contour smoothing requires scipy.") from exc
+
     interior_lookup = {int(vertex): row for row, vertex in enumerate(interior)}
-    matrix = np.zeros((len(interior), len(interior)), dtype=float)
+    rows: list[int] = []
+    columns: list[int] = []
+    coefficients: list[float] = []
     right_hand_side = np.zeros((len(interior), 2), dtype=float)
     for row, vertex in enumerate(interior):
         degree = len(neighbors[int(vertex)])
         if degree == 0:
             raise ValueError("Isolated parameterization vertex.")
-        matrix[row, row] = float(degree)
+        rows.append(row)
+        columns.append(row)
+        coefficients.append(float(degree))
         for neighbor in neighbors[int(vertex)]:
             neighbor_row = interior_lookup.get(int(neighbor))
             if neighbor_row is None:
                 right_hand_side[row] += uv[int(neighbor)]
             else:
-                matrix[row, neighbor_row] -= 1.0
-    uv[interior] = np.linalg.solve(matrix, right_hand_side)
+                rows.append(row)
+                columns.append(neighbor_row)
+                coefficients.append(-1.0)
+    matrix = coo_matrix((coefficients, (rows, columns)), shape=(len(interior), len(interior))).tocsc()
+    _report_smoothing_activity("solving harmonic contour chart")
+    solved = spsolve(matrix, right_hand_side)
+    if not np.all(np.isfinite(solved)):
+        raise ValueError("Singular harmonic parameterization patch.")
+    uv[interior] = solved
     return uv
 
 
@@ -884,7 +991,9 @@ def _periodic_linear_interpolation(
 def _map_uv_points(chart: _SurfaceChart, points_uv: np.ndarray) -> np.ndarray | None:
     mapped = []
     hint: int | None = None
-    for point in points_uv:
+    for point_index, point in enumerate(points_uv):
+        if point_index % 512 == 0:
+            _report_smoothing_activity("mapping fitted contour to surface")
         located = _locate_uv_point(chart, point, hint)
         if located is None:
             return None
@@ -941,7 +1050,9 @@ def _trace_uv_polyline(
         return None
     face_hint, _ = located
     traced: list[tuple[int, np.ndarray, np.ndarray]] = []
-    for start, end in zip(points_uv[:-1], points_uv[1:]):
+    for segment_index, (start, end) in enumerate(zip(points_uv[:-1], points_uv[1:])):
+        if segment_index % 256 == 0:
+            _report_smoothing_activity("tracing contour across surface triangles")
         pieces = _trace_uv_segment(chart, start, end, face_hint)
         if not pieces:
             return None
@@ -1146,7 +1257,9 @@ def _max_point_to_polyline_distance(points: np.ndarray, polyline: np.ndarray) ->
     directions = np.diff(polyline, axis=0)
     lengths_squared = np.einsum("ij,ij->i", directions, directions)
     maximum = 0.0
-    for point in np.asarray(points, dtype=float):
+    for point_index, point in enumerate(np.asarray(points, dtype=float)):
+        if point_index % 256 == 0:
+            _report_smoothing_activity("checking contour displacement")
         relative = point - starts
         parameters = np.divide(
             np.einsum("ij,ij->i", relative, directions),
@@ -1161,37 +1274,120 @@ def _max_point_to_polyline_distance(points: np.ndarray, polyline: np.ndarray) ->
 
 
 def _polyline_self_intersects(points: np.ndarray) -> bool:
+    """Check all segments without decimating away small self-intersections.
+
+    A uniform spatial hash supplies overlapping segment bounds; the exact
+    predicates are vectorized over each small candidate set. Smooth sampled
+    curves therefore avoid the previous quadratic Python pair loop. Explicit
+    work limits retain the original contour when a pathological candidate
+    would require excessive cell storage or pair comparisons.
+    """
+
     points = np.asarray(points, dtype=float)
-    if len(points) > 513:
-        indices = np.linspace(0, len(points) - 1, 513, dtype=np.int64)
-        points = points[indices]
     segment_count = len(points) - 1
-    closed = bool(
-        np.linalg.norm(points[-1] - points[0]) <= 1.0e-10 * max(float(np.linalg.norm(np.ptp(points, axis=0))), 1.0)
-    )
-    for first in range(segment_count):
-        for second in range(first + 2, segment_count):
-            if closed and first == 0 and second == segment_count - 1:
-                continue
-            if _segments_intersect_2d(points[first], points[first + 1], points[second], points[second + 1]):
+    if segment_count < 3:
+        return False
+    if not np.all(np.isfinite(points)):
+        return True
+    closed = _is_closed(points)
+    extent = float(np.max(np.ptp(points, axis=0)))
+    if extent <= 0.0:
+        return True
+    tolerance = 64.0 * np.finfo(float).eps * extent
+    starts, ends = points[:-1], points[1:]
+    minimum = np.minimum(starts, ends) - tolerance
+    maximum = np.maximum(starts, ends) + tolerance
+    origin = np.min(minimum, axis=0)
+    # Small cells also bound candidate traffic for very slender simple loops.
+    cell_width = extent / max(int(4.0 * np.sqrt(segment_count)), 1)
+    cell_minimum = np.floor((minimum - origin) / cell_width).astype(np.int64)
+    cell_maximum = np.floor((maximum - origin) / cell_width).astype(np.int64)
+    cells: dict[tuple[int, int], list[int]] = {}
+    cell_references = 0
+    pair_candidates = 0
+    for index in range(segment_count):
+        if index % 1024 == 0:
+            _report_smoothing_activity("checking contour self-intersections")
+        width = int(cell_maximum[index, 0] - cell_minimum[index, 0] + 1)
+        height = int(cell_maximum[index, 1] - cell_minimum[index, 1] + 1)
+        cell_references += width * height
+        if cell_references > _MAX_TOPOLOGY_CELL_REFERENCES:
+            raise _TopologyWorkLimit("Contour topology cell workspace exceeded.")
+        keys = [
+            (first, second)
+            for first in range(int(cell_minimum[index, 0]), int(cell_maximum[index, 0]) + 1)
+            for second in range(int(cell_minimum[index, 1]), int(cell_maximum[index, 1]) + 1)
+        ]
+        pair_candidates += sum(len(cells.get(key, ())) for key in keys)
+        if pair_candidates > _MAX_TOPOLOGY_PAIR_CANDIDATES:
+            raise _TopologyWorkLimit("Contour topology pair workspace exceeded.")
+        candidates = {other for key in keys for other in cells.get(key, ()) if other < index - 1}
+        if closed and index == segment_count - 1:
+            candidates.discard(0)
+        if candidates:
+            others = np.fromiter(candidates, dtype=np.int64)
+            overlap = np.all(maximum[others] >= minimum[index], axis=1) & np.all(
+                minimum[others] <= maximum[index], axis=1
+            )
+            others = others[overlap]
+            if len(others) and np.any(
+                _segment_intersections_2d(starts[index], ends[index], starts[others], ends[others], tolerance)
+            ):
                 return True
+        for key in keys:
+            cells.setdefault(key, []).append(index)
     return False
 
 
 def _segments_intersect_2d(a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray) -> bool:
-    def cross(first: np.ndarray, second: np.ndarray) -> float:
-        return float(first[0] * second[1] - first[1] * second[0])
+    extent = max(float(np.linalg.norm(b - a)), float(np.linalg.norm(d - c)), np.finfo(float).tiny)
+    tolerance = 64.0 * np.finfo(float).eps * extent
+    return bool(_segment_intersections_2d(a, b, c[None, :], d[None, :], tolerance)[0])
 
-    direction_ab = b - a
-    direction_cd = d - c
-    denominator = cross(direction_ab, direction_cd)
-    if abs(denominator) <= 1.0e-14:
+
+def _segment_intersections_2d(
+    a: np.ndarray,
+    b: np.ndarray,
+    starts: np.ndarray,
+    ends: np.ndarray,
+    tolerance: float,
+) -> np.ndarray:
+    def cross(first: np.ndarray, second: np.ndarray) -> np.ndarray:
+        return first[..., 0] * second[..., 1] - first[..., 1] * second[..., 0]
+
+    ab = b - a
+    directions = ends - starts
+    first = cross(ab, starts - a)
+    second = cross(ab, ends - a)
+    third = cross(directions, a - starts)
+    fourth = cross(directions, b - starts)
+    cross_tolerance = tolerance * np.maximum(np.linalg.norm(ab), np.linalg.norm(directions, axis=1))
+    straddles_ab = ((first <= cross_tolerance) & (second >= -cross_tolerance)) | (
+        (second <= cross_tolerance) & (first >= -cross_tolerance)
+    )
+    straddles_cd = ((third <= cross_tolerance) & (fourth >= -cross_tolerance)) | (
+        (fourth <= cross_tolerance) & (third >= -cross_tolerance)
+    )
+    overlap = np.all(np.maximum(a, b) + tolerance >= np.minimum(starts, ends), axis=1) & np.all(
+        np.minimum(a, b) - tolerance <= np.maximum(starts, ends), axis=1
+    )
+    return straddles_ab & straddles_cd & overlap
+
+
+def _reverses_closed_orientation(source: np.ndarray, candidate: np.ndarray) -> bool:
+    """Retain circulation for contractible loops; developed winding loops stay open."""
+
+    if not _is_closed(source):
         return False
-    relative = c - a
-    first_parameter = cross(relative, direction_cd) / denominator
-    second_parameter = cross(relative, direction_ab) / denominator
-    tolerance = 1.0e-10
-    return bool(tolerance < first_parameter < 1.0 - tolerance and tolerance < second_parameter < 1.0 - tolerance)
+    source_relative = source - source[0]
+    candidate_relative = candidate - candidate[0]
+    source_area = float(np.sum(_signed_cross_products(source_relative)))
+    candidate_area = float(np.sum(_signed_cross_products(candidate_relative)))
+    return bool(source_area * candidate_area <= 0.0)
+
+
+def _signed_cross_products(points: np.ndarray) -> np.ndarray:
+    return points[:-1, 0] * points[1:, 1] - points[:-1, 1] * points[1:, 0]
 
 
 def _coefficient_of_variation(values: np.ndarray) -> float:

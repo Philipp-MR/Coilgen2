@@ -70,7 +70,7 @@ def test_widening_keeps_cumulative_work_and_separates_external_cache(monkeypatch
         charts.append(True)
         raise ValueError("fixture support is planar")
 
-    monkeypatch.setattr(shapes, "_cylinder_chart", no_chart)
+    monkeypatch.setattr(shapes, "_developable_chart", no_chart)
     evaluator = shapes.JointTransitionEvaluator(
         case.part,
         case.config,

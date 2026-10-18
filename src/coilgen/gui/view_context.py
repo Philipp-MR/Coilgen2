@@ -20,6 +20,7 @@ from .colors import apply_tone
 from .icons import icon
 from .job_history import format_job_timestamp
 from .dataset_capabilities import FIELD_KEYS as _FIELD_KEYS, PATH_PREFIXES, resolve_dataset
+from .run_metadata import read_run_metadata
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,7 +300,7 @@ def build_view_context(
             False,
             "Sampling unavailable",
         )
-    metadata = _mapping(getattr(record, "metadata", None))
+    metadata = _mapping(read_run_metadata(record))
     job, state = _mapping(metadata.get("job")), _mapping(state)
 
     def provenance(field):

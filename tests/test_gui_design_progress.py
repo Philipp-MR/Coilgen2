@@ -1,45 +1,14 @@
 """Graphical progress reports recorded computation, never inferred success."""
 
 import os
-from pathlib import Path
 
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QCoreApplication, QEvent, Qt
-from PySide6.QtGui import QFont, QFontDatabase
-from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QPushButton, QToolButton
 
-from coilgen.gui.design_progress import DesignProgress, build_design_progress
-
-
-@pytest.fixture
-def app():
-    return QApplication.instance() or QApplication([])
-
-
-@pytest.fixture
-def progress(app):
-    widget = DesignProgress()
-    yield widget
-    widget.close()
-    widget.deleteLater()
-    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-
-
-@pytest.fixture
-def native_font(app):
-    font_id = -1
-    font_path = Path("C:/Windows/Fonts/segoeui.ttf")
-    if not QFontDatabase.families() and font_path.exists():
-        font_id = QFontDatabase.addApplicationFont(str(font_path))
-    font = QFont(QFontDatabase.applicationFontFamilies(font_id)[0], 9) if font_id >= 0 else app.font()
-    yield font
-    if font_id >= 0:
-        QFontDatabase.removeApplicationFont(font_id)
+from coilgen.gui.design_progress import build_design_progress
 
 
 def _statuses(snapshot):
@@ -198,30 +167,6 @@ def test_unavailable_runtime_cannot_animate_or_invent_completed_evidence(verific
         assert snapshot.tone == "error" and "verification failed" in snapshot.activity
 
 
-@pytest.mark.parametrize("value", [None, 0.45])
-def test_unavailable_runtime_disables_follow_hides_animation_and_recovers(progress, value):
-    events = []
-    progress.follow_requested.connect(events.append)
-    state = {"status": "running", "progress": value}
-    progress.set_state("evaluated", state, completed=("prepared",), following=True)
-    assert progress.chips["sheet"].property("stageStatus") == "current"
-    assert progress.follow_button.isEnabled()
-    progress.set_state("evaluated", state, completed=("prepared",), following=True, unavailable="Status unreadable")
-    assert progress.progress_bar.isHidden() and progress.progress_bar.maximum() == 100
-    assert progress.chips["sheet"].property("stageStatus") == "waiting"
-    assert not progress.follow_button.isHidden() and not progress.follow_button.isEnabled()
-    assert progress.follow_button.isChecked() and "unavailable" in progress.follow_button.toolTip()
-    assert "Status unreadable" in progress.activity_label.toolTip()
-    assert events == []
-    progress.set_state("evaluated", state, completed=("prepared",), following=True)
-    assert not progress.progress_bar.isHidden() and progress.follow_button.isEnabled()
-    assert progress.chips["sheet"].property("stageStatus") == "current"
-    assert progress.snapshot.percent == (45 if value is not None else None)
-    assert progress.progress_bar.maximum() == (100 if value is not None else 0)
-    assert "Runtime unavailable" not in progress.snapshot.activity
-    assert events == []
-
-
 @pytest.mark.parametrize("value, expected", [(0, 0), (0.275, 28), (1, 100)])
 def test_only_finite_fraction_progress_is_presented(value, expected):
     snapshot = build_design_progress("evaluated", {"status": "running", "progress": value})
@@ -279,69 +224,3 @@ def test_unknown_requested_boundary_is_rejected(requested):
 def test_unknown_verification_state_is_rejected():
     with pytest.raises(ValueError, match="Unknown evidence verification"):
         build_design_progress("sheet", verification="accepted")
-
-
-def test_only_follow_is_interactive_and_programmatic_updates_do_not_emit(progress):
-    events = []
-    progress.follow_requested.connect(events.append)
-    progress.set_state("evaluated", {"status": "running"}, following=True)
-    assert not progress.follow_button.isHidden()
-    assert progress.follow_button.isChecked()
-    assert events == []
-    progress.show()
-    QTest.mouseClick(progress.follow_button, Qt.MouseButton.LeftButton)
-    assert events == [False]
-    assert progress.findChildren(QToolButton) == [progress.follow_button]
-    assert not progress.findChildren(QPushButton)
-    assert all(chip.focusPolicy() == Qt.FocusPolicy.NoFocus for chip in progress.chips.values())
-    progress.set_state("sheet", {"status": "completed"}, completed=("prepared", "sheet"), verification="verified")
-    assert progress.follow_button.isHidden()
-    assert events == [False]
-
-
-def test_widget_busy_and_known_progress_are_distinct(progress):
-    progress.set_state("evaluated", {"status": "running", "progress": None})
-    assert progress.progress_bar.maximum() == 0
-    progress.set_state("evaluated", {"status": "running", "progress": 0.63})
-    assert progress.progress_bar.maximum() == 100
-    assert progress.progress_bar.value() == 63
-    progress.set_state("evaluated", {"status": "completed", "progress": 1}, verification="pending")
-    assert progress.progress_bar.maximum() == 0
-    progress.set_state("evaluated")
-    assert progress.progress_bar.isHidden()
-
-
-def test_cached_chip_has_explicit_accessible_state_and_no_completed_badge(progress):
-    progress.set_state("evaluated", reusable=("prepared", "sheet"))
-    chip = progress.chips["sheet"]
-    assert chip.property("stageStatus") == "reusable"
-    assert "checkpoint available for reuse" in chip.accessibleName()
-    assert "not a newly completed stage" in chip.toolTip()
-    assert progress.chips["contours"].property("stageStatus") == "waiting"
-
-
-@pytest.mark.parametrize("width", [400, 800])
-def test_compact_layout_keeps_all_chips_and_follow_visible_without_overflow(app, progress, native_font, width):
-    progress.setFont(native_font)
-    progress.set_state(
-        "evaluated",
-        {
-            "status": "running",
-            "name": "A very long reproducible conical second-order shim design",
-            "project_revision": 100,
-            "progress": 0.23,
-        },
-        completed=("prepared", "sheet"),
-        preview_stage="sheet",
-    )
-    progress.resize(width, progress.sizeHint().height())
-    progress.show()
-    app.processEvents()
-    assert progress.minimumSizeHint().width() <= width
-    assert progress.height() <= 90
-    assert progress.follow_button.geometry().right() < width
-    assert all(chip.geometry().right() < width and chip.width() >= 30 for chip in progress.chips.values())
-    assert progress.activity_label.full_text in progress.activity_label.toolTip()
-    assert progress.chips["sheet"].property("stageStatus") == "complete"
-    assert progress.chips["sheet"].property("plottedStage") is True
-    assert not progress.grab().isNull()

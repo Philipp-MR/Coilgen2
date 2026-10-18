@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
@@ -13,6 +14,7 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 
+from ..persistence import json_value
 from ..research.storage import DirectoryOwner, request_identity, verified_result, verify_input_files
 from .project import ProjectDocument
 from .project import _freeze
@@ -23,10 +25,12 @@ class RunRecord:
     directory: Path
     _metadata: dict = field(repr=False)
     _arrays: dict[str, np.ndarray] = field(repr=False)
+    _execution_times: dict[str, str] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "directory", Path(self.directory).resolve())
-        object.__setattr__(self, "_metadata", _freeze(deepcopy(self._metadata)))
+        object.__setattr__(self, "_metadata", _freeze(json_value(self._metadata)))
+        object.__setattr__(self, "_execution_times", _freeze(deepcopy(self._execution_times)))
         arrays = {key: np.array(value, copy=True) for key, value in self._arrays.items()}
         for value in arrays.values():
             value.flags.writeable = False
@@ -34,9 +38,21 @@ class RunRecord:
 
     @property
     def metadata(self) -> dict:
-        from ..persistence import json_value
-
         return json_value(self._metadata)
+
+    @property
+    def metadata_view(self) -> Mapping:
+        """Borrow immutable JSON metadata without copying fabrication diagnostics.
+
+        Nested mappings are read-only and sequences are tuples. ``metadata``
+        still returns detached dictionaries/lists for callers that edit them.
+        """
+        return self._metadata
+
+    @property
+    def execution_times(self) -> dict[str, str]:
+        """Detached archived timestamp provenance, separate from live job state."""
+        return dict(self._execution_times)
 
     @property
     def arrays(self) -> dict[str, np.ndarray]:
@@ -267,4 +283,6 @@ class DesignService:
         job = directory / "job.json"
         if job.is_file():
             result["job"] = json.loads(job.read_text(encoding="utf-8"))
-        return RunRecord(directory, deepcopy(result), arrays)
+        from .bundles import archived_execution_times
+
+        return RunRecord(directory, deepcopy(result), arrays, archived_execution_times(directory, result))

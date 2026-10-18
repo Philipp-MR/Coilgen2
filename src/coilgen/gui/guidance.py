@@ -19,6 +19,7 @@ from ..application.targets import recognize_solid_harmonic_target
 from ..config import CoilGenConfig
 from ..field_units import PROTON_GYROMAGNETIC_RATIO_HZ_PER_T
 from ..target import _axis_from_expression, _target_gradient_normalization_method
+from .run_metadata import read_run_metadata
 
 
 CONTINUATION_STAGES = {
@@ -55,7 +56,7 @@ def _config(project):
 
 
 def _metadata(record):
-    return record.metadata if record is not None else {}
+    return read_run_metadata(record)
 
 
 def _identity(metadata, key):

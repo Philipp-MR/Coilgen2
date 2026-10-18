@@ -5,14 +5,63 @@ from __future__ import annotations
 import base64
 import binascii
 from dataclasses import dataclass, field
+from datetime import datetime
 from hashlib import sha256
 import json
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 
 from ..research.storage import result_metadata_digest
+from ..persistence import file_digest
 from .evidence import EvidenceIntegrityError, verify_record
 from .service import DesignService, RunRecord
+
+
+_EXECUTION_FILE = "execution_times.json"
+
+
+def _execution_times(payload, request_sha256):
+    """Read durable provenance only; never reconstruct a transient worker state."""
+    value = json.loads(payload)
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema", "request_sha256", "times"}
+        or value["schema"] != "coilgen-execution-times-v1"
+        or value["request_sha256"] != request_sha256
+        or not isinstance(value["times"], dict)
+        or not value["times"]
+        or set(value["times"]) - {"created_at", "completed_at"}
+    ):
+        raise ValueError("Malformed or differently bound archived execution timestamps.")
+    for timestamp in value["times"].values():
+        if not isinstance(timestamp, str) or not ("T" in timestamp or " " in timestamp):
+            raise ValueError("Archived execution time must retain a recorded ISO timestamp.")
+        datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    return value["times"]
+
+
+def archived_execution_times(directory, metadata):
+    """Accept cache dates only if their full immutable archive identity verifies."""
+    directory = Path(directory).resolve()
+    path = directory / _EXECUTION_FILE
+    if not path.is_file():
+        return {}
+    try:
+        _digest(directory.name)
+        hashes = {}
+        for member in directory.rglob("*"):
+            if not member.is_file():
+                continue
+            name = _relative_name(member.relative_to(directory).as_posix())
+            if not member.resolve().is_relative_to(directory) or member.is_symlink():
+                return {}
+            hashes[name] = file_digest(member)
+        identity = sha256(json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        if identity != directory.name:
+            return {}
+        return _execution_times(path.read_bytes(), metadata["request_sha256"])
+    except (OSError, KeyError, ValueError, TypeError):
+        return {}
 
 
 def _digest(value):
@@ -133,12 +182,19 @@ class RunArchive:
             name = f"portable_inputs/{expected}"
             if name not in files or sha256(files[name]).hexdigest() != expected:
                 raise ValueError("Archived run is missing an exact portable input copy.")
+        if _EXECUTION_FILE in files:
+            _execution_times(files[_EXECUTION_FILE], digest)
         return result
 
     @property
     def metadata(self) -> dict:
         """Detached original result metadata, without transient live job state."""
         return json.loads(dict(self._files)["result.json"])
+
+    @property
+    def execution_times(self) -> dict:
+        payload = dict(self._files).get(_EXECUTION_FILE)
+        return _execution_times(payload, self.metadata["request_sha256"]) if payload is not None else {}
 
     @classmethod
     def capture(cls, record: RunRecord, alias: str | None = None):
@@ -166,6 +222,35 @@ class RunArchive:
             if sha256(payload).hexdigest() != expected:
                 raise ValueError("Run input changed while its archive was being captured.")
             files[f"portable_inputs/{expected}"] = payload
+        times = verified.execution_times
+        job = verified.metadata.get("job") or {}
+        if job.get("request_sha256") == result.get("request_sha256") and (
+            not result.get("project_id") or job.get("project_id") == result["project_id"]
+        ):
+            for key, value in (
+                ("created_at", job.get("created_at")),
+                (
+                    "completed_at",
+                    job.get("completed_at", job.get("updated_at")) if job.get("status") == "completed" else None,
+                ),
+            ):
+                if isinstance(value, str):
+                    try:
+                        candidate = {
+                            "schema": "coilgen-execution-times-v1",
+                            "request_sha256": result["request_sha256"],
+                            "times": {key: value},
+                        }
+                        _execution_times(json.dumps(candidate), result["request_sha256"])
+                    except (TypeError, ValueError):
+                        continue
+                    times[key] = value
+        if times:
+            files[_EXECUTION_FILE] = json.dumps(
+                {"schema": "coilgen-execution-times-v1", "request_sha256": result["request_sha256"], "times": times},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
         payloads = tuple(sorted(files.items()))
         if alias is None:
             name = verified.metadata.get("name")

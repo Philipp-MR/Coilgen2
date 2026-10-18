@@ -38,9 +38,12 @@ class GroupRouteValidationLimits:
     maximum_triangle_pairs: int = 32000000
     maximum_triangle_broadphase_pairs: int = 128000000
     maximum_target_points: int = 10000
+    # Route-field screening does not spend the separate conductor-preview
+    # allowance. Bound its Biot–Savart work independently, per routed part.
+    maximum_field_candidates: int = 96
 
     def __post_init__(self):
-        if any(not isinstance(value, int) or value < 1 for value in vars(self).values()):
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in vars(self).values()):
             raise ValueError("Group route validation limits must be positive integers.")
 
 
@@ -645,6 +648,7 @@ def validate_group_route_candidate(
         "group_count": len(group_sequence),
         "field_current_a": current,
         "normal_shift_applied": bool(apply_normal_shift),
+        "body_preview_started": False,
     }
     try:
         preview_config = _preview_config(config)
@@ -707,6 +711,7 @@ def validate_group_route_candidate(
         reasons = assess(baseline.route_field_per_amp, _field(preview.wire_path.v, targets), "route")
         if reasons:
             return GroupRouteValidation(False, tuple(reasons), diagnostics, baseline=baseline)
+        diagnostics["body_preview_started"] = True
         sweep, reasons = _sweep_preview(preview, config, limits, progress_callback)
         diagnostics["manufacturing"] = sweep
         if reasons:

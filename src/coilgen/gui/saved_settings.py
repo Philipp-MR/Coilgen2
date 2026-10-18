@@ -23,13 +23,15 @@ class SavedSettingsTask(QRunnable):
         self.verification_error = False
 
     def run(self):
+        from .design_tasks import deliver_task_signal
+
         try:
             request = load_saved_request(self.record)
         except Exception as exc:
             self.verification_error = isinstance(exc, SavedEvidenceError)
-            self.signals.finished.emit(None, f"{type(exc).__name__}: {exc}")
+            deliver_task_signal(self.signals, "finished", None, f"{type(exc).__name__}: {exc}")
         else:
-            self.signals.finished.emit(request, "")
+            deliver_task_signal(self.signals, "finished", request, "")
 
 
 class SavedSettingsDialog(QDialog):

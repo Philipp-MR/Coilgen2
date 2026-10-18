@@ -240,6 +240,7 @@ def _objective(candidate, direction, weight):
 
 def test_b0_preference_improves_mutable_objective_without_charging_protected_turns():
     case = make_group_routing_case("greedy_trap")
+    case.config.joint_group_routing_selection_policy = "physical"
     limits = GroupRoutingLimits(beam_width=512, candidate_count=4, return_fractions=(0.0, 0.75))
     direction = (1, 1, 0)
     shortest = propose_joint_group_routes(case.part, case.config, limits=limits, b0_direction=direction, b0_weight=0)
@@ -255,6 +256,7 @@ def test_b0_preference_improves_mutable_objective_without_charging_protected_tur
 
 def test_zero_weight_recovers_global_length_minimum_on_small_exhaustive_port_graph():
     case = make_group_routing_case("greedy_trap")
+    case.config.joint_group_routing_selection_policy = "physical"
     lengths = []
     for tail in itertools.permutations((1, 2)):
         order = (0, *tail)

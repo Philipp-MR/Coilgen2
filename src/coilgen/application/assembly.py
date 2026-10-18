@@ -158,9 +158,13 @@ class ProjectAssembly:
     def rename(self, name: str) -> ProjectAssembly:
         return self if name == self.name else replace(self, name=name, revision=self.revision + 1)
 
-    def save(self, path: str | Path) -> Path:
-        """Atomically save all channels, owned inputs and completed results in one JSON."""
+    def save(self, path: str | Path, *, progress=None) -> Path:
+        """Atomically save JSON or a compact ``.coilgen`` binary evidence bundle."""
         path = Path(path).expanduser().resolve()
+        if path.suffix.lower() == ".coilgen":
+            from .portable import save_bundle
+
+            return save_bundle(self, path, progress=progress)
         atomic_json(path, self.to_dict())
         return path
 
@@ -188,8 +192,15 @@ class ProjectAssembly:
         }
 
     @classmethod
-    def load(cls, path: str | Path) -> ProjectAssembly:
+    def load(cls, path: str | Path, *, progress=None) -> ProjectAssembly:
         path = Path(path).expanduser().resolve()
+        from .portable import is_bundle, load_bundle
+
+        if is_bundle(path):
+            document = load_bundle(path, progress=progress)
+            if not isinstance(document, cls):
+                raise ValueError("Compact file contains a single project, not an independent-channel assembly.")
+            return document
         value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_json_object)
         return cls.from_dict(value, project_root=path.parent)
 

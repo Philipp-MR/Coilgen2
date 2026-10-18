@@ -64,6 +64,7 @@ from .physics import calculate_resistance_matrix, calculate_sensitivity_matrix
 from .preoptimization import apply_preoptimized_stream_function, has_preoptimized_stream_function
 from .progress import ProgressReporter, progress_scope
 from .pipeline_stages import PipelineCheckpoint, PipelineStage, PipelineState, stage_fingerprints
+from .pipeline_failure import retain_pipeline_failure
 from .symmetry import mirror_symmetric_mesh_from_half
 from .surface_topology import mesh_quality_report
 from .target import define_target_field
@@ -79,6 +80,7 @@ class _ExecutionContext:
         )
         self.start_time = time.perf_counter()
         self.last_stage_time = self.start_time
+        self.failed_operation = None
         self.timing_summary: list[dict[str, float | str]] = [
             {"stage": "start", "stage_seconds": 0.0, "elapsed_seconds": 0.0}
         ]
@@ -112,8 +114,12 @@ class _ExecutionContext:
 
     def compute(self, name, operation, *args, **kwargs):
         start, end = self._operation_ranges[name]
-        with progress_scope(start, end, name, label="CoilGen"):
-            return operation(*args, **kwargs)
+        with progress_scope(start, end, name, label="CoilGen", operation=name):
+            try:
+                return operation(*args, **kwargs)
+            except Exception:
+                self.failed_operation = name
+                raise
 
 
 class CoilGenPipeline:
@@ -217,6 +223,18 @@ class CoilGenPipeline:
                         with progress_scope(95, 100, "Retaining checkpoint and stage preview", label="CoilGen"):
                             completed(tuple(PipelineStage)[index], state)
                 position = end
+            except Exception as error:
+                retain_pipeline_failure(
+                    error,
+                    state=state,
+                    config=self.config,
+                    stage=tuple(PipelineStage)[index],
+                    source_config=canonical_config,
+                    requirements=self.requirements,
+                    operation=context.failed_operation,
+                    timings=context.timing_summary,
+                )
+                raise
             finally:
                 self.config = canonical_config
         if selected is not PipelineStage.EVALUATED:
@@ -260,9 +278,10 @@ class CoilGenPipeline:
             from .research.convex import preflight_research_physics
 
             preflight_research_physics(self.config.research_physics, sum(mesh.n_faces for mesh in prepared_meshes))
+        state.parts = [CoilPart(mesh=mesh) for mesh in prepared_meshes]
         mesh_quality_diagnostics = _validate_prepared_mesh_quality(prepared_meshes, self.config)
         symmetry_mesh_diagnostics.update(mesh_quality_diagnostics)
-        parts = [CoilPart(mesh=mesh) for mesh in prepared_meshes]
+        parts = state.parts
         secondary_target_mesh = (
             load_secondary_target_mesh(
                 self.config,
@@ -283,6 +302,7 @@ class CoilGenPipeline:
                 else self._requirements_target()
             ),
         )
+        state.target_field = target_field
         stage("defined target field")
 
         parts = context.compute("Build mesh neighborhoods", calculate_one_ring_by_mesh, parts)
@@ -532,6 +552,7 @@ class CoilGenPipeline:
             regularization_diagnostics["routing_source_part_count"] = len(parts)
             if self.config.routing_circuit_scope == "single" and len(parts) > 1:
                 parts = assemble_routing_parts(parts, primary_surface_index=primary_surface_ind)
+                state.parts = parts
                 primary_surface_ind = 0
                 regularization_diagnostics["routing_parts_assembled"] = True
             parts = context.compute(
@@ -573,6 +594,9 @@ class CoilGenPipeline:
             context.compute("Sweep conductors", create_swept_coil_meshes, unswept_parts, self.config)
         refresh_retained_route_diagnostics(parts)
         stage("finalized swept conductor meshes")
+        # Retain the actual final candidate before a strict assembly gate can
+        # reject it. This is failure evidence, never a completed checkpoint.
+        state.parts = parts
         if not skip_postprocessing:
             from .routing_assembly import validate_routing_assembly
 

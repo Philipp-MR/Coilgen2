@@ -25,6 +25,8 @@ from .models import (
 )
 from .parallel import chunk_ranges, memory_limited_chunk_size, parallel_map, resolve_worker_count, should_parallelize
 from .progress import ProgressReporter, progress_scope
+from .regular_rings import regular_ring_order, ring_support_axis
+from .routing_objective import routing_selection_policy
 from .surface_distance import SurfaceGeodesicSolver
 from .surface_topology import (
     LoopTopologySignature,
@@ -875,8 +877,15 @@ def topological_loop_grouping(
 
         higher_loops = [tuple(np.where(contains[loop_ind, :])[0].tolist()) for loop_ind in range(n_loops)]
         group_outer_loop_indices: list[list[int]] = []
-        for loop_indices in part.loop_groups:
+        ring_order_diagnostics: list[dict[str, object]] = []
+        regular_order = routing_selection_policy(config) == "regular"
+        ring_axis = ring_support_axis(part.mesh) if regular_order else None
+        for group_index, loop_indices in enumerate(part.loop_groups):
             ordered = sorted(loop_indices, key=lambda idx: len(higher_loops[idx]), reverse=True)
+            if regular_order:
+                ordered, order_diagnostics = regular_ring_order(part, ordered, signatures, contains, ring_axis)
+                ring_order_diagnostics.append({"group_index": group_index, **order_diagnostics})
+                part.loop_groups[group_index] = list(ordered)
             outer_loop_indices = _topologically_outer_loop_indices(ordered, contains)
             group_outer_loop_indices.append(list(outer_loop_indices))
             part.groups.append(
@@ -887,6 +896,8 @@ def topological_loop_grouping(
                 )
             )
         part.topology_diagnostics["group_outer_loop_indices"] = group_outer_loop_indices
+        if regular_order:
+            part.topology_diagnostics["regular_ring_traversal"] = ring_order_diagnostics
         if progress is not None:
             progress.report(
                 end,
@@ -984,7 +995,10 @@ def interconnect_within_groups(
     progress: ProgressReporter | None = None,
     *,
     open_singletons: bool = False,
+    cut_plan=None,
 ) -> list[CoilPart]:
+    if cut_plan is not None and len(parts) != 1:
+        raise ValueError("A routing port plan belongs to one isolated support context")
     use_geodesic_connections = _use_geodesic_inter_group_paths(config)
     require_surface_connections = _strict_geodesic_inter_group_paths(config)
     total_groups = sum(len(part.groups) for part in parts)
@@ -993,14 +1007,41 @@ def interconnect_within_groups(
     for part_ind, part in enumerate(parts):
         part.connected_groups = []
         align_axial_rings = _inter_group_cut_alignment_state(part, config) is not None
-        geodesic_solver = SurfaceGeodesicSolver(part.mesh) if use_geodesic_connections else None
+        geodesic_solver = (
+            SurfaceGeodesicSolver(part.mesh, refine_routes=routing_selection_policy(config) == "regular")
+            if use_geodesic_connections
+            else None
+        )
         if not part.groups:
             continue
-        coherent_rails = _coherent_axial_ring_rails(
-            part, config, geodesic_solver, allow_direct_fallback=not require_surface_connections
+        coherent_rails = (
+            {}
+            if cut_plan is not None
+            else _coherent_axial_ring_rails(
+                part, config, geodesic_solver, allow_direct_fallback=not require_surface_connections
+            )
         )
         for group_ind, group in enumerate(part.groups):
             loop_count = len(group.loops)
+            if cut_plan is not None and group_ind in cut_plan.groups:
+                from .routing_ports import connected_group_from_ports
+
+                connected = connected_group_from_ports(
+                    group,
+                    cut_plan.groups[group_ind],
+                    geodesic_solver,
+                    allow_direct_fallback=not require_surface_connections,
+                    corner_step_deg=float(config.sweep_bend_arc_angle_deg),
+                )
+                group.within_group_cut_score = _within_group_return_path_score(connected.return_path_v)
+                group.within_group_cut_scores = {"planned": group.within_group_cut_score}
+                part.connected_groups.append(connected)
+                completed_groups += 1
+                if task is not None:
+                    task.update(
+                        completed_groups, message=f"group {group_ind + 1}: planned directed ports and return lane"
+                    )
+                continue
             if task is not None:
                 task.update(
                     completed_groups,
@@ -1171,7 +1212,11 @@ def interconnect_among_groups(
                     ),
                     force=True,
                 )
-            geodesic_solver = SurfaceGeodesicSolver(part.mesh) if use_geodesic_connections else None
+            geodesic_solver = (
+                SurfaceGeodesicSolver(part.mesh, refine_routes=routing_selection_policy(config) == "regular")
+                if use_geodesic_connections
+                else None
+            )
             if progress is not None:
                 progress.report(None, f"Fuse groups on support {part_ind + 1}/{len(parts)}", force=True)
             part.wire_path = _greedy_fuse_connected_groups(
@@ -1186,7 +1231,11 @@ def interconnect_among_groups(
 
         connected_group_buffer = [_copy_connected_group(group) for group in part.connected_groups]
         terminal_fusion_eligible = [True] * len(connected_group_buffer)
-        geodesic_solver = SurfaceGeodesicSolver(part.mesh) if use_geodesic_connections else None
+        geodesic_solver = (
+            SurfaceGeodesicSolver(part.mesh, refine_routes=routing_selection_policy(config) == "regular")
+            if use_geodesic_connections
+            else None
+        )
         all_return_points_v = _stack_return_points_v(connected_group_buffer)
         alignment_state = _inter_group_cut_alignment_state(part, config)
         hierarchy = [len(positions) for positions in part.level_positions]
@@ -1392,13 +1441,18 @@ def interconnect_among_groups(
         largest = connected_group_buffer[largest_index]
         part.wire_path = _rotate_wire_path_to_max_z(WirePath(v=largest.v.copy()))
     for part in parts:
-        _assign_wire_path_segment_owners(part)
+        _assign_wire_path_segment_owners(part, config=config)
     if task is not None:
         task.done()
     return parts
 
 
-def _assign_wire_path_segment_owners(part: CoilPart, tolerance: float = 1e-9) -> None:
+def _assign_wire_path_segment_owners(
+    part: CoilPart,
+    tolerance: float = 1e-9,
+    *,
+    config: CoilGenConfig | None = None,
+) -> None:
     """Label final route intervals and their explicit geometric contract."""
 
     if part.wire_path is None or len(part.wire_path.v) < 2:
@@ -1413,8 +1467,24 @@ def _assign_wire_path_segment_owners(part: CoilPart, tolerance: float = 1e-9) ->
                 continue
             candidate_owners.setdefault(_segment_geometry_key(start_v, end_v, tolerance), []).append(owner)
 
+    explicit_joins = routing_selection_policy(config) == "regular"
     for group_index, group in enumerate(part.connected_groups):
-        add_polyline(group.v, WireSegmentOwner(kind="contour_group", group_index=group_index))
+        add_polyline(
+            group.v,
+            WireSegmentOwner(
+                kind="contour_group",
+                group_index=group_index,
+                connector_role="joint_spiral_join" if explicit_joins else "",
+            ),
+        )
+        if explicit_joins:
+            add_polyline(
+                group.return_path_v,
+                WireSegmentOwner(
+                    kind="within_group_return",
+                    group_index=group_index,
+                ),
+            )
         if group_index < len(part.groups):
             loop_group = part.groups[group_index]
             for local_loop_index, opened_loop in enumerate(loop_group.opened_loops):
@@ -1446,7 +1516,8 @@ def _assign_wire_path_segment_owners(part: CoilPart, tolerance: float = 1e-9) ->
         matches = candidate_owners.get(_segment_geometry_key(start_v, end_v, tolerance), [])
         connector_matches = [owner for owner in matches if owner.kind == "inter_group_connector"]
         loop_matches = [owner for owner in matches if owner.kind == "contour_loop"]
-        owners.append((connector_matches or loop_matches or matches or [None])[0])
+        return_matches = [owner for owner in matches if owner.kind == "within_group_return"]
+        owners.append((connector_matches or loop_matches or return_matches or matches or [None])[0])
 
     next_connector_index = len(part.opening_cuts_among_groups)
     unknown_runs = _false_runs([owner is not None for owner in owners])
@@ -1464,6 +1535,14 @@ def _assign_wire_path_segment_owners(part: CoilPart, tolerance: float = 1e-9) ->
                 connector_role="bridge",
             )
             next_connector_index += 1
+        elif explicit_joins:
+            # A clipped or newly joined interval without an exact construction
+            # match is not evidence of protected winding or a known return.
+            # Keep it ambiguous so regularity cannot reward missing provenance.
+            owner = WireSegmentOwner(
+                kind="contour_group",
+                group_index=previous_group if previous_group >= 0 else max(following_group, 0),
+            )
         elif previous is not None and previous == following:
             owner = previous
         elif previous is not None:
@@ -1483,7 +1562,7 @@ def _assign_wire_path_segment_owners(part: CoilPart, tolerance: float = 1e-9) ->
 
 
 def _wire_segment_geometry(part: CoilPart, owner: WireSegmentOwner) -> WirePathGeometry:
-    if owner.kind in {"contour_group", "contour_loop"}:
+    if owner.kind in {"contour_group", "contour_loop", "within_group_return"}:
         return WirePathGeometry.SURFACE
     if owner.kind != "inter_group_connector":
         return WirePathGeometry.FREE_3D
@@ -1510,7 +1589,7 @@ def _segment_geometry_key(
 def _owner_group_index(owner: WireSegmentOwner | None) -> int:
     if owner is None:
         return -1
-    if owner.kind in {"contour_group", "contour_loop"}:
+    if owner.kind in {"contour_group", "contour_loop", "within_group_return"}:
         return owner.group_index
     return -1
 
@@ -1585,10 +1664,18 @@ def _inter_group_cut_alignment_state(
     forced = mode in {"on", "true", "1", "cylinder", "cylindrical", "cylinder_seam", "cylindrical_seam", "seam"}
     if not forced and mode != "auto":
         return None
-    if not forced and not bool(getattr(config, "surface_is_cylinder_flag", False)):
+    verified_ring_axis = None
+    if routing_selection_policy(config) == "regular":
+        records = part.topology_diagnostics.get("regular_ring_traversal", [])
+        if any(record.get("method") == "directed_support_axis_monotone" for record in records):
+            verified_ring_axis = ring_support_axis(part.mesh)
+    if not forced and not bool(getattr(config, "surface_is_cylinder_flag", False)) and verified_ring_axis is None:
         return None
 
-    axis_result = _mesh_boundary_axis(part.mesh)
+    # A cone's verified essential rings share the same intrinsic strip seam as
+    # cylinder rings. The cylinder flag remains the historical physical-policy
+    # gate; explicit alignment opt-outs above always take precedence.
+    axis_result = verified_ring_axis if verified_ring_axis is not None else _mesh_boundary_axis(part.mesh)
     if axis_result is None:
         if not forced:
             return None
@@ -2913,7 +3000,8 @@ def _inter_group_connector_result(
             return ConnectorPathResult(path_v=direct_v, used_direct_fallback=False)
         return ConnectorPathResult(path_v=np.zeros((0, 3), dtype=float), used_direct_fallback=True)
 
-    result = geodesic_solver.distance_between_points(start_v, end_v)
+    route = getattr(geodesic_solver, "route_between_points", geodesic_solver.distance_between_points)
+    result = route(start_v, end_v)
     if not math.isfinite(result.distance) or len(result.path_v) < 2:
         if allow_direct_fallback:
             return ConnectorPathResult(path_v=direct_v, used_direct_fallback=True)
@@ -4655,6 +4743,8 @@ def _route_quality_diagnostics(
 
 
 def _inter_group_route_diagnostics(part: CoilPart, config: CoilGenConfig | None) -> dict[str, float | int | bool]:
+    from .shared_return_cycles import _bridge_pair_distance
+
     cuts = part.opening_cuts_among_groups
     connector_paths = [path_v for cut in cuts for path_v in _inter_group_connection_paths(cut)]
     strict_surface = config is not None and _strict_geodesic_inter_group_paths(config)
@@ -4668,6 +4758,11 @@ def _inter_group_route_diagnostics(part: CoilPart, config: CoilGenConfig | None)
     forbidden_direct_count = int(
         strict_surface and sum(cut.connection_method != "geodesic" or cut.used_direct_fallback for cut in cuts)
     )
+    pair_distances = [_bridge_pair_distance(cut.connection_path_v, cut.closing_connection_path_v) for cut in cuts]
+    # These are two distinct directed bridges of the same closed cycle. A
+    # common endpoint is also a nonlocal revisit, not an adjacent path join.
+    pair_intersections = sum(distance <= 1e-10 for distance in pair_distances)
+    finite_pair_distances = [distance for distance in pair_distances if math.isfinite(distance)]
     return {
         "inter_group_cut_count": int(len(cuts)),
         "inter_group_geodesic_connector_count": int(sum(cut.connection_method == "geodesic" for cut in cuts)),
@@ -4684,6 +4779,9 @@ def _inter_group_route_diagnostics(part: CoilPart, config: CoilGenConfig | None)
         "max_inter_group_direct_distance": max(direct_distances) if direct_distances else 0.0,
         "max_inter_group_geodesic_distance": max(geodesic_distances) if geodesic_distances else 0.0,
         "max_inter_group_connector_distance": max(connector_distances) if connector_distances else 0.0,
+        "inter_group_bridge_pair_intersection_count": int(pair_intersections),
+        "min_inter_group_bridge_pair_distance_m": min(finite_pair_distances) if finite_pair_distances else math.inf,
+        "inter_group_bridge_pair_distance_reference": "recorded_unmounted_3d_connector_paths",
     }
 
 
@@ -4845,11 +4943,17 @@ def _route_quality_summary(
     degenerate_cuts = int(opening_cuts.get("degenerate_opening_cut_count", 0))
     suspicious_connectors = int(inter_group.get("suspicious_inter_group_connector_count", 0))
     surface_connector_failures = int(inter_group.get("surface_geodesic_connector_failure_count", 0))
+    bridge_pair_intersections = int(inter_group.get("inter_group_bridge_pair_intersection_count", 0))
     shift_failures = int(bool(route_quality.get("normal_shift_quality_failure", False)))
     failures = (
-        clearance_violations + wire_clearance_failures + degenerate_cuts + surface_connector_failures + shift_failures
+        clearance_violations
+        + wire_clearance_failures
+        + degenerate_cuts
+        + surface_connector_failures
+        + shift_failures
+        + bridge_pair_intersections
     )
-    topology_failures = degenerate_cuts + surface_connector_failures
+    topology_failures = degenerate_cuts + surface_connector_failures + bridge_pair_intersections
     warnings = (
         int(route_quality.get("wire_clearance_warning_count", 0))
         + int(inter_group.get("inter_group_clearance_fallback_count", 0))
@@ -4866,6 +4970,8 @@ def _route_quality_summary(
         failure_reasons.append("degenerate_opening_cut")
     if surface_connector_failures:
         failure_reasons.append("surface_geodesic_connector")
+    if bridge_pair_intersections:
+        failure_reasons.append("inter_group_bridge_pair_intersection")
     if shift_failures:
         failure_reasons.append("normal_shift_unresolved")
     status = "fail" if failures else "warn" if warnings else "pass"

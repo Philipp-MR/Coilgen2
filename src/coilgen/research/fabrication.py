@@ -329,6 +329,10 @@ def winding_instructions(record, return_path_m=None, *, checkpoint_spacing_m=0.0
             )
         elif kind == "contour_loop":
             operation, instruction = "wind_turn", f"Wind turn {loop + 1}" if loop >= 0 else "Wind the independent turn"
+        elif kind == "within_group_return":
+            operation, instruction = "route_group_return", f"Route the return for contour group {group + 1}"
+        elif kind == "contour_group" and connector_role == "joint_spiral_join":
+            operation, instruction = "route_group_join", f"Route the turn-to-turn join for contour group {group + 1}"
         elif kind == "contour_group":
             operation, instruction = "wind_group", f"Wind contour group {group + 1}"
         else:
@@ -339,6 +343,9 @@ def winding_instructions(record, return_path_m=None, *, checkpoint_spacing_m=0.0
                 "body_id": record.body_id,
                 "operation": operation,
                 "segment_role": segment_role,
+                "owner_kind": kind,
+                "connector_role": connector_role,
+                "source_kind": record.path.source_kind,
                 "group_index": group,
                 "loop_index": loop,
                 "connector_index": connector,

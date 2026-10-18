@@ -158,6 +158,32 @@ def test_maps_use_one_percent_normalization_and_preserve_unsupported_pixels(appl
     dialog.reject()
 
 
+@pytest.mark.parametrize("count", (1, 3, 4))
+def test_wide_slice_canvas_keeps_maps_centered_and_shares_one_physical_scale(
+    application, record, dataset, monkeypatch, count
+):
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+    monkeypatch.setattr(gui, "sample_slices", fake_slices)
+    dialog = dialog_with_data(record, dataset)
+    dialog.count.setValue(count)
+    dialog.debounce.stop()
+    dialog.slice_plot.figure.set_size_inches(12, 2.7)
+    dialog.refresh_analysis()
+    wait_worker(application, dialog)
+    figure = dialog.slice_plot.figure
+    FigureCanvasAgg(figure).draw()
+    maps = [axis for axis in figure.axes[:-1] if axis.get_visible()]
+    assert len(maps) == count and figure.axes[-1].get_visible()
+    assert all(axis.get_anchor() == "C" for axis in maps)
+    assert all(axis.collections[0].get_clim() == dialog._color_limits for axis in maps)
+    assert figure.axes[-1].get_position().x0 - max(axis.get_position().x1 for axis in maps) < 0.1
+    if count == 1:
+        assert maps[0].get_position().x0 < 0.55
+    assert dialog.state.mapped.summary["error_rms_T"] == pytest.approx(2e-6)
+    dialog.reject()
+
+
 def test_source_capabilities_current_policy_and_old_result_guard(application, record, dataset, monkeypatch):
     monkeypatch.setattr(gui, "sample_slices", fake_slices)
     bare = replace(dataset, key="routed", label="Routed", target_T=None)
@@ -534,9 +560,9 @@ def test_sparse_owned_roi_and_moved_source_fit_preserve_same_volume_grid(applica
     assert float(dialog.harmonic_radius.text()) == pytest.approx(0.02)
     assert dialog.selection().harmonic_center_m == pytest.approx((0.4, 0.2, 0.1))
     dialog.center.setText(".5 .5 .5")
-    dialog.size.setText(".11 .22")
+    dialog.slice_span.setText(".11 .22")
     dialog.source.setCurrentIndex(dialog.source.findData("validation"))
-    assert dialog.center.text() == ".5 .5 .5" and dialog.size.text() == ".11 .22"
+    assert dialog.center.text() == ".5 .5 .5" and dialog.slice_span.text() == ".11 .22"
     dialog.fit_source.click()
     assert dialog.selection().center_m == pytest.approx((0.4, 0.2, 0.1))
     dialog.source.setCurrentIndex(dialog.source.findData("moved"))
@@ -580,4 +606,397 @@ def test_csv_names_metric_definition_and_preserves_weights(application, record, 
     assert column in data.dtype.names
     assert data["saved_sample_weight"] == pytest.approx(weighted.weights)
     assert data[column] == pytest.approx(dialog.state.mapped.values)
+    dialog.reject()
+
+
+@pytest.mark.parametrize(
+    "view, tab", [("field", 0), ("metrics", 0), ("slices", 1), ("errors", 2), ("harmonics", 3), ("coil", 4)]
+)
+def test_direct_view_entry_is_retained_through_catalog_loading(application, record, dataset, view, tab):
+    dialog = gui.FieldAnalysisDialog(
+        record, initial_view=view, auto_start=False, plot_factory=FakePlot, cloud_factory=FakeCloud
+    )
+    assert dialog.tabs.currentIndex() == tab
+    # The latest action can arrive before the source worker completes.
+    dialog.focus_view("field")
+    dialog.focus_view(view)
+    dialog._catalog_loaded((dataset,))
+    assert dialog.tabs.currentIndex() == tab
+    assert dialog.metric_selector.currentData() == ("field" if view == "field" else "signed_residual")
+    dialog.debounce.stop()
+    dialog.reject()
+
+
+def test_reused_view_preserves_source_current_grid_and_display_conventions(application, record, dataset):
+    recorded = replace(dataset, key="routed", label="Recorded routed field")
+    original = replace(dataset, key="routed_at_stream_current", provenance={"current_policy": "original"})
+    dialog = gui.FieldAnalysisDialog(
+        record, initial_source="routed", auto_start=False, plot_factory=FakePlot, cloud_factory=FakeCloud
+    )
+    dialog._catalog_loaded((recorded, original))
+    dialog.current_policy.setCurrentIndex(1)
+    dialog.center.setText(".01 .02 .03")
+    dialog.slice_span.setText(".11 .12")
+    dialog.offsets.setText("-.01 .02")
+    dialog.order.setValue(3)
+    dialog.units.setCurrentIndex(1)
+    dialog.normalization.setCurrentIndex(1)
+    before = dialog.selection()
+    for view in ["errors", "slices", "metrics", "harmonics", "field"]:
+        assert dialog.focus_view(view)
+        after = dialog.selection()
+        assert replace(after, metric=before.metric) == before
+        assert dialog.source.currentData() == "routed" and dialog.current_policy.currentData() == "stream"
+    dialog.debounce.stop()
+    dialog.reject()
+
+
+@pytest.mark.parametrize("context, component", [("mr_shim", "Bz"), ("mr_gradient", "Bparallel")])
+def test_error_entry_uses_bz_only_for_explicit_shim_context(application, record, dataset, context, component):
+    metadata = record.metadata
+    metadata.update(design_context=context, target_field_component="Bparallel")
+    bound = RunRecord(record.directory, metadata, record.arrays)
+    dialog = gui.FieldAnalysisDialog(
+        bound, initial_view="errors", auto_start=False, plot_factory=FakePlot, cloud_factory=FakeCloud
+    )
+    dialog._catalog_loaded((dataset,))
+    assert dialog.component.currentData() == component
+    assert dialog.metric_selector.currentData() == "signed_residual"
+    dialog.debounce.stop()
+    dialog.reject()
+
+
+@pytest.mark.parametrize(
+    "initial, policy", [(None, "stream"), ("routed", "recorded"), ("routed_at_stream_current", "stream")]
+)
+def test_fresh_original_current_default_respects_explicit_source(application, record, dataset, initial, policy):
+    recorded = replace(dataset, key="routed")
+    original = replace(dataset, key="routed_at_stream_current", provenance={"current_policy": "original"})
+    dialog = gui.FieldAnalysisDialog(
+        record, initial_source=initial, auto_start=False, plot_factory=FakePlot, cloud_factory=FakeCloud
+    )
+    dialog._catalog_loaded((recorded, original))
+    assert dialog.source.currentData() == "routed"
+    assert dialog.current_policy.currentData() == policy
+    dialog.debounce.stop()
+    dialog.reject()
+
+
+def test_view_entry_invalid_or_closed_cannot_mutate_live_analysis(application, record, dataset):
+    dialog = dialog_with_data(record, dataset)
+    before, tab, generation = dialog.selection(), dialog.tabs.currentIndex(), dialog._generation
+    with pytest.raises(ValueError, match="view must be"):
+        dialog.focus_view("acceptance")
+    assert dialog.selection() == before and dialog.tabs.currentIndex() == tab and dialog._generation == generation
+    dialog.reject()
+    assert dialog.focus_view("errors") is False
+    assert dialog.tabs.currentIndex() == tab
+
+
+def test_error_view_without_target_cannot_claim_a_residual(application, record, dataset):
+    bare = replace(dataset, target_T=None)
+    dialog = dialog_with_data(record, bare)
+    dialog.focus_view("errors")
+    assert dialog.tabs.currentIndex() == 2 and dialog.metric_selector.currentData() == "field"
+    assert dialog.normalization.currentData() == "none"
+    assert not dialog.metric_selector.model().item(dialog.metric_selector.findData("signed_residual")).isEnabled()
+    dialog.debounce.stop()
+    dialog.reject()
+
+
+def test_direct_entry_invalidates_inflight_old_map_without_changing_grid(application, record, dataset):
+    dialog = dialog_with_data(record, dataset)
+    before = dialog.selection()
+    worker = SimpleNamespace(cancel=Event(), generation=dialog._generation)
+    dialog.worker = worker
+    dialog.focus_view("field")
+    assert worker.cancel.is_set() and dialog._generation > worker.generation
+    assert replace(dialog.selection(), metric=before.metric) == before
+    dialog.worker = None
+    dialog.debounce.stop()
+    dialog.reject()
+
+
+@pytest.mark.parametrize("size", [(1250, 820), (850, 680)])
+def test_grouped_analysis_controls_and_page_tabs_fit_smaller_windows(application, record, dataset, size):
+    dialog = dialog_with_data(record, dataset)
+    dialog.resize(*size)
+    dialog.show()
+    application.processEvents()
+    assert dialog.size().width() == size[0]
+    assert dialog.height() == size[1]
+    assert dialog.tabs.tabBar().isVisible()
+    for tab in range(5):
+        dialog.tabs.setCurrentIndex(tab)
+        application.processEvents()
+        for widget in [
+            dialog.source,
+            dialog.current_policy,
+            dialog.metric_selector,
+            dialog.display_controls.toggle,
+            dialog.tabs.tabBar(),
+            dialog.export_data,
+            dialog.export_plot,
+        ]:
+            if not widget.isVisible():
+                continue
+            origin = widget.mapTo(dialog, widget.rect().topLeft())
+            assert origin.x() >= 0 and origin.y() >= 0
+            assert origin.x() + widget.width() <= dialog.width()
+            assert origin.y() + widget.height() <= dialog.height()
+    assert not dialog.grab().isNull()
+    dialog.reject()
+
+
+def _coil_items(dialog):
+    return {
+        item.data(0, gui.Qt.ItemDataRole.UserRole): item
+        for group_index in range(dialog.coil_stats.topLevelItemCount())
+        for group in [dialog.coil_stats.topLevelItem(group_index)]
+        for row in range(group.childCount())
+        for item in [group.child(row)]
+    }
+
+
+def test_coil_statistics_remain_usable_without_any_field_arrays(application, tmp_path):
+    record = RunRecord(tmp_path, {"name": "Geometry only", "summary": {"resistance_ohm": 0.4}}, {})
+    dialog = gui.FieldAnalysisDialog(
+        record, initial_view="coil", auto_start=False, plot_factory=FakePlot, cloud_factory=FakeCloud
+    )
+    dialog._catalog_loaded(())
+    assert dialog.tabs.currentIndex() == 4 and dialog.export_data.isEnabled()
+    assert not dialog.export_plot.isEnabled()
+    items = _coil_items(dialog)
+    assert items["coil:resistance"].text(1) == "0.4"
+    assert items["coil:inductance"].text(1) == "Unavailable"
+    assert items["coil:mass"].text(1) == "Unavailable"
+    assert dialog.material_density.value() == 0
+    assert "Coil stats" in dialog.status.text()
+    dialog.reject()
+
+
+def test_explicit_density_estimates_do_not_relabel_saved_mass_or_mutate_run(application, tmp_path):
+    record = RunRecord(
+        tmp_path,
+        {
+            "name": "Rejected conductor geometry",
+            "request_sha256": "a" * 64,
+            "fabrication": {
+                "ready": False,
+                "paths": [
+                    {
+                        "body_id": "coil, 1",
+                        "diagnostics": {
+                            "absolute_volume_m3": 2.1e-6,
+                            "sweep_expected_profile_volume_m3": 2e-6,
+                        },
+                    },
+                ],
+            },
+        },
+        {},
+    )
+    before = record.metadata
+    dialog = gui.FieldAnalysisDialog(
+        record, initial_view="coil", auto_start=False, plot_factory=FakePlot, cloud_factory=FakeCloud
+    )
+    dialog._catalog_loaded(())
+    dialog.material_density.setValue(1000)
+    assert dialog._coil_report.row("coil:mass").value is None
+    assert dialog._coil_estimates.row("coil:mass").value == pytest.approx(0.002)
+    assert "Estimated bare conductor mass: 2 g" in dialog.mass_estimate_note.text()
+    assert "geometry checks failed" in dialog.coil_note.text().lower()
+    assert record.metadata == before
+    path = tmp_path / "coil_stats.json"
+    dialog.export_coil_stats(path)
+    data = json.loads(path.read_text())
+    assert data["assumed_density_kg_per_m3"] == 1000 and data["acceptance_claim"] is False
+    assert next(row for row in data["recorded_statistics"]["rows"] if row["key"] == "coil:mass")["value"] is None
+    assert next(row for row in data["assumed_density_estimates"] if row["key"] == "estimate:coil:mass")[
+        "value"
+    ] == pytest.approx(0.002)
+    csv_path = tmp_path / "coil_stats.csv"
+    dialog.export_coil_stats(csv_path)
+    import csv
+
+    with csv_path.open(encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    assert len({row["key"] for row in rows}) == len(rows)
+    assert next(row for row in rows if row["key"] == "coil:mass")["status"] == "Unavailable"
+    assert next(row for row in rows if row["key"] == "estimate:coil:mass")["category"] == "Density estimates"
+    body = next(row for row in rows if row["key"] == "reviewed:coil, 1:nominal_volume")
+    assert body["body_id"] == "coil, 1" and float(body["value"]) == pytest.approx(2e-6)
+    assert all(None not in row for row in rows)
+    dialog.material_density.setValue(0)
+    assert not dialog._mass_estimate_rows() and dialog._coil_report.row("coil:mass").value is None
+    assert "Enter density" in dialog.mass_estimate_note.text()
+    dialog.reject()
+
+
+def test_harmonic_worker_completion_cannot_steal_later_coil_stats_focus(application, record, dataset, monkeypatch):
+    dialog = dialog_with_data(record, dataset)
+    state = gui.AnalysisState(dialog.selection(), dataset, metric_map(dataset), None, (), harmonics={})
+    worker = SimpleNamespace(cancel=Event(), generation=dialog._generation)
+    dialog.worker = worker
+    dialog.focus_view("coil")
+    monkeypatch.setattr(dialog, "_render", lambda: None)
+    dialog._finished(worker, ("harmonics", state), "")
+    assert dialog.tabs.currentIndex() == 4
+    assert dialog.export_data.isEnabled() and not dialog.export_plot.isEnabled()
+    dialog.debounce.stop()
+    dialog.reject()
+
+
+def test_fresh_coil_entry_starts_no_catalog_or_physical_slice_work(application, tmp_path, monkeypatch):
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("Opening saved coil statistics must not evaluate field sources or slice grids.")
+
+    monkeypatch.setattr(gui, "source_catalog", unexpected)
+    monkeypatch.setattr(gui, "sample_slices", unexpected)
+    record = RunRecord(tmp_path, {"summary": {"resistance_ohm": 0.4}}, {})
+    dialog = gui.FieldAnalysisDialog(record, initial_view="coil", plot_factory=FakePlot, cloud_factory=FakeCloud)
+    application.processEvents()
+    assert dialog.worker is None and dialog.state is None and not dialog.debounce.isActive()
+    assert dialog.export_data.isEnabled() and _coil_items(dialog)["coil:resistance"].text(1) == "0.4"
+    dialog.reject()
+
+
+@pytest.mark.parametrize("view", ["metrics", "errors"])
+def test_native_metrics_entry_defers_physical_slice_sampling_until_requested(
+    application, record, dataset, monkeypatch, view
+):
+    calls = []
+
+    def sampler(*args, **kwargs):
+        calls.append(kwargs)
+        return fake_slices(*args, **kwargs)
+
+    monkeypatch.setattr(gui, "sample_slices", sampler)
+    dialog = dialog_with_data(record, dataset)
+    dialog.focus_view(view)
+    dialog.debounce.stop()
+    dialog._automatic_analysis()
+    wait_worker(application, dialog)
+    assert calls == [] and dialog.state.slices is None
+    assert dialog.state.error_map.summary["error_rms_T"] == pytest.approx(2e-6)
+    native_values = dialog.state.mapped.values.copy()
+    dialog.focus_view("slices")
+    dialog.debounce.stop()
+    dialog._automatic_analysis()
+    wait_worker(application, dialog)
+    assert len(calls) == 1 and dialog.state.slices is not None
+    np.testing.assert_array_equal(dialog.state.mapped.values, native_values)
+    dialog.reject()
+
+
+def test_later_field_entry_loads_catalog_once_from_a_fresh_coil_window(application, record, dataset, monkeypatch):
+    catalogs = []
+    monkeypatch.setattr(gui, "source_catalog", lambda *_args, **_kwargs: catalogs.append(True) or (dataset,))
+    monkeypatch.setattr(gui, "sample_slices", lambda *_args, **_kwargs: pytest.fail("Native metrics need no slices."))
+    dialog = gui.FieldAnalysisDialog(record, initial_view="coil", plot_factory=FakePlot, cloud_factory=FakeCloud)
+    dialog.focus_view("metrics")
+    wait_worker(application, dialog)
+    # Catalog completion schedules a separate captured native-metric worker.
+    application.processEvents()
+    wait_worker(application, dialog)
+    assert catalogs == [True] and dialog.state.slices is None
+    dialog.focus_view("errors")
+    dialog.debounce.stop()
+    dialog._automatic_analysis()
+    wait_worker(application, dialog)
+    assert catalogs == [True]
+    dialog.reject()
+
+
+def test_slice_context_geometry_cannot_expand_the_sampled_world_window(application, record, dataset, monkeypatch):
+    def sampler(*args, **kwargs):
+        result = fake_slices(*args, **kwargs)
+        distant_support = np.array([[-1, -1, 0], [1, 1, 0]])
+        return replace(
+            result, slices=tuple(replace(piece, support_outlines_m=(distant_support,)) for piece in result.slices)
+        )
+
+    monkeypatch.setattr(gui, "sample_slices", sampler)
+    dialog = dialog_with_data(record, dataset)
+    dialog.refresh_analysis()
+    wait_worker(application, dialog)
+    for axis, piece in zip(dialog.slice_plot.figure.axes, dialog.state.slices.slices):
+        assert axis.get_xlim() == pytest.approx(
+            (piece.coordinates_m[:, :, 0].min(), piece.coordinates_m[:, :, 0].max())
+        )
+        assert axis.get_ylim() == pytest.approx(
+            (piece.coordinates_m[:, :, 1].min(), piece.coordinates_m[:, :, 1].max())
+        )
+    assert dialog.state.mapped.summary["error_rms_T"] == pytest.approx(2e-6)
+    dialog.reject()
+
+
+def test_explicit_source_on_reuse_restores_original_current_and_omitted_source_preserves_it(
+    application, record, dataset
+):
+    recorded = replace(dataset, key="routed")
+    original = replace(dataset, key="routed_at_stream_current", provenance={"current_policy": "original"})
+    dialog = gui.FieldAnalysisDialog(
+        record, initial_source="sheet", auto_start=False, plot_factory=FakePlot, cloud_factory=FakeCloud
+    )
+    dialog._catalog_loaded((dataset, recorded, original))
+    dialog.center.setText(".01 .02 .03")
+    dialog.focus_view("errors", source="routed_at_stream_current")
+    assert dialog.selection().source_key == "routed_at_stream_current"
+    assert dialog.current_policy.currentData() == "stream"
+    assert dialog.center.text() == ".01 .02 .03"
+    dialog.focus_view("slices")
+    assert dialog.selection().source_key == "routed_at_stream_current"
+    dialog.focus_view("metrics", source="routed_field")
+    assert dialog.selection().source_key == "routed" and dialog.current_policy.currentData() == "recorded"
+    dialog.debounce.stop()
+    dialog.reject()
+
+
+def test_explicit_source_requested_during_loading_is_retained_and_missing_source_is_graceful(
+    application, record, dataset
+):
+    recorded = replace(dataset, key="routed")
+    original = replace(dataset, key="routed_at_stream_current", provenance={"current_policy": "original"})
+    dialog = gui.FieldAnalysisDialog(
+        record, initial_view="coil", auto_start=False, plot_factory=FakePlot, cloud_factory=FakeCloud
+    )
+    dialog.focus_view("errors", source="routed_at_stream_current")
+    dialog._catalog_loaded((dataset, recorded, original))
+    assert dialog.selection().source_key == "routed_at_stream_current" and dialog.tabs.currentIndex() == 2
+    before = dialog.selection()
+    dialog.focus_view("errors", source="absent_at_stream_current")
+    assert dialog.selection() == before and "unavailable" in dialog.status.text()
+    dialog.debounce.stop()
+    dialog.reject()
+
+
+@pytest.mark.parametrize("view, tab", [("metrics", 0), ("slices", 1), ("errors", 2), ("harmonics", 3)])
+def test_native_tab_click_from_fresh_coil_page_loads_field_catalog_and_requested_page(
+    application, record, dataset, monkeypatch, view, tab
+):
+    from PySide6.QtTest import QTest
+
+    catalogs, slices = [], []
+    monkeypatch.setattr(gui, "source_catalog", lambda *_args, **_kwargs: catalogs.append(True) or (dataset,))
+
+    def sampler(*args, **kwargs):
+        slices.append(True)
+        return fake_slices(*args, **kwargs)
+
+    monkeypatch.setattr(gui, "sample_slices", sampler)
+    dialog = gui.FieldAnalysisDialog(record, initial_view="coil", plot_factory=FakePlot, cloud_factory=FakeCloud)
+    dialog.show()
+    application.processEvents()
+    assert dialog.worker is None and not catalogs
+    bar = dialog.tabs.tabBar()
+    QTest.mouseClick(bar, gui.Qt.MouseButton.LeftButton, pos=bar.tabRect(tab).center())
+    application.processEvents()
+    wait_worker(application, dialog)
+    application.processEvents()
+    wait_worker(application, dialog)
+    assert catalogs == [True] and dialog.state is not None
+    assert dialog._requested_view == view and dialog.tabs.currentIndex() == tab
+    assert dialog.metric_selector.currentData() == "signed_residual"
+    assert slices == ([True] if view == "slices" else [])
     dialog.reject()

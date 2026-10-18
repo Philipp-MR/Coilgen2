@@ -323,7 +323,7 @@ class ChannelOverview(QDialog):
             pool = matching or candidates
             record = max(
                 enumerate(pool),
-                key=lambda pair: (run_timestamp(pair[1].metadata).timestamp or float("-inf"), pair[0]),
+                key=lambda pair: (run_timestamp(pair[1]).timestamp or float("-inf"), pair[0]),
                 default=(None, None),
             )[1]
             active = job is not None and job.get("status") in {"queued", "running", "cancelling"}
@@ -355,7 +355,7 @@ class ChannelOverview(QDialog):
                 else "No saved result"
             )
             record_detail = (
-                f"{record.metadata.get('name', 'Saved run')}\n{context}\nSubmitted: {run_timestamp(record.metadata).text}\nPipeline: {record.metadata.get('pipeline_stage', 'unrecorded')}\n{run_timestamp(record.metadata).tooltip}"
+                f"{record.metadata.get('name', 'Saved run')}\n{context}\nSubmitted: {run_timestamp(record).text}\nPipeline: {record.metadata.get('pipeline_stage', 'unrecorded')}\n{run_timestamp(record).tooltip}"
                 if record
                 else "Compute this channel to save model-linked evidence."
             )

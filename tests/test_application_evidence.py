@@ -300,3 +300,20 @@ def test_artifact_reads_reject_nonportable_or_escaping_names(tmp_path, name):
     selected = DesignService.load_run(_saved_run(tmp_path))
     with pytest.raises(ValueError, match="portable|leave"):
         read_verified_artifact(selected, name)
+
+
+def test_passive_source_health_reads_captured_failure_without_resolving_or_clearing(tmp_path, monkeypatch):
+    health = SourceHealth()
+    directory = tmp_path.resolve()
+    missing = directory / "unknown"
+    health.mark_failed(directory, "Saved artifact checksum changed")
+
+    def filesystem_lookup(*_args, **_kwargs):
+        raise AssertionError("Passive progress display performed a filesystem lookup")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "resolve", filesystem_lookup)
+        assert health.known_error(directory) == "Saved artifact checksum changed"
+        assert health.known_error(missing) == ""
+    assert health.error(directory) == "Saved artifact checksum changed"
+    assert health.report(missing).status == "unverified"

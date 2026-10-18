@@ -327,5 +327,14 @@ def _biot_savart_segment_chunk(
     finite_segment_factor[safe] = (
         axial_start[safe] / distance_start[safe] + axial_end[safe] / distance_end[safe]
     ) / rho2[safe]
+    # Beyond either endpoint, the signed endpoint terms nearly cancel for
+    # samples close to the supporting line. Rationalizing their difference
+    # retains the small physical field without dividing a rounded zero by rho².
+    exterior = safe & ((axial_start < 0.0) | (axial_end < 0.0))
+    a, b = np.abs(axial_start[exterior]), np.abs(axial_end[exterior])
+    ra, rb = distance_start[exterior], distance_end[exterior]
+    finite_segment_factor[exterior] = (
+        np.broadcast_to(length, rho2.shape)[exterior] * (a + b) / (ra * rb * (a * rb + b * ra))
+    )
     d_b = np.cross(direction[None, :, :], r_perp, axis=2) * finite_segment_factor[:, :, None]
     return BIOT_SAVART_COEFF * d_b.sum(axis=1)

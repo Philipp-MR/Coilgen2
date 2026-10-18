@@ -1,13 +1,14 @@
 """Execution feedback remains distinct from numerical and manufacturing verdicts."""
 
 from datetime import datetime, timezone
+import time
 from unittest.mock import Mock
 
 import pytest
 
 import test_workbench_usability as usability
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QCoreApplication, Qt
 from PySide6.QtWidgets import QHeaderView
 
 from coilgen.application import ProjectDocument
@@ -18,6 +19,14 @@ from coilgen.gui.workbench import CoilGenWorkbench
 
 application = usability.application
 windows = usability.windows
+
+
+def _settle_completion(window):
+    deadline = time.monotonic() + 10
+    while window._run_load_tasks and time.monotonic() < deadline:
+        QCoreApplication.processEvents()
+        time.sleep(0.005)
+    assert not window._run_load_tasks
 
 
 def _record(window, directory):
@@ -46,7 +55,37 @@ def _complete(window):
     window.service.load_run = Mock(return_value=record)
     window.jobs.states[0].update(status="completed", progress=1.0, stage="Complete")
     window.poll_jobs()
+    _settle_completion(window)
     return id_, record
+
+
+def test_stale_checkpoint_explains_reuse_scope_without_hiding_recorded_results(windows):
+    from coilgen.application.reuse import ReusePlan
+
+    window = windows()
+    window._reuse_plan = ReusePlan((), ("sheet",), ())
+    window._refresh_stage_status(refresh_reuse=False)
+    item = window.stage_items["sheet"]
+    assert item.text(1) == "Stale"
+    assert "checkpoint fingerprint differs" in item.toolTip(1)
+    assert "current source, inputs, requirements" in item.toolTip(1)
+    assert "saved result remains available for inspection" in item.toolTip(1)
+
+
+def test_state_persistence_warning_is_visible_without_disabling_worker_cancellation(windows):
+    window = windows()
+    window.compute()
+    state = window.jobs.states[0]
+    state.update(status="running", stage="Solving field", persistence_error="PermissionError: job.json locked")
+    window.poll_jobs()
+    assert "job state not saved; retrying" in window.execution_label.text()
+    assert "job.json locked" in window.execution_label.toolTip()
+    assert window.cancel_action.isEnabled() and window.cancel_action.isVisible()
+    assert not window._last_runtime_error
+    state.pop("persistence_error")
+    window.poll_jobs()
+    assert "not saved" not in window.execution_label.text()
+    assert window.cancel_action.isEnabled()
 
 
 def test_persistent_progress_keeps_execution_completion_separate_from_acceptance(windows):
@@ -86,6 +125,7 @@ def test_verification_error_is_persistent_and_disables_results_action(windows):
     window.service.load_run = Mock(side_effect=ValueError("Artifact checksum changed"))
     window.jobs.states[0].update(status="completed", stage="Complete", progress=1.0)
     window.poll_jobs()
+    _settle_completion(window)
     assert "evidence verification failed" in window.execution_label.text()
     assert "checksum" in window.execution_label.toolTip()
     assert not window.view_results_button.isEnabled()

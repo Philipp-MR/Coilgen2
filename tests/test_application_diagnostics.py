@@ -68,6 +68,85 @@ def test_capsule_witness_uses_saved_profile_origin_not_offset_centroid(problem_r
     assert not penetration.locatable
 
 
+def test_topology_issue_names_saved_failure_and_connector_without_inventing_location(problem_record):
+    body = problem_record.metadata["fabrication"]["paths"][0]
+    body["connector_id"] = "connector-7"
+    body["diagnostics"].update(
+        manufacturing_failure_reasons="route_topology_failure",
+        manufacturing_route_topology_failure_reasons="degenerate_opening_cut;surface_geodesic_connector",
+        route_group_id=4,
+    )
+    issue = next(issue for issue in run_problems(problem_record) if "route_topology_failure" in issue.key)
+    assert "degenerate_opening_cut" in issue.explanation
+    assert "surface_geodesic_connector" in issue.explanation
+    assert "connector-7" in issue.explanation and "route_group_id: 4" in issue.explanation
+    assert not issue.locatable
+
+
+@pytest.mark.parametrize("closed,index,expected", ((False, 1, (0, 1, 2)), (True, 0, (3, 0, 1))))
+def test_minimum_bend_witness_uses_verified_final_triplet(problem_record, closed, index, expected):
+    path = problem_record.directory / problem_record.metadata["artifacts"][0]["name"]
+    with np.load(path, allow_pickle=False) as loaded:
+        frames = {key: loaded[key] for key in loaded.files}
+    frames["closed"] = np.array(closed)
+    np.savez(path, **frames)
+    problem_record.metadata["artifacts"][0]["sha256"] = file_digest(path)
+    diagnostics = problem_record.metadata["fabrication"]["paths"][0]["diagnostics"]
+    diagnostics.update(
+        manufacturing_failure_reasons="minimum_bend_radius_violation",
+        sweep_final_min_bend_point_index=index,
+        sweep_final_bend_point_count=4,
+        sweep_final_min_bend_radius_m=0.001,
+        sweep_required_bend_radius_m=0.006,
+    )
+    issue = next(issue for issue in run_problems(problem_record) if "minimum_bend_radius_violation" in issue.key)
+    np.testing.assert_array_equal(issue.points_m, frames["points_m"][list(expected)])
+    assert issue.segments == ((0, 1), (1, 2))
+    diagnostics["sweep_final_bend_point_count"] = 3
+    issue = next(issue for issue in run_problems(problem_record) if "minimum_bend_radius_violation" in issue.key)
+    assert not issue.locatable
+
+
+@pytest.mark.parametrize("index", (6, 16, 17))
+def test_support_witness_uses_declared_ring_major_vertex_and_asymmetric_cap_center(problem_record, index):
+    from coilgen.manufacturing import _polygon_centroid
+
+    path = problem_record.directory / problem_record.metadata["artifacts"][0]["name"]
+    with np.load(path, allow_pickle=False) as loaded:
+        frames = {key: loaded[key] for key in loaded.files}
+    profile = np.array([[0, 0], [0.004, 0], [0.006, 0.002], [0, 0.003]])
+    frames["cross_section_m"] = profile
+    np.savez(path, **frames)
+    problem_record.metadata["artifacts"][0]["sha256"] = file_digest(path)
+    diagnostics = problem_record.metadata["fabrication"]["paths"][0]["diagnostics"]
+    diagnostics.update(
+        manufacturing_failure_reasons="support_surface_penetration",
+        sweep_support_penetration_vertex_index=index,
+        sweep_support_penetration_vertex_count=18,
+        sweep_support_vertex_order="ring_major_profile_then_open_cap_centers",
+    )
+    issue = next(issue for issue in run_problems(problem_record) if "support_surface_penetration" in issue.key)
+    ring = index // 4 if index < 16 else 0 if index == 16 else 3
+    offset = (profile[index % 4] if index < 16 else profile.mean(axis=0)) - _polygon_centroid(profile)
+    expected = frames["points_m"][ring] + offset[0] * frames["transverse"][ring] + offset[1] * frames["normals"][ring]
+    np.testing.assert_allclose(issue.points_m, [expected], atol=1e-18)
+    assert not issue.segments and issue.dataset == "review_conductor"
+    assert np.linalg.norm(profile.mean(axis=0) - _polygon_centroid(profile)) > 0
+    for key, value in (
+        ("sweep_support_penetration_vertex_count", 16),
+        ("sweep_support_vertex_order", "unrecorded"),
+        ("sweep_support_penetration_vertex_index", True),
+    ):
+        previous = diagnostics[key]
+        diagnostics[key] = value
+        issue = next(issue for issue in run_problems(problem_record) if "support_surface_penetration" in issue.key)
+        assert not issue.locatable
+        diagnostics[key] = previous
+    problem_record.metadata["artifacts"][0]["sha256"] = "0" * 64
+    issue = next(issue for issue in run_problems(problem_record) if "support_surface_penetration" in issue.key)
+    assert not issue.locatable
+
+
 def test_fold_witness_reconstructs_recorded_patch_from_asymmetric_profile(problem_record):
     issue = next(issue for issue in run_problems(problem_record) if "folded" in issue.key)
     np.testing.assert_allclose(issue.points_m, [[0, 0, 0], [0.1, 0, 0], [0.1, 0.004, 0], [0, 0.004, 0]], atol=1e-18)

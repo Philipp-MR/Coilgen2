@@ -90,6 +90,11 @@ def main(argv=None) -> int:
         controls = {}
         if args.stage:
             controls["pipeline_stage"] = args.stage
+            if args.stage != "evaluated":
+                # A stage override stops a full-design preset before its
+                # fabrication review; the saved study remains unchanged.
+                controls["fabricate"] = False
+                controls["engineering"] = None
         if args.resume:
             controls["resume_checkpoint"] = str(args.resume.expanduser().resolve())
         with progress_context(

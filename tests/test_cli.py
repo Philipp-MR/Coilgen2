@@ -8,6 +8,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 from coilgen.cli import main
 
 
@@ -33,6 +35,30 @@ def test_malformed_project_returns_actionable_error(tmp_path, capsys):
     path.write_text('{"schema":"unknown"}', encoding="utf-8")
     assert main(["inspect", str(path)]) == 1
     assert "schema" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("with_engineering", [False, True])
+def test_stage_override_runs_full_design_preset_without_fabrication(tmp_path, capsys, with_engineering):
+    from coilgen.application import ProjectDocument
+    from coilgen.gradient_engineering import GradientEngineeringSpec
+
+    path = tmp_path / "gradient.json"
+    assert main(["new", "--preset", "cylinder", "--output", str(path)]) == 0
+    original = ProjectDocument.load(path)
+    if with_engineering:
+        original = original.update_study({"engineering": GradientEngineeringSpec().to_dict()})
+        original.save(path)
+    assert original.study["fabricate"] is True
+    output = tmp_path / "prepared"
+    assert main(["run", str(path), "--stage", "prepared", "--output", str(output)]) == 0
+    summary = json.loads(capsys.readouterr().out.split("\n", 1)[1])
+    assert summary["pipeline_stage"] == "prepared"
+    request = json.loads((output / "request.json").read_text(encoding="utf-8"))
+    assert request["fabricate"] is False
+    assert request.get("engineering") is None
+    assert ProjectDocument.load(path).fingerprint == original.fingerprint
+    assert ProjectDocument.load(path).study["fabricate"] is True
+    assert ProjectDocument.load(path).study.get("engineering") == original.study.get("engineering")
 
 
 def test_headless_entrypoints_never_import_gui_dependencies(tmp_path):

@@ -617,6 +617,7 @@ class RenderlessPlotter(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.interactor = self
+        self.iren = object()
         self.camera_position = [(1, 1, 1), (0, 0, 0), (0, 0, 1)]
         self.plane_widgets = []
         self._plane_clipped_meshes = []

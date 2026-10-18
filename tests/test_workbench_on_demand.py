@@ -27,7 +27,10 @@ def _show(window, application):
     window.resize(1120, 800)
     window.show()
     window.activateWindow()
-    application.processEvents()
+    # QStatusBar posts a second layout request after its first show. Measure
+    # the settled model viewport before attributing a resize to a panel action.
+    for _ in range(3):
+        application.processEvents()
 
 
 def _open_tabs(window):

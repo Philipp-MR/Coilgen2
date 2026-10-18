@@ -46,7 +46,9 @@ PARAMETERS = object_parameters(
             "main_field_strength_T": 1.5,
             "b0_direction": (0.0, 0.0, 1.0),
             "progress": True,
-            "skip_sweep": True,
+            # The connected circuit spans both planes; validate its fabricated
+            # centroid and swept body before claiming a completed design.
+            "skip_sweep": False,
             "skip_inductance": False,
         },
         "output": {

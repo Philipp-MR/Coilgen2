@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import csv
 
 import pytest
 
-from coilgen import CoilGenConfig, result_quality_status, result_summary_dict, run_coilgen
+from coilgen import CoilGenConfig, result_quality_status, result_summary_dict, run_coilgen, write_design_summary_csv
+from coilgen.reporting import result_performance_table_rows
 from coilgen.models import CoilGenResult
 from coilgen.study import DesignStudyTable, study_result_from_coilgen_result
 
@@ -76,6 +78,34 @@ def test_missing_or_successful_contract_preserves_existing_quality(legacy_result
         constrained_solver_diagnostic_result=False,
     )
     assert result_quality_status(result) == baseline
+
+
+def test_reporting_separates_completed_execution_from_failed_engineering_checks(legacy_result):
+    result = deepcopy(legacy_result)
+    result.coil_parts[0].route_diagnostics["route_quality_status"] = "fail"
+    summary = result_summary_dict(result)
+    assert summary["execution_status"] == "completed"
+    assert summary["engineering_status"] == "FAIL"
+    assert summary["quality_status"] == "FAIL"
+    assert "Route-quality" in summary["first_failure"]
+    rows = {(group, quantity): value for group, quantity, value, _unit in result_performance_table_rows(result)}
+    assert rows[("Execution", "status")] == "completed"
+    assert rows[("Quality", "engineering acceptance")] == "FAIL"
+    assert rows[("Optimization", "linearity RMS constraint met")] == "inactive"
+    assert rows[("Optimization", "suppression constraint met")] == "inactive"
+
+
+def test_actual_design_csv_preserves_metadata_and_two_column_structure(legacy_result, tmp_path):
+    result = deepcopy(legacy_result)
+    result.input_data.layout_manufacturing_intent = 'Copper, "rolled"\nprototype'
+    path = write_design_summary_csv(result, tmp_path / "design.csv")
+    with path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.reader(handle))
+    assert all(len(row) == 2 for row in rows)
+    summary = dict(rows[1:])
+    assert summary["layout_manufacturing_intent"] == result.input_data.layout_manufacturing_intent
+    assert summary["execution_status"] == "completed"
+    assert summary["engineering_status"] == result_summary_dict(result)["engineering_status"]
 
 
 def test_failed_contract_is_reported_and_excluded_from_default_study_ranking(

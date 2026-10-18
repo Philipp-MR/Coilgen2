@@ -12,7 +12,8 @@ from threading import RLock
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-OUTPUT_ROOT = REPOSITORY_ROOT / "outputs"
+_output_override = os.environ.get("COILGEN_OUTPUT_ROOT", "").strip()
+OUTPUT_ROOT = Path(_output_override).expanduser().resolve() if _output_override else REPOSITORY_ROOT / "outputs"
 PROJECT_DATA_ROOT = REPOSITORY_ROOT / "project_data"
 RUN_DIRECTORY_FORMAT = "%Y-%m-%d_%H-%M-%S-%f_%z"
 

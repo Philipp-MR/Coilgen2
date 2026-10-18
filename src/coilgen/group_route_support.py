@@ -1,6 +1,8 @@
 """Conservative whole-body support certificates for joint routing proposals.
 
-Convex planar domains use exact halfspaces. Centered mounting also supports
+Convex planar domains use exact halfspaces. Verified circular polygonal
+cylinders/frustums use complete triangular-face exclusion from their actual
+bounded convex solid. Centered mounting also supports
 oriented triangular surfaces through bounded whole-chord support certificates
 and a conservative whole-body tube bound against physical boundary edges.
 Intentional centered embedding is not physical substrate-exterior clearance.
@@ -11,6 +13,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .connector_bridge_validation import _SpatialSupport, _segment_hits_triangle
+from .group_route_convex_shell import ConvexSupportShell, certify_shell_body, convex_circular_shell
 
 
 @dataclass(frozen=True)
@@ -18,7 +21,7 @@ class GroupRouteSupport:
     accepted: bool
     reasons: tuple[str, ...]
     diagnostics: dict = field(default_factory=dict)
-    _domain: tuple | None = field(default=None, repr=False, compare=False)
+    _domain: tuple | ConvexSupportShell | None = field(default=None, repr=False, compare=False)
 
 
 def _planar_convex_domain(mesh, tolerance, maximum_faces):
@@ -532,8 +535,25 @@ def check_group_route_support_domain(part_mesh, config, *, tolerance_m=1e-8, max
         return GroupRouteSupport(False, ("invalid_lift_limit",), diagnostics)
     domain, reason = _planar_convex_domain(part_mesh, tolerance_m, maximum_support_faces)
     if reason:
-        # Planar exterior mounting has a full-body halfspace proof. Curved
-        # reference supports are admissible only under centered semantics.
+        # Curved exterior mounting needs a verified physical solid, independently
+        # of its metadata and the approximate analytic sweep parameterization.
+        if mode != "centered" and reason == "unsupported_nonplanar_support":
+            orientation_reason = _oriented_surface_reason(part_mesh, maximum_support_faces)
+            if orientation_reason:
+                return GroupRouteSupport(False, (orientation_reason,), diagnostics)
+            shell, shell_reason = convex_circular_shell(part_mesh, tolerance_m)
+            if shell is not None:
+                diagnostics.update(
+                    support_geometry="verified_convex_circular_polygonal_cylinder_or_frustum",
+                    support_realization="actual_triangle_mesh",
+                    support_side_plane_count=len(shell.plane_points),
+                    support_axial_length_m=shell.axial_length,
+                    centered_profile_embedding_intended=False,
+                )
+                return GroupRouteSupport(True, (), diagnostics, shell)
+            diagnostics["curved_support_rejection_reason"] = shell_reason
+            if shell_reason == "support_face_edge_work_budget_exceeded":
+                return GroupRouteSupport(False, (shell_reason,), diagnostics)
         allowed = {
             "unsupported_nonplanar_support",
             "unsupported_nonconvex_support",
@@ -570,7 +590,9 @@ def certify_group_route_support(
     frames and both the original and final unmounted reference origins obey the
     configured signed lift. This is not a claim that a centered body is wholly
     outside a physical substrate. Surface-outer/inner bodies additionally obey
-    the corresponding exterior plane halfspace, including triangle interiors.
+    the corresponding plane or verified circular-shell mounting halfspaces,
+    including complete triangle interiors. Curved support means the actual
+    polygonal mesh solid; this is not an ideal analytic-radius exterior claim.
 
     Convex planar domains have an exact halfspace proof. Other centered supports
     use adaptive whole-chord support checks and a whole-triangle tube proof of
@@ -635,9 +657,11 @@ def certify_group_route_support(
         return reject("section_frame_profile_mismatch")
     centroid = _polygon_centroid(section)
     if (
-        not np.allclose(np.linalg.norm(trace.normals, axis=1), 1.0, rtol=0, atol=1e-8)
+        not np.allclose(np.linalg.norm(trace.tangents, axis=1), 1.0, rtol=0, atol=1e-8)
+        or not np.allclose(np.linalg.norm(trace.normals, axis=1), 1.0, rtol=0, atol=1e-8)
         or not np.allclose(np.linalg.norm(trace.transverse, axis=1), 1.0, rtol=0, atol=1e-8)
         or np.any(np.abs(np.einsum("ij,ij->i", trace.normals, trace.transverse)) > 1e-8)
+        or np.max(np.linalg.norm(np.cross(trace.tangents, trace.normals) - trace.transverse, axis=1)) > 1e-8
     ):
         return reject("invalid_section_frames")
     section_centered = section - centroid
@@ -658,7 +682,7 @@ def certify_group_route_support(
         return reject("body_section_loft_topology_mismatch")
     mounting_offset = _mounting_centerline_offset(config, section)
     final_origins = trace.points_m - (mounting_offset + centroid[1]) * trace.normals - centroid[0] * trace.transverse
-    if domain is None:
+    if domain is None or isinstance(domain, ConvexSupportShell):
         ring_vertex_count = len(final_origins) * len(section)
         actual_ring_offsets = body_points[:ring_vertex_count].reshape(rings.shape) - final_origins[:, None]
         envelope = float(np.linalg.norm(actual_ring_offsets, axis=2).max())
@@ -667,6 +691,16 @@ def certify_group_route_support(
                 envelope,
                 float(np.linalg.norm(body_points[-2:] - final_origins[[0, -1]], axis=1).max()),
             )
+        if isinstance(domain, ConvexSupportShell):
+            reason = certify_shell_body(domain, body_points, body.faces, mode, tolerance_m, 50_000_000, diagnostics)
+            if reason:
+                diagnostics.update(
+                    certificate_scope="curved_mesh_support_mounting_and_whole_body_footprint",
+                    mounting_mode=mode,
+                    centered_profile_embedding_intended=False,
+                    support_realization="actual_triangle_mesh",
+                )
+                return reject(reason)
         reason = _general_centered_certificate(
             part,
             config,
@@ -679,6 +713,16 @@ def certify_group_route_support(
                 part, config, final_origins, tolerance_m, diagnostics
             ),
         )
+        if isinstance(domain, ConvexSupportShell):
+            diagnostics.update(
+                certificate_scope="curved_mesh_support_mounting_and_whole_body_footprint",
+                mounting_mode=mode,
+                centered_profile_embedding_intended=False,
+                support_realization="actual_triangle_mesh",
+                # Only the separately verified finite body receives this claim.
+                whole_body_exterior_to_support=mode == "surface_outer",
+                support_side_plane_count=len(domain.plane_points),
+            )
         return reject(reason) if reason else GroupRouteSupport(True, (), diagnostics)
     origin, normal, polygon, inward = domain
     reference = np.vstack((part.wire_path.v, final_origins))

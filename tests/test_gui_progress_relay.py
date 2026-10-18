@@ -6,7 +6,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication
 
 from coilgen.gui.array_studies import ArrayStudyDialog, _ArrayTask
-from coilgen.gui.design_tasks import DesignStudyTask, ProgressSignalRelay
+from coilgen.gui.design_tasks import DesignStudyTask, ProgressSignalRelay, deliver_task_signal
 from coilgen.progress import ProgressReporter, progress_scope
 
 
@@ -61,6 +61,100 @@ def test_general_study_worker_forwards_progress_and_failed_work_never_completes(
     assert events[-1]["overall_percent"] == 40
     assert not any(event.get("overall_percent") == 100 for event in events)
     assert finished[0][0] is None and "ValueError" in finished[0][1]
+
+
+@pytest.mark.parametrize("kind", ("design", "analysis"))
+@pytest.mark.parametrize("fail", (False, True))
+def test_pending_workers_finish_without_emitting_from_destroyed_signal_sources(application, kind, fail):
+    from shiboken6 import delete, isValid
+    from coilgen.gui.field_analysis import _AnalysisTask
+
+    completed = []
+
+    def operation(_captured):
+        delete(task.signals)
+        if kind == "design":
+            ProgressReporter(label="Shutdown check").report(40, "Finishing captured operation")
+        else:
+            task.report(40, "Finishing captured analysis")
+        completed.append(True)
+        if fail:
+            raise ValueError("Captured operation failed")
+        return object()
+
+    task = DesignStudyTask(operation, object()) if kind == "design" else _AnalysisTask(operation, 1)
+    task.run()
+    assert completed == [True] and not isValid(task.signals)
+
+
+def test_signal_delivery_does_not_hide_runtime_errors_from_a_live_source(application):
+    from PySide6.QtCore import QObject
+
+    class BrokenSignal:
+        def emit(self, *_args):
+            raise RuntimeError("An unrelated item was deleted")
+
+    signals = QObject()
+    signals.broken = BrokenSignal()
+    with pytest.raises(RuntimeError, match="unrelated item"):
+        deliver_task_signal(signals, "broken", 1)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    (
+        "array",
+        "preview",
+        "system_preview",
+        "live_preview",
+        "saved_settings",
+        "geometry_export",
+        "artifact_export",
+    ),
+)
+@pytest.mark.parametrize("fail", (False, True))
+def test_remaining_workers_finish_after_qt_destroys_signal_sources(application, monkeypatch, kind, fail):
+    """Shutdown may delete Qt objects while captured numerical/file work finishes."""
+    from pathlib import Path
+    from types import SimpleNamespace
+    from shiboken6 import delete, isValid
+    from coilgen.gui import export_panel, live_preview, saved_settings, viewport
+
+    completed = []
+
+    def operation(*_args, **_kwargs):
+        delete(task.signals)
+        if kind in {"array", "geometry_export", "artifact_export"}:
+            ProgressReporter(label="Shutdown check").report(40, "Finishing captured operation")
+        completed.append(True)
+        if fail:
+            raise ValueError("Captured operation failed")
+        return object()
+
+    if kind == "array":
+        task = _ArrayTask(operation)
+    elif kind == "preview":
+        monkeypatch.setattr(viewport, "_preview_data", operation)
+        task = viewport._PreviewTask(1, None, None, None)
+    elif kind == "system_preview":
+        monkeypatch.setattr("coilgen.geometry.load_mesh_from_config", operation)
+        config = SimpleNamespace(coil_mesh_file="create cylinder mesh")
+        task = viewport._SystemSupportTask(1, (("channel", "identity", config, Path.cwd()),))
+    elif kind == "live_preview":
+        task = live_preview._Load(1, (Path.cwd(), {}, None), operation)
+    elif kind == "saved_settings":
+        monkeypatch.setattr(saved_settings, "load_saved_request", operation)
+        task = saved_settings.SavedSettingsTask(None, None, None)
+    else:
+        record = SimpleNamespace(directory=Path.cwd(), metadata={}, arrays={})
+        if kind == "geometry_export":
+            monkeypatch.setattr("coilgen.application.cad.export_geometry", operation)
+            task = export_panel.GeometryExportTask(record, Path.cwd(), (), "mm")
+        else:
+            monkeypatch.setattr(export_panel, "export_verified_artifacts", operation)
+            task = export_panel.ArtifactExportTask(record, Path.cwd(), loader=None)
+    task.run()
+    assert completed == [True] and not isValid(task.signals)
 
 
 def test_opaque_entry_is_visible_before_blocking_work_and_repeated_entries_are_bounded(monkeypatch):

@@ -629,7 +629,7 @@ RUN_STANDARD_EXAMPLES_DEFAULT_PARAMETERS = {
             "mesh_parameter_key": "biplanar_mesh_parameter_list",
             "mesh_parameters": (0.25, 0.25, 10, 10, 1, 0, 0, 0, 0, 0, 0.2),
             "inter_group_connection_path_method": "direct_3d",
-            "config_overrides": {"surface_is_cylinder_flag": False},
+            "config_overrides": {"surface_is_cylinder_flag": False, "skip_sweep": False},
         },
     },
     "dense_examples": {
@@ -672,6 +672,7 @@ RUN_STANDARD_EXAMPLES_DEFAULT_PARAMETERS = {
             "mesh_parameters": (0.12, 0.2, 0.28, 0.08, 0.2),
             "inter_group_connection_path_method": "direct_3d",
             "config_overrides": {
+                "skip_sweep": False,
                 "surface_is_cylinder_flag": True,
                 "target_region_radius": 0.05,
                 "target_region_resolution": 5,

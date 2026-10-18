@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -291,6 +292,10 @@ def result_summary_dict(result: CoilGenResult) -> dict[str, Any]:
     """Return a compact SI-unit summary suitable for Markdown/CSV reports."""
 
     config = getattr(result, "input_data", None)
+    electrical_skipped = bool(getattr(config, "skip_inductance_calculation", False))
+    reported_resistance = None if electrical_skipped else result.resistance
+    reported_inductance = None if electrical_skipped else result.inductance_matrix
+    quality = result_quality_status(result)
     design_context = result_design_context(result)
     sparsified_parts = [part for part in result.coil_parts if part.contour_sparsification is not None]
     sparsification_diagnostics = sparsified_parts[0].contour_sparsification.diagnostics if sparsified_parts else {}
@@ -342,7 +347,7 @@ def result_summary_dict(result: CoilGenResult) -> dict[str, Any]:
         if np.isfinite(part.minimal_contour_distance) and part.minimal_contour_distance > 0.0
     ]
     symmetry = symmetry_summary_dict(result)
-    inductance_summary = inductance_matrix_summary_dict(result.inductance_matrix)
+    inductance_summary = inductance_matrix_summary_dict(reported_inductance)
     layout_gradient_summary = (
         layout_gradient_summary_dict(result.layout_gradient)
         if design_context.enabled(EvaluationFeature.GRADIENT_FIT)
@@ -386,6 +391,16 @@ def result_summary_dict(result: CoilGenResult) -> dict[str, Any]:
         }
     return {
         "report_schema_version": REPORT_SCHEMA_VERSION,
+        "execution_status": str(result.regularization_diagnostics.get("execution_status", "completed")),
+        "engineering_acceptance_status": quality.status,
+        "engineering_status": quality.status,
+        "engineering_acceptance_scope": "Reported checks only; unassessed checks and construction release are excluded.",
+        "quality_status": quality.status,
+        "quality_failures": "; ".join(quality.failures),
+        "quality_warnings": "; ".join(quality.warnings),
+        "first_failing_check": quality.failures[0] if quality.failures else "",
+        "first_failure": quality.failures[0] if quality.failures else "",
+        **_constraint_status_summary(result),
         **{f"software_{key}": value for key, value in software_attribution().items()},
         "problem_schema_version": str(getattr(config, "problem_schema_version", "")),
         "design_context": design_context.key,
@@ -660,10 +675,11 @@ def result_summary_dict(result: CoilGenResult) -> dict[str, Any]:
         "needed_current_A": float(result.needed_current_layout),
         "coil_length_m": _first_or_nan(result.coil_lengths),
         "coil_length_total_m": _sum_or_nan(result.coil_lengths),
-        "coil_resistance_ohm": _first_or_nan(result.resistance),
-        "coil_resistance_total_ohm": _sum_or_nan(result.resistance),
-        "coil_inductance_H": _matrix_first_or_nan(result.inductance_matrix),
-        "coil_inductance_same_current_H": _same_current_inductance(result.inductance_matrix),
+        "coil_electrical_calculation_status": "skipped" if electrical_skipped else "enabled",
+        "coil_resistance_ohm": _first_or_nan(reported_resistance),
+        "coil_resistance_total_ohm": _sum_or_nan(reported_resistance),
+        "coil_inductance_H": _matrix_first_or_nan(reported_inductance),
+        "coil_inductance_same_current_H": _same_current_inductance(reported_inductance),
         "min_contour_distance_m": min(contour_distances) if contour_distances else float("nan"),
         "unconnected_contours_min_wire_distance_m": (
             min(unconnected_contour_wire_distances) if unconnected_contour_wire_distances else float("nan")
@@ -813,6 +829,10 @@ def result_summary_dict(result: CoilGenResult) -> dict[str, Any]:
         ),
         "dsv_constraint_met": bool(result.regularization_diagnostics.get("dsv_constraint_met", False)),
         "dsv_constraint_metric": str(result.regularization_diagnostics.get("dsv_constraint_metric", "")),
+        "dsv_constraint_weighting": str(result.regularization_diagnostics.get("dsv_constraint_weighting", "")),
+        "dsv_constraint_residual_statistics_scope": str(
+            result.regularization_diagnostics.get("dsv_constraint_residual_statistics_scope", "")
+        ),
         "dsv_constraint_relative_residual_percent": float(
             result.regularization_diagnostics.get("dsv_constraint_relative_residual_percent", np.nan)
         ),
@@ -824,6 +844,9 @@ def result_summary_dict(result: CoilGenResult) -> dict[str, Any]:
         ),
         "dsv_constraint_allowed_field_metric_T": float(
             result.regularization_diagnostics.get("dsv_constraint_allowed_field_metric_T", np.nan)
+        ),
+        "dsv_constraint_allowed_with_acceptance_field_metric_T": float(
+            result.regularization_diagnostics.get("dsv_constraint_allowed_with_acceptance_field_metric_T", np.nan)
         ),
         "dsv_constraint_std_T": float(result.regularization_diagnostics.get("dsv_constraint_std_T", np.nan)),
         "dsv_constraint_allowed_std_T": float(
@@ -969,6 +992,56 @@ def result_summary_dict(result: CoilGenResult) -> dict[str, Any]:
     }
 
 
+def _constraint_status_summary(result: CoilGenResult) -> dict[str, str]:
+    """Distinguish inactive requirements, missing evidence, and assessed checks.
+
+    Legacy boolean summary fields are retained for consumers; human-facing
+    tables use these explicit statuses rather than treating absence as False.
+    """
+    diagnostics = result.regularization_diagnostics
+    config = result.input_data
+    method = str(diagnostics.get("stream_function_scheme", getattr(config, "sf_opt_method", "tikhonov"))).lower()
+    target_requested = method not in {"tikhonov", "tikkonov", "tikhonov_regularized_least_squares"}
+
+    def positive(name: str) -> bool:
+        value = getattr(config, name, 0.0)
+        return isinstance(value, (float, int, np.number)) and np.isfinite(value) and value > 0.0
+
+    requested = {
+        "target_error": target_requested,
+        "dsv": target_requested,
+        "suppression": bool(diagnostics.get("suppression_constraint_enabled", False)),
+        "linearity_rms": positive("linearity_rms_tolerance_percent"),
+        "linearity_peak": positive("linearity_peak_tolerance_percent"),
+        "gradient_strength": positive("gradient_strength_tolerance_percent"),
+        "cross_gradient": positive("linearity_cross_gradient_tolerance_percent"),
+        "shield_gradient_opposition": bool(diagnostics.get("shield_gradient_opposition_enabled", False)),
+    }
+    statuses = {}
+    for name, enabled in requested.items():
+        key = f"{name}_constraint_met"
+        value = diagnostics.get(key)
+        explicitly_inactive = (
+            name == "suppression"
+            and diagnostics.get("suppression_constraint_enabled") is False
+            or name == "shield_gradient_opposition"
+            and diagnostics.get("shield_gradient_opposition_enabled") is False
+        )
+        status = (
+            "inactive"
+            if explicitly_inactive
+            else "PASS"
+            if isinstance(value, (bool, np.bool_)) and value
+            else "FAIL"
+            if isinstance(value, (bool, np.bool_))
+            else "unknown"
+            if enabled
+            else "inactive"
+        )
+        statuses[f"{name}_constraint_status"] = status
+    return statuses
+
+
 def result_performance_table_rows(result: CoilGenResult) -> list[list[str]]:
     """Return the formatted rows used by the plot-book and terminal result summaries."""
 
@@ -979,12 +1052,17 @@ def result_performance_table_rows(result: CoilGenResult) -> list[list[str]]:
 
     def add(group: str, quantity: str, key: str | None = None, unit: str = "-", *, value: Any = None) -> None:
         raw_value = summary.get(key, value) if key is not None else value
+        if key is not None and key.endswith("_constraint_met"):
+            raw_value = summary.get(key.removesuffix("_met") + "_status", raw_value)
         formatted = format_result_summary_value(raw_value)
         if formatted:
             rows.append([group, quantity, formatted, unit])
 
     part_count = int(summary.get("part_count", 0))
-    add("Quality", "overall status", value=quality.status)
+    add("Execution", "status", "execution_status")
+    add("Quality", "engineering acceptance", "engineering_acceptance_status")
+    add("Quality", "acceptance scope", "engineering_acceptance_scope")
+    add("Quality", "first failing check", "first_failing_check")
     add("Quality", "warning count", value=len(quality.warnings))
     add("Quality", "failure count", value=len(quality.failures))
     add("Conventions", "problem schema", "problem_schema_version")
@@ -1124,6 +1202,7 @@ def result_performance_table_rows(result: CoilGenResult) -> list[list[str]]:
             "T",
         )
 
+    add("Electrical", "resistance/inductance calculation", "coil_electrical_calculation_status")
     if part_count > 1:
         add("Electrical", "total conductor length", "coil_length_total_m", "m")
         add("Electrical", "sum of part resistances", "coil_resistance_total_ohm", "Ohm")
@@ -1209,6 +1288,7 @@ def result_performance_table_rows(result: CoilGenResult) -> list[list[str]]:
     add("Optimization", "target-error auto retry violation ratio", "target_error_auto_retry_selected_violation_ratio")
     add("Optimization", "DSV constraint met", "dsv_constraint_met")
     add("Optimization", "DSV constraint metric", "dsv_constraint_metric")
+    add("Optimization", "DSV constraint weighting", "dsv_constraint_weighting")
     add("Optimization", "DSV residual", "dsv_constraint_relative_residual_percent", "%")
     add("Optimization", "DSV residual std", "dsv_constraint_std_T", "T")
     add("Optimization", "DSV allowed residual std", "dsv_constraint_allowed_std_T", "T")
@@ -1859,7 +1939,9 @@ def write_design_report(
         "",
         f"Original CoilGen reference: [{COILGEN_CITATION}]({COILGEN_PUBLICATION_URL})",
         "",
-        f"Overall status: **{quality.status}**",
+        f"Execution status: **{summary['execution_status']}**",
+        f"Engineering acceptance: **{quality.status}** (reported checks only)",
+        "Unassessed engineering checks and construction release are excluded from this status.",
         f"Design context: **{design_context.key}**",
         "",
     ]
@@ -1985,7 +2067,9 @@ def write_design_report(
     lines.append("")
     lines.extend(_markdown_table(current_density_report_dict(result)))
     lines.append("")
-    inductance_rows = _inductance_matrix_rows(result.inductance_matrix)
+    inductance_rows = _inductance_matrix_rows(
+        None if getattr(result.input_data, "skip_inductance_calculation", False) else result.inductance_matrix
+    )
     if inductance_rows:
         lines.extend(["## Inductance Matrix", ""])
         lines.append(
@@ -2035,10 +2119,10 @@ def write_design_summary_csv(result: CoilGenResult, path: str | Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     summary = result_summary_dict(result)
-    lines = ["quantity,value"]
-    for key, value in summary.items():
-        lines.append(f"{key},{value}")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(("quantity", "value"))
+        writer.writerows(summary.items())
     return path
 
 

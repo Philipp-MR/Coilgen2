@@ -23,6 +23,8 @@ class _Load(QRunnable):
 
     @Slot()
     def run(self):
+        from .design_tasks import deliver_task_signal
+
         directory, identity, _signature = self.request
         preview, error = None, None
         try:
@@ -31,7 +33,7 @@ class _Load(QRunnable):
             # Optional display failures must still release the loader/coalesced
             # request, including resource and unexpected archive errors.
             error = str(exc) or type(exc).__name__
-        self.signals.finished.emit(self.epoch, self.request, preview, error)
+        deliver_task_signal(self.signals, "finished", self.epoch, self.request, preview, error)
 
 
 class LivePreviewController(QObject):
@@ -78,6 +80,16 @@ class LivePreviewController(QObject):
     @property
     def loading(self):
         return self._worker is not None and self._worker.epoch == self._epoch
+
+    @property
+    def working(self):
+        """Actual archive loading, including discarded requests still finishing.
+
+        ``loading`` describes the selected live view. A channel change or pause
+        invalidates that view without cancelling archive decompression; global
+        activity must remain visible until the retained worker has finished.
+        """
+        return self._worker is not None
 
     @property
     def error(self):
@@ -175,6 +187,7 @@ class LivePreviewController(QObject):
             return
         if self._worker is not None:
             self._pending = request
+            self.changed.emit()
             return
         self._launch(request)
 

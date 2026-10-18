@@ -232,3 +232,43 @@ def test_unavailable_original_current_is_not_promoted_by_refitted_field(panel):
     panel.set_record(record)
     assert "Connected conductor: saved refitted current 7 A" in panel.metrics.text()
     assert "99 A" not in panel.metrics.text()
+
+
+def test_narrow_acceptance_window_retains_evaluation_scope_and_saved_margin(panel, application):
+    panel.set_record(_record())
+    panel.resize(760, 600)
+    panel.show()
+    application.processEvents()
+    assert not panel.table.isColumnHidden(5)
+    assert not panel.table.isColumnHidden(3)
+    assert panel.table.columnWidth(5) >= 170
+    assert panel.table.columnWidth(0) < 340
+
+
+def test_integrity_failure_or_different_run_disables_locate_without_erasing_saved_check(panel):
+    received = []
+    panel.witness_requested.connect(received.append)
+    record = _record()
+    panel.set_record(record, issues=(_issue(),), diagnostic="Saved evidence checksum changed.")
+    _select(panel, "body:Strict review:body1:clearance")
+    assert not panel.locate.isEnabled()
+
+    panel._locate()
+    assert not received
+    assert panel._check().status == "Failed"
+    from dataclasses import replace
+
+    wrong = replace(_issue(), run_directory=str(Path("other-run").resolve()))
+    panel.set_record(record, issues=(wrong,))
+    _select(panel, "body:Strict review:body1:clearance")
+    assert not panel.locate.isEnabled()
+
+
+def test_archived_execution_timestamp_is_presented_separately_from_live_job_state(panel):
+    record = _record()
+    record.execution_times = {"created_at": "2026-10-11T03:27:53.159402+00:00"}
+    before = repr(record.metadata)
+    panel.set_record(record)
+    assert "date unrecorded" not in panel.identity.text()
+    assert "UTC: 2026-10-11T03:27:53" in panel.identity.toolTip()
+    assert "job" not in record.metadata and repr(record.metadata) == before

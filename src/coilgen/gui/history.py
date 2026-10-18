@@ -374,7 +374,7 @@ class HistoryPanel(QWidget):
                 accepted = summary.get("accepted")
                 claimed = summary.get("scope") in {"continuous_sheet", "fabrication_review"}
                 error = summary.get("validated_relative_field_error")
-                date = run_timestamp(metadata)
+                date = run_timestamp(entry.run or metadata)
                 compatibility, compatibility_label = run_compatibility(metadata, project)
                 values = (
                     (

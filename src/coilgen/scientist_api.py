@@ -45,10 +45,22 @@ def run_coil_design(design: Any, options: CoilDesignRunOptions | None = None) ->
 
     options = options or CoilDesignRunOptions()
     project_root = Path(options.project_root)
-    result = design.run(project_root=project_root)
     output_dir = (
         Path(options.output_dir) if options.output_dir is not None else project_root / "outputs" / options.output_prefix
     )
+    try:
+        result = design.run(project_root=project_root)
+    except Exception as error:
+        if options.save_reports:
+            from .pipeline_failure import write_failure_evidence
+
+            try:
+                write_failure_evidence(error, output_dir, prefix=options.output_prefix)
+            except Exception as report_error:
+                # A failed report must never mask the scientific failure.
+                if hasattr(error, "add_note"):
+                    error.add_note(f"Failure evidence could not be written: {report_error}")
+        raise
     output_dir.mkdir(parents=True, exist_ok=True)
 
     files: list[Path] = []

@@ -1,9 +1,11 @@
 """Durable links, source integrity and scoped comparisons without solver duplication."""
 
 from hashlib import sha256
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import json
 from pathlib import Path
 import shutil
+from threading import Event
 
 import numpy as np
 import pytest
@@ -360,3 +362,106 @@ def test_scope_link_is_idempotent_and_keeps_existing_target_aliases_and_session(
     assert store.session("p", channel_id="a") == {"selected_id": target.id, "view_state": {"component": "By"}}
     assert store.link_scope("p", source_channel_id="a", target_channel_id="a") == {target.id: target.id}
     assert store.restore("p")[0].alias == "Standalone alias"
+
+
+def test_completed_run_link_serializes_with_alias_and_session_edits_without_changing_evidence(tmp_path, monkeypatch):
+    import coilgen.application.history as history_module
+
+    first = write_run(tmp_path / "first")
+    second = write_run(tmp_path / "second")
+    store = RunHistoryStore(tmp_path / "session.json")
+    entry = store.add_run("p", first, channel_id="a", alias="Before completion")
+    evidence = {path: path.read_bytes() for run in (first, second) for path in run.directory.iterdir()}
+    entered, release = Event(), Event()
+    renamed, saved = Event(), Event()
+    original_write = history_module.atomic_json
+
+    def blocking_first_write(path, data):
+        if path == store.path and not entered.is_set():
+            entered.set()
+            assert release.wait(5), "Test did not release the history manifest write."
+        return original_write(path, data)
+
+    def rename():
+        renamed.set()
+        store.rename_run(entry.id, "User's current alias")
+
+    def save():
+        saved.set()
+        store.save_session("p", channel_id="a", selected_id=entry.id, view_state={"component": "By"})
+
+    monkeypatch.setattr(history_module, "atomic_json", blocking_first_write)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        link = pool.submit(store.add_run, "p", second, channel_id="a")
+        try:
+            assert entered.wait(3)
+            alias = pool.submit(rename)
+            session = pool.submit(save)
+            assert renamed.wait(3) and saved.wait(3)
+            # Both same-instance edits must wait for the pending atomic write,
+            # rather than being rejected as another runtime owner.
+            for pending in (alias, session):
+                with pytest.raises(TimeoutError):
+                    pending.result(timeout=0.05)
+        finally:
+            release.set()
+        assert link.result(timeout=3).verified
+        alias.result(timeout=3)
+        session.result(timeout=3)
+
+    entries = RunHistoryStore(store.path).restore("p", channel_id="a")
+    assert len(entries) == 2 and all(item.verified for item in entries)
+    assert entries[0].id == entry.id and entries[0].alias == "User's current alias"
+    assert store.session("p", channel_id="a") == {"selected_id": entry.id, "view_state": {"component": "By"}}
+    assert {path: path.read_bytes() for path in evidence} == evidence
+
+
+def test_same_instance_thread_lock_does_not_replace_external_history_ownership(tmp_path):
+    from coilgen.research.storage import DirectoryOwner
+
+    run = write_run(tmp_path / "run")
+    store = RunHistoryStore(tmp_path / "session.json")
+    entry = store.add_run("p", run, alias="Original alias")
+    before = store.path.read_bytes()
+    with DirectoryOwner(store.path.parent, filename=f".{store.path.name}.lock"):
+        with pytest.raises(RuntimeError, match="Another runtime already owns"):
+            store.rename_run(entry.id, "Cannot acquire an external owner's lock")
+    assert store.path.read_bytes() == before
+    store.rename_run(entry.id, "After lock release")
+    assert store.restore("p")[0].alias == "After lock release"
+
+
+def test_history_manifest_read_handle_finishes_before_concurrent_session_replacement(tmp_path, monkeypatch):
+    store = RunHistoryStore(tmp_path / "session.json")
+    store.save_session("p", view_state={"component": "Bz"})
+    original_read = Path.read_text
+    entered, release, saving = Event(), Event(), Event()
+
+    def held_manifest_read(path, *args, **kwargs):
+        if path == store.path and not entered.is_set():
+            # Hold a real read handle as a background history restoration would.
+            # On Windows it prevents os.replace until this context closes.
+            with path.open("r", encoding=kwargs.get("encoding", "utf-8")) as stream:
+                entered.set()
+                assert release.wait(5), "Test did not release the manifest reader."
+                return stream.read()
+        return original_read(path, *args, **kwargs)
+
+    def save():
+        saving.set()
+        store.save_session("p", view_state={"component": "By"})
+
+    monkeypatch.setattr(Path, "read_text", held_manifest_read)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        reader = pool.submit(store.restore, "p")
+        try:
+            assert entered.wait(3)
+            writer = pool.submit(save)
+            assert saving.wait(3)
+            with pytest.raises(TimeoutError):
+                writer.result(timeout=0.05)
+        finally:
+            release.set()
+        assert reader.result(timeout=3) == ()
+        writer.result(timeout=3)
+    assert store.session("p") == {"selected_id": None, "view_state": {"component": "By"}}

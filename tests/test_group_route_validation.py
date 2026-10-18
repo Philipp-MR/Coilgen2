@@ -143,6 +143,7 @@ def test_same_current_field_delta_rejects_before_candidate_sweep(loop_case, monk
     result = validation.validate_group_route_candidate(part, path, config, baseline=baseline, **kwargs)
     assert not result.accepted and "field_delta_budget_exceeded" in result.reasons
     assert result.diagnostics["route_maximum_field_delta_t_per_a"] > kwargs["maximum_field_delta_t_per_a"]
+    assert result.diagnostics["body_preview_started"] is False
 
 
 @pytest.mark.parametrize("mutation", ["route", "support", "config", "roi"])

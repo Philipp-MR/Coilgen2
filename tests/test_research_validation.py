@@ -57,6 +57,16 @@ def test_absolute_norm_budget_retains_design_sample_normalization():
     assert check["passed"]
 
 
+def test_field_check_records_active_samples_not_array_length_or_weight_sum():
+    result = field_result(target_field_component="By")
+    target = np.zeros((4, 3))
+    actual = target.copy()
+    actual[:, 1] = [1e-6, 50e-6, 3e-6, 50e-6]
+    check = field_budget_check(result, actual, target, weights=np.array([2.0, 0.0, 6.0, np.nan]))
+    assert check["sample_count"] == 2 and check["component"] == "By"
+    assert check["rms_error_T"] == pytest.approx(np.sqrt(7) * 1e-6)
+
+
 @pytest.mark.parametrize("kind", ["std", "custom", "imported"])
 def test_unsupported_independent_contract_is_explicitly_unverified(kind):
     result = field_result()
@@ -153,6 +163,8 @@ def test_final_wire_torque_violation_blocks_acceptance_even_when_field_passes():
     assert not validation["passed"]
     assert validation["torque_Nm"] == pytest.approx([-6, 0, 0])
     assert validation["checks"][0]["passed"]
+    assert validation["checks"][0]["sample_count"] == 1
+    assert validation["currents_A"] == {"loop": 2.0}
     assert any(row["name"] == "Fabricated wire torque" and not row["passed"] for row in validation["checks"])
 
 

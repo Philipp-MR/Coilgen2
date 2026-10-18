@@ -1517,8 +1517,12 @@ def _validate_optimization_settings(config: CoilGenConfig, error, warning) -> No
         )
     if int(getattr(config, "contour_smoothing_patch_rings", 4)) < 1:
         error("contour_smoothing_patch_rings", "Contour smoothing patch rings must be at least one.")
-    if float(config.contour_smoothing_max_displacement) < 0.0:
-        error("contour_smoothing_max_displacement", "Contour smoothing max displacement must be non-negative.")
+    smoothing_displacement_limit = _finite_float(config.contour_smoothing_max_displacement)
+    if not np.isfinite(smoothing_displacement_limit) or smoothing_displacement_limit < 0.0:
+        error(
+            "contour_smoothing_max_displacement",
+            "Contour smoothing max displacement must be finite and non-negative.",
+        )
     if float(config.turn_spacing_regularization_factor) < 0.0:
         error("turn_spacing_regularization_factor", "Turn-spacing regularization factor must be non-negative.")
     if int(config.turn_spacing_max_iterations) < 1:
@@ -1905,8 +1909,47 @@ def _validate_routing_settings(config: CoilGenConfig, error, warning) -> None:
         config.joint_group_routing_search_mode,
         {"progressive", "thorough"},
     )
+    _enum(
+        error,
+        "joint_group_routing_selection_policy",
+        config.joint_group_routing_selection_policy,
+        {"regular", "physical"},
+    )
+    regular_tolerance = config.joint_group_routing_regular_field_tolerance_rel
+    if isinstance(regular_tolerance, (bool, np.bool_)):
+        error(
+            "joint_group_routing_regular_field_tolerance_rel",
+            "Regularity field tolerance must be numeric, not a boolean.",
+        )
+    else:
+        _at_least_float(
+            error,
+            "regular routing relative RMS tolerance",
+            "joint_group_routing_regular_field_tolerance_rel",
+            regular_tolerance,
+            0.0,
+        )
     if not isinstance(config.joint_group_routing_search_cuts, (bool, np.bool_)):
         error("joint_group_routing_search_cuts", "Alternate cut search must be enabled or disabled with a boolean.")
+    port_count = config.joint_group_routing_port_search_count
+    if (
+        isinstance(port_count, (bool, np.bool_))
+        or not isinstance(port_count, (int, np.integer))
+        or not 0 <= port_count <= 32
+    ):
+        error("joint_group_routing_port_search_count", "The attachment-context budget must be an integer in [0, 32].")
+    for name, minimum, maximum, label in (
+        ("joint_group_routing_cut_span_max_factor", 1.0, 16.0, "cut span factor"),
+        ("joint_group_routing_seam_search_extent_rel", 0.0, 0.25, "relative seam search extent"),
+    ):
+        value = getattr(config, name)
+        if (
+            isinstance(value, (bool, np.bool_))
+            or not isinstance(value, (int, float, np.number))
+            or not np.isfinite(value)
+            or not minimum <= value <= maximum
+        ):
+            error(name, f"The {label} must be finite and in [{minimum}, {maximum}].")
     _enum(
         error,
         "joint_group_routing_field_acceptance",

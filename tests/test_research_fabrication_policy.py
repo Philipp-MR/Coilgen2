@@ -117,6 +117,56 @@ def test_winding_operations_follow_provenance_independently_of_sampling_density(
     assert plans[1]["sampled_interval_count"] > plans[0]["sampled_interval_count"]
 
 
+def test_group_joins_and_returns_are_named_without_changing_protected_turns_or_interval_coverage():
+    span_owners = [
+        WireSegmentOwner("contour_loop", group_index=2, loop_index=4),
+        WireSegmentOwner("contour_group", group_index=2, connector_role="joint_spiral_join"),
+        WireSegmentOwner("contour_loop", group_index=2, loop_index=5),
+        WireSegmentOwner("within_group_return", group_index=2, connector_role="return_lane"),
+        WireSegmentOwner("inter_group_connector", connector_index=0, connector_role="closing"),
+        WireSegmentOwner("contour_group", group_index=3),
+    ]
+    expected = ["wind_turn", "route_group_join", "wind_turn", "route_group_return", "interconnect", "wind_group"]
+    plans = []
+    for density in (1, 5):
+        counts = density * np.array([4, 2, 3, 3, 2, 2])
+        owners = [owner for owner, count in zip(span_owners, counts, strict=True) for _ in range(count)]
+        points = np.column_stack((np.linspace(-0.1, 0.1, len(owners) + 1), np.zeros((len(owners) + 1, 2))))
+        part = CoilPart(mesh=_plane(), wire_path=WirePath(v=points, segment_owners=owners))
+        config = CoilGenConfig(
+            sweep_path_simplification="off",
+            sweep_max_segment_length=0,
+            sweep_max_chord_error=0,
+            sweep_frame_angle_tolerance_deg=0,
+            conductor_cross_section_width=0.0001,
+            conductor_cross_section_height=0.0001,
+        )
+        create_swept_coil_meshes([part], config)
+        record = FabricationRecord(
+            "part001_body0001", 1, None, part.fabrication_path, part.swept_body, part.manufacturing_diagnostics
+        )
+        plan = winding_instructions(record, checkpoint_spacing_m=0.025)
+        steps = plan["steps"]
+        assert [step["operation"] for step in steps] == expected
+        assert [step["owner_kind"] for step in steps] == [owner.kind for owner in span_owners]
+        assert [step["connector_role"] for step in steps] == [owner.connector_role for owner in span_owners]
+        assert all(step["source_kind"] == "wire_path" for step in steps)
+        assert steps[0]["instruction"].startswith("Wind turn 5")
+        assert steps[2]["instruction"].startswith("Wind turn 6")
+        assert steps[5]["instruction"].startswith("Wind contour group 4")
+        # Every sampled physical interval belongs to exactly one operation;
+        # adding route labels must not duplicate or omit protected turns.
+        covered = [i for step in steps for i in range(step["start_sample_index"], step["end_sample_index"])]
+        assert covered == list(range(plan["sampled_interval_count"]))
+        assert sum(step["interval_length_m"] for step in steps) == pytest.approx(record.path.length_m)
+        np.testing.assert_array_equal(plan["electrical_points_m"], record.points_m)
+        plans.append(plan)
+    assert plans[0]["operation_count"] == plans[1]["operation_count"] == 6
+    assert [step["interval_length_m"] for step in plans[0]["steps"]] == pytest.approx(
+        [step["interval_length_m"] for step in plans[1]["steps"]]
+    )
+
+
 def test_material_homogenization_matches_parallel_wire_joule_loss():
     material = WireSheetMaterial.round_wire(0.001, 0.004, resistivity_ohm_m=1.8e-8)
     current, length, turns = 3.0, 0.4, 12

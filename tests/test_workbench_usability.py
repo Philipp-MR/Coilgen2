@@ -3,6 +3,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 import os
+import time
 from uuid import uuid4
 
 import pytest
@@ -407,6 +408,11 @@ def test_inactive_channel_completion_persists_without_replacing_active_evidence(
         }
     )
     window.poll_jobs()
+    deadline = time.monotonic() + 10
+    while id_ not in window.runs and time.monotonic() < deadline:
+        QCoreApplication.processEvents()
+        time.sleep(0.005)
+    assert id_ in window.runs
     assert window.project.id == active.id
     assert window._selected_run == selected
     assert window.viewport.displayed["request_sha256"] == displayed_identity

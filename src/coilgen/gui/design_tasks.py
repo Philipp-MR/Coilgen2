@@ -1,7 +1,17 @@
 """Verification-heavy design actions over captured immutable project inputs."""
 
 from PySide6.QtCore import QObject, QRunnable, Signal
+from shiboken6 import isValid
 from ..progress import ProgressRelay as ProgressSignalRelay
+
+
+def deliver_task_signal(signals, name, *values):
+    """Allow pending workers to finish after Qt destroys their signal source."""
+    try:
+        getattr(signals, name).emit(*values)
+    except RuntimeError as exc:
+        if "deleted" not in str(exc) or isValid(signals):
+            raise
 
 
 class _Signals(QObject):
@@ -19,13 +29,13 @@ class DesignStudyTask(QRunnable):
     def run(self):
         from ..progress import progress_context
 
-        relay = ProgressSignalRelay(self.signals.progress.emit)
+        relay = ProgressSignalRelay(lambda event: deliver_task_signal(self.signals, "progress", event))
         try:
             with progress_context(relay.report):
                 result = self.operation(self.project, *self.args, **self.kwargs)
         except Exception as exc:
             relay.flush()
-            self.signals.finished.emit(None, f"{type(exc).__name__}: {exc}")
+            deliver_task_signal(self.signals, "finished", None, f"{type(exc).__name__}: {exc}")
         else:
             relay.flush()
-            self.signals.finished.emit(result, "")
+            deliver_task_signal(self.signals, "finished", result, "")

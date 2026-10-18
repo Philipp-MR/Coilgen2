@@ -892,6 +892,9 @@ def _realize_wire_path(
 ) -> tuple[_RealizedWirePath | None, dict[str, float | int | bool | str]]:
     """Prepare the authoritative physical path shared by routing and sweeping."""
 
+    ProgressReporter.from_config(config, label="Conductor realization").report(
+        None, "Prepare route source geometry and interval provenance", force=True
+    )
     source_points = np.asarray(part.wire_path.v, dtype=float)
     raw_points = _dedupe_path(source_points)
     closed_path = _is_closed_path(raw_points)
@@ -1157,8 +1160,11 @@ def _final_path_bend_diagnostics(points, cross_section, config, *, closed):
     The minimum bend radius is a physical postcondition even when automatic
     filleting is disabled. Coarser precursor checks cannot certify this path.
     """
-    radii = _polyline_circumradii(points, closed=closed, minimum_turn_angle_deg=1e-6)
+    radii, radius_indices = _polyline_circumradii(
+        points, closed=closed, minimum_turn_angle_deg=1e-6, return_indices=True
+    )
     minimum = float(np.min(radii)) if len(radii) else np.inf
+    worst_point = int(radius_indices[np.argmin(radii)]) if len(radii) else None
     radius = max(float(config.sweep_min_bend_radius), 0.0)
     lengths = _centerline_segment_lengths(points, closed=closed)
     # A collinear reversal has undefined circumcircle and must not look straight.
@@ -1166,12 +1172,15 @@ def _final_path_bend_diagnostics(points, cross_section, config, *, closed):
     reversal = bool(np.any(angles >= 180.0 - 1e-6))
     if reversal:
         minimum = 0.0
+        worst_point = int(np.argmax(angles)) + (0 if closed else 1)
     # This check uses the physical centroid trace, so its enclosing radius
     # must also be centred on the profile centroid rather than the CAD origin.
     envelope = _cross_section_envelope_radius(cross_section - _polygon_centroid(cross_section))
     ratio = envelope / minimum if minimum > 0.0 else np.inf
     return {
         "sweep_final_min_bend_radius_m": minimum if np.isfinite(minimum) else None,
+        "sweep_final_min_bend_point_index": worst_point,
+        "sweep_final_bend_point_count": int(len(points)),
         "sweep_final_bend_radius_reference": "mounted_profile_centroid_after_ring_repair",
         "sweep_final_min_bend_radius_violation": bool(radius > 0.0 and minimum < 0.99 * radius),
         "sweep_final_collinear_reversal": reversal,
@@ -1205,6 +1214,7 @@ def _source_path_displacement_diagnostics(source_points, physical_points, source
         if len(displacement)
         else 0.0,
         "sweep_source_displacement_sampling": "final_interval_midpoints_to_matched_source_segments",
+        "sweep_source_displacement_worst_interval": int(np.argmax(displacement)) if len(displacement) else None,
     }
 
 
@@ -1773,6 +1783,9 @@ def _support_conformity_diagnostics(
         "sweep_support_penetration_count": 0,
         "sweep_support_max_penetration_m": 0.0,
         "sweep_support_penetration_violation": False,
+        "sweep_support_penetration_vertex_index": None,
+        "sweep_support_penetration_vertex_count": int(swept_mesh.n_vertices),
+        "sweep_support_vertex_order": "ring_major_profile_then_open_cap_centers",
     }
     if mode == "centered" or swept_mesh.n_vertices == 0:
         return diagnostics
@@ -1787,6 +1800,7 @@ def _support_conformity_diagnostics(
             "sweep_support_penetration_count": int(np.count_nonzero(violation)),
             "sweep_support_max_penetration_m": float(max(np.max(penetration), 0.0)),
             "sweep_support_penetration_violation": bool(np.any(violation)),
+            "sweep_support_penetration_vertex_index": int(np.argmax(penetration)) if np.any(violation) else None,
         }
     )
     return diagnostics
@@ -2625,24 +2639,26 @@ def _prepare_sweep_centerline(
     ):
         source_frame_state = _SweepSourceFrameState()
     resolver_options = {} if source_frame_state is None else {"source_frame_state": source_frame_state}
-    bent, bent_geometry, bend_diagnostics = _resolve_sweep_centerline_bends(
-        part,
-        simplified,
-        simplified_geometry,
-        cross_section,
-        config,
-        closed=closed,
-        **resolver_options,
-    )
+    with progress_scope(0, 55, "Resolve conductor bends without changing source turns"):
+        bent, bent_geometry, bend_diagnostics = _resolve_sweep_centerline_bends(
+            part,
+            simplified,
+            simplified_geometry,
+            cross_section,
+            config,
+            closed=closed,
+            **resolver_options,
+        )
     diagnostics.update(bend_diagnostics)
-    resampled, resampled_geometry, sampling_diagnostics = _surface_adaptive_resample(
-        part,
-        bent,
-        bent_geometry,
-        cross_section,
-        config,
-        closed=closed,
-    )
+    with progress_scope(55, 85, "Adaptively sample conductor length, chord and support normals"):
+        resampled, resampled_geometry, sampling_diagnostics = _surface_adaptive_resample(
+            part,
+            bent,
+            bent_geometry,
+            cross_section,
+            config,
+            closed=closed,
+        )
     diagnostics.update(sampling_diagnostics)
     if source_frame_state is not None and source_frame_state.eligible:
         resampled, resampled_geometry, source_sampling_details = _repair_source_frame_sampling(
@@ -2689,10 +2705,13 @@ def _polyline_circumradii(
     *,
     closed: bool,
     minimum_turn_angle_deg: float,
-) -> np.ndarray:
+    return_indices: bool = False,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     if len(points) < 3:
-        return np.zeros(0, dtype=float)
+        radii = np.zeros(0, dtype=float)
+        return (radii, np.zeros(0, dtype=np.int64)) if return_indices else radii
     radii: list[float] = []
+    retained_indices: list[int] = []
     indices = range(len(points)) if closed else range(1, len(points) - 1)
     for index in indices:
         previous = points[(index - 1) % len(points)]
@@ -2707,7 +2726,9 @@ def _polyline_circumradii(
         if area_twice <= 1e-30:
             continue
         radii.append(first * second * third / (2.0 * area_twice))
-    return np.asarray(radii, dtype=float)
+        retained_indices.append(index)
+    values = np.asarray(radii, dtype=float)
+    return (values, np.asarray(retained_indices, dtype=np.int64)) if return_indices else values
 
 
 def _surface_adaptive_resample(
@@ -2797,6 +2818,9 @@ def _surface_adaptive_resample(
     depth_limit_count = 0
     unresolved_count = 0
     domain_fallback_count = 0
+    task = ProgressReporter.from_config(config, label="Conductor sampling").task(
+        "source segments", expected_segment_count
+    )
 
     def append_segment(
         start: np.ndarray,
@@ -2812,6 +2836,9 @@ def _surface_adaptive_resample(
         nonlocal depth_limit_count
         nonlocal unresolved_count
         nonlocal domain_fallback_count
+        # A single input segment may require many recursive support projections.
+        # Its completion count stays fixed until all of its subdivisions return.
+        task.update(task.completed, message=f"{task.completed}/{task.total}; refinement depth {depth}")
         midpoint_linear = 0.5 * (start + end)
         follows_support = geometry == WirePathGeometry.SURFACE
         midpoint_normal = start_normal + end_normal
@@ -2896,6 +2923,7 @@ def _surface_adaptive_resample(
 
     segment_count = len(points) if closed else len(points) - 1
     for segment_index in range(segment_count):
+        task.update(segment_index)
         following = (segment_index + 1) % len(points)
         append_segment(
             points[segment_index],
@@ -2905,6 +2933,7 @@ def _surface_adaptive_resample(
             0,
             segment_geometry[segment_index],
         )
+    task.done()
     if closed:
         output.pop()
     sampled_points = np.asarray(output, dtype=float)
@@ -4483,7 +4512,11 @@ def _build_radius_controlled_fillet_path(
     surface_validation_failure_count = 0
     offset_surface_fillet_count = 0
     maximum_offset_surface_gap = 0.0
-    for index, candidate in resolved.items():
+    task = ProgressReporter.from_config(config, label="Conductor bends").task(
+        "fillet corners", len(resolved), indeterminate=True
+    )
+    for completed, (index, candidate) in enumerate(resolved.items()):
+        task.update(completed)
         plan = corner_plans.get(index) if corner_plans is not None else None
         previous_index = plan.previous_support_index if plan is not None else (index - 1) % len(points)
         following_index = plan.following_support_index if plan is not None else (index + 1) % len(points)
@@ -4556,6 +4589,7 @@ def _build_radius_controlled_fillet_path(
         arcs[index] = (start, end, arc, candidate.blend_geometry)
         inserted_count += max(len(arc) - 2, 0)
 
+    task.done()
     if not arcs:
         return _SweepFilletBuildResult(
             points=points,

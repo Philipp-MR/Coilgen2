@@ -1,4 +1,4 @@
-"""Passive recorded computation progress beside the scientific plot.
+"""Selected-run computation status and persistent global activity.
 
 The controller supplies completed stage boundaries recorded after checkpoint
 storage, loaded stage snapshots or verified final results. Worker percentages
@@ -10,15 +10,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-import math
-from numbers import Real
 
-from PySide6.QtCore import QEvent, QRectF, QSignalBlocker, QSize, Qt, Signal
-from PySide6.QtGui import QIcon, QPainter, QPen
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QProgressBar, QSizePolicy, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QMenu, QProgressBar, QSizePolicy, QToolButton, QWidget
 
-from .colors import apply_tone, tone_color
-from .icons import icon
+from .colors import apply_tone
+from .runtime_feedback import RuntimeFeedback, fraction_percent as _percent, runtime_feedback, work_detail
 
 
 _STAGES = (
@@ -87,34 +84,16 @@ class DesignProgressState:
     follow_available: bool
     provenance: str
     status: str
+    runtime: RuntimeFeedback = RuntimeFeedback()
 
 
 def _text(value):
     return " ".join(value.split()) if isinstance(value, str) else ""
 
 
-def _percent(value):
-    if isinstance(value, bool) or not isinstance(value, Real):
-        return None
-    try:
-        value = float(value)
-    except (OverflowError, ValueError):
-        return None
-    if not math.isfinite(value) or not 0 <= value <= 1:
-        return None
-    return min(99, round(value * 100)) if value < 1 else 100
-
-
 def _work_detail(state):
-    detail = ""
-    if state.get("progress_indeterminate"):
-        detail = " · current operation has no measurable work total"
-    elif (value := _percent(state.get("phase_progress"))) is not None:
-        detail = f" · current operation {value}%"
-    completed, total = state.get("progress_completed"), state.get("progress_total")
-    if isinstance(completed, int) and isinstance(total, int) and total > 0:
-        detail += f" ({completed}/{total} work units)"
-    return detail
+    detail = work_detail(state)
+    return " · " + detail if detail else ""
 
 
 class ComputationIndicator(QWidget):
@@ -123,6 +102,7 @@ class ComputationIndicator(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("computing_indicator")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.label = QLabel(self)
@@ -137,6 +117,28 @@ class ComputationIndicator(QWidget):
         self.progress.setFixedSize(36, 10)
         self.progress.setTextVisible(False)
         layout.addWidget(self.progress)
+        self.details_label = QLabel(self)
+        self.details_label.setObjectName("computing_task_summary")
+        self.details_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.details_label.setMinimumWidth(0)
+        self.details_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.details_label.setAccessibleName("Current workers and operations")
+        layout.addWidget(self.details_label, 2)
+        self.runtime_label = QLabel(self)
+        self.runtime_label.setObjectName("computing_runtime_observation")
+        self.runtime_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.runtime_label.setMinimumWidth(0)
+        self.runtime_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.runtime_label.setAccessibleName("Worker elapsed time and observed liveness")
+        layout.addWidget(self.runtime_label, 1)
+        self.tasks_button = QToolButton(self)
+        self.tasks_button.setText("Tasks…")
+        self.tasks_button.setAccessibleName("Show every current computation and its progress")
+        self.tasks_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.tasks_menu = QMenu(self.tasks_button)
+        self.tasks_menu.setToolTipsVisible(True)
+        self.tasks_button.setMenu(self.tasks_menu)
+        layout.addWidget(self.tasks_button)
         self.message = QLabel(self)
         self.message.setTextFormat(Qt.TextFormat.PlainText)
         self.message.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -150,6 +152,8 @@ class ComputationIndicator(QWidget):
         indeterminate = False
         busy = bool(active or working)
         details = []
+        visible_tasks = []
+        task_rows = []
         if unavailable:
             text = "Working… · job activity unavailable" if working else "Activity unavailable"
             busy = bool(working)
@@ -163,9 +167,22 @@ class ComputationIndicator(QWidget):
             elif cancelling:
                 text = "Cancelling…"
             else:
-                percent = _percent(active[0].get("progress"))
+                runtime = runtime_feedback(active[0])
+                percent = (
+                    runtime.phase_percent
+                    if runtime.phase_percent is not None
+                    else (None if runtime.allocated else _percent(active[0].get("progress")))
+                )
                 indeterminate = bool(active[0].get("progress_indeterminate"))
-                text = f"Computing ({percent}%)" if percent is not None else "Computing…"
+                if indeterminate:
+                    percent = None
+                text = (
+                    f"Operation {percent}%"
+                    if runtime.phase_percent is not None
+                    else f"Computing ({percent}%)"
+                    if percent is not None
+                    else "Computing…"
+                )
             for state in active:
                 value = _percent(state.get("progress"))
                 details.append(
@@ -181,6 +198,8 @@ class ComputationIndicator(QWidget):
             if len(working) == 1 and isinstance(working[0], Mapping):
                 percent = _percent(working[0].get("progress"))
                 indeterminate = bool(working[0].get("progress_indeterminate"))
+                if indeterminate:
+                    percent = None
                 text = f"Computing ({percent}%)" if percent is not None else "Computing…"
             else:
                 text = f"Working ({len(working)} tasks)" if len(working) > 1 else "Working…"
@@ -189,6 +208,10 @@ class ComputationIndicator(QWidget):
             details.append("Waiting for an available worker; computation has not started.")
         else:
             self.label.clear()
+            self.details_label.clear()
+            self.runtime_label.clear()
+            self.tasks_menu.close()
+            self._set_task_rows(())
             self.hide()
             return
         for item in working:
@@ -202,6 +225,87 @@ class ComputationIndicator(QWidget):
                 )
             else:
                 details.append(str(item))
+        for state in () if unavailable else (*active, *queued):
+            name = _text(state.get("name")) or _text(state.get("id")) or "Worker"
+            status = state.get("status", "")
+            value = _percent(state.get("progress")) if status != "queued" else None
+            opaque = state.get("progress_indeterminate") or status == "cancelling"
+            runtime = runtime_feedback(state)
+            suffix = (
+                f"operation {runtime.phase_percent}%"
+                if runtime.phase_percent is not None and not opaque
+                else f"allocated work {value}%"
+                if value is not None and not opaque and runtime.allocated
+                else f"{value}%"
+                if value is not None and not opaque
+                else "queued"
+                if status == "queued"
+                else status
+            )
+            operation = runtime.operation
+            revision = state.get("project_revision")
+            identity = f"revision {revision}" if isinstance(revision, int) and not isinstance(revision, bool) else ""
+            if job_id := _text(state.get("id")):
+                identity += (" · " if identity else "") + "job " + job_id
+            visible_tasks.append(
+                (operation + " · " if operation and len(active) == 1 and not working else "")
+                + f"{name} {suffix}"
+                + (" · no work total" if state.get("progress_indeterminate") else "")
+            )
+            task_rows.append(
+                f"{name}: {status}"
+                + (
+                    f" (allocated work {value}%)"
+                    if value is not None and runtime.allocated
+                    else f" ({value}%)"
+                    if value is not None
+                    else ""
+                )
+                + (f"\n{identity}" if identity else "")
+                + (f"\n{operation}" if operation else "")
+                + _work_detail(state)
+                + (f"\n{runtime.line}" if runtime.line else "")
+                + (f"\n{runtime.tooltip}" if runtime.tooltip else "")
+            )
+        for item in working:
+            state = item if isinstance(item, Mapping) else {"name": str(item)}
+            name = _text(state.get("name")) or "Working"
+            value = _percent(state.get("progress"))
+            operation = _text(state.get("stage"))
+            if state.get("progress_indeterminate"):
+                value = None
+            visible_tasks.append(
+                f"{name}"
+                + (f" {value}%" if value is not None else " · working")
+                + (f" · {operation}" if not active and len(working) == 1 else "")
+            )
+            task_rows.append(
+                name
+                + (f" ({value}%)" if value is not None else " · working")
+                + (f"\n{operation}" if operation else "")
+                + _work_detail(state)
+            )
+        if unavailable:
+            task_rows.append("Job runtime unavailable\n" + str(unavailable))
+        runtime = (
+            runtime_feedback(active[0])
+            if len(active) == 1 and not unavailable
+            else runtime_feedback(queued[0])
+            if len(queued) == 1 and not active and not unavailable
+            else RuntimeFeedback()
+        )
+        self.runtime_label.setText(runtime.line)
+        self.runtime_label.setToolTip(runtime.line + ("\n" + runtime.tooltip if runtime.tooltip else ""))
+        self.runtime_label.setAccessibleDescription(self.runtime_label.toolTip())
+        self.runtime_label.setVisible(bool(runtime.line))
+        if runtime.line:
+            details.append(runtime.line + ". " + runtime.tooltip)
+        summary = "  ·  ".join(visible_tasks)
+        self.details_label.setText(summary)
+        self.details_label.setToolTip(summary)
+        self.details_label.setAccessibleDescription(summary)
+        self.details_label.setVisible(bool(summary))
+        self._set_task_rows(task_rows)
         self.label.setText(text)
         self.setToolTip("\n".join(details))
         self.label.setToolTip(self.toolTip())
@@ -209,8 +313,21 @@ class ComputationIndicator(QWidget):
         self.progress.setRange(0, 100 if percent is not None and not indeterminate else 0)
         if percent is not None:
             self.progress.setValue(percent)
-        apply_tone(self.label, "warning" if unavailable else "info")
+        apply_tone(
+            self.label, "warning" if unavailable or any(state["status"] == "cancelling" for state in active) else "info"
+        )
         self.show()
+
+    def _set_task_rows(self, rows):
+        actions = self.tasks_menu.actions()
+        for index, row in enumerate(rows):
+            action = actions[index] if index < len(actions) else self.tasks_menu.addAction("")
+            action.setText(row.replace("&", "&&"))
+            action.setToolTip(row)
+        for action in actions[len(rows) :]:
+            self.tasks_menu.removeAction(action)
+            action.deleteLater()
+        self.tasks_button.setVisible(bool(rows))
 
 
 def build_design_progress(
@@ -292,7 +409,8 @@ def build_design_progress(
                 inferred=mark_current and key == current and not explicit_active,
             )
         )
-    activity = _text(state.get("stage"))
+    runtime = runtime_feedback(state)
+    activity = runtime.operation
     name = _text(state.get("name"))
     revision = state.get("project_revision")
     provenance = name
@@ -314,6 +432,8 @@ def build_design_progress(
         description = "Computing · " + (activity or "worker activity unrecorded")
     elif status == "cancelling":
         description, tone = "Cancelling · waiting for the worker to stop", "warning"
+        if activity:
+            description += " · " + activity
     elif status == "failed":
         description, tone = "Execution failed · " + (_text(state.get("error")) or activity or "see Messages"), "error"
     elif status in {"cancelled", "interrupted"}:
@@ -341,8 +461,8 @@ def build_design_progress(
     # Keep the operation visible even when a long design name is elided.
     text = description + (" · " + provenance if provenance else "")
     tooltip = (
-        text + ". Solid blue stages show recorded computation, not engineering acceptance."
-        " Dotted blue Cached stages show verified boundaries available for reuse."
+        text + ". Completed stages show recorded computation, not engineering acceptance."
+        " Cached stages show verified boundaries available for reuse."
         " Optional live display availability and final result verification are separate checks."
     )
     if cached:
@@ -376,7 +496,8 @@ def build_design_progress(
         tooltip += " Overall progress estimates allocated work, not remaining time." + _work_detail(state)
     busy = not runtime_unavailable and (
         verification == "pending"
-        or (status in {"running", "cancelling"} and (percent is None or state.get("progress_indeterminate", False)))
+        or status == "cancelling"
+        or (status == "running" and (percent is None or state.get("progress_indeterminate", False)))
     )
     return DesignProgressState(
         tuple(stages),
@@ -388,183 +509,5 @@ def build_design_progress(
         not runtime_unavailable and status in _ACTIVE,
         provenance,
         "unavailable" if runtime_unavailable else status,
+        RuntimeFeedback(operation=runtime.operation) if runtime_unavailable else runtime,
     )
-
-
-class _StageChip(QWidget):
-    """Painted computation indicator with no action or keyboard focus."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.stage = None
-        self.setMinimumWidth(30)
-        self.setFixedHeight(34)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-
-    def set_stage(self, stage):
-        self.stage = stage
-        self.setObjectName(f"design_progress_{stage.key}")
-        self.setProperty("stageStatus", stage.status)
-        self.setProperty("plottedStage", stage.viewed)
-        self.setAccessibleName(f"{stage.label}: {_STATUS_TEXT[stage.status]}")
-        self.setAccessibleDescription(stage.tooltip)
-        self.setToolTip(stage.tooltip)
-        self.update()
-
-    def sizeHint(self):
-        label = self.stage.label if self.stage else "Prepare"
-        return QSize(self.fontMetrics().horizontalAdvance(label) + 42, 34)
-
-    def paintEvent(self, event):
-        if self.stage is None:
-            return
-        stage = self.stage
-        palette = self.palette()
-        tone = (
-            "error"
-            if stage.status == "failed"
-            else "warning"
-            if stage.status in {"stopped", "current"}
-            else "info"
-            if stage.status in {"complete", "reusable"}
-            else "neutral"
-        )
-        foreground = tone_color(tone, palette)
-        muted = palette.color(palette.ColorGroup.Disabled, palette.ColorRole.WindowText)
-        if stage.status in {"waiting", "skipped"}:
-            foreground = muted
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(foreground, 1.6 if stage.status == "current" else 1)
-        if stage.status == "skipped":
-            pen.setStyle(Qt.PenStyle.DashLine)
-        elif stage.status == "reusable":
-            pen.setStyle(Qt.PenStyle.DotLine)
-        painter.setPen(pen)
-        painter.drawRoundedRect(QRectF(1, 1, self.width() - 2, self.height() - 2), 5, 5)
-        badge = {"complete": "evaluated", "current": "pending", "failed": "failed", "skipped": "skipped"}.get(
-            stage.status
-        )
-        mode = QIcon.Mode.Disabled if stage.status in {"waiting", "skipped"} else QIcon.Mode.Normal
-        painter.drawPixmap(6, 7, icon(stage.icon_name, badge=badge).pixmap(QSize(20, 20), mode))
-        rect = self.rect().adjusted(31, 0, -5, 0)
-        text = self.fontMetrics().elidedText(stage.label, Qt.TextElideMode.ElideRight, max(0, rect.width()))
-        if stage.status == "reusable":
-            text += "\n" + self.fontMetrics().elidedText("Cached", Qt.TextElideMode.ElideRight, max(0, rect.width()))
-        painter.setPen(foreground)
-        painter.drawText(rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
-        if stage.viewed:
-            painter.setPen(QPen(tone_color("info", palette), 3))
-            painter.drawLine(6, self.height() - 4, self.width() - 6, self.height() - 4)
-
-
-class _ActivityLabel(QLabel):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.full_text = ""
-        self.setMinimumWidth(0)
-        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-
-    def set_full_text(self, text):
-        self.full_text = text
-        self._elide()
-
-    def _elide(self):
-        self.setText(self.fontMetrics().elidedText(self.full_text, Qt.TextElideMode.ElideRight, max(0, self.width())))
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._elide()
-
-
-class DesignProgress(QWidget):
-    """Compact progress summary; Follow run is its only interactive control."""
-
-    follow_requested = Signal(bool)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("design_progress")
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.snapshot = None
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 2, 0, 2)
-        layout.setSpacing(4)
-        chip_row = QHBoxLayout()
-        chip_row.setSpacing(5)
-        self.chips = {key: _StageChip(self) for key in _KEYS}
-        for chip in self.chips.values():
-            chip_row.addWidget(chip, 1)
-        layout.addLayout(chip_row)
-        activity_row = QHBoxLayout()
-        activity_row.setSpacing(7)
-        self.activity_label = _ActivityLabel(self)
-        self.activity_label.setObjectName("design_progress_activity")
-        activity_row.addWidget(self.activity_label, 1)
-        self.progress_bar = QProgressBar(self)
-        self.progress_bar.setObjectName("design_progress_percent")
-        self.progress_bar.setFixedWidth(95)
-        self.progress_bar.setMaximumHeight(18)
-        self.progress_bar.setFormat("%p%")
-        self.progress_bar.setAccessibleName("Worker-reported work progress")
-        self.progress_bar.setToolTip(
-            "Reported execution progress. A percentage does not verify a completed design stage."
-        )
-        activity_row.addWidget(self.progress_bar)
-        self.follow_button = QToolButton(self)
-        self.follow_button.setObjectName("design_progress_follow")
-        self.follow_button.setCheckable(True)
-        self.follow_button.setText("Follow run")
-        self.follow_button.setIcon(icon("visibility"))
-        self.follow_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.follow_button.setAccessibleName("Follow completed stage previews in the plot")
-        self.follow_button.setToolTip(
-            "Show completed stage previews as the design runs. Turn off to keep inspecting the selected dataset."
-        )
-        self.follow_button.toggled.connect(self.follow_requested)
-        activity_row.addWidget(self.follow_button)
-        layout.addLayout(activity_row)
-        self.set_state("evaluated")
-
-    def set_state(self, requested_stage, state=None, **options):
-        self.snapshot = build_design_progress(requested_stage, state, **options)
-        snapshot = self.snapshot
-        for stage in snapshot.stages:
-            self.chips[stage.key].set_stage(stage)
-        self.activity_label.set_full_text(snapshot.activity)
-        self.activity_label.setToolTip(snapshot.tooltip)
-        self.activity_label.setAccessibleDescription(snapshot.tooltip)
-        apply_tone(self.activity_label, snapshot.tone)
-        self.progress_bar.setVisible(snapshot.status not in {"idle", "unavailable"})
-        self.progress_bar.setRange(0, 0 if snapshot.busy else 100)
-        self.progress_bar.setValue(snapshot.percent if snapshot.percent is not None else 0)
-        self.progress_bar.setFormat(
-            "Queued"
-            if snapshot.status == "queued"
-            else f"{snapshot.percent}%"
-            if snapshot.percent is not None
-            else "Unreported"
-        )
-        self.progress_bar.setToolTip(snapshot.tooltip)
-        last_status = _text(state.get("status")) if isinstance(state, Mapping) else ""
-        self.follow_button.setVisible(
-            snapshot.follow_available or snapshot.status == "unavailable" and last_status in _ACTIVE
-        )
-        self.follow_button.setEnabled(snapshot.follow_available)
-        self.follow_button.setToolTip(
-            "Runtime status is unavailable. Following can resume when status recovers; the selected plot is retained."
-            if snapshot.status == "unavailable"
-            else "Show completed stage previews as the design runs. Turn off to keep inspecting the selected dataset."
-        )
-        with QSignalBlocker(self.follow_button):
-            self.follow_button.setChecked(bool(options.get("following", True)))
-        self.updateGeometry()
-
-    def changeEvent(self, event):
-        super().changeEvent(event)
-        if event.type() in {QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange, QEvent.Type.FontChange}:
-            if self.snapshot is not None:
-                apply_tone(self.activity_label, self.snapshot.tone)
-                self.activity_label._elide()
-                for chip in self.chips.values():
-                    chip.update()

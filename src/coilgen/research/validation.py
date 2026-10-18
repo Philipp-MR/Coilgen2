@@ -72,8 +72,10 @@ def field_budget_check(
     if not np.any(active):
         return {"verified": False, "passed": None, "reason": "No positive-weight field samples are available."}
     actual, target, weights = actual[active], target[active], weights[active]
+    sampling = {"sample_count": int(np.count_nonzero(active)), "component": config.target_field_component}
     if not np.all(np.isfinite(actual)) or not np.all(np.isfinite(target)):
         return {
+            **sampling,
             "verified": True,
             "passed": False,
             "value": None,
@@ -120,6 +122,7 @@ def field_budget_check(
     limit = solve_limit / design_margin
     allowance = spec.acceptance_absolute_by_unit.get("T", 0.0) + spec.acceptance_relative_tolerance * limit
     return {
+        **sampling,
         "verified": True,
         "passed": bool(rms <= limit + allowance),
         "contract_kind": kind,
@@ -690,4 +693,5 @@ def validate_fabricated_constraints(
         "partial_path_torque_Nm": torque.tolist() if uniform_paths_available and not complete_circuits else None,
         "field_T": field if paths_valid else None,
         "current_source": "original_contour_current_no_refit",
+        "currents_A": {body_id: float(body["current_A"]) for body_id, body in bodies.items()} if paths_valid else {},
     }

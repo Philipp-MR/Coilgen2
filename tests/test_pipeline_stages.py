@@ -1,6 +1,7 @@
 """Scientific parity, checkpoint ownership and bounded worker stage execution."""
 
 from dataclasses import asdict, replace
+from hashlib import sha256
 import json
 from pathlib import Path
 import time
@@ -107,6 +108,25 @@ def test_contour_manufacturing_and_resampling_modes_invalidate_contours():
     )
 
 
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"joint_group_routing_selection_policy": "physical"},
+        {"joint_group_routing_regular_field_tolerance_rel": 0.00025},
+        {"joint_group_routing_port_search_count": 3},
+        {"joint_group_routing_cut_span_max_factor": 2.0},
+        {"joint_group_routing_seam_search_extent_rel": 0.05},
+    ],
+)
+def test_routing_selection_policy_invalidates_geometry_without_resolving_current_sheet(changes):
+    before = config()
+    assert invalidated_stage(before, replace(before, **changes)) is PipelineStage.ROUTED
+    manufacturing = replace(
+        before, contour_only_sweep_mode=True, skip_sweep=False, contour_sparsification_mode="field_fit"
+    )
+    assert invalidated_stage(manufacturing, replace(manufacturing, **changes)) is PipelineStage.CONTOURS
+
+
 def test_numerical_source_identity_tracks_engine_and_excludes_presentation(tmp_path):
     (tmp_path / "gui").mkdir()
     ui = tmp_path / "gui" / "workbench.py"
@@ -144,6 +164,68 @@ def test_checkpoint_manifest_and_arrays_are_integrity_checked(tmp_path):
         destination.writestr("arrays.npz", data)
     with pytest.raises(ValueError, match="manifest.*integrity"):
         PipelineCheckpoint.load(path)
+
+
+@pytest.mark.parametrize("unknown_field,missing_unrelated", [(False, False), (True, False), (False, True)])
+@pytest.mark.parametrize("schema_version", [2, 3])
+def test_authenticated_checkpoint_config_migration_is_narrow_and_preserves_old_policy(
+    tmp_path,
+    unknown_field,
+    missing_unrelated,
+    schema_version,
+):
+    original = CoilGenPipeline(config()).run_stage("prepared")
+    path = original.save(tmp_path / "legacy.cgstage")
+    with zipfile.ZipFile(path) as source:
+        manifest = json.loads(source.read("manifest.json"))
+        data = source.read("arrays.npz")
+    manifest["schema"] = f"coilgen.pipeline-checkpoint/{schema_version}"
+
+    def make_legacy(value):
+        if isinstance(value, list):
+            for item in value:
+                make_legacy(item)
+        elif isinstance(value, dict):
+            if value.get("$class") == "CoilGenConfig":
+                attrs = value["fields"]
+                if schema_version == 2:
+                    attrs.pop("joint_group_routing_selection_policy")
+                    attrs.pop("joint_group_routing_regular_field_tolerance_rel")
+                attrs.pop("joint_group_routing_port_search_count")
+                attrs.pop("joint_group_routing_cut_span_max_factor")
+                attrs.pop("joint_group_routing_seam_search_extent_rel")
+                if unknown_field:
+                    attrs["unknown_routing_magic"] = True
+                if missing_unrelated:
+                    attrs.pop("levels")
+            for item in value.values():
+                make_legacy(item)
+
+    make_legacy(manifest["payload"])
+    # Even authenticated former schemas may add only their known missing fields.
+    # Actual historical source fingerprints remain unchanged in real artifacts.
+    for stage in manifest["fingerprints"]:
+        manifest["fingerprints"][stage] = "historical_engine_fingerprint"
+    manifest.pop("payload_sha256")
+    manifest["payload_sha256"] = sha256(
+        json.dumps(manifest, allow_nan=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    with zipfile.ZipFile(path, "w") as destination:
+        destination.writestr("manifest.json", json.dumps(manifest))
+        destination.writestr("arrays.npz", data)
+    if unknown_field or missing_unrelated:
+        with pytest.raises(ValueError, match="fields.*schema"):
+            PipelineCheckpoint.load(path)
+        return
+    loaded = PipelineCheckpoint.load(path)
+    assert loaded.config.joint_group_routing_selection_policy == ("physical" if schema_version == 2 else "regular")
+    assert loaded.config.joint_group_routing_regular_field_tolerance_rel == 0.001
+    assert loaded.config.joint_group_routing_port_search_count == 0
+    assert loaded.config.joint_group_routing_cut_span_max_factor == 1.0
+    assert loaded.config.joint_group_routing_seam_search_extent_rel == 0.0
+    np.testing.assert_array_equal(loaded.parts[0].mesh.vertices, original.parts[0].mesh.vertices)
+    with pytest.raises(ValueError, match="Cannot reuse prepared"):
+        CoilGenPipeline(loaded.config).run_stage("sheet", loaded)
 
 
 def test_stage_request_and_resume_keep_geometry_scope_explicit(tmp_path):

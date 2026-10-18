@@ -55,6 +55,9 @@ from version control.
 
 ## Useful Settings
 
+Set `COILGEN_OUTPUT_ROOT` to redirect the timestamped output base without
+changing input-data paths; see the [output-base instructions](../general_examples/README.md).
+
 The supplied manufacturing geometry is configured as follows:
 
 - Gx, Gy, and Gz use their corresponding remeshed octagonal STL surfaces.

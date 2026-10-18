@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass, replace
+import csv
 import json
 from pathlib import Path
 from threading import Event
@@ -15,18 +16,25 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QFileDialog,
     QGridLayout,
+    QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QToolButton,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -36,6 +44,8 @@ from ..application.field_sampling import sample_slices
 from ..attribution import AUTHOR_CREDIT, SOFTWARE_NAME, software_attribution
 from ..persistence import atomic_text_writer, json_value
 from ..progress import DesignCancelled
+from .coil_statistics import build_coil_statistics, mass_estimates
+from .run_metadata import read_run_metadata
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,20 +102,27 @@ class _AnalysisTask(QRunnable):
             self._last_percent is None or percent >= self._last_percent + 1 or percent >= 100
         )
         if changed_kind or changed_percent or message != self._last_message or now - self._last_update >= 0.1:
-            self.signals.progress.emit(percent, message)
+            from .design_tasks import deliver_task_signal
+
+            deliver_task_signal(self.signals, "progress", percent, message)
             self._last_update, self._last_percent, self._last_message = now, percent, message
 
     def run(self):
+        from .design_tasks import deliver_task_signal
+
         try:
             self.check()
             result = self.operation(self)
             self.check()
         except Exception as exc:
-            self.signals.finished.emit(
-                None, "Cancelled" if isinstance(exc, (DesignCancelled, InterruptedError)) else str(exc)
+            deliver_task_signal(
+                self.signals,
+                "finished",
+                None,
+                "Cancelled" if isinstance(exc, (DesignCancelled, InterruptedError)) else str(exc),
             )
         else:
-            self.signals.finished.emit(result, "")
+            deliver_task_signal(self.signals, "finished", result, "")
 
 
 class _FigurePanel(QWidget):
@@ -138,6 +155,34 @@ class _UnavailablePlot(QLabel):
         )
         self.setWordWrap(True)
         self.figure = None
+
+
+class _ControlSection(QWidget):
+    """Keep plotting space available while exposing editable conventions."""
+
+    def __init__(self, title, body):
+        super().__init__()
+        self.title, self.body = title, body
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        self.toggle = QToolButton()
+        self.toggle.setCheckable(True)
+        self.toggle.setAutoRaise(True)
+        self.toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.toggle.setText(title)
+        self.toggle.toggled.connect(self._expanded)
+        layout.addWidget(self.toggle, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(body)
+        body.hide()
+
+    def set_summary(self, summary):
+        self.toggle.setText(self.title + " · " + summary)
+
+    def _expanded(self, expanded):
+        self.toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+        self.body.setVisible(expanded)
 
 
 class _PointCloudView(QWidget):
@@ -321,37 +366,57 @@ class FieldAnalysisDialog(QDialog):
     progressDetails = Signal(object)
     closed = Signal()
 
+    _VIEW_TABS = {"field": 0, "metrics": 0, "slices": 1, "errors": 2, "harmonics": 3, "coil": 4}
+
     def __init__(
-        self, record, parent=None, *, plot_factory=None, cloud_factory=None, auto_start=True, initial_source=None
+        self,
+        record,
+        parent=None,
+        *,
+        plot_factory=None,
+        cloud_factory=None,
+        auto_start=True,
+        initial_source=None,
+        initial_view="metrics",
     ):
+        self._validate_view(initial_view)
         super().__init__(parent)
         self.record, self.datasets, self.state, self.worker = record, {}, None, None
         self._generation, self._pending, self._close_pending, self._closed = 0, False, False, False
+        self._auto_start, self._catalog_ready, self._grid_requested = auto_start, False, False
         self._last_source_key = None
         self._plot_factory, self._cloud_factory = plot_factory or _FigurePanel, cloud_factory or _PointCloudView
-        self._initial_source = {
-            "contour_field": "contour",
-            "contour_residual": "contour",
-            "routed_field": "routed",
-            "routed_residual": "routed",
-            "winding_validation_residual": "winding_validation",
-        }.get(initial_source, initial_source)
-        self.setWindowTitle(f"Field analysis — {record.metadata.get('name', 'Verified run')}")
+        self._initial_source = self._source_alias(initial_source)
+        self._requested_view = initial_view
+        metadata = read_run_metadata(record)
+        context = metadata.get("design_context")
+        for section in ("summary", "config"):
+            nested = metadata.get(section)
+            if context is None and isinstance(nested, Mapping):
+                context = nested.get("design_context")
+        self._is_shim = context == "mr_shim"
+        self.setWindowTitle(f"Coil results — {metadata.get('name', 'Verified run')}")
         self.setWindowModality(Qt.WindowModality.NonModal)
         self.resize(1250, 820)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(10)
+        title = QLabel("Coil results")
+        title_font = title.font()
+        title_font.setPointSizeF(title_font.pointSizeF() * 1.6)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        layout.addWidget(title)
         self.identity = QLabel(
-            f"Verified run · revision {record.metadata.get('project_revision', '—')} · "
-            f"request {record.metadata.get('request_sha256', '')[:16]}\n"
-            "Coordinates are world metres. Analysis retains the recorded source and current policy."
+            f"{metadata.get('name', 'Verified run')} · revision {metadata.get('project_revision', '—')} · "
+            f"request {metadata.get('request_sha256', '')[:16]}"
         )
         self.identity.setWordWrap(True)
         self.identity.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.identity)
-        controls = QGridLayout()
         self.source, self.current_policy, self.component, self.metric_selector = (QComboBox() for _ in range(4))
         self.source.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.source.setMinimumContentsLength(24)
+        self.source.setMinimumContentsLength(16)
         self.current_policy.addItem("Stored evaluation", "recorded")
         self.current_policy.addItem("Stream-function current", "stream")
         for name in ["Bx", "By", "Bz", "Bparallel", "magnitude"]:
@@ -372,21 +437,50 @@ class FieldAnalysisDialog(QDialog):
         self.normalization.addItem("Physical field units", "none")
         self.normalization.addItem("% of global target RMS", "target_rms")
         self.normalization.addItem("% of global target peak", "target_peak")
-        for col, (title, widget) in enumerate(
-            [
-                ("Source", self.source),
-                ("Current policy", self.current_policy),
-                ("Component", self.component),
-                ("Map", self.metric_selector),
-                ("Unit", self.units),
-                ("Sampling", self.sampling),
-                ("Error normalization", self.normalization),
-            ]
-        ):
-            controls.addWidget(QLabel(title), 0, col)
-            controls.addWidget(widget, 1, col)
-        controls.setColumnStretch(0, 2)
-        layout.addLayout(controls)
+        self.current_policy.setToolTip(
+            "Use the saved evaluation or the original stream-function current; no current refit."
+        )
+        self.metric_selector.setToolTip("Signed residual = selected field component − target component.")
+        self.component.setToolTip("Bparallel projects onto the recorded B0 direction. |B| is the vector magnitude.")
+        self.normalization.setToolTip(
+            "One target scale from all native samples is shared by every slice; no pointwise division."
+        )
+        primary = QHBoxLayout()
+        primary.addWidget(
+            self._control_group(
+                "Field source and current",
+                [
+                    ("Source", self.source),
+                    ("Current policy", self.current_policy),
+                ],
+            ),
+            3,
+        )
+        primary.addWidget(
+            self._control_group(
+                "Map to inspect",
+                [
+                    ("Component", self.component),
+                    ("Map", self.metric_selector),
+                ],
+            ),
+            2,
+        )
+        self.field_controls = QWidget()
+        self.field_controls.setLayout(primary)
+        layout.addWidget(self.field_controls)
+        self.display_controls = _ControlSection(
+            "Display conventions",
+            self._control_group(
+                "",
+                [
+                    ("Field unit", self.units),
+                    ("Native-sample statistics", self.sampling),
+                    ("Error normalization", self.normalization),
+                ],
+            ),
+        )
+        layout.addWidget(self.display_controls)
         self.scope = QLabel("Loading available field sources…")
         self.scope.setWordWrap(True)
         layout.addWidget(self.scope)
@@ -396,31 +490,38 @@ class FieldAnalysisDialog(QDialog):
         self._build_slices_tab()
         self._build_distribution_tab()
         self._build_harmonics_tab()
-        self.status = QLabel("Only calculated, finite field sources are selectable.")
+        self._build_coil_tab()
+        self.status = QLabel("Analysis describes the saved field. Engineering acceptance remains in Review.")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         footer = QHBoxLayout()
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.hide()
+        layout.addWidget(self.progress)
         self.refresh = QPushButton("Evaluate maps")
         self.refresh.clicked.connect(self.refresh_analysis)
         self.cancel = QPushButton("Cancel calculation")
         self.cancel.clicked.connect(self._cancel)
         self.cancel.hide()
-        self.export_data = QPushButton("Export analysis JSON / CSV…")
+        self.export_data = QPushButton("Export data…")
+        self.export_data.setToolTip("Export the captured analysis as JSON or native-sample CSV.")
         self.export_data.clicked.connect(self._choose_export)
-        self.export_plot = QPushButton("Export current plot PNG…")
+        self.export_plot = QPushButton("Export plot…")
+        self.export_plot.setToolTip("Save the selected page's plot as PNG.")
         self.export_plot.clicked.connect(self._choose_plot)
         close = QPushButton("Close")
         close.clicked.connect(self.reject)
-        for widget in [self.progress, self.refresh, self.cancel, self.export_data, self.export_plot, close]:
+        for widget in [self.refresh, self.cancel]:
+            footer.addWidget(widget)
+        footer.addStretch()
+        for widget in [self.export_data, self.export_plot, close]:
             footer.addWidget(widget)
         layout.addLayout(footer)
         self.debounce = QTimer(self)
         self.debounce.setSingleShot(True)
         self.debounce.setInterval(250)
-        self.debounce.timeout.connect(self.refresh_analysis)
+        self.debounce.timeout.connect(self._automatic_analysis)
         self.source.currentIndexChanged.connect(self._source_changed)
         for widget in [
             self.current_policy,
@@ -436,13 +537,127 @@ class FieldAnalysisDialog(QDialog):
             (widget.currentIndexChanged if isinstance(widget, QComboBox) else widget.valueChanged).connect(
                 self._changed
             )
-        for widget in [self.center, self.size, self.offsets, self.harmonic_center, self.harmonic_radius]:
+        for widget in [self.center, self.slice_span, self.offsets, self.harmonic_center, self.harmonic_radius]:
             widget.textEdited.connect(self._changed)
+        for widget in [self.units, self.sampling, self.normalization, self.plane]:
+            widget.currentIndexChanged.connect(self._control_summaries)
+        for widget in [self.count, self.resolution, self.order]:
+            widget.valueChanged.connect(self._control_summaries)
+        self._control_summaries()
+        self.tabs.currentChanged.connect(self._view_changed)
         self.profile_axis.currentIndexChanged.connect(lambda: self._draw_distribution() if self._current() else None)
         self.harmonic_source.currentIndexChanged.connect(lambda: self._draw_harmonics() if self._current() else None)
         self._enable(False)
-        if auto_start:
+        self.tabs.setCurrentIndex(self._VIEW_TABS[initial_view])
+        self._view_changed()
+
+    @staticmethod
+    def _control_group(title, controls, columns=None):
+        group = QGroupBox(title)
+        grid = QGridLayout(group)
+        grid.setContentsMargins(12, 10, 12, 10)
+        grid.setHorizontalSpacing(12)
+        columns = columns or len(controls)
+        for index, (label, widget) in enumerate(controls):
+            row, column = divmod(index, columns)
+            caption = QLabel(label)
+            caption.setWordWrap(True)
+            grid.addWidget(caption, 2 * row, column)
+            grid.addWidget(widget, 2 * row + 1, column)
+            widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            if isinstance(widget, QComboBox):
+                widget.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+                widget.setMinimumContentsLength(8 if label in {"Component", "Plane"} else 16)
+            grid.setColumnStretch(column, 1)
+        return group
+
+    @classmethod
+    def _validate_view(cls, view):
+        if not isinstance(view, str) or view not in cls._VIEW_TABS:
+            raise ValueError("Field analysis view must be field, metrics, slices, errors, harmonics, or coil.")
+
+    @staticmethod
+    def _source_alias(source):
+        return {
+            "contour_field": "contour",
+            "contour_residual": "contour",
+            "routed_field": "routed",
+            "routed_residual": "routed",
+            "winding_validation_residual": "winding_validation",
+        }.get(source, source)
+
+    def focus_view(self, view, *, source=None):
+        """Open a diagnostic page without resetting source, current, or grid settings.
+
+        Requests made while the source catalog loads are applied to that catalog.
+        An explicit source selects its recorded/original current variant; omitted
+        sources preserve that choice. Error-facing pages select a signed residual
+        when a target exists; shim results use Bz. Display and fit settings remain.
+        """
+        self._validate_view(view)
+        if self._closed or self._close_pending:
+            return False
+        unavailable = None
+        if source is not None:
+            source = self._source_alias(source)
+            if not self._catalog_ready:
+                self._initial_source = source
+            elif source in self.datasets:
+                original = source.endswith("_at_stream_current")
+                self.source.setCurrentIndex(self.source.findData(source.removesuffix("_at_stream_current")))
+                self.current_policy.setCurrentIndex(1 if original else 0)
+            else:
+                unavailable = str(source)
+        self._requested_view = view
+        self.tabs.setCurrentIndex(self._VIEW_TABS[view])
+        if self.datasets and view not in {"harmonics", "coil"}:
+            dataset = self._dataset()
+            metric = "field" if view == "field" or dataset.target_T is None else "signed_residual"
+            if self._is_shim:
+                self.component.setCurrentIndex(self.component.findData("Bz"))
+            self.metric_selector.setCurrentIndex(self.metric_selector.findData(metric))
+        elif view != "coil" and self._auto_start and not self._catalog_ready and self.worker is None:
+            self.load_sources()
+        if unavailable is not None:
+            self.status.setText(
+                f"Requested field source '{unavailable}' is unavailable. The selected saved source is retained."
+            )
+        return True
+
+    def _control_summaries(self, *_):
+        unit = self.units.currentText() if self.normalization.currentData() == "none" else "%"
+        self.display_controls.set_summary(
+            f"{unit} · {self.sampling.currentText()} · {self.normalization.currentText()}"
+        )
+        self.slice_controls.set_summary(
+            f"{self.plane.currentText()} · {self.count.value()} slices · {self.resolution.value()} pixels / axis"
+        )
+        self.harmonic_controls.set_summary(f"Maximum degree {self.order.value()} · center and radius in metres")
+
+    def _view_changed(self, *_):
+        if self._VIEW_TABS[self._requested_view] != self.tabs.currentIndex():
+            self._requested_view = {0: "metrics", 1: "slices", 2: "errors", 3: "harmonics", 4: "coil"}[
+                self.tabs.currentIndex()
+            ]
+        coil = self.tabs.currentIndex() == self._VIEW_TABS["coil"]
+        for widget in [self.field_controls, self.display_controls, self.scope, self.refresh]:
+            widget.setVisible(not coil)
+        self.export_data.setText("Export stats…" if coil else "Export data…")
+        self.export_data.setEnabled(coil or (self.worker is None and self._current()))
+        self.export_plot.setEnabled(not coil and self.worker is None and self._current())
+        if not coil and self._auto_start and not self._catalog_ready and self.worker is None:
             QTimer.singleShot(0, self, self.load_sources)
+        if not coil and self.datasets and self.tabs.currentIndex() == self._VIEW_TABS["slices"]:
+            self._grid_requested = True
+            if self.state is None or self.state.slices is None or not self._current():
+                self._pending = True
+                self.debounce.start()
+
+    def _automatic_analysis(self):
+        if self.tabs.currentIndex() == self._VIEW_TABS["coil"]:
+            self._pending = False
+            return
+        self.refresh_analysis(sample_grid=self._grid_requested or self.tabs.currentIndex() == self._VIEW_TABS["slices"])
 
     def _plot(self, parent):
         try:
@@ -453,6 +668,9 @@ class FieldAnalysisDialog(QDialog):
     def _build_cloud_tab(self):
         page = QWidget()
         layout = QVBoxLayout(page)
+        note = QLabel("Native sample metrics · every finite saved sample contributes to the selected convention.")
+        note.setWordWrap(True)
+        layout.addWidget(note)
         split = QSplitter()
         try:
             self.cloud = self._cloud_factory(split)
@@ -461,23 +679,30 @@ class FieldAnalysisDialog(QDialog):
         split.addWidget(self.cloud)
         right = QWidget()
         right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(10, 0, 0, 0)
+        right_layout.addWidget(QLabel("Field and residual metrics"))
         self.summary = QTableWidget(0, 2)
         self.summary.setHorizontalHeaderLabels(["Metric / convention", "Value"])
+        self._style_table(self.summary)
+        self.summary.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.summary.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         right_layout.addWidget(self.summary)
         self.samples = QTableWidget(0, 4)
         self.samples.setHorizontalHeaderLabels(["x [m]", "y [m]", "z [m]", "Map value"])
-        right_layout.addWidget(QLabel("Largest absolute native-sample values · at most 256 rows"))
+        self._style_table(self.samples)
+        sample_note = QLabel("Largest absolute map values · up to 256 native samples")
+        sample_note.setWordWrap(True)
+        right_layout.addWidget(sample_note)
         right_layout.addWidget(self.samples)
         split.addWidget(right)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 2)
         layout.addWidget(split)
-        self.tabs.addTab(page, "3D samples and metrics")
+        self.tabs.addTab(page, "Metrics / 3D")
 
     def _build_slices_tab(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        row = QHBoxLayout()
         self.plane, self.count, self.resolution = QComboBox(), QSpinBox(), QSpinBox()
         for plane in ["xy", "xz", "yz"]:
             self.plane.addItem(plane.upper(), plane)
@@ -485,18 +710,28 @@ class FieldAnalysisDialog(QDialog):
         self.count.setValue(5)
         self.resolution.setRange(16, 128)
         self.resolution.setValue(64)
-        self.center, self.size, self.offsets = QLineEdit("0 0 0"), QLineEdit("0.1 0.1"), QLineEdit("-0.04 0.04")
-        for title, widget in [
-            ("Plane", self.plane),
-            ("Center xyz [m]", self.center),
-            ("Full span [m]", self.size),
-            ("Offsets from center [m]", self.offsets),
-            ("Slices", self.count),
-            ("Pixels / axis", self.resolution),
-        ]:
-            row.addWidget(QLabel(title))
-            row.addWidget(widget)
-        layout.addLayout(row)
+        self.center, self.slice_span, self.offsets = QLineEdit("0 0 0"), QLineEdit("0.1 0.1"), QLineEdit("-0.04 0.04")
+        self.slice_controls = _ControlSection(
+            "Slice settings",
+            self._control_group(
+                "World coordinates",
+                [
+                    ("Center xyz [m]", self.center),
+                    ("Full in-plane span [m]", self.slice_span),
+                    ("Plane", self.plane),
+                    ("Offsets from center [m]", self.offsets),
+                    ("Slices", self.count),
+                    ("Pixels / axis", self.resolution),
+                ],
+                columns=3,
+            ),
+        )
+        layout.addWidget(self.slice_controls)
+        self.center.setToolTip("World x y z, in metres.")
+        self.slice_span.setToolTip(
+            "Two full spans, in metres, along the selected plane's horizontal and vertical axes."
+        )
+        self.offsets.setToolTip("Minimum and maximum offsets from the world center along the plane normal, in metres.")
         self.slice_note = QLabel(
             "Grey pixels are unsupported. Dashed outlines identify the owned ROI or sampling hull."
         )
@@ -512,7 +747,7 @@ class FieldAnalysisDialog(QDialog):
         layout.addLayout(fit_row)
         self.slice_plot = self._plot(page)
         layout.addWidget(self.slice_plot, 1)
-        self.tabs.addTab(page, "Linked slice grid")
+        self.tabs.addTab(page, "Slices")
 
     def _build_distribution_tab(self):
         page = QWidget()
@@ -522,16 +757,17 @@ class FieldAnalysisDialog(QDialog):
         self.profile_axis = QComboBox()
         self.profile_axis.addItems(["x", "y", "z"])
         row.addWidget(self.profile_axis)
-        row.addWidget(QLabel("Other coordinates vary; each plotted point is an actual saved sample."), 1)
+        note = QLabel("Other coordinates vary; this is a sample trend, rather than a line scan.")
+        note.setWordWrap(True)
+        row.addWidget(note, 1)
         layout.addLayout(row)
         self.error_plot = self._plot(page)
         layout.addWidget(self.error_plot, 1)
-        self.tabs.addTab(page, "Error histogram and profile")
+        self.tabs.addTab(page, "Errors")
 
     def _build_harmonics_tab(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        row = QHBoxLayout()
         self.order, self.harmonic_center, self.harmonic_radius = QSpinBox(), QLineEdit("0 0 0"), QLineEdit("0.05")
         self.order.setRange(0, 12)
         self.order.setValue(4)
@@ -540,18 +776,26 @@ class FieldAnalysisDialog(QDialog):
         self.harmonic_source = QComboBox()
         for source in ["field", "target", "residual"]:
             self.harmonic_source.addItem(source.capitalize(), source)
-        for title, widget in [
-            ("Maximum degree", self.order),
-            ("Expansion center [m]", self.harmonic_center),
-            ("Reference radius [m]", self.harmonic_radius),
-            ("Coefficients", self.harmonic_source),
-        ]:
-            row.addWidget(QLabel(title))
-            row.addWidget(widget)
+        self.harmonic_controls = _ControlSection(
+            "Expansion settings",
+            self._control_group(
+                "Scalar solid harmonics",
+                [
+                    ("Maximum degree", self.order),
+                    ("Expansion center xyz [m]", self.harmonic_center),
+                    ("Reference radius [m]", self.harmonic_radius),
+                ],
+            ),
+        )
+        layout.addWidget(self.harmonic_controls)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Display coefficients"))
+        row.addWidget(self.harmonic_source)
+        row.addStretch()
         row.addWidget(self.fit)
         layout.addLayout(row)
         self.harmonic_note = QLabel(
-            "Real solid harmonics use the displayed center and reference radius. A scalar expansion requires a source-free region; a numerical fit alone does not verify this assumption."
+            "Scalar solid harmonics require a source-free region. The fit does not verify this assumption or engineering acceptance."
         )
         self.harmonic_note.setWordWrap(True)
         layout.addWidget(self.harmonic_note)
@@ -559,8 +803,119 @@ class FieldAnalysisDialog(QDialog):
         layout.addWidget(self.harmonic_plot, 2)
         self.coefficients = QTableWidget(0, 4)
         self.coefficients.setHorizontalHeaderLabels(["Degree l", "Order m", "Real harmonic", "Coefficient [µT]"])
-        layout.addWidget(self.coefficients, 1)
-        self.tabs.addTab(page, "Solid harmonics")
+        self._style_table(self.coefficients)
+        self.coefficient_table = _ControlSection("Coefficient table", self.coefficients)
+        self.coefficients.setMaximumHeight(180)
+        layout.addWidget(self.coefficient_table)
+        self.tabs.addTab(page, "Harmonics")
+
+    def _build_coil_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        self._coil_report = build_coil_statistics(self.record)
+        self.coil_note = QLabel(self._coil_report.message)
+        self.coil_note.setWordWrap(True)
+        layout.addWidget(self.coil_note)
+        density_row = QHBoxLayout()
+        density_row.addWidget(QLabel("Material density [kg/m³]"))
+        self.material_density = QDoubleSpinBox()
+        self.material_density.setDecimals(2)
+        self.material_density.setRange(0, 1e6)
+        self.material_density.setSpecialValueText("Unspecified")
+        self.material_density.setToolTip(
+            "Optional assumption for nominal conductor mass; saved material and design settings remain unchanged."
+        )
+        density_row.addWidget(self.material_density)
+        self.mass_estimate_note = QLabel()
+        self.mass_estimate_note.setWordWrap(True)
+        density_row.addWidget(self.mass_estimate_note, 1)
+        layout.addLayout(density_row)
+        self.coil_stats = QTreeWidget()
+        self.coil_stats.setColumnCount(5)
+        self.coil_stats.setHeaderLabels(["Property / body", "Value", "Unit", "Scope", "Status"])
+        self.coil_stats.setAlternatingRowColors(True)
+        self.coil_stats.setUniformRowHeights(True)
+        self.coil_stats.setColumnWidth(0, 285)
+        self.coil_stats.setColumnWidth(1, 100)
+        self.coil_stats.setColumnWidth(2, 65)
+        self.coil_stats.setColumnWidth(3, 300)
+        self.coil_stats.header().setStretchLastSection(False)
+        self.coil_stats.header().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.coil_stats.header().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        layout.addWidget(self.coil_stats, 1)
+        self.material_density.valueChanged.connect(self._update_coil_stats)
+        self._update_coil_stats()
+        self.tabs.addTab(page, "Coil stats")
+
+    def _update_coil_stats(self, *_):
+        self._coil_estimates = mass_estimates(self._coil_report, self.material_density.value())
+        self.coil_note.setText(
+            self._coil_estimates.message if self.material_density.value() > 0 else self._coil_report.message
+        )
+        if self.material_density.value() > 0 and self._coil_estimates.mass_unavailable_reason:
+            self.coil_note.setText(self.coil_note.text() + " " + self._coil_estimates.mass_unavailable_reason)
+        mass = self._coil_estimates.row("coil:mass")
+        if mass is None or mass.status != "Assumed density estimate":
+            mass = self._coil_estimates.row("estimate:coil:mass")
+        if self.material_density.value() == 0:
+            self.mass_estimate_note.setText(
+                "Enter density to estimate bare conductor mass; insulation, feeds and former are excluded."
+            )
+        elif mass is None or mass.value is None:
+            self.mass_estimate_note.setText(
+                "Mass estimate unavailable: no finite nominal conducting volume is recorded."
+            )
+        else:
+            scale, unit = (1000, "g") if mass.value < 1 else (1, "kg")
+            self.mass_estimate_note.setText(
+                f"Estimated bare conductor mass: {mass.value * scale:.5g} {unit} · nominal conducting volume × entered density; insulation, feeds and former excluded."
+            )
+        self.coil_stats.clear()
+        groups = {}
+        rows = list(self._coil_report.rows)
+        estimates = self._mass_estimate_rows()
+        rows.extend(estimates)
+        for row in rows:
+            category = "Density estimates" if row in estimates else row.category
+            group = groups.get(category)
+            if group is None:
+                group = QTreeWidgetItem(self.coil_stats, [category])
+                font = group.font(0)
+                font.setBold(True)
+                group.setFont(0, font)
+                group.setExpanded(True)
+                groups[category] = group
+            quantity = f"{row.body_id} · {row.quantity}" if row.body_id else row.quantity
+            value = (
+                "Unavailable"
+                if row.value is None
+                else f"{row.value:.7g}"
+                if isinstance(row.value, (float, np.floating))
+                else str(row.value)
+            )
+            item = QTreeWidgetItem(group, [quantity, value, row.unit, row.scope, row.status])
+            item.setData(0, Qt.ItemDataRole.UserRole, row.key)
+            for column in range(5):
+                item.setToolTip(column, f"{quantity}\n{row.scope}\nSaved source: {row.source_key or '—'}\n{row.status}")
+
+    def _mass_estimate_rows(self):
+        return tuple(
+            replace(
+                row, key="estimate:coil:mass", category="Density estimates", quantity="Nominal conductor mass estimate"
+            )
+            if row.key == "coil:mass"
+            else row
+            for row in self._coil_estimates.rows
+            if row.key.startswith("estimate:") or row.status == "Assumed density estimate"
+        )
+
+    @staticmethod
+    def _style_table(table):
+        table.setAlternatingRowColors(True)
+        table.verticalHeader().hide()
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setShowGrid(False)
 
     def _enable(self, enabled):
         for widget in [
@@ -575,8 +930,9 @@ class FieldAnalysisDialog(QDialog):
             self.fit,
         ]:
             widget.setEnabled(enabled)
-        self.export_data.setEnabled(enabled and self._current())
-        self.export_plot.setEnabled(enabled and self._current())
+        coil = self.tabs.currentIndex() == self._VIEW_TABS["coil"]
+        self.export_data.setEnabled(coil or (enabled and self._current()))
+        self.export_plot.setEnabled(not coil and enabled and self._current())
 
     def load_sources(self):
         if self.worker is None and not self._close_pending and not self._closed:
@@ -649,7 +1005,7 @@ class FieldAnalysisDialog(QDialog):
             horizontal, vertical, normal = {"xy": (0, 1, 2), "xz": (0, 2, 1), "yz": (1, 2, 0)}[self.plane.currentData()]
             radius = max(float(span.max()) / 2, 1e-6)
             self.center.setText(" ".join(f"{value:.10g}" for value in center))
-            self.size.setText(
+            self.slice_span.setText(
                 " ".join(f"{max(span[axis] * 1.05, radius * 0.2):.8g}" for axis in (horizontal, vertical))
             )
             self.offsets.setText(f"{-span[normal] * 0.4:.8g} {span[normal] * 0.4:.8g}")
@@ -669,7 +1025,7 @@ class FieldAnalysisDialog(QDialog):
 
     def selection(self):
         center = _numbers(self.center.text(), 3, "Slice center")
-        size = _numbers(self.size.text(), 2, "Slice span")
+        size = _numbers(self.slice_span.text(), 2, "Slice span")
         bounds = _numbers(self.offsets.text(), 2, "Slice offsets")
         harmonic_center = _numbers(self.harmonic_center.text(), 3, "Harmonic center")
         radius = _numbers(self.harmonic_radius.text(), 1, "Harmonic radius")[0]
@@ -713,9 +1069,10 @@ class FieldAnalysisDialog(QDialog):
         except ValueError:
             return False
 
-    def refresh_analysis(self):
+    def refresh_analysis(self, *, sample_grid=True):
         if self._close_pending or self._closed or not self.datasets:
             return
+        self._grid_requested |= sample_grid
         if self.worker is not None:
             self._pending = True
             return
@@ -725,6 +1082,8 @@ class FieldAnalysisDialog(QDialog):
         except ValueError as exc:
             self.status.setText(str(exc))
             return
+        sample_grid = self._grid_requested
+        self._grid_requested = False
         previous = self.state
 
         def slice_controls(item):
@@ -766,7 +1125,14 @@ class FieldAnalysisDialog(QDialog):
                     else None
                 )
             )
-            task.report(10, "Reuse captured physical slice grid" if reused is not None else "Evaluate slice grid")
+            task.report(
+                10,
+                "Reuse captured physical slice grid"
+                if reused is not None
+                else "Evaluate slice grid"
+                if sample_grid
+                else "Native sample metrics ready",
+            )
             slices = (
                 reused
                 if reused is not None
@@ -783,9 +1149,11 @@ class FieldAnalysisDialog(QDialog):
                     ),
                     cancel_check=task.check,
                 )
+                if sample_grid
+                else None
             )
             values = []
-            for index, piece in enumerate(slices.slices):
+            for index, piece in enumerate(slices.slices if slices is not None else ()):
                 task.report(None, f"Calculate scalar slice map {index + 1}/{len(slices.slices)}")
                 values.append(self._slice_values(dataset, mapped, piece, selection))
                 task.report(
@@ -851,6 +1219,7 @@ class FieldAnalysisDialog(QDialog):
         if state.selection.component == "magnitude":
             self.status.setText("Select Bx, By, Bz or Bparallel for a source-free scalar harmonic expansion.")
             return
+        self.focus_view("harmonics")
 
         def operation(task):
             task.report(None, "Fit common real solid-harmonic basis")
@@ -920,8 +1289,6 @@ class FieldAnalysisDialog(QDialog):
                     self._render()
                 except Exception as exc:
                     self.status.setText("Field plot publication failed: " + str(exc))
-                if kind == "harmonics":
-                    self.tabs.setCurrentIndex(3)
             else:
                 self.status.setText("Saved captured field analysis: " + str(value))
         self.progress.hide()
@@ -933,9 +1300,10 @@ class FieldAnalysisDialog(QDialog):
             self.sampling.setEnabled(bool(self._dataset().weights is not None and np.any(self._dataset().weights > 0)))
             self.units.setEnabled(self.normalization.currentData() == "none")
         if self._pending:
-            QTimer.singleShot(0, self, self.refresh_analysis)
+            QTimer.singleShot(0, self, self._automatic_analysis)
 
     def _catalog_loaded(self, datasets):
+        self._catalog_ready = True
         self.datasets = {dataset.key: dataset for dataset in datasets}
         self.source.blockSignals(True)
         for dataset in datasets:
@@ -953,17 +1321,23 @@ class FieldAnalysisDialog(QDialog):
         self.source.blockSignals(False)
         if not self.datasets:
             self.scope.setText("This verified run has no finite field maps to analyze.")
-            self.status.setText("Compute a field-bearing design stage and open its saved evidence.")
+            self.status.setText(
+                "No finite field maps are recorded. Saved coil statistics remain available in Coil stats."
+            )
             return
-        component = self.component.findData(self.record.metadata.get("target_field_component", "Bz"))
+        component = self.component.findData(read_run_metadata(self.record).get("target_field_component", "Bz"))
         if component >= 0:
             self.component.setCurrentIndex(component)
         dataset = self._dataset()
         if dataset.target_T is not None:
             self.metric_selector.setCurrentIndex(self.metric_selector.findData("signed_residual"))
         self._source_changed()
+        original = self.source.currentData() + "_at_stream_current"
         if self._initial_source in self.datasets and self._initial_source.endswith("_at_stream_current"):
             self.current_policy.setCurrentIndex(1)
+        elif self._initial_source is None and original in self.datasets:
+            self.current_policy.setCurrentIndex(1)
+        self.focus_view(self._requested_view, source=self._initial_source)
 
     @staticmethod
     def _display(state):
@@ -994,6 +1368,7 @@ class FieldAnalysisDialog(QDialog):
                 )
                 item = QTableWidgetItem(text)
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                item.setToolTip(text)
                 table.setItem(row, col, item)
         table.resizeColumnsToContents()
 
@@ -1007,7 +1382,7 @@ class FieldAnalysisDialog(QDialog):
         limits = (-maximum, maximum) if self._signed(state) else (0, maximum)
         self._color_limits = limits
         self.scope.setText(
-            f"{state.dataset.label} · {state.dataset.scope}\nSource current policy: {state.dataset.provenance.get('current_policy', 'saved')} · no current refit · "
+            f"{state.dataset.label} · {state.dataset.scope.replace('_', ' ')}\nSource current policy: {state.dataset.provenance.get('current_policy', 'saved')} · no current refit · "
             f"{len(state.dataset.points_m):,} native samples · {state.mapped.sampling_convention}"
             + (" · 3D display capped at 50,000 points; statistics use all samples" if len(values) > 50_000 else "")
             + (
@@ -1015,16 +1390,9 @@ class FieldAnalysisDialog(QDialog):
                 if state.dataset.provenance.get("suppression_sample_count", 0)
                 else ""
             )
-            + (
-                (
-                    "\nOwned ROI wireframe is shown in 3D."
-                    if hasattr(self.cloud, "set_roi")
-                    else "\nOwned ROI geometry is recorded; 3D wireframe rendering is unavailable."
-                )
-                if state.dataset.target_geometry is not None
-                and state.dataset.target_geometry.get("region", {}).get("shape") != "enclosing_mesh"
-                else "\nNo inferred enclosing volume is drawn; native sample locations define the displayed coverage."
-            )
+        )
+        self.scope.setToolTip(
+            "Owned ROI geometry is shown when recorded; no enclosing volume is inferred from samples."
         )
         summary = []
         for key, value in state.mapped.summary.items():
@@ -1069,6 +1437,13 @@ class FieldAnalysisDialog(QDialog):
         factor, unit = self._display(state)
         figure = self.slice_plot.figure
         figure.clear()
+        figure.set_layout_engine("compressed")
+        if state.slices is None:
+            self.slice_note.setText(
+                "Physical slice sampling starts when Slices is opened or Evaluate maps is selected. Native-sample metrics are already available."
+            )
+            self.slice_plot.draw()
+            return
         count = len(state.slice_values)
         columns = min(3, count)
         rows = (count + columns - 1) // columns
@@ -1112,10 +1487,16 @@ class FieldAnalysisDialog(QDialog):
             axis.set_title(f"{'xyz'[normal]} = {piece.offset_m:.5g} m", fontsize=10)
             axis.set_xlabel(f"{'xyz'[horizontal]} [m]")
             axis.set_ylabel(f"{'xyz'[vertical]} [m]")
+            # Context outlines must not silently enlarge the requested sampling
+            # window and shrink the actual ROI into a few pixels.
+            axis.set_xlim(float(points[:, :, horizontal].min()), float(points[:, :, horizontal].max()))
+            axis.set_ylim(float(points[:, :, vertical].min()), float(points[:, :, vertical].max()))
             axis.set_aspect("equal")
             visible.append(axis)
         if image is not None:
-            figure.colorbar(image, ax=visible, label=f"{state.mapped.label} [{unit}]", shrink=0.82)
+            # Colorbar's default parent anchor pushes equal-aspect slices to
+            # the right edge of wide windows. Keep maps centered in each cell.
+            figure.colorbar(image, ax=visible, label=f"{state.mapped.label} [{unit}]", shrink=0.82, panchor=False)
         descriptions = {
             "direct_sheet": "saved sheet, directly evaluated",
             "direct_wire": "saved winding, directly evaluated",
@@ -1200,6 +1581,7 @@ class FieldAnalysisDialog(QDialog):
             figure.clear()
         if not state.harmonics:
             self.coefficients.setRowCount(0)
+            self.coefficient_table.set_summary("Fit harmonics to populate")
             if figure is not None:
                 figure.text(0.1, 0.5, "Use Fit field / target / residual to inspect the common harmonic basis.")
                 self.harmonic_plot.draw()
@@ -1218,12 +1600,22 @@ class FieldAnalysisDialog(QDialog):
             for term, coefficient in zip(fit.terms, fit.coefficients, strict=True)
         ]
         self._set_table(self.coefficients, rows)
+        self.coefficient_table.set_summary(f"{len(rows)} real harmonic terms · coefficients in µT")
         condition = result.get("condition_number", result.get("condition"))
         diagnostics = result.get("diagnostics", ())
-        self.harmonic_note.setText(
+        details = (
             f"Rank {fit.rank}/{len(fit.terms)} · {fit.sample_count} samples · "
             f"condition {condition if condition is not None else 'unavailable'} · fit residual RMS {fit.residual_rms * 1e6:.5g} µT\n"
             + str(result.get("sourcefree_caveat", "Source-free validity is not established by this fit."))
+            + ("\n" + str(diagnostics) if diagnostics else "")
+        )
+        self.harmonic_note.setToolTip(details)
+        condition_text = (
+            f"{condition:.4g}" if isinstance(condition, (float, np.floating)) else str(condition or "unavailable")
+        )
+        self.harmonic_note.setText(
+            f"Rank {fit.rank}/{len(fit.terms)} · {fit.sample_count} samples · condition {condition_text} · fit residual RMS {fit.residual_rms * 1e6:.5g} µT\n"
+            "The numerical fit does not verify source-free validity or engineering acceptance."
             + ("\n" + str(diagnostics) if diagnostics else "")
         )
         if figure is not None:
@@ -1233,7 +1625,7 @@ class FieldAnalysisDialog(QDialog):
             axis.set_xticks(ids)
             axis.set_xticklabels([f"{term.degree},{term.order}" for term in fit.terms], rotation=90, fontsize=7)
             axis.set_xlabel("Real solid harmonic (degree, order)")
-            axis.set_ylabel(f"{source.capitalize()} coefficient [µT]")
+            axis.set_ylabel(f"{source.capitalize()} coefficient\n[µT]")
             axis.axhline(0, color="black", linewidth=0.7)
             self.harmonic_plot.draw()
 
@@ -1321,6 +1713,20 @@ class FieldAnalysisDialog(QDialog):
         report(100, "Captured numerical export complete")
 
     def _choose_export(self):
+        if self.tabs.currentIndex() == self._VIEW_TABS["coil"]:
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Export recorded coil statistics and explicit mass assumptions",
+                "coil_statistics.csv",
+                "Coil statistics CSV (*.csv);;Coil statistics JSON (*.json)",
+            )
+            if path:
+                try:
+                    self.export_coil_stats(path)
+                    self.status.setText("Saved recorded coil statistics: " + str(path))
+                except Exception as exc:
+                    self.status.setText("Coil statistics export failed: " + str(exc))
+            return
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Export captured field analysis",
@@ -1339,8 +1745,34 @@ class FieldAnalysisDialog(QDialog):
 
             self._start(operation)
 
+    def export_coil_stats(self, path):
+        """Export saved scalars separately from the user's optional density estimate."""
+        path = Path(path)
+        estimates = self._mass_estimate_rows()
+        if path.suffix.lower() == ".csv":
+            with atomic_text_writer(path) as output:
+                writer = csv.writer(output)
+                columns = ["key", "category", "body_id", "quantity", "value", "unit", "scope", "status", "source_key"]
+                writer.writerow(columns)
+                for row in (*self._coil_report.rows, *estimates):
+                    writer.writerow([getattr(row, column) for column in columns])
+        elif path.suffix.lower() == ".json":
+            payload = {
+                "software": software_attribution(),
+                "run_request_sha256": read_run_metadata(self.record).get("request_sha256"),
+                "recorded_statistics": self._coil_report,
+                "assumed_density_kg_per_m3": self.material_density.value() or None,
+                "assumed_density_estimates": estimates,
+                "acceptance_claim": False,
+            }
+            with atomic_text_writer(path) as output:
+                json.dump(_portable(payload), output, allow_nan=False, indent=2)
+                output.write("\n")
+        else:
+            raise ValueError("Choose a .json or .csv coil-statistics export.")
+
     def _choose_plot(self):
-        if not self._current():
+        if not self._current() or self.tabs.currentIndex() == self._VIEW_TABS["coil"]:
             return
         plot = [self.cloud, self.slice_plot, self.error_plot, self.harmonic_plot][self.tabs.currentIndex()]
         if not hasattr(plot, "save_png"):

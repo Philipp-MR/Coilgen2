@@ -5,6 +5,7 @@ from unittest.mock import Mock
 import pytest
 import test_workbench_usability as usability
 from test_workbench_execution_feedback import _record
+from test_workbench_completed_run_loading import wait as wait_for
 
 from coilgen.application import ProjectAssembly, ProjectDocument
 from coilgen.application.presets import preset_config, preset_study
@@ -109,9 +110,10 @@ def test_poll_failure_is_retained_for_a_later_history_alias(windows):
     window.service.load_run = Mock(side_effect=ValueError("Saved mesh checksum changed."))
     window.jobs.states[0].update(status="completed")
     window.poll_jobs()
+    wait_for(lambda: not window._run_load_tasks)
     window.runs["later-alias"] = _source(window, window.jobs.directory / state["id"])
     window._job_verification_errors.pop(state["id"])
-    assert window._run_verification_error("later-alias") == "Saved mesh checksum changed."
+    assert window._run_verification_error("later-alias") == "ValueError: Saved mesh checksum changed."
 
 
 @pytest.mark.parametrize("action", ["artifacts", "resume"])

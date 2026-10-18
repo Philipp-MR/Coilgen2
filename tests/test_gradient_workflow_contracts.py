@@ -52,9 +52,11 @@ def engineering_project():
 def test_absent_engineering_keeps_legacy_request_and_project_serialization(tmp_path):
     original = ResearchRequest.from_config(config())
     legacy = asdict(original)
-    legacy.pop("engineering")
+    optional = ("engineering", "requirements", "scene", "dynamic_analysis", "array_study")
+    for key in optional:
+        assert legacy.pop(key) is None
     assert original.to_dict() == json.loads(json.dumps(legacy, default=str))
-    assert ResearchRequest.from_dict({**legacy, "engineering": None}).to_dict() == original.to_dict()
+    assert ResearchRequest.from_dict({**legacy, **dict.fromkeys(optional)}).to_dict() == original.to_dict()
     project = ProjectDocument.from_config(config())
     path = project.save(tmp_path / "default.coilgen.json")
     assert "engineering" not in project.study

@@ -80,6 +80,16 @@ def candidate_for(part):
     )
 
 
+def test_cut_context_fingerprint_keeps_distinct_return_seed_with_equal_ports():
+    original = make_part()
+    identical = deepcopy(original)
+    alternate = deepcopy(original)
+    alternate.connected_groups[0].return_path_v[1] += [0, 0, 0.01]
+    np.testing.assert_array_equal(original.groups[0].opened_loops[0].v, alternate.groups[0].opened_loops[0].v)
+    assert adoption._cut_context_fingerprint(original) == adoption._cut_context_fingerprint(identical)
+    assert adoption._cut_context_fingerprint(original) != adoption._cut_context_fingerprint(alternate)
+
+
 def prepared_for(part, path):
     result = deepcopy(part)
     result.wire_path = deepcopy(path)
@@ -87,6 +97,21 @@ def prepared_for(part, path):
         wire_points_m=path.v + [0, 0, 0.02], segment_owners=deepcopy(path.segment_owners)
     )
     return result
+
+
+def distinct_shaped_proposals(monkeypatch):
+    """Different geometry, so a physical-check budget is not spent on repeats."""
+    serial = iter(range(1000))
+
+    def shape(_part, candidate, _config, **_kwargs):
+        values = [deepcopy(candidate) for _ in range(3)]
+        for value in values:
+            origin = value.path.v[0]
+            value.path.v = origin + (1.0 - 0.0001 * next(serial)) * (value.path.v - origin)
+            value.length_m = adoption._length(value.path.v)
+        return GroupRouteProposals(values)
+
+    monkeypatch.setattr(adoption, "shape_joint_group_route", shape)
 
 
 def state_snapshot(part):
@@ -196,11 +221,102 @@ def test_default_enabled_and_explicit_off_performs_no_work(setup_adoption):
     assert CoilGenConfig().joint_group_routing_max_candidates == 6
     assert CoilGenConfig().joint_group_routing_max_field_change_rel == 0.001
     assert CoilGenConfig().joint_group_routing_field_acceptance == "absolute"
+    assert CoilGenConfig().joint_group_routing_selection_policy == "regular"
+    assert CoilGenConfig().joint_group_routing_regular_field_tolerance_rel == 0.001
     parts = [make_part()]
     before = state_snapshot(parts[0])
     assert adoption.improve_group_routes(parts, CoilGenConfig(joint_group_routing=False), target) is parts
     assert state_snapshot(parts[0]) == before
     assert not calls.field and not calls.propose
+
+
+@pytest.mark.parametrize(
+    "policy,increase_T,validator_accepts,adopted",
+    [
+        ("regular", 0.3e-6, True, True),
+        (" REGULAR ", 0.3e-6, True, True),
+        ("regular", 0.5e-6, True, False),
+        ("regular", 0.0, False, False),
+        ("physical", 0.3e-6, True, False),
+        (" PhYsIcAl ", 0.3e-6, True, False),
+    ],
+)
+def test_regular_preference_requires_baseline_anchored_field_budget_and_all_gates(
+    setup_adoption,
+    monkeypatch,
+    policy,
+    increase_T,
+    validator_accepts,
+    adopted,
+):
+    target, _, _ = setup_adoption
+    part = make_part()
+    owner = WireSegmentOwner("within_group_return", group_index=0)
+    owners = [owner] * 3 + [WireSegmentOwner("contour_loop")] * 2
+    part.wire_path = WirePath(
+        np.array([[0.0, 0, 0], [2, 0, 0], [1, 0, 0], [3, 0, 0], [3, 1, 0], [0, 0, 0]]),
+        owners,
+    )
+    part.fabrication_path = prepared_for(part, part.wire_path).fabrication_path
+    candidate = candidate_for(part)
+    candidate.path = WirePath(
+        np.array([[0.0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0], [3, 1, 0], [0, 0, 0]]),
+        deepcopy(owners),
+    )
+    candidate.segment_ids = (None,) * 5
+    candidate.length_m = adoption._length(candidate.path.v)
+    monkeypatch.setattr(adoption, "propose_joint_group_routes", lambda *_a, **_k: GroupRouteProposals([candidate]))
+
+    def validate(context, path, *_a, **_k):
+        if not validator_accepts:
+            return GroupRouteValidation(False, ("route_fixed_current_target",), {})
+        # Both unchanged contours contribute 1 uT/A. The original series route
+        # contributes 1 uT/A at 2 A; this candidate's contour-reference RMS
+        # increases by precisely increase_T. Geometry improves independently.
+        cached = np.tile([0.0, 0.0, 1e-6 - increase_T / 2], (len(target.coords), 1))
+        return GroupRouteValidation(True, (), {}, prepared_for(context, path), physical_field_per_amp=cached)
+
+    monkeypatch.setattr(adoption, "validate_group_route_candidate", validate)
+    config = CoilGenConfig(
+        joint_group_routing_selection_policy=policy,
+        joint_group_routing_regular_field_tolerance_rel=0.0001,
+        joint_group_routing_max_candidates=1,
+    )
+    selected = adoption.improve_group_routes([part], config, target)[0]
+    assert (selected is not part) is adopted
+    diagnostics = selected.joint_route_diagnostics
+    assert diagnostics["selection_policy"] == policy.strip().lower()
+    assert diagnostics["regularity_part_rms_tolerance_T"] == pytest.approx(0.4e-6)
+    assert diagnostics["regularity_maximum_longitudinal_rms_T"] == pytest.approx(2.4e-6)
+    attempt = diagnostics["attempts"][0]
+    if adopted:
+        assert attempt["routing_metrics"]["added_backtracking_m"] == 0
+        assert diagnostics["baseline_routing_metrics"]["added_backtracking_m"] == 1
+    elif not validator_accepts:
+        assert attempt["reasons"] == ["route_fixed_current_target"]
+    elif policy == "regular":
+        assert "regularity_field_rms_tolerance_exceeded" in attempt["reasons"]
+    else:
+        assert "no_routing_objective_or_manufacturing_improvement" in attempt["reasons"]
+
+
+@pytest.mark.parametrize(
+    "policy,tolerance,field",
+    [
+        ("beauty", 0.001, "joint_group_routing_selection_policy"),
+        ("regular", -0.001, "joint_group_routing_regular_field_tolerance_rel"),
+        ("regular", np.nan, "joint_group_routing_regular_field_tolerance_rel"),
+        ("regular", True, "joint_group_routing_regular_field_tolerance_rel"),
+    ],
+)
+def test_regular_policy_validation_rejects_undefined_ranking_or_budget(policy, tolerance, field):
+    report = validate_config(
+        CoilGenConfig(
+            joint_group_routing_selection_policy=policy,
+            joint_group_routing_regular_field_tolerance_rel=tolerance,
+        )
+    )
+    assert any(message.field == field for message in report.errors)
 
 
 def test_joint_progress_reports_measured_phase_eta_and_real_work_counts(setup_adoption, monkeypatch, capsys):
@@ -458,8 +574,9 @@ def test_explicit_pipeline_skip_modes_remain_authoritative(setup_adoption, flag)
 
 
 @pytest.mark.parametrize("budget", [1, 2, 4, 5, 6])
-def test_hard_candidate_budget_spans_multiple_proposals(setup_adoption, budget):
+def test_hard_candidate_budget_spans_multiple_proposals(setup_adoption, monkeypatch, budget):
     target, calls, _ = setup_adoption
+    distinct_shaped_proposals(monkeypatch)
     parts = [make_part()]
     result = adoption.improve_group_routes(
         parts,
@@ -489,7 +606,13 @@ def test_all_group_orders_receive_first_shape_before_later_alternatives(setup_ad
 
     monkeypatch.setattr(adoption, "shape_joint_group_route", ordered_shapes)
     adoption.improve_group_routes(
-        [part], CoilGenConfig(joint_group_routing_max_candidates=6, joint_group_routing_search_mode="thorough"), target
+        [part],
+        CoilGenConfig(
+            joint_group_routing_max_candidates=6,
+            joint_group_routing_search_mode="thorough",
+            joint_group_routing_selection_policy="physical",
+        ),
+        target,
     )
     assert len(calls.validate) == 6
     assert [row["variants"] for row in part.joint_route_diagnostics["attempts"]] == [
@@ -791,6 +914,7 @@ def test_shorter_raw_route_cannot_hide_worse_fabricated_route(setup_adoption, mo
 
 def test_winner_is_committed_once_with_constant_backgrounds_within_each_part(setup_adoption, monkeypatch):
     target, calls, _ = setup_adoption
+    distinct_shaped_proposals(monkeypatch)
     parts = [make_part(0), make_part(1), make_part(2, groups=1)]
     counts = {id(part): 0 for part in parts}
     prepared = []
@@ -927,7 +1051,13 @@ def test_uncertified_baseline_cannot_veto_a_valid_more_jump_repair(setup_adoptio
     assert selected.joint_route_diagnostics["selection_basis"] == "baseline_repair"
 
 
-def test_actual_longitudinal_field_improvement_beats_shorter_equal_jump_route(setup_adoption, monkeypatch):
+@pytest.mark.parametrize("policy,adopted", [("physical", True), ("regular", False)])
+def test_actual_longitudinal_field_improvement_beats_shorter_equal_jump_route_under_physical_policy(
+    setup_adoption,
+    monkeypatch,
+    policy,
+    adopted,
+):
     target, _, _ = setup_adoption
     part = make_part()
 
@@ -944,8 +1074,15 @@ def test_actual_longitudinal_field_improvement_beats_shorter_equal_jump_route(se
 
     monkeypatch.setattr(adoption, "biot_savart_wire_path", field)
     monkeypatch.setattr(adoption, "validate_group_route_candidate", validate)
-    selected = adoption.improve_group_routes([part], CoilGenConfig(joint_group_routing_max_candidates=1), target)[0]
-    assert selected is not part
+    selected = adoption.improve_group_routes(
+        [part], CoilGenConfig(joint_group_routing_max_candidates=1, joint_group_routing_selection_policy=policy), target
+    )[0]
+    assert (selected is not part) is adopted
+    if not adopted:
+        assert selected.joint_route_diagnostics["attempts"][0]["reasons"] == [
+            "no_routing_objective_or_manufacturing_improvement"
+        ]
+        return
     values = selected.joint_route_diagnostics["selected_routing_metrics"]
     assert values["longitudinal_rms_T"] == 0
     assert values["length_m"] > 4
@@ -1524,6 +1661,52 @@ def test_progressive_acceptance_stops_before_expanding_curves(setup_adoption, mo
     assert selected.joint_route_diagnostics["jump_optimality_proven"] is False
 
 
+def test_cheap_field_rejections_leave_body_slot_for_later_candidate(setup_adoption, monkeypatch):
+    target, calls, _ = setup_adoption
+    distinct_shaped_proposals(monkeypatch)
+
+    def decide(part, path, _config, **kwargs):
+        calls.validate.append((part, path, kwargs))
+        if len(calls.validate) < 4:
+            return GroupRouteValidation(False, ("pointwise_field_delta_budget",), {"body_preview_started": False})
+        return GroupRouteValidation(True, (), {"body_preview_started": True}, prepared_for(part, path))
+
+    monkeypatch.setattr(adoption, "validate_group_route_candidate", decide)
+    original = make_part()
+    selected = adoption.improve_group_routes([original], CoilGenConfig(joint_group_routing_max_candidates=1), target)[0]
+    assert selected is not original
+    diagnostics = selected.joint_route_diagnostics
+    assert diagnostics["field_candidate_count"] == 4
+    assert diagnostics["body_preview_candidate_count"] == diagnostics["candidate_count"] == 1
+    assert len({row[2]["maximum_field_delta_t_per_a"] for row in calls.validate}) == 1
+    assert all(row[2]["current_a"] == original.contour_step for row in calls.validate)
+
+
+def test_field_screen_work_cap_is_distinct_from_body_and_physical_field_limits(setup_adoption, monkeypatch):
+    target, calls, _ = setup_adoption
+    distinct_shaped_proposals(monkeypatch)
+    real_limits = adoption.GroupRouteValidationLimits
+    monkeypatch.setattr(adoption, "GroupRouteValidationLimits", lambda: real_limits(maximum_field_candidates=4))
+
+    def reject(part, path, _config, **kwargs):
+        calls.validate.append((part, path, kwargs))
+        return GroupRouteValidation(False, ("pointwise_field_delta_budget",), {"body_preview_started": False})
+
+    monkeypatch.setattr(adoption, "validate_group_route_candidate", reject)
+    original = make_part()
+    before = state_snapshot(original)
+    selected = adoption.improve_group_routes([original], CoilGenConfig(joint_group_routing_max_candidates=1), target)[0]
+    assert selected is original and state_snapshot(original) == before
+    diagnostics = selected.joint_route_diagnostics
+    assert diagnostics["field_candidate_count"] == len(calls.validate) == 4
+    assert diagnostics["body_preview_candidate_count"] == diagnostics["candidate_count"] == 0
+    assert diagnostics["field_screen_budget_exhausted"]
+    assert "field_screen_candidate_budget_exhausted" in diagnostics["work_budget_exhaustion_reasons"]
+    assert diagnostics["work_budget_exhausted"] and not diagnostics["infeasibility_proven"]
+    assert not diagnostics.get("physical_candidate_budget_exhausted", False)
+    assert len({row[2]["maximum_field_delta_t_per_a"] for row in calls.validate}) == 1
+
+
 def test_progressive_shape_failure_expands_without_sweeping_failed_geometry(setup_adoption, monkeypatch):
     target, calls, _ = setup_adoption
     stage = SimpleNamespace(level=0)
@@ -1548,6 +1731,66 @@ def test_progressive_shape_failure_expands_without_sweeping_failed_geometry(setu
     assert len(calls.baseline) == 1
 
 
+@pytest.mark.parametrize("policy,expected_cut_calls", [("regular", 2), ("physical", 1)])
+def test_failed_transition_drives_bounded_port_context_search_without_changing_body_budget(
+    setup_adoption,
+    monkeypatch,
+    policy,
+    expected_cut_calls,
+):
+    target, calls, _ = setup_adoption
+    stage = SimpleNamespace(level=0)
+    monkeypatch.setattr(
+        adoption,
+        "JointTransitionEvaluator",
+        lambda *_a, **_k: SimpleNamespace(set_search_level=lambda level: setattr(stage, "level", level)),
+    )
+    cut_calls = []
+
+    def cuts(part, _config, **kwargs):
+        cut_calls.append(kwargs)
+        alternate = deepcopy(part)
+        alternate.groups[0].opened_loops[0].v[0] += [0.001, 0, 0]
+        return SimpleNamespace(
+            variants=[alternate] if kwargs.get("failure_witnesses") else [],
+            reasons=(),
+            diagnostics={},
+        )
+
+    monkeypatch.setattr(adoption, "propose_joint_cut_variants", cuts)
+    old_shape = adoption.shape_joint_group_route
+    witness = dict(
+        endpoints_m=[[0.0, 0, 0], [0.01, 0, 0]],
+        owner={"group_index": 0},
+        tangent_before=[1.0, 0, 0],
+        tangent_after=[1.0, 0, 0],
+        reasons=["insufficient_bend_radius"],
+    )
+    monkeypatch.setattr(
+        adoption,
+        "shape_joint_group_route",
+        lambda *args, **kwargs: (
+            GroupRouteProposals(reason="no_supported_transition", diagnostics={"failed_transition_witness": witness})
+            if stage.level == 0
+            else old_shape(*args, **kwargs)
+        ),
+    )
+    part = make_part()
+    before = state_snapshot(part)
+    config = CoilGenConfig(joint_group_routing_selection_policy=policy, joint_group_routing_max_candidates=3)
+    adoption.improve_group_routes([part], config, target)
+    assert len(cut_calls) == expected_cut_calls
+    assert len(calls.validate) <= config.joint_group_routing_max_candidates
+    assert state_snapshot(part) == before
+    assert part.joint_route_diagnostics["infeasibility_proven"] is False
+    if policy == "regular":
+        assert cut_calls[1]["maximum_candidates"] <= 7
+        assert all(value == witness for value in cut_calls[1]["failure_witnesses"])
+        assert part.joint_route_diagnostics["failure_directed_cut_search"]["context_count_after_search"] == 2
+    else:
+        assert "failure_directed_cut_search" not in part.joint_route_diagnostics
+
+
 def test_progressive_uses_budget_only_for_distinct_validation_inputs(setup_adoption):
     target, calls, _ = setup_adoption
     part = make_part()
@@ -1569,3 +1812,66 @@ def test_candidate_fingerprint_preserves_cut_and_interval_semantics():
     candidate = candidate_for(part)
     candidate.segment_ids = ((0, 0, 0), *candidate.segment_ids[1:])
     assert adoption._candidate_fingerprint("existing", candidate) != original
+
+
+def test_regular_topology_search_keeps_order_diversity_and_all_pending_proposals():
+    candidates = [
+        SimpleNamespace(group_sequence=(0, 2, 1, 3), variant_names=("in",) * 4),
+        SimpleNamespace(group_sequence=(0, 2, 1, 3), variant_names=("out",) * 4),
+        SimpleNamespace(group_sequence=(0, 1, 2, 3), variant_names=("in",) * 4),
+    ]
+    assert adoption._topology_search_order(candidates)[0] == 0
+    assert adoption._topology_search_order(candidates, attempted_indices=(0,)) == [2, 1]
+
+
+def test_regular_topology_search_softly_avoids_witnessed_directed_cycle_return():
+    candidates = [
+        SimpleNamespace(group_sequence=(0, 2, 1, 3)),
+        SimpleNamespace(group_sequence=(0, 2, 1, 3)),
+        SimpleNamespace(group_sequence=(0, 1, 2, 3)),
+    ]
+    witness = {
+        "owner": {
+            "kind": "inter_group_connector",
+            "connector_role": "joint_return",
+            "group1_index": 0,
+            "group2_index": 2,
+        }
+    }
+    ordered = adoption._topology_search_order(candidates, failure_witnesses=(witness,))
+    assert ordered == [2, 0, 1]
+    assert sorted(ordered) == list(range(len(candidates)))
+    # A failure in the closing directed edge is considered, too. Its reversed
+    # direction is not automatically excluded or declared infeasible.
+    reverse = SimpleNamespace(group_sequence=(0, 3, 1, 2))
+    assert adoption._topology_search_order([reverse, candidates[2]], failure_witnesses=(witness,)) == [0, 1]
+    closing = {"owner": {**witness["owner"], "group1_index": 2, "group2_index": 0}}
+    assert adoption._topology_search_order([reverse, candidates[2]], failure_witnesses=(closing,)) == [1, 0]
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "pointwise_field_delta_budget",
+        "field_delta_budget_exceeded",
+        "regularity_field_rms_budget_exceeded",
+        "physical_candidate_budget_exhausted",
+    ],
+)
+def test_physical_field_budget_is_not_computational_work_exhaustion(reason):
+    assert not adoption._work_budget_reason(reason)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "joint_shape_trial_budget_exceeded",
+        "joint_spatial_pair_budget_exceeded",
+        "connector_evaluation_budget",
+        "expanded_state_budget",
+        "search_budget_exhausted",
+        "transition_work_budget_exhausted",
+    ],
+)
+def test_computational_work_budget_exhaustion_is_reported(reason):
+    assert adoption._work_budget_reason(reason)

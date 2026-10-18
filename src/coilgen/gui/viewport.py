@@ -150,6 +150,8 @@ class _PreviewTask(QRunnable):
         self.generation, self.config, self.root, self.owner = generation, config, root, owner
 
     def run(self):
+        from .design_tasks import deliver_task_signal
+
         try:
             requirements = getattr(self.owner, "study", {}).get("requirements")
             result = (
@@ -165,7 +167,7 @@ class _PreviewTask(QRunnable):
                 message,
                 {"available": False, "message": message, "coordinate_frame": "world", "target": {"available": False}},
             )
-        self.signals.finished.emit(self.generation, result)
+        deliver_task_signal(self.signals, "finished", self.generation, result)
 
 
 class _SystemSupportTask(QRunnable):
@@ -178,6 +180,7 @@ class _SystemSupportTask(QRunnable):
 
     def run(self):
         from ..geometry import load_mesh_from_config
+        from .design_tasks import deliver_task_signal
 
         result = {}
         for channel_id, identity, config, root in self.requests:
@@ -192,7 +195,7 @@ class _SystemSupportTask(QRunnable):
                 result[channel_id] = (identity, arrays, "")
             except Exception as exc:
                 result[channel_id] = (identity, {}, f"Support unavailable: {type(exc).__name__}: {exc}")
-        self.signals.finished.emit(self.generation, result)
+        deliver_task_signal(self.signals, "finished", self.generation, result)
 
 
 class ScientificViewport(QWidget):
@@ -201,6 +204,7 @@ class ScientificViewport(QWidget):
     error = Signal(str)
     preflight_ready = Signal(dict)
     context_changed = Signal()
+    activity_changed = Signal()
 
     def __init__(self, parent=None, *, synchronous_preview=False):
         super().__init__(parent)
@@ -659,9 +663,11 @@ class ScientificViewport(QWidget):
         self.view.activated.connect(self._set_view)
         self.orthographic.toggled.connect(self._set_projection)
         reset.clicked.connect(self._fit_view)
-        self.plotter.enable_mesh_picking(
-            callback=self._picked_actor, show=False, show_message=False, left_clicking=True, use_actor=True
-        )
+        # VTK disables its interactor in offscreen mode; picking needs one.
+        if getattr(self.plotter, "iren", None) is not None:
+            self.plotter.enable_mesh_picking(
+                callback=self._picked_actor, show=False, show_message=False, left_clicking=True, use_actor=True
+            )
         self._rebuild_capabilities()
         self._refresh_availability()
 
@@ -882,6 +888,7 @@ class ScientificViewport(QWidget):
             return
         self._system_generation += 1
         self._pending_system_preview = None
+        self.activity_changed.emit()
         requests = []
         for id_, channel in channels.items():
             if id_ == active_channel_id or id_ in self._system_supports or id_ in self._system_support_errors:
@@ -895,16 +902,20 @@ class ScientificViewport(QWidget):
             request = self._system_generation, tuple(requests)
             if self._synchronous_preview:
                 task = _SystemSupportTask(*request)
+                self._system_worker = task
                 task.signals.finished.connect(self._system_preview_finished)
+                self.activity_changed.emit()
                 task.run()
             elif self._system_worker is None:
                 self._start_system_preview(request)
             else:
                 self._pending_system_preview = request
+                self.activity_changed.emit()
 
     def _start_system_preview(self, request):
         self._system_worker = _SystemSupportTask(*request)
         self._system_worker.signals.finished.connect(self._system_preview_finished)
+        self.activity_changed.emit()
         QThreadPool.globalInstance().start(self._system_worker)
 
     @Slot(int, object)
@@ -931,6 +942,7 @@ class ScientificViewport(QWidget):
         if self._pending_system_preview is not None:
             request, self._pending_system_preview = self._pending_system_preview, None
             self._start_system_preview(request)
+        self.activity_changed.emit()
 
     def _sync_system_mesh_controls(self):
         for id_ in tuple(self.system_mesh_checks):
@@ -1109,6 +1121,7 @@ class ScientificViewport(QWidget):
             # Incomplete models are normal while choosing inputs. They need no
             # backend worker; any old in-flight result is already invalidated.
             self._pending_preview = None
+            self.activity_changed.emit()
             _, _, self._preview_error, preflight = _preview_data(config, root)
             if self._system_active_channel is not None:
                 self._system_support_errors[self._system_active_channel] = self._preview_error
@@ -1120,13 +1133,16 @@ class ScientificViewport(QWidget):
         request = self._preview_generation, deepcopy(config), root, _owner
         if self._synchronous_preview:
             task = _PreviewTask(*request)
+            self._preview_worker = task
             task.signals.finished.connect(self._preview_finished)
+            self.activity_changed.emit()
             task.run()
         elif self._preview_worker is None:
             self._start_preview(request)
         else:
             # Coalesce rapid edits. Never queue an unbounded sequence of meshes.
             self._pending_preview = request
+            self.activity_changed.emit()
         if self.dataset.currentData() in {"support", "preview_target"}:
             self._render()
 
@@ -1161,6 +1177,7 @@ class ScientificViewport(QWidget):
     def _start_preview(self, request):
         self._preview_worker = _PreviewTask(*request)
         self._preview_worker.signals.finished.connect(self._preview_finished)
+        self.activity_changed.emit()
         QThreadPool.globalInstance().start(self._preview_worker)
 
     @Slot(int, object)
@@ -1210,6 +1227,7 @@ class ScientificViewport(QWidget):
         if self._pending_preview is not None:
             request, self._pending_preview = self._pending_preview, None
             self._start_preview(request)
+        self.activity_changed.emit()
 
     def display_run(self, arrays, metadata=None):
         self._stage_arrays, self._stage_metadata = {}, {}
@@ -1336,6 +1354,7 @@ class ScientificViewport(QWidget):
         self.set_assembly_context(None)
         self._preview_generation += 1
         self._pending_preview = None
+        self.activity_changed.emit()
         self._preview_arrays = {}
         self._preview_geometry = {}
         self._support = None
@@ -1899,7 +1918,13 @@ class ScientificViewport(QWidget):
             if is_field
             else "Field units apply to field maps. Geometry coordinates are in metres."
         )
-        self.wire_current.setEnabled(has_wire_maps)
+        fixed_field_current = key in FIELD_KEYS and key not in WIRE_FIELDS
+        self.wire_current.setEnabled(has_wire_maps and not fixed_field_current)
+        self.wire_current.setToolTip(
+            "This field has a fixed saved current policy. Choose a routed or contour field to select a different saved wire map."
+            if fixed_field_current
+            else "Select already computed wire maps; no current fitting or field recalculation."
+        )
         self.wire_current.setVisible(has_wire_maps)
         self.slice_axis.setEnabled(is_field)
         self.slice_position.setEnabled(is_field and self.slice_axis.currentText() != "All points")
@@ -2258,6 +2283,7 @@ class ScientificViewport(QWidget):
             if self._system_worker is not None:
                 self._system_worker.signals.finished.disconnect(self._system_preview_finished)
                 self._system_worker = None
+            self.activity_changed.emit()
             self.plotter.close()
         super().closeEvent(event)
 

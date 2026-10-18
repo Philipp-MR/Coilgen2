@@ -217,7 +217,9 @@ PARAMETERS = object_parameters(
                 "mesh_parameter_key": "biplanar_mesh_parameter_list",
                 "mesh_parameters": (0.25, 0.25, 10, 10, 1, 0, 0, 0, 0, 0, 0.2),
                 "inter_group_connection_path_method": "direct_3d",
-                "config_overrides": {"surface_is_cylinder_flag": False},
+                # One circuit across disconnected planes requires the final
+                # conductor body/support checks, even when exports are off.
+                "config_overrides": {"surface_is_cylinder_flag": False, "skip_sweep": False},
             },
         },
         "dense_examples": {
@@ -261,6 +263,7 @@ PARAMETERS = object_parameters(
                 "mesh_parameters": (0.12, 0.2, 0.28, 0.08, 0.2),
                 "inter_group_connection_path_method": "direct_3d",
                 "config_overrides": {
+                    "skip_sweep": False,
                     "surface_is_cylinder_flag": True,
                     "target_region_radius": 0.05,
                     "target_region_resolution": 5,
@@ -323,7 +326,7 @@ def main(parameters=None, *, smoke=False, headless=False):
             name,
             output_dir=output_dir,
             project_root=PROJECT_ROOT,
-            save_reports=False,
+            save_reports=True,
             save_gallery=False,
         )
         project.channel(
@@ -332,11 +335,18 @@ def main(parameters=None, *, smoke=False, headless=False):
             save_gallery=bool(parameters["output"]["save_svg_galleries"]),
         )
         with native_thread_budget():
-            project_run = project.solve()
-        result = project_run.channel_runs[0].result
-        results[name] = result
+            project_run = project.solve(continue_on_channel_failure=True)
         projects[name] = project
         project_runs[name] = project_run
+        channel_run = project_run.channel_runs[0]
+        if channel_run.exception is not None:
+            failures.append(f"{name}: {channel_run.exception}")
+            print(f"  FAIL {name}: {channel_run.exception}")
+            for path in project_run.files:
+                print(f"  Evidence: {path}")
+            continue
+        result = project_run.channel_runs[0].result
+        results[name] = result
         files = list(project_run.files)
         example_failures, example_warnings = validate_generated_example_result(
             name,

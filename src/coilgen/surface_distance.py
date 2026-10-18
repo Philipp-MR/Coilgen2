@@ -53,7 +53,7 @@ class SurfaceGeodesicSolver:
     that Dijkstra's directed tie choices are preserved.
     """
 
-    def __init__(self, mesh: Mesh):
+    def __init__(self, mesh: Mesh, *, refine_routes: bool = False):
         self.mesh = Mesh(vertices=mesh.vertices.copy(), faces=mesh.faces.copy())
         self.mesh.vertices.flags.writeable = False
         self.mesh.faces.flags.writeable = False
@@ -68,6 +68,59 @@ class SurfaceGeodesicSolver:
         self.path_cache_misses = 0
         self._path_cache: OrderedDict[tuple[object, ...], tuple[GeodesicPathResult, int]] = OrderedDict()
         self._path_cache_bytes = 0
+        self.refine_routes = bool(refine_routes)
+        self._route_corridor = None
+        self._route_cache = OrderedDict()
+        self._route_cache_bytes = 0
+        self.last_route_diagnostics = {}
+
+    def route_between_points(self, point_a: np.ndarray, point_b: np.ndarray) -> GeodesicPathResult:
+        """Refine only mutable connector proposals; distance queries are unchanged."""
+        key = (np.asarray(point_a, dtype=float).tobytes(), np.asarray(point_b, dtype=float).tobytes())
+        cached = self._route_cache.get(key) if self.refine_routes else None
+        if cached is not None:
+            self._route_cache.move_to_end(key)
+            self.last_route_diagnostics = dict(cached[1])
+            return _copy_result(cached[0])
+        result = self.distance_between_points(point_a, point_b)
+        if not self.refine_routes or not np.isfinite(result.distance) or len(result.path_v) < 2:
+            self.last_route_diagnostics = {"status": "mesh_vertex_seed"}
+            return result
+        try:
+            from .surface_corridor import SurfaceCorridor
+        except ModuleNotFoundError as error:
+            if error.name != "scipy" and not str(error.name).startswith("scipy."):
+                raise
+            raise ImportError(
+                "Regular geodesic connector refinement requires SciPy. "
+                'Install the spatial extra with: python -m pip install ".[spatial]"'
+            ) from error
+
+        if self._route_corridor is None:
+            self._route_corridor = SurfaceCorridor(self.mesh, self.vertex_faces)
+        source = self.samples_from_points(point_a).vertices
+        target = self.samples_from_points(point_b).vertices
+        route = self._route_corridor.route(result.point_a, result.point_b, source, target, result.path_v)
+        self.last_route_diagnostics = {
+            "status": route.status,
+            "support_face_count": len(route.face_indices),
+            "optimizer_converged": route.optimizer_converged,
+            "scope": "connector_seed_inside_actual_triangles; not finite_body_or_field_certificate",
+        }
+        if route.face_indices:
+            result.path_v = route.points.copy()
+            result.distance = float(np.linalg.norm(np.diff(result.path_v, axis=0), axis=1).sum())
+        size = result.path_v.nbytes + result.point_a.nbytes + result.point_b.nbytes + sum(map(len, key))
+        if size <= _PATH_CACHE_MAX_BYTES and _PATH_CACHE_MAX_ENTRIES > 0:
+            while self._route_cache and (
+                len(self._route_cache) >= _PATH_CACHE_MAX_ENTRIES
+                or self._route_cache_bytes + size > _PATH_CACHE_MAX_BYTES
+            ):
+                _, entry = self._route_cache.popitem(last=False)
+                self._route_cache_bytes -= entry[2]
+            self._route_cache[key] = (_copy_result(result), dict(self.last_route_diagnostics), size)
+            self._route_cache_bytes += size
+        return result
 
     def clear_sample_cache(self) -> None:
         """Release sampled endpoints and all paths derived from them."""
@@ -84,6 +137,8 @@ class SurfaceGeodesicSolver:
         self.path_cache_hits = 0
         self.path_cache_misses = 0
         self.last_dijkstra_settled_count = 0
+        self._route_cache.clear()
+        self._route_cache_bytes = 0
 
     def distance_between_points(self, point_a: np.ndarray, point_b: np.ndarray) -> GeodesicPathResult:
         return self._distance_between_samples(self.samples_from_points(point_a), self.samples_from_points(point_b))

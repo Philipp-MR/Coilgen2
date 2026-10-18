@@ -3,6 +3,9 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+import numpy as np
+import pytest
+
 from coilgen import (
     CoilGenConfig,
     REPORT_SCHEMA_VERSION,
@@ -13,6 +16,8 @@ from coilgen import (
     write_design_report,
     write_design_summary_csv,
 )
+from coilgen.inductance import calculate_inductance_by_coil_layout
+from coilgen.models import ContourLine
 
 
 def _small_report_config() -> CoilGenConfig:
@@ -81,3 +86,39 @@ def test_free_design_context_keeps_schema_but_skips_gradient_specific_report(tmp
     report_text = report_path.read_text(encoding="utf-8")
     assert "Not applicable for design_context=free" in report_text
     assert validate_markdown_sections(report_text).ok
+
+
+@pytest.mark.parametrize("skipped", (True, False))
+def test_skipped_electrical_arrays_are_not_exported_as_zero_hardware(tmp_path: Path, skipped: bool) -> None:
+    config = _small_report_config()
+    config.skip_inductance_calculation = skipped
+    result = run_coilgen(config)
+    # A known closed contour keeps this reporting regression independent of
+    # contour pruning by the deliberately tiny sheet fixture.
+    angle = np.linspace(0, 2 * np.pi, 17)
+    result.coil_parts[0].contour_lines = [
+        ContourLine(np.column_stack((0.05 * np.cos(angle), 0.05 * np.sin(angle), np.zeros_like(angle))), 1.0)
+    ]
+    _, result.inductance_matrix, result.resistance, result.coil_lengths, _ = calculate_inductance_by_coil_layout(
+        result.coil_parts, config
+    )
+    resistance_before = result.resistance.copy()
+    inductance_before = result.inductance_matrix.copy()
+    summary = result_summary_dict(result)
+    assert summary["coil_electrical_calculation_status"] == ("skipped" if skipped else "enabled")
+    assert summary["coil_length_total_m"] > 0
+    keys = ("coil_resistance_ohm", "coil_resistance_total_ohm", "coil_inductance_H", "coil_inductance_same_current_H")
+    if skipped:
+        assert all(math.isnan(summary[key]) for key in keys)
+        assert "coil_inductance_self_part1_H" not in summary
+        assert not any(key.startswith("coil_mutual_inductance_") for key in summary)
+        assert not np.any(resistance_before) and not np.any(inductance_before)
+    else:
+        assert all(summary[key] > 0 for key in keys)
+        assert summary["coil_inductance_self_part1_H"] == inductance_before[0, 0]
+    text = write_design_report(result, tmp_path / "electrical.md").read_text(encoding="utf-8")
+    assert ("## Inductance Matrix" in text) is (not skipped)
+    csv_text = write_design_summary_csv(result, tmp_path / "electrical.csv").read_text(encoding="utf-8")
+    assert f"coil_electrical_calculation_status,{'skipped' if skipped else 'enabled'}" in csv_text
+    np.testing.assert_array_equal(result.resistance, resistance_before)
+    np.testing.assert_array_equal(result.inductance_matrix, inductance_before)

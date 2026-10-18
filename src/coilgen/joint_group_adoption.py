@@ -37,13 +37,20 @@ from .manufacturing import (
 from .progress import ProgressReporter
 from .routing_progress import RoutingProgress
 from .physics import biot_savart_wire_path
-from .routing_objective import routing_metrics, route_is_better
+from .routing_objective import (
+    added_route_regularity,
+    routing_metrics,
+    route_is_better,
+    routing_selection_policy,
+    regularity_order_key,
+)
 from .routing_jumps import fabricated_jump_metrics, raised_span_metrics
 from .routing_field_objective import longitudinal_field_distortion
 from .routing_baseline import assess_routing_baseline
 from .contours import contour_evaluation_points
 from .group_route_clearance import audit_interpart_clearance
 from .routing_symmetry import audit_routing_symmetry
+from .shared_return_cycles import propose_shared_return_cycles
 
 
 def _route_metrics(part, config, *, complete_provenance=False):
@@ -52,7 +59,8 @@ def _route_metrics(part, config, *, complete_provenance=False):
     Joint proposals explicitly label each protected contour interval. Legacy
     group owners do not distinguish ordinary joins from turns; omitting their
     directional penalty underestimates the diagnostic guide. This guide is not
-    used for the final jumps/field/length comparison.
+    used for the historical jumps/field/length comparison. Regularity metrics
+    include only explicit joins/returns, never ambiguous legacy contour groups.
     """
     physical = part.fabrication_path
     if physical is None:
@@ -84,6 +92,45 @@ def _route_metrics(part, config, *, complete_provenance=False):
     values = routing_metrics(
         points, config.b_0_direction, config.joint_group_routing_b0_weight, mutable_segments=mutable
     )
+    explicit_added = (
+        np.array(
+            [
+                owner.kind in {"within_group_return", "inter_group_connector"}
+                or (owner.kind == "contour_group" and getattr(owner, "connector_role", "") == "joint_spiral_join")
+                for owner in owners
+            ],
+            dtype=bool,
+        )
+        if len(owners) == len(points) - 1
+        else np.zeros(len(points) - 1, dtype=bool)
+    )
+    regularity_unknown = len(owners) != len(points) - 1 or any(
+        owner.kind != "contour_loop" and not added for owner, added in zip(owners, explicit_added)
+    )
+    span_ids = (
+        tuple(
+            (
+                owner.kind,
+                owner.group_index,
+                owner.connector_index,
+                owner.group1_index,
+                owner.group2_index,
+                owner.connector_role,
+            )
+            for owner in owners
+        )
+        if len(owners) == len(points) - 1
+        else None
+    )
+    values.update(
+        added_route_regularity(
+            points,
+            explicit_added,
+            span_ids=span_ids,
+            closed=getattr(physical, "closed", False),
+        )
+    )
+    values["regularity_is_lower_bound"] = regularity_unknown
     values.update(cost_is_lower_bound=lower_bound, geometry="fabricated_centroid")
     values.update(fabricated_jump_metrics(part, config))
     return values
@@ -124,12 +171,16 @@ def refresh_retained_route_diagnostics(parts):
             diagnostics.update(refreshed)
 
 
-def _order_complete_return_families(ordered_candidates):
+def _order_complete_return_families(ordered_candidates, *, selection_policy="physical"):
     """Reserve complete-family representatives within each measured jump class."""
     result = []
     for jumps in sorted({item[0] for item in ordered_candidates}):
         group = [item for item in ordered_candidates if item[0] == jumps]
         selected = group[:1]
+        if selection_policy == "regular":
+            physical = min(group, key=lambda item: round(item[1], 12))
+            if physical is not selected[0]:
+                selected.append(physical)
         for representative in _detour_rail_representatives(
             group, lambda item: getattr(item[4], "joint_detour_rail_key", ((), 0.0, 0.0, 0.0))
         ):
@@ -145,6 +196,85 @@ def _order_complete_return_families(ordered_candidates):
         selected.extend(item for item in group if all(item is not prior for prior in selected))
         result.extend(selected)
     return result
+
+
+def _proposal_regularity(candidate):
+    """Exact protected identities delimit the mutable proposal spans."""
+    points = np.asarray(candidate.path.v, dtype=float)
+    identities = tuple(candidate.segment_ids)
+    if len(identities) != len(points) - 1:
+        raise ValueError("Proposal regularity requires complete protected interval identities.")
+    return added_route_regularity(
+        points,
+        [identity is None for identity in identities],
+        span_ids=[
+            (
+                owner.kind,
+                owner.group_index,
+                owner.connector_index,
+                owner.group1_index,
+                owner.group2_index,
+                owner.connector_role,
+            )
+            for owner in candidate.path.segment_owners
+        ],
+        closed=True,
+    )
+
+
+def _cut_context_fingerprint(context):
+    """Keep different directed return seeds even when the opened ports match."""
+    digest = hashlib.sha256()
+
+    def add_points(points):
+        points = np.ascontiguousarray(points, dtype=float)
+        digest.update(repr(points.shape).encode())
+        digest.update(points.tobytes())
+
+    for group in context.groups:
+        for loop in group.opened_loops:
+            add_points(loop.v)
+    for group in context.connected_groups:
+        for attribute in ("spiral_in_v", "spiral_out_v", "return_path_v"):
+            add_points(getattr(group, attribute))
+    return digest.digest()
+
+
+def _topology_search_order(candidates, *, attempted_indices=(), failure_witnesses=()):
+    """Softly prefer another cycle order and avoid witnessed directed returns.
+
+    Every pending proposal remains available. A failed group pair is a search
+    preference, never a claim that another port or winding state is infeasible.
+    """
+    attempted = set(attempted_indices)
+    seen_orders = {candidates[index].group_sequence for index in attempted}
+    failed_pairs = set()
+    for witness in failure_witnesses:
+        owner = witness.get("owner", {})
+        if owner.get("kind") == "inter_group_connector" and owner.get("connector_role") == "joint_return":
+            first, second = owner.get("group1_index", -1), owner.get("group2_index", -1)
+            if first >= 0 and second >= 0 and first != second:
+                failed_pairs.add((first, second))
+
+    def key(index):
+        order = candidates[index].group_sequence
+        witnessed_returns = sum(pair in failed_pairs for pair in zip(order, order[1:] + order[:1]))
+        return witnessed_returns, order in seen_orders, index
+
+    return sorted((index for index in range(len(candidates)) if index not in attempted), key=key)
+
+
+def _work_budget_reason(reason):
+    """Distinguish computational work from the independent physical field budget."""
+    reason = str(reason)
+    if reason == "field_screen_candidate_budget_exhausted":
+        return True
+    if "work_limit" in reason or "work_budget" in reason:
+        return True
+    return "field" not in reason and (
+        reason.endswith("_budget_exceeded")
+        or reason in {"expanded_state_budget", "connector_evaluation_budget", "search_budget_exhausted"}
+    )
 
 
 def _candidate_fingerprint(context_name, candidate):
@@ -183,6 +313,26 @@ def improve_group_routes(parts, config, target_field):
     ):
         return parts
     production_config = config
+    selection_policy = routing_selection_policy(config)
+    regular_raw = getattr(config, "joint_group_routing_regular_field_tolerance_rel", 0.001)
+    if selection_policy not in {"regular", "physical"}:
+        for part in parts:
+            part.joint_route_diagnostics = _retained_diagnostics(part, "invalid_routing_selection_policy")
+        return parts
+    try:
+        regular_relative = float(regular_raw)
+        regular_valid = (
+            not isinstance(regular_raw, (bool, np.bool_))
+            and np.isscalar(regular_raw)
+            and np.isfinite(regular_relative)
+            and regular_relative >= 0
+        )
+    except (TypeError, ValueError):
+        regular_valid = False
+    if not regular_valid:
+        for part in parts:
+            part.joint_route_diagnostics = _retained_diagnostics(part, "invalid_regularity_field_tolerance")
+        return parts
     search_mode = getattr(config, "joint_group_routing_search_mode", "progressive")
     if search_mode not in {"progressive", "thorough"}:
         for part in parts:
@@ -290,6 +440,7 @@ def improve_group_routes(parts, config, target_field):
             parts[index].joint_route_diagnostics = _retained_diagnostics(parts[index], "invalid_field_budget_context")
         return parts
     field_budget = relative * target_scale / abs(current) / len(eligible)
+    regular_rms_tolerance = float(regular_relative) * target_scale / len(eligible)
     longitudinal_relative = getattr(config, "joint_group_routing_max_longitudinal_field_change_rel", None)
     longitudinal_kwargs = {}
     if longitudinal_relative is not None:
@@ -356,8 +507,18 @@ def improve_group_routes(parts, config, target_field):
             "baseline_routing_metrics": baseline_metrics,
             "b0_direction": np.asarray(config.b_0_direction, dtype=float).tolist(),
             "b0_weight": float(config.joint_group_routing_b0_weight),
-            "objective_scope": "cyclic_jumps_then_fixed_current_longitudinal_rms_then_length",
-            "selection_policy": "best_validated_lexicographic_route_within_budget",
+            "objective_scope": (
+                "cyclic_jumps_then_added_backtracking_attachment_bending_join_consistency_excess_turning_then_length_then_longitudinal_rms"
+                if selection_policy == "regular"
+                else "cyclic_jumps_then_fixed_current_longitudinal_rms_then_length"
+            ),
+            "selection_policy": selection_policy,
+            "regularity_metric_scope": (
+                "explicit_added_fabricated_spans_with_directed_interfaces_and_within_group_join_consistency"
+            ),
+            "regularity_field_tolerance_rel": float(regular_relative),
+            "regularity_part_rms_tolerance_T": regular_rms_tolerance,
+            "regularity_field_tolerance_basis": "baseline_anchored_equal_share_of_whole_coil_peak_target_allowance",
             "field_reference": "original_oriented_contours",
             "field_acceptance_policy": getattr(config, "joint_group_routing_field_acceptance", "absolute"),
             "source_contour_clearance_m": source_contour_clearance,
@@ -367,6 +528,7 @@ def improve_group_routes(parts, config, target_field):
             "jump_optimality_proven": False,
             "search_mode": search_mode,
             "search_coverage": "bounded_progressive" if progressive else "bounded_broad_transition_search",
+            "maximum_cut_contexts": 32,
             "attempts": [],
         }
         if longitudinal_kwargs:
@@ -447,6 +609,21 @@ def improve_group_routes(parts, config, target_field):
                 progress_callback=search_progress,
                 **({"symmetry": symmetry} if progressive else {"transition_evaluator": evaluator}),
             )
+            if selection_policy == "regular":
+                shared = propose_shared_return_cycles(context, config)
+                proposals.diagnostics["shared_return_cycles"] = {"reason": shared.reason, **shared.diagnostics}
+                if shared.candidates:
+                    # Reserve the next winding trial for a genuinely different
+                    # retained-return topology. It still goes through the same
+                    # shaping, original-reference fields and body validator.
+                    ordinary = proposals.candidates
+                    proposals.candidates = [
+                        family[rank]
+                        for rank in range(max(len(ordinary), len(shared.candidates)))
+                        for family in (ordinary, shared.candidates)
+                        if rank < len(family)
+                    ]
+                    proposals.reason = "candidates_available"
             work_progress.finish(message=proposals.reason)
             task.update(
                 completed,
@@ -480,6 +657,7 @@ def improve_group_routes(parts, config, target_field):
         baseline_certification_failure = ()
         diagnostics["baseline_certification_deferred"] = True
         candidate_count = 0
+        field_candidate_count = 0
         validated_context_counts = {}
         validated_candidates = set()
         best = None
@@ -502,6 +680,7 @@ def improve_group_routes(parts, config, target_field):
             nonlocal active_work_progress
             alternatives = []
             shape_count = 0
+            attempted_topologies = {}
             # Each cut context receives its best topology before further orders
             # consume the preview budget. Shape alternatives are a second pass.
             for rank in range(max(len(values.candidates) for _name, _context, values, _evaluator in contexts)):
@@ -511,6 +690,19 @@ def improve_group_routes(parts, config, target_field):
                     if shape_count >= maximum_shape_attempts:
                         diagnostics["shape_search_budget_exhausted"] = True
                         break
+                    candidate_index = rank
+                    if selection_policy == "regular":
+                        tried = attempted_topologies.setdefault(name, set())
+                        witnesses = [
+                            attempt["shaping"]["failed_transition_witness"]
+                            for attempt in diagnostics["attempts"]
+                            if attempt.get("shaping", {}).get("failed_transition_witness")
+                        ]
+                        candidate_index = _topology_search_order(
+                            values.candidates, attempted_indices=tried, failure_witnesses=witnesses
+                        )[0]
+                        tried.add(candidate_index)
+                    topology = values.candidates[candidate_index]
                     shape_count += 1
                     diagnostics["shape_attempt_count"] = diagnostics.get("shape_attempt_count", 0) + 1
                     work_progress.activity(
@@ -537,7 +729,7 @@ def improve_group_routes(parts, config, target_field):
                     try:
                         shapes = shape_joint_group_route(
                             context,
-                            values.candidates[rank],
+                            topology,
                             config,
                             maximum_candidates=3,
                             projector=projector,
@@ -552,6 +744,8 @@ def improve_group_routes(parts, config, target_field):
                         diagnostics["attempts"].append(
                             {
                                 "context": name,
+                                "topology_index": candidate_index,
+                                "group_sequence": list(topology.group_sequence),
                                 "reasons": [shapes.reason],
                                 "shaping": shapes.diagnostics,
                                 "eligible_for_adoption": False,
@@ -573,12 +767,53 @@ def improve_group_routes(parts, config, target_field):
 
         def ordered_proposals():
             nonlocal validation_total, validation_stage_start
-            stages = (0, 1) if progressive else (0,)
+            stages = (0, 1) if progressive or selection_policy == "regular" else (0,)
             diagnostics["search_stages"] = []
             for level in stages:
-                if level and (best is not None or candidate_count >= config.joint_group_routing_max_candidates):
+                if level and (
+                    best is not None
+                    or candidate_count >= config.joint_group_routing_max_candidates
+                    or field_candidate_count >= limits.maximum_field_candidates
+                ):
                     break
                 if level:
+                    # A local failed transition identifies a useful port search
+                    # direction. Keep incumbent geometry immutable and propose
+                    # additional cut contexts once, before widening curve grids.
+                    witnesses = [
+                        attempt["shaping"]["failed_transition_witness"]
+                        for attempt in diagnostics["attempts"]
+                        if attempt.get("shaping", {}).get("failed_transition_witness")
+                    ]
+                    if selection_policy == "regular" and config.joint_group_routing_search_cuts and witnesses:
+                        requested = int(getattr(config, "joint_group_routing_port_search_count", 8))
+                        context_limit = min(32, max(len(contexts), requested))
+                        additions = (
+                            propose_joint_cut_variants(
+                                part,
+                                config,
+                                maximum_candidates=max(0, context_limit - 1),
+                                failure_witnesses=witnesses,
+                            )
+                            if requested > 0
+                            else GroupRouteProposals(reason="port_context_search_disabled")
+                        )
+                        diagnostics["failure_directed_cut_search"] = {
+                            **additions.diagnostics,
+                            "reasons": getattr(
+                                additions, "reasons", (additions.reason,) if hasattr(additions, "reason") else ()
+                            ),
+                            "witness_count": len(witnesses),
+                            "maximum_total_contexts": context_limit,
+                        }
+                        seen = {_cut_context_fingerprint(context) for _name, context, _values, _evaluator in contexts}
+                        for context in getattr(additions, "variants", ()):
+                            key = _cut_context_fingerprint(context)
+                            if key in seen or len(contexts) >= context_limit:
+                                continue
+                            seen.add(key)
+                            contexts.append(context_proposal(f"failure_directed_ports_{len(contexts)}", context))
+                        diagnostics["failure_directed_cut_search"]["context_count_after_search"] = len(contexts)
                     for _name, _context, _values, evaluator in contexts:
                         if evaluator is not None:
                             evaluator.set_search_level(level)
@@ -589,6 +824,11 @@ def improve_group_routes(parts, config, target_field):
                     if progressive
                     else max(6, 3 * config.joint_group_routing_max_candidates)
                 )
+                if level and selection_policy == "regular":
+                    # The physical-preview budget stays unchanged. Separate
+                    # bounded cheap shaping work lets every new port context
+                    # reach its two directed winding leaders before adoption.
+                    maximum_shape_attempts = max(maximum_shape_attempts, 2 * len(contexts))
                 shape_total = min(
                     maximum_shape_attempts, sum(len(values.candidates) for _name, _context, values, _e in contexts)
                 )
@@ -612,18 +852,21 @@ def improve_group_routes(parts, config, target_field):
                             {"context": context_name, "reasons": ["jump_measurement_unavailable"], "detail": str(error)}
                         )
                         continue
+                    if selection_policy == "regular":
+                        candidate.regularity_guide = _proposal_regularity(candidate)
                     ordered.append((jumps["jump_count"], guide["cost_m"], context_name, context, candidate))
                 work_progress.finish()
                 ordered.sort(
                     key=lambda item: (
                         item[0],
                         validated_context_counts.get(item[2], 0) if level else 0,
+                        *(regularity_order_key(item[4].regularity_guide) if selection_policy == "regular" else ()),
                         round(item[1], 12),
                     )
                 )
-                ordered = _order_complete_return_families(ordered)
+                ordered = _order_complete_return_families(ordered, selection_policy=selection_policy)
                 shaped_count = len(ordered)
-                if progressive:
+                if progressive or selection_policy == "regular":
                     unique, seen = [], set(validated_candidates)
                     for item in ordered:
                         key = _candidate_fingerprint(item[2], item[4])
@@ -647,22 +890,29 @@ def improve_group_routes(parts, config, target_field):
                         "shaped_candidates": shaped_count,
                         "distinct_candidates": len(ordered),
                         "physical_candidate_budget": validation_total,
+                        "field_candidate_budget": min(
+                            len(ordered), limits.maximum_field_candidates - field_candidate_count
+                        ),
                     }
                 )
                 diagnostics["proposed_jump_budgets"] = sorted(
                     set(diagnostics.get("proposed_jump_budgets", [])) | {item[0] for item in ordered}
                 )
-                diagnostics["physical_candidate_budget_exhausted"] = (
-                    diagnostics.get("physical_candidate_budget_exhausted", False) or len(ordered) > stage_budget
-                )
                 if validation_total:
                     work_progress.start(f"finalist validation (stage {level + 1})", validation_total)
-                    yield from ordered[:validation_total]
+                    for item in ordered:
+                        if candidate_count - validation_stage_start >= stage_budget:
+                            diagnostics["physical_candidate_budget_exhausted"] = True
+                            break
+                        if field_candidate_count >= limits.maximum_field_candidates:
+                            diagnostics["field_screen_budget_exhausted"] = True
+                            break
+                        yield item
                     work_progress.finish()
 
         for proposed_jumps, _guide, context_name, context, candidate in ordered_proposals():
-            candidate_count += 1
-            if progressive:
+            field_candidate_count += 1
+            if progressive or selection_policy == "regular":
                 validated_candidates.add(_candidate_fingerprint(context_name, candidate))
             validated_context_counts[context_name] = validated_context_counts.get(context_name, 0) + 1
             if route_fields is None:
@@ -712,6 +962,14 @@ def improve_group_routes(parts, config, target_field):
                     longitudinal_rms_T=baseline_field_metrics["rms_T"],
                     longitudinal_peak_T=baseline_field_metrics["peak_T"],
                 )
+                diagnostics["regularity_maximum_longitudinal_rms_T"] = (
+                    baseline_metrics["longitudinal_rms_T"] + regular_rms_tolerance
+                )
+                diagnostics["baseline_comparison_policy"] = (
+                    "physical"
+                    if selection_policy == "regular" and baseline_metrics["regularity_is_lower_bound"]
+                    else selection_policy
+                )
             if context_name not in baselines:
                 # Cut contexts were prepared before dense geometry existed.
                 # Bind only physical state, preserving their directed cuts and
@@ -721,10 +979,13 @@ def improve_group_routes(parts, config, target_field):
                 baselines[context_name] = prepare_group_route_baseline(
                     context, config, target_field.coords, limits, reuse_existing_sweep=True, audit_geometry=False
                 )
-            if candidate_count == 1:
+            if field_candidate_count == 1:
                 work_progress.start("finalist validation (stage 1)", validation_total)
             work_progress.activity(
-                message=f"{context_name}: validating finalist {candidate_count - validation_stage_start}/{validation_total}",
+                message=(
+                    f"{context_name}: field screen {field_candidate_count}/{limits.maximum_field_candidates}; "
+                    f"body previews {candidate_count}/{config.joint_group_routing_max_candidates}"
+                ),
                 force=True,
             )
             result = validate_group_route_candidate(
@@ -752,6 +1013,11 @@ def improve_group_routes(parts, config, target_field):
                 limits=limits,
                 progress_callback=validation_progress,
             )
+            # Production validators record whether expensive body work began.
+            # Unmarked validators retain their historical whole-candidate
+            # accounting (including third-party validators/test doubles).
+            if result.diagnostics.get("body_preview_started", True):
+                candidate_count += 1
             reasons = list(result.reasons)
             candidate_metrics = None
             if result.accepted:
@@ -776,6 +1042,14 @@ def improve_group_routes(parts, config, target_field):
                         longitudinal_rms_T=candidate_field_metrics["rms_T"],
                         longitudinal_peak_T=candidate_field_metrics["peak_T"],
                     )
+                    if selection_policy == "regular":
+                        if candidate_metrics["regularity_is_lower_bound"]:
+                            reasons.append("missing_candidate_regularity_provenance")
+                        if (
+                            candidate_metrics["longitudinal_rms_T"]
+                            > diagnostics["regularity_maximum_longitudinal_rms_T"]
+                        ):
+                            reasons.append("regularity_field_rms_tolerance_exceeded")
                 except ValueError:
                     reasons.append("missing_candidate_objective_provenance")
                 support = certify_group_route_support(result.prepared_part, config)
@@ -859,7 +1133,9 @@ def improve_group_routes(parts, config, target_field):
                 if (
                     not reasons
                     and baseline_feasibility["accepted"]
-                    and not route_is_better(candidate_metrics, baseline_metrics)
+                    and not route_is_better(
+                        candidate_metrics, baseline_metrics, policy=diagnostics["baseline_comparison_policy"]
+                    )
                 ):
                     reasons.append("no_routing_objective_or_manufacturing_improvement")
             diagnostics["attempts"].append(
@@ -871,6 +1147,7 @@ def improve_group_routes(parts, config, target_field):
                     "routing_metrics": candidate_metrics,
                     "proposed_jump_count": proposed_jumps,
                     "proposed_return_family_counts": getattr(candidate, "joint_return_family_counts", {}),
+                    "proposed_join_family_consistency": getattr(candidate, "joint_join_family_diagnostics", {}),
                     "reasons": reasons,
                     "validation": result.diagnostics,
                     "eligible_for_adoption": not reasons and result.accepted,
@@ -878,7 +1155,7 @@ def improve_group_routes(parts, config, target_field):
                 }
             )
             if not reasons and result.accepted:
-                if best is None or route_is_better(candidate_metrics, best[1]):
+                if best is None or route_is_better(candidate_metrics, best[1], policy=selection_policy):
                     best = (
                         result.prepared_part,
                         candidate_metrics,
@@ -892,6 +1169,7 @@ def improve_group_routes(parts, config, target_field):
                 force=True,
             )
             if candidate_count >= config.joint_group_routing_max_candidates:
+                diagnostics["physical_candidate_budget_exhausted"] = True
                 break
         if validation_total:
             work_progress.finish()
@@ -920,6 +1198,9 @@ def improve_group_routes(parts, config, target_field):
                 selected_manufacturing_failure_reasons="",
                 selected_length_m=metrics["length_m"],
                 selected_routing_metrics=metrics,
+                selected_join_family_consistency=diagnostics["attempts"][attempt_index].get(
+                    "proposed_join_family_consistency", {}
+                ),
                 selected_physical_minimum_centerline_distance_m=(
                     value
                     if (
@@ -957,7 +1238,13 @@ def improve_group_routes(parts, config, target_field):
                     diagnostics[f"selected_{key}"] = {
                         stage: field_validation.get(f"{stage}_{key}", "") for stage in ("route", "physical")
                     }
-        diagnostics.update(candidate_count=candidate_count, elapsed_s=time.perf_counter() - start_time)
+        diagnostics.update(
+            candidate_count=candidate_count,
+            body_preview_candidate_count=candidate_count,
+            field_candidate_count=field_candidate_count,
+            maximum_field_candidates=limits.maximum_field_candidates,
+            elapsed_s=time.perf_counter() - start_time,
+        )
         diagnostics["transition_searches"] = [
             {"context": name, **getattr(evaluator, "diagnostics", {})}
             for name, _context, _values, evaluator in contexts
@@ -969,6 +1256,36 @@ def improve_group_routes(parts, config, target_field):
             diagnostics["reason"] = "no_validated_improvement"
         diagnostics["accepted_improvement_found_within_budget"] = best is not None
         diagnostics["infeasibility_proven"] = False
+        work_reasons = sorted(
+            {
+                reason
+                for attempt in diagnostics["attempts"]
+                for reason in attempt.get("reasons", [])
+                if _work_budget_reason(reason)
+            }
+        )
+        if diagnostics.get("field_screen_budget_exhausted"):
+            work_reasons.append("field_screen_candidate_budget_exhausted")
+        for _name, _context, values, evaluator in contexts:
+            records = (values.diagnostics, getattr(evaluator, "diagnostics", {}))
+            for record in records:
+                reason = record.get("budget_exhaustion_reason")
+                if reason and reason not in work_reasons:
+                    work_reasons.append(reason)
+            if _work_budget_reason(values.reason) and values.reason not in work_reasons:
+                work_reasons.append(values.reason)
+        work_reasons.sort()
+        diagnostics["work_budget_exhausted"] = bool(work_reasons)
+        diagnostics["work_budget_exhaustion_reasons"] = work_reasons
+        diagnostics["search_failure_scope"] = (
+            "work_budget"
+            if work_reasons
+            else "bounded_proposal_coverage"
+            if diagnostics.get("shape_search_budget_exhausted")
+            else "physical_candidate_budget"
+            if diagnostics.get("physical_candidate_budget_exhausted")
+            else "bounded_port_and_curve_families"
+        )
         selected[index].joint_route_diagnostics = diagnostics
         task.advance(
             message=f"part {index + 1}/{len(parts)}: {diagnostics['status']}; {diagnostics['reason']}", force=True

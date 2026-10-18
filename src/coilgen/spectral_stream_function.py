@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import OrderedDict
+from hashlib import sha256
+from threading import RLock
 from typing import Any
 
 import numpy as np
@@ -12,6 +15,12 @@ from .models import Mesh
 class SpectralStreamFunctionBasis:
     basis: np.ndarray
     diagnostics: dict[str, Any]
+
+
+_BASIS_CACHE: OrderedDict[str, SpectralStreamFunctionBasis] = OrderedDict()
+_BASIS_CACHE_LOCK = RLock()
+_BASIS_CACHE_MAX_BYTES = 64 * 1024 * 1024
+_BASIS_CACHE_MAX_ENTRIES = 8
 
 
 def build_spectral_stream_function_basis(
@@ -38,19 +47,27 @@ def build_spectral_stream_function_basis(
     if base_unknown_count == 0:
         raise ValueError("Cannot build a spectral stream-function basis for zero unknowns.")
 
-    stiffness, mass = cotangent_stiffness_and_lumped_mass(mesh)
-    reduced_stiffness = expansion.T @ (stiffness @ expansion)
-    reduced_mass = expansion.T @ (mass[:, None] * expansion)
-    reduced_mass = 0.5 * (reduced_mass + reduced_mass.T)
-    if not np.all(np.isfinite(reduced_mass)):
-        raise ValueError("Cannot build spectral stream-function basis: reduced surface mass contains nonfinite values.")
-
     cutoff_length = _positive_float(getattr(config, "stream_function_spectral_cutoff_length_m", 0.0))
     min_modes = max(int(getattr(config, "stream_function_spectral_min_modes", 1)), 1)
     max_modes = int(getattr(config, "stream_function_spectral_max_modes", 0))
     if max_modes <= 0:
         max_modes = min(max(base_unknown_count, min_modes), 256)
     max_modes = min(max(max_modes, min_modes), base_unknown_count)
+    cutoff_policy = _normalise_cutoff_policy(getattr(config, "stream_function_spectral_cutoff_policy", "hard"))
+    cache_key = _basis_cache_key(mesh, expansion, (cutoff_length, min_modes, max_modes, cutoff_policy))
+    with _BASIS_CACHE_LOCK:
+        cached = _BASIS_CACHE.get(cache_key)
+        if cached is not None:
+            _BASIS_CACHE.move_to_end(cache_key)
+            diagnostics = dict(cached.diagnostics, stream_function_spectral_cache_hit=True)
+            return SpectralStreamFunctionBasis(cached.basis.copy(), diagnostics)
+
+    stiffness, mass = cotangent_stiffness_and_lumped_mass(mesh)
+    reduced_stiffness = expansion.T @ (stiffness @ expansion)
+    reduced_mass = expansion.T @ (mass[:, None] * expansion)
+    reduced_mass = 0.5 * (reduced_mass + reduced_mass.T)
+    if not np.all(np.isfinite(reduced_mass)):
+        raise ValueError("Cannot build spectral stream-function basis: reduced surface mass contains nonfinite values.")
 
     requested_eigenmodes = max_modes
     eigenvalues, eigenvectors, solver_name = _lowest_mass_normalised_eigenvectors(
@@ -64,7 +81,6 @@ def build_spectral_stream_function_basis(
     if cutoff_length > 0.0:
         cutoff_lambda = float((2.0 * np.pi / cutoff_length) ** 2)
         cutoff_count = int(np.count_nonzero(eigenvalues <= cutoff_lambda * (1.0 + 1.0e-10)))
-        cutoff_policy = _normalise_cutoff_policy(getattr(config, "stream_function_spectral_cutoff_policy", "hard"))
         if cutoff_policy == "hard":
             if cutoff_count <= 0:
                 longest_wavelength = _lambda_to_wavelength(float(eigenvalues[0]))
@@ -80,7 +96,6 @@ def build_spectral_stream_function_basis(
         cutoff_lambda = float("inf")
         cutoff_count = int(eigenvalues.size)
         selected_count = max_modes
-        cutoff_policy = _normalise_cutoff_policy(getattr(config, "stream_function_spectral_cutoff_policy", "hard"))
     selected_count = min(max(selected_count, 1), eigenvalues.size, max_modes)
 
     selected_values = np.asarray(eigenvalues[:selected_count], dtype=float)
@@ -116,7 +131,57 @@ def build_spectral_stream_function_basis(
         "stream_function_spectral_min_retained_wavelength_m": retained_wavelength,
         "stream_function_spectral_next_rejected_wavelength_m": rejected_wavelength,
     }
+    # Reuse only numerically verified bases. An inaccurate eigenproblem keeps
+    # its historical result but is never propagated to another preparation.
+    residual = reduced_stiffness @ selected_basis - (reduced_mass @ selected_basis) * selected_values[None, :]
+    scale = (
+        np.linalg.norm(reduced_stiffness, ord=np.inf)
+        + np.abs(selected_values) * np.linalg.norm(reduced_mass, ord=np.inf)
+    ) * np.linalg.norm(selected_basis, axis=0)
+    relative_residual = float(np.max(np.linalg.norm(residual, axis=0) / np.maximum(scale, np.finfo(float).tiny)))
+    mass_orthogonality_error = float(
+        np.linalg.norm(selected_basis.T @ reduced_mass @ selected_basis - np.eye(selected_count), ord=np.inf)
+    )
+    cache_eligible = bool(
+        np.isfinite(relative_residual)
+        and relative_residual <= 1.0e-7
+        and np.isfinite(mass_orthogonality_error)
+        and mass_orthogonality_error <= 1.0e-8
+    )
+    diagnostics.update(
+        stream_function_spectral_cache_hit=False,
+        stream_function_spectral_cache_eligible=cache_eligible,
+        stream_function_spectral_eigen_residual_relative=relative_residual,
+        stream_function_spectral_mass_orthogonality_error=mass_orthogonality_error,
+    )
+    if cache_eligible and selected_basis.nbytes <= _BASIS_CACHE_MAX_BYTES:
+        cached_basis = selected_basis.copy()
+        cached_basis.setflags(write=False)
+        with _BASIS_CACHE_LOCK:
+            _BASIS_CACHE[cache_key] = SpectralStreamFunctionBasis(cached_basis, dict(diagnostics))
+            _BASIS_CACHE.move_to_end(cache_key)
+            while (
+                len(_BASIS_CACHE) > _BASIS_CACHE_MAX_ENTRIES
+                or sum(item.basis.nbytes for item in _BASIS_CACHE.values()) > _BASIS_CACHE_MAX_BYTES
+            ):
+                _BASIS_CACHE.popitem(last=False)
     return SpectralStreamFunctionBasis(selected_basis, diagnostics)
+
+
+def _basis_cache_key(mesh: Mesh, expansion: np.ndarray, settings: tuple) -> str:
+    """Fingerprint all inputs defining the operator, mass, reduction and cutoff.
+
+    Geometry content, not object identity or an input filename, determines reuse.
+    Exact face ordering is included because assembly order affects rounding.
+    """
+
+    digest = sha256(b"cotangent_spectral_basis_v1")
+    for value in (np.asarray(mesh.vertices, dtype=float), np.asarray(mesh.faces, dtype=np.int64), expansion):
+        array = np.ascontiguousarray(value)
+        digest.update(str((array.shape, array.dtype.str)).encode("ascii"))
+        digest.update(memoryview(array).cast("B"))
+    digest.update(repr(settings).encode("ascii"))
+    return digest.hexdigest()
 
 
 def cotangent_stiffness_and_lumped_mass(mesh: Mesh) -> tuple[np.ndarray, np.ndarray]:

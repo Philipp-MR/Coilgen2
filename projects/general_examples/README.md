@@ -7,6 +7,13 @@ Direct execution works from any working directory. Add `--headless` to suppress
 interactive plots; `MPLBACKEND=Agg` also requests a noninteractive run. Output
 folders are timestamped below `outputs/general_examples/`.
 
+Set `COILGEN_OUTPUT_ROOT` before launching a script to choose another output
+base, for example `$env:COILGEN_OUTPUT_ROOT = "C:\CoilGenRuns"` in PowerShell.
+Project names and fresh timestamped run folders are retained below that base;
+input paths still resolve below the repository's `project_data/` directory.
+Relative output bases resolve from the working directory. Remove the variable
+to restore the default repository output location.
+
 ## Structure
 
 - `scripts/`: runnable example scripts.

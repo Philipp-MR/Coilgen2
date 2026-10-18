@@ -1,0 +1,210 @@
+{
+  "passed": true,
+  "created_utc": "2026-10-18T17:05:59.751145+00:00",
+  "python": "3.12.14",
+  "numpy": "2.5.1",
+  "numerical_source_sha256": "40eae6bf79729fedadd12d97eb4ee38b9b5b4a51ec44d36ee9de1f9d54abc365",
+  "scope": "Independent analytic field checks, finite-wire conditioning, P1 sheet gauge/current and SI scaling. No optimized-mesh convergence or hardware qualification is asserted.",
+  "circular_loop_refinement": {
+    "cases": [
+      {
+        "radius_m": 0.1,
+        "z_offset_m": 0.0,
+        "segment_count": 180,
+        "numerical_bz_per_a": 6.2838233741583335e-06,
+        "analytical_bz_per_a": 6.283185307179587e-06,
+        "relative_error_percent": 0.010155151369127173
+      },
+      {
+        "radius_m": 0.1,
+        "z_offset_m": 0.0,
+        "segment_count": 720,
+        "numerical_bz_per_a": 6.283225181810263e-06,
+        "analytical_bz_per_a": 6.283185307179587e-06,
+        "relative_error_percent": 0.0006346244576145237
+      },
+      {
+        "radius_m": 0.1,
+        "z_offset_m": 0.0,
+        "segment_count": 2880,
+        "numerical_bz_per_a": 6.283187799326207e-06,
+        "analytical_bz_per_a": 6.283185307179587e-06,
+        "relative_error_percent": 3.966374535944869e-05
+      },
+      {
+        "radius_m": 0.1,
+        "z_offset_m": 0.03,
+        "segment_count": 180,
+        "numerical_bz_per_a": 5.5217062275202915e-06,
+        "analytical_bz_per_a": 5.521284442322883e-06,
+        "relative_error_percent": 0.007639258614811595
+      },
+      {
+        "radius_m": 0.1,
+        "z_offset_m": 0.03,
+        "segment_count": 720,
+        "numerical_bz_per_a": 5.521310802169089e-06,
+        "analytical_bz_per_a": 5.521284442322883e-06,
+        "relative_error_percent": 0.00047742235491018975
+      },
+      {
+        "radius_m": 0.1,
+        "z_offset_m": 0.03,
+        "segment_count": 2880,
+        "numerical_bz_per_a": 5.521286089806527e-06,
+        "analytical_bz_per_a": 5.521284442322883e-06,
+        "relative_error_percent": 2.9838775033095655e-05
+      },
+      {
+        "radius_m": 0.1,
+        "z_offset_m": 0.2,
+        "segment_count": 180,
+        "numerical_bz_per_a": 5.619052882046592e-07,
+        "analytical_bz_per_a": 5.61985178483258e-07,
+        "relative_error_percent": 0.014215726972443754
+      },
+      {
+        "radius_m": 0.1,
+        "z_offset_m": 0.2,
+        "segment_count": 720,
+        "numerical_bz_per_a": 5.619801854223038e-07,
+        "analytical_bz_per_a": 5.61985178483258e-07,
+        "relative_error_percent": 0.00088846844104812
+      },
+      {
+        "radius_m": 0.1,
+        "z_offset_m": 0.2,
+        "segment_count": 2880,
+        "numerical_bz_per_a": 5.619848664172667e-07,
+        "analytical_bz_per_a": 5.61985178483258e-07,
+        "relative_error_percent": 5.552922092951833e-05
+      }
+    ],
+    "error_reduction_per_4x_segment_count": [
+      16.001827927179413,
+      16.00011425707037,
+      16.00104925176504,
+      16.000065498019175,
+      16.000261028600587,
+      16.00001631890042
+    ]
+  },
+  "nearly_collinear_wire": [
+    {
+      "axial_m": -0.1,
+      "radial_m": [
+        0.0001,
+        1e-06,
+        1e-08,
+        1e-10
+      ],
+      "decimal_60_digit_field_T_per_A": [
+        3.749996484378076e-10,
+        3.749999999648438e-12,
+        3.749999999999965e-14,
+        3.75e-16
+      ],
+      "evaluated_field_T_per_A": [
+        3.749996484378075e-10,
+        3.749999999648437e-12,
+        3.749999999999964e-14,
+        3.7499999999999993e-16
+      ],
+      "relative_error": [
+        -2.220446049250313e-16,
+        -2.220446049250313e-16,
+        -3.3306690738754696e-16,
+        -1.1102230246251565e-16
+      ],
+      "legacy_endpoint_difference_relative_error": [
+        -5.735137920126476e-10,
+        8.283412089582498e-08,
+        0.03620815631682239,
+        -1.0
+      ]
+    },
+    {
+      "axial_m": 0.2,
+      "radial_m": [
+        0.0001,
+        1e-06,
+        1e-08,
+        1e-10
+      ],
+      "decimal_60_digit_field_T_per_A": [
+        3.749996484378076e-10,
+        3.749999999648438e-12,
+        3.749999999999965e-14,
+        3.75e-16
+      ],
+      "evaluated_field_T_per_A": [
+        3.749996484378075e-10,
+        3.749999999648437e-12,
+        3.749999999999964e-14,
+        3.7499999999999993e-16
+      ],
+      "relative_error": [
+        -2.220446049250313e-16,
+        -2.220446049250313e-16,
+        -3.3306690738754696e-16,
+        -1.1102230246251565e-16
+      ],
+      "legacy_endpoint_difference_relative_error": [
+        -5.735137920126476e-10,
+        8.283412089582498e-08,
+        0.03620815631682239,
+        -1.0
+      ]
+    }
+  ],
+  "uniform_sheet_solid_angle": [
+    {
+      "coordinate_scale": 0.001,
+      "rotated_and_translated": false,
+      "sheet_field_relative_error": 7.39216341895364e-13,
+      "scalar_vectorized_relative_difference": 2.054005646528182e-17,
+      "ohmic_power_W_for_sheet_resistivity_factor_1_ohm": 4e-08,
+      "constant_stream_gauge_residual_T_per_A": 2.710505431213761e-20
+    },
+    {
+      "coordinate_scale": 0.001,
+      "rotated_and_translated": true,
+      "sheet_field_relative_error": 7.243499415741958e-13,
+      "scalar_vectorized_relative_difference": 0.0,
+      "ohmic_power_W_for_sheet_resistivity_factor_1_ohm": 4.000000000000689e-08,
+      "constant_stream_gauge_residual_T_per_A": 1.9321265276431413e-19
+    },
+    {
+      "coordinate_scale": 1.0,
+      "rotated_and_translated": false,
+      "sheet_field_relative_error": 7.391823177493754e-13,
+      "scalar_vectorized_relative_difference": 4.108011293056364e-17,
+      "ohmic_power_W_for_sheet_resistivity_factor_1_ohm": 0.04,
+      "constant_stream_gauge_residual_T_per_A": 5.293955920339377e-23
+    },
+    {
+      "coordinate_scale": 1.0,
+      "rotated_and_translated": true,
+      "sheet_field_relative_error": 7.391717538070005e-13,
+      "scalar_vectorized_relative_difference": 0.0,
+      "ohmic_power_W_for_sheet_resistivity_factor_1_ohm": 0.04,
+      "constant_stream_gauge_residual_T_per_A": 1.0336779377773683e-22
+    },
+    {
+      "coordinate_scale": 10.0,
+      "rotated_and_translated": false,
+      "sheet_field_relative_error": 7.392131275295735e-13,
+      "scalar_vectorized_relative_difference": 0.0,
+      "ohmic_power_W_for_sheet_resistivity_factor_1_ohm": 4.0,
+      "constant_stream_gauge_residual_T_per_A": 3.308722450212111e-24
+    },
+    {
+      "coordinate_scale": 10.0,
+      "rotated_and_translated": true,
+      "sheet_field_relative_error": 7.38979910524923e-13,
+      "scalar_vectorized_relative_difference": 0.0,
+      "ohmic_power_W_for_sheet_resistivity_factor_1_ohm": 4.0,
+      "constant_stream_gauge_residual_T_per_A": 2.4593847705324685e-23
+    }
+  ]
+}

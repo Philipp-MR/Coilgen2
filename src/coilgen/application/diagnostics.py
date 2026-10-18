@@ -145,6 +145,8 @@ def _saved_frames(record, body_id):
                 return None
             if not all(np.all(np.isfinite(frames[key])) for key in required[:-1]):
                 return None
+            if frames["closed"].size != 1 or frames["closed"].dtype != np.dtype(bool):
+                return None
             frames["closed"] = bool(frames["closed"].item())
             return frames
         except (KeyError, OSError, ValueError):
@@ -163,7 +165,7 @@ def _frame_witness(frames, diagnostics, kind):
     centroid = _polygon_centroid(frames["cross_section_m"])
 
     def interval(index):
-        if not isinstance(index, int) or index < 0 or index >= count - (not closed):
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0 or index >= count - (not closed):
             return None
         return index, (index + 1) % count
 
@@ -182,6 +184,46 @@ def _frame_witness(frames, diagnostics, kind):
         description = (
             "Saved minimum-clearance interval pair; mounted profile origins recovered from saved centroid frames."
         )
+    elif kind == "bend":
+        index = diagnostics.get("sweep_final_min_bend_point_index")
+        if (
+            diagnostics.get("sweep_final_bend_point_count") != count
+            or isinstance(index, bool)
+            or not isinstance(index, int)
+            or not (0 <= index < count if closed else 1 <= index < count - 1)
+        ):
+            return (), (), "The minimum-bend sample does not match the verified final centroid frames."
+        indices = ((index - 1) % count, index, (index + 1) % count)
+        selected = points[list(indices)]
+        segments = ((0, 1), (1, 2))
+        description = f"Saved minimum-bend triplet at final centroid sample {index}; no location is inferred."
+    elif kind == "support":
+        profile = frames["cross_section_m"]
+        section_count = len(profile)
+        lateral_count = count * section_count
+        vertex_count = lateral_count + (0 if closed else 2)
+        index = diagnostics.get("sweep_support_penetration_vertex_index")
+        if (
+            diagnostics.get("sweep_support_vertex_order") != "ring_major_profile_then_open_cap_centers"
+            or diagnostics.get("sweep_support_penetration_vertex_count") != vertex_count
+            or isinstance(index, bool)
+            or not isinstance(index, int)
+            or not 0 <= index < vertex_count
+        ):
+            return (), (), "No verified sweep-vertex ordering/count matches the saved support-penetration index."
+        if index < lateral_count:
+            ring, section = divmod(index, section_count)
+            offset = profile[section] - centroid
+        else:
+            ring = 0 if index == lateral_count else count - 1
+            # Sweep end-cap centers use the mean of the profile vertices, not
+            # the area centroid; retain asymmetric profile geometry exactly.
+            offset = np.mean(profile, axis=0) - centroid
+        selected = np.array(
+            [points[ring] + offset[0] * frames["transverse"][ring] + offset[1] * frames["normals"][ring]]
+        )
+        segments = ()
+        description = f"Recorded most penetrating sweep vertex {index}, reconstructed from verified final frames and declared ordering."
     elif kind == "fold":
         rings = interval(diagnostics.get("sweep_worst_quad_ring"))
         section = diagnostics.get("sweep_worst_quad_section")
@@ -213,6 +255,14 @@ def _frame_witness(frames, diagnostics, kind):
 
 
 _BODY_REASONS = {
+    "minimum_bend_radius_violation": (
+        "Conductor bend radius is too small",
+        "The saved final centroid path violates its configured minimum bend radius.",
+        "sweep_final_min_bend_radius_m",
+        "sweep_required_bend_radius_m",
+        "m",
+        "bend",
+    ),
     "route_topology_failure": (
         "Route continuity or topology failed",
         "The recorded route topology precheck failed. Continuous-sheet acceptance does not certify a connected winding.",
@@ -263,11 +313,11 @@ _BODY_REASONS = {
     ),
     "support_surface_penetration": (
         "Conductor penetrates its support",
-        "The stored conductor envelope penetrates the intended mounting side. The penetration coordinate was not recorded.",
+        "The stored conductor envelope penetrates the intended mounting side; inspect its recorded sweep vertex when available.",
         "sweep_support_max_penetration_m",
         "sweep_support_conformity_tolerance_m",
         "m",
-        None,
+        "support",
     ),
     "poor_sweep_triangle_quality": (
         "Conductor surface triangles are poorly shaped",
@@ -382,6 +432,14 @@ def run_problems(record) -> tuple[ProblemIssue, ...]:
                 if witness
                 else ((), (), "No spatial witness was recorded.")
             )
+            if reason == "route_topology_failure":
+                details = diagnostics.get("manufacturing_route_topology_failure_reasons")
+                if isinstance(details, str) and details.strip():
+                    explanation += " Recorded topology reasons: " + details.replace(";", ", ") + "."
+                for key in ("group_id", "route_group_id", "connector_id", "route_connector_id"):
+                    identity = body.get(key, diagnostics.get(key))
+                    if isinstance(identity, (str, int)) and not isinstance(identity, bool):
+                        explanation += f" Recorded {key}: {identity}."
             if scope == "pipeline_sweep_geometry":
                 explanation += " Scope: saved pipeline sweep geometry; strict fabrication review is a separate check."
                 description = "No spatial failure witness was saved for this pipeline body. Inspect its recorded geometry and settings."

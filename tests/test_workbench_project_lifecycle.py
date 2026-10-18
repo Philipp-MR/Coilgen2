@@ -6,6 +6,7 @@ import json
 import pytest
 import test_workbench_usability as usability
 
+from PySide6.QtCore import QEventLoop, QTimer
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 from coilgen.application import DesignService, ProjectAssembly, ProjectDocument
@@ -137,6 +138,24 @@ def test_failed_open_after_discard_choice_retains_notes_and_owner(owners, tmp_pa
     monkeypatch.setattr(QMessageBox, "question", lambda *_args: QMessageBox.StandardButton.Discard)
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (str(path), ""))
     window._open_dialog()
+    assert window.assembly is original and window.project.id == projects[0].id
+    assert window.history_panel.note_drafts(projects[0].id, design_study_state(window.project)) == draft
+    # File Open verifies off-thread; the failed parse must preserve drafts both
+    # while loading and after the queued failure reaches the current editor.
+    if not errors:
+        loop = QEventLoop()
+        poll, deadline = QTimer(), QTimer()
+        poll.timeout.connect(lambda: loop.quit() if errors else None)
+        deadline.setSingleShot(True)
+        deadline.timeout.connect(loop.quit)
+        poll.start(5)
+        deadline.start(3000)
+        try:
+            loop.exec()
+        finally:
+            poll.stop()
+            deadline.stop()
+    assert window._project_open_task is None
     assert window.assembly is original and window.project.id == projects[0].id
     assert window.history_panel.note_drafts(projects[0].id, design_study_state(window.project)) == draft
     assert len(errors) == 1 and errors[0].startswith("Cannot open project:")

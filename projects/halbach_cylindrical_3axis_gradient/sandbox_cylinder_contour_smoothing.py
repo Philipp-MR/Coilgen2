@@ -285,12 +285,24 @@ def _save_figure(result: CylinderSmoothingSandboxResult, path: Path) -> None:
     after_x, after_z = _developed_projection(result.after)
     before_sample_x, _, before_curvature = _developed_curvature_trace(result.before)
     after_sample_x, _, after_curvature = _developed_curvature_trace(result.after)
+    # Metrics use each curve's own origin; overlays must retain their physical
+    # azimuth difference instead of aligning unrelated first samples.
+    before_angle = np.unwrap(np.arctan2(result.before.v[:, 0], result.before.v[:, 1]))
+    after_angle = np.unwrap(np.arctan2(result.after.v[:, 0], result.after.v[:, 1]))
+    before_direction = -1.0 if before_angle[-1] < before_angle[0] else 1.0
+    after_direction = -1.0 if after_angle[-1] < after_angle[0] else 1.0
+    difference = after_angle[0] - before_angle[0]
+    offset = CYLINDER_RADIUS_M * before_direction * np.arctan2(np.sin(difference), np.cos(difference))
+    direction = before_direction / after_direction
+    after_x = direction * after_x + offset
+    after_sample_x = direction * after_sample_x + offset
+    after_curvature = direction * after_curvature
     fig, axes = plt.subplots(2, 1, figsize=(11.0, 8.5))
     axes[0].plot(before_x * 1.0e3, before_z * 1.0e3, color="0.65", linewidth=1.2, label="mesh contour")
     axes[0].plot(after_x * 1.0e3, after_z * 1.0e3, color="tab:orange", linewidth=2.0, label="smoothed")
     axes[0].set_xlabel("developed circumferential distance [mm]")
     axes[0].set_ylabel("axial position [mm]")
-    axes[0].set_title("Coarse-cylinder contour in exact developed coordinates")
+    axes[0].set_title("Coarse-cylinder contour in exact developed coordinates, shared azimuth origin")
     axes[0].grid(True, alpha=0.25)
     axes[0].legend()
     axes[1].plot(before_sample_x * 1.0e3, before_curvature, color="0.65", linewidth=1.0, label="before")

@@ -5,6 +5,7 @@ from typing import Sequence, TypeVar
 import numpy as np
 
 from .models import WirePathGeometry, WireSegmentOwner
+from .progress import ProgressReporter
 
 _SegmentValue = TypeVar("_SegmentValue")
 
@@ -67,7 +68,11 @@ def _indexed_segment_matches(
     seeds = np.asarray(tree.query(midpoints, k=1)[1], dtype=np.int64)
     rounding_guard = 64.0 * np.finfo(float).eps * coordinate_scale
     nearest = np.empty(len(midpoints), dtype=np.int64)
+    task = ProgressReporter(label="Path provenance").task(
+        "indexed target intervals", len(midpoints), indeterminate=True
+    )
     for target_index, seed in enumerate(seeds):
+        task.update(target_index)
         target_slice = slice(target_index, target_index + 1)
         seed_slice = slice(seed, seed + 1)
         score = float(
@@ -95,6 +100,7 @@ def _indexed_segment_matches(
             source_scale_sq,
         )
         nearest[target_index] = indices[int(np.argmin(scores[0]))]
+    task.done()
     return nearest
 
 
@@ -173,7 +179,9 @@ def nearest_source_segment_indices(
 
     nearest_indices = np.zeros(target_segment_count, dtype=np.int64)
     chunk_size = max(int(chunk_size), 1)
+    task = ProgressReporter(label="Path provenance").task("target intervals", target_segment_count, indeterminate=True)
     for start_index in range(0, target_segment_count, chunk_size):
+        task.update(start_index)
         stop_index = min(start_index + chunk_size, target_segment_count)
         scores = _segment_match_scores(
             target_midpoints[start_index:stop_index],
@@ -187,6 +195,7 @@ def nearest_source_segment_indices(
         )
         nearest = valid_indices[np.argmin(scores, axis=1)]
         nearest_indices[start_index:stop_index] = nearest
+    task.done()
     return nearest_indices
 
 

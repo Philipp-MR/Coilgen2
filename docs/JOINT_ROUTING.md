@@ -12,7 +12,43 @@ does not design external leads, terminal pads, vias or PCB layers.
 
 `CoilGenConfig.joint_group_routing` defaults to `True`. The existing route is
 built first. A candidate replaces it only after independent validation on an
-isolated part. Set the option to `False` to retain the existing routing path.
+isolated part. Set the option to `False` to disable joint replacement. The
+selected routing policy still controls construction of the initial route.
+
+## Regular initial routes and curved supports
+
+The regular policy orders verified essential rings monotonically along the
+support axis, with axis sign determined by directed contour area. It requires
+compatible boundary topology, once-encircling contours, a common current
+orientation and disjoint complete axial bands. Nested saddle contours,
+interleaving bands and ambiguous supports are left unchanged. Full contour
+coordinates, potential, direction and multiplicity are preserved. Diagnostics
+record the original and selected loop indices and axial travel.
+
+Verified conical ring groups reuse the coherent seam and coupled cut-side
+construction. Explicit alignment opt-out remains effective. Surface connector
+seeds are refined inside a bounded strip of actual triangles, with crossings
+parameterized on shared edges and exact terminal points. This minimizes strip
+arc length without mesh-vertex zigzags; it does not prove a global geodesic,
+obstacle clearance or a manufacturable bend. Distance-only queries retain the
+vertex-distance behavior. The physical policy retains the historical ring
+enumeration and connector seeds.
+
+Outside/inside mounting now recognizes complete convex polygonal cylindrical
+and conical-frustum side meshes using their actual oriented faces and two
+circular, homothetic rims. Whole swept triangles are tested against the
+verified mesh solid; exterior vertices alone cannot rule out midface
+penetration. Signed lift, finite axial footprint, exact section/body frame
+correspondence and bounded work remain required. This certificate concerns
+the supplied mesh substrate, not an ideal analytic cylinder inferred from
+metadata. Unknown shapes and unfinished audits remain unsupported.
+
+Explicit within-group joins and returns are recorded separately from protected
+turns. Winding instructions retain those roles and their source ownership.
+Intervals lacking exact construction matches remain ambiguous; their
+regularity metrics are reported as lower bounds. The joint search continues
+to use tangent-constrained, radius-screened curve families and complete
+circuit coupling, followed by the full physical and field gates below.
 
 `joint_group_routing_search_mode="progressive"` is the default. Complete
 directed circuits are ranked with cheap port geometry before detailed curves
@@ -84,11 +120,57 @@ The candidate must satisfy all of these conditions:
 
 ## Selection priorities, B0 guide and cut placement
 
-Feasible fabricated candidates are compared lexicographically:
+`joint_group_routing_selection_policy="regular"` is the default. Feasible
+fabricated candidates are compared lexicographically:
 
 1. Fewest continuous raised transfers on the closed conductor.
-2. Lowest weighted DSV RMS of `I * (B_candidate - B_original_contours) dot unit_B0`.
-3. Shortest fabricated conductor length, for numerical ties in field error.
+2. Least backtracking along each explicitly owned added span's endpoint chord.
+3. Least attachment turning at added/protected and declared span interfaces.
+4. Least dimensionless bending energy, `L * sum(theta² / dual_length)`, within added spans.
+5. Most consistent normalized bending descriptor across repeated joins in the same group.
+6. Least added excess travel, then least total turning and shortest complete fabricated length.
+7. Lowest weighted DSV RMS of `I * (B_candidate - B_original_contours) dot unit_B0`.
+
+These geometric measures exclude retained winding intervals. Straight-interval
+subdivision, rigid motion and current reversal leave them unchanged. Added spans
+crossing the closed circuit's storage seam are joined before measurement. A
+closed added span has no chord direction; its backtracking is reported as zero
+and its full length is excess travel. Ambiguous legacy `contour_group` ownership
+is excluded and reported as incomplete evidence. Such an incumbent uses the
+historical physical comparison, while regular candidates require explicit
+provenance. Total turning discourages repeated direction changes; minimum bend
+radius and finite-body checks still determine physical feasibility. The bending
+guide coalesces collinear subdivisions; it approximates `L * integral(kappa² ds)`
+and discourages concentrated bends without charging retained winding curvature.
+Proposal shortlists use the same attachment and curvature measures while retaining
+historical length/B0 alternatives so a geometric preference cannot erase all
+field-compatible families before validation.
+Repeated-join consistency compares scale-invariant bending energies only for
+explicit `joint_spiral_join` spans with the same group owner. Single joins,
+returns and unrelated groups do not acquire symmetry constraints. Selected
+family and consistency diagnostics expose this soft preference; it never
+certifies feasibility or forces geometrically different joins to be identical.
+
+Regular preference receives a separately recorded RMS allowance anchored to the
+unchanged incumbent, never a pairwise epsilon. The default
+`joint_group_routing_regular_field_tolerance_rel=0.001` allows at most 0.1% of
+peak active DSV target as additional whole-coil longitudinal RMS. Each eligible
+part receives an equal share. Zero forbids RMS growth. This extra limit never
+relaxes absolute/non-regression field, suppression, gradient, vector-change,
+support, clearance or manufacturing gates. Diagnostics record the policy,
+per-part allowance in tesla, absolute RMS ceiling and measured regularity.
+
+`joint_group_routing_selection_policy="physical"` retains the historical ranking:
+jump count, longitudinal RMS, then fabricated length for numerical field ties.
+It also retains historical contour traversal and mesh path seeding. Both policy
+and RMS allowance are editable in the engineering settings and serialized in
+the project configuration; changing them invalidates affected pipeline stages.
+Authenticated version-2 pipeline checkpoints that predate these fields load
+for inspection with the historical physical policy explicitly restored. Version-3
+checkpoints retain their recorded policy. Both historical versions disable the
+new port search on load; version 4 records its three controls explicitly.
+The narrow migration retains source fingerprints
+and does not permit resuming evidence created by a different numerical engine.
 
 One uninterrupted raised transfer counts once regardless of crossed turns. A
 span through the array's start/end is counted once. Counting removes mounting
@@ -123,14 +205,15 @@ curves exist. After shaping, measured jump count determines finalist order.
 The additive geometric guide breaks provisional ties before whole-circuit field
 evaluation. It is not the final field objective. Final adoption measures the
 fabricated centroid and re-counts physical jumps after shaping. A longer route
-can win by reducing jumps or actual longitudinal error, while alignment alone
-cannot overrule either. Resistance and inductance are recalculated downstream.
+can win by reducing jumps, improving regularity within its explicit RMS allowance,
+or reducing actual longitudinal error under the physical policy. Resistance and
+inductance are recalculated downstream.
 This is not an inductance/power/force optimizer.
 New spiral joins carry explicit `joint_spiral_join` provenance through
 fabrication. Their directional cost remains known even when a previously
 accepted route is later retained without change.
 
-`joint_group_routing_search_cuts=True` tries at most two isolated high/low rail
+`joint_group_routing_search_cuts=True` retains two isolated high/low rail
 alternatives: flip all unforced groups with available cut states, then flip only the worst
 scoring free group. Coupled axial ring groups flip together; a forced member
 pins that cohort's automatic members. Explicit `force_cut_selection` choices are honored. Each
@@ -141,8 +224,63 @@ a sole closed loop stays closed. Source winding direction is preserved.
 Shaping shares its bounded work across contexts, then physical validation visits
 the proposed jump budgets in ascending order. Set the option to `False` to keep
 the existing multi-loop cuts; singleton internal ports remain necessary.
-This is a bounded alternative search, not arbitrary cut relocation or an
-exhaustive joint optimization of every possible port.
+After unsuccessful regular shaping, bounded alternatives also sample continuous
+directed arc-length positions on the original contours. The controls are
+`joint_group_routing_port_search_count=8` (0–32 context limit; zero disables the
+new alternatives), `joint_group_routing_cut_span_max_factor=4.0` (1–16 times the
+nominal cut width), and `joint_group_routing_seam_search_extent_rel=0.1` (0–0.25
+of each original perimeter). Actual removed arc spans and seam shifts are saved
+per contour. Retained vertices and interpolated segment ports lie exactly on the
+original directed polyline, with face/barycentric provenance where available.
+Explicit forced groups are preserved. Interleaved axial bands are recorded for
+planning; electromagnetic groups are neither repartitioned nor reversed.
+
+On annular supports, lane direction follows the directed source opening chord
+in the local circumferential/axial frame. An explicitly degenerate direction
+is rejected. Axial projected loop area is not an orientation test for saddle
+contours: it vanishes there and its roundoff sign changes under rigid motion.
+
+Shared lane proposals account for profile clearance and required bend radius.
+Returns use a continuous lane seed rather than visiting every intermediate
+loop start. A bounded exact 3D audit ranks cross-group added seed corridors;
+it excludes retained turns, does not prune crossings that could require lift,
+and provides no finite-body or infeasibility certificate. Compact and thorough
+regular searches can both try these repair contexts. Full curve/body work and
+physical-finalist budgets remain bounded. This samples continuous port locations;
+it does not solve the continuous global placement problem exhaustively.
+
+For two groups, the search also proposes complete cycles using a prefix of one
+directed return and a suffix of the other, with distinct interior return ports.
+Both directed cycle edges are declared; every retained contour interval occurs
+exactly once. Raw bridge pairs that intersect in 3D are rejected before shaping.
+These seeds receive winding trials alongside the ordinary cycle family. Their
+bridge separation alone does not certify the remaining returns, bend radius or
+finite conductor: the entire shaped cycle still uses the original field
+reference and full body validator. The baseline is never replaced by a raw seed.
+
+Within each context, regular topology trials prefer an untried group order
+before repeating its other winding states. A witnessed failed inter-group
+return also softly lowers the priority of that directed cycle edge, including
+the closing edge. Every proposal remains available later; a failure at one
+port never certifies that edge infeasible at another. Attempted topology indices
+and group sequences are recorded. Field-tolerance rejection is reported as a
+physical acceptance limit, separately from computational work exhaustion and
+bounded topology/shape coverage.
+
+Verified polygonal frusta also admit nominal cubic and biarc transitions in an
+isometric development of their actual facets. Exact facet-crossing samples keep
+the mapped chords on the supplied mesh. Chart radius screens do not certify
+the 3D bends at facet creases: independent support, swept-body, curvature,
+clearance and unchanged-current field checks remain mandatory. Unknown, damaged
+or nearly cylindrical frusta fall back to existing supported families.
+
+For completed runs, **Results → Interconnections** or **View → Inspect interconnections…**
+opens the immutable geometry inspection. Each actual support is shown separately,
+including the biplanar supports. The full developed support uses millimetres,
+with signed face height, directed current arrows and group ownership. Exact saved
+profile rings can be shown as the conductor envelope. Selecting a recorded
+engineering check locates its saved spatial witness; a projected X is never
+reported as a physical collision by itself.
 
 For cylindrical axial ring groups, baseline cut placement also preserves one
 common corridor. This applies only when B0 and each individual loop normal are
@@ -326,8 +464,14 @@ limit across shape attempts. Budget exhaustion is explicit and is never cached a
 unsupported geometric connection. These ranking checks are not finite-body
 clearance certificates.
 
-The configured complete-candidate validation budget remains 1–64 (default six),
-shared across all cut contexts and shape alternatives. Shape attempts are bounded
+The configured conductor-preview budget remains 1–64 (default six), shared
+across all cut contexts and shape alternatives. Route-field failures before
+sweeping do not consume these slots. A separate per-part limit of 96 candidate
+field screens bounds that work; exhaustion is reported as computational work,
+never geometric infeasibility. Diagnostics retain field-screen and body-preview
+counts separately. All unchanged-current route and fabricated field limits
+remain mandatory; a candidate reaches sweeping only after its route field passes.
+Shape attempts are bounded
 separately to `max(6, 3 * candidate_budget)`. The best fully validated physical
 objective reached within this budget is selected, rather than the first passing
 candidate. All alternatives for one part use the same original baseline and
@@ -337,6 +481,17 @@ deterministically encountered winner.
 Large/unsupported cases, missing target or swept geometry, weighted turns that
 have not been physically expanded, and PCB layer routing retain the baseline.
 Budgets also bound route points, section points, target points and triangle pairs.
+
+An invalid reference can also make local field-preserving repair insufficient.
+On identical geometry evaluation, current, model and sample weights, a whole-coil
+pointwise vector-change allowance `epsilon` implies
+`RMS(Bnew_z - Btarget_z) >= max(0, RMS(Bold_z - Btarget_z) - epsilon)`.
+This reverse-triangle bound can rule out a target-error threshold within that
+specific reference-field neighborhood. It does not prove the complete design
+infeasible or transfer automatically between different fabrication resweeps.
+Retained contours can independently violate the required bend radius. Protected
+contours and a disabled source-deviation option cannot silently be replaced by
+smoothed turns merely to obtain a passing interconnection result.
 The independent body audit admits at most 2,000,000 faces and streams triangle
 pair work in batches of at most 4,096. Its separate ceilings are 128,000,000
 broad-phase leaf pairs and 32,000,000 exact near pairs. These bounds admit the

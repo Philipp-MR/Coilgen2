@@ -1,6 +1,7 @@
 """Modeless expert edits use one retained draft and atomic model comparison."""
 
 from copy import deepcopy
+import time
 
 import pytest
 import test_workbench_usability as usability
@@ -40,6 +41,16 @@ def expert_window(application, tmp_path):
 
 def _edit(expert, key="min_turn_distance", text="4"):
     expert.fields[key].control.setText(text)
+
+
+def _wait_for_project_open(application, window):
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        application.processEvents()
+        if window._project_open_task is None:
+            return
+        QTest.qWait(5)
+    pytest.fail("Background project opening did not finish")
 
 
 def test_expert_window_is_modeless_and_reuses_uncommitted_draft_after_close(expert_window, application):
@@ -114,6 +125,7 @@ def test_explicit_discard_and_reload_replaces_expert_baseline_with_current_model
     _edit(previous, text="7")
     assert window.apply_config({"levels": 19, "min_turn_distance": 0.006})
     current = window.project
+    undo_count = window.undo_stack.count()
     discard = next(
         button
         for button in previous.findChildren(QPushButton)
@@ -125,7 +137,11 @@ def test_explicit_discard_and_reload_replaces_expert_baseline_with_current_model
     assert replacement is not previous
     assert replacement.draft["min_turn_distance"] == current.config.min_turn_distance
     assert replacement.draft["levels"] == 19
-    assert replacement.fields["min_turn_distance"].control.text() == "6"
+    assert float(replacement.fields["min_turn_distance"].control.text()) / 1000 == pytest.approx(
+        current.config.min_turn_distance
+    )
+    assert not replacement.pending_changes
+    assert window.project is current and window.undo_stack.count() == undo_count
     assert replacement.isVisible() and not replacement.isModal()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     assert not isValid(previous)
@@ -279,7 +295,7 @@ def test_canceling_main_window_close_keeps_owned_popups_and_drafts_open(expert_w
 
 
 def test_file_open_discard_removes_previous_owner_expert_and_retains_exact_new_inputs(
-    expert_window, tmp_path, monkeypatch
+    expert_window, application, tmp_path, monkeypatch
 ):
     window = expert_window
     old_owner, old_expert = window.project, window.expert_window
@@ -298,12 +314,13 @@ def test_file_open_discard_removes_previous_owner_expert_and_retains_exact_new_i
     monkeypatch.setattr(QMessageBox, "question", discard)
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (str(path), ""))
     window._open_dialog()
+    _wait_for_project_open(application, window)
     assert prompts == ["Unsaved project changes"]
     assert window.project.id == incoming.id and window.project.id != old_owner.id
     assert window.project.fingerprint == incoming.fingerprint
     assert window.project.values == incoming.values
     assert window.expert_window is None
-    assert not old_expert.isVisible()
+    assert not isValid(old_expert) or not old_expert.isVisible()
     assert window.undo_stack.isClean() and window.undo_stack.count() == 0
     assert window._check_expert_draft()
     saved = window.save_project(tmp_path / "new-owner-save.json")
@@ -318,7 +335,7 @@ def test_file_open_discard_removes_previous_owner_expert_and_retains_exact_new_i
 
 @pytest.mark.parametrize("failure", ["missing", "malformed"])
 def test_failed_file_open_preserves_previous_owner_expert_and_uncommitted_draft(
-    expert_window, tmp_path, monkeypatch, failure
+    expert_window, application, tmp_path, monkeypatch, failure
 ):
     window = expert_window
     owner, expert = window.project, window.expert_window
@@ -333,6 +350,7 @@ def test_failed_file_open_preserves_previous_owner_expert_and_uncommitted_draft(
     monkeypatch.setattr(QMessageBox, "question", lambda *_args: QMessageBox.StandardButton.Discard)
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (str(path), ""))
     window._open_dialog()
+    _wait_for_project_open(application, window)
     assert window.project is owner and window.project_path is None
     assert window.expert_window is expert and isValid(expert) and expert.isVisible()
     assert expert.windowTitle() == title and expert.draft == draft and expert.pending_changes

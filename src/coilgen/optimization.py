@@ -347,6 +347,9 @@ class ResidualConstraintBlock:
     component: str = ""
     weighting: str = "uniform"
     group_size: int = 1
+    # Reporting metadata only; matrices, budgets and feasibility remain in the
+    # original solver row units. STD rows have already lost their DC offset.
+    row_weights: np.ndarray | None = None
 
 
 @dataclass
@@ -2573,6 +2576,8 @@ def _dsv_constraint_block(
         metric=metric,
         field_limit_T=float(field_limit) if field_limit is not None else None,
         field_metric_denominator=float(root_count) if metric in {"std", "rms"} else 1.0,
+        weighting=("uniform" if not row_count or np.all(weight_values == weight_values[0]) else "target_weights"),
+        row_weights=weight_values.copy(),
     )
 
 
@@ -2602,6 +2607,11 @@ def _target_error_constraint_blocks(
                 relative_tolerance_percent=relative_tolerance_percent,
                 absolute_tolerance=absolute_tolerance,
                 metric="norm",
+                weighting=(
+                    "target_weights"
+                    if problem.target_weights is not None and np.unique(np.asarray(problem.target_weights)).size > 1
+                    else "uniform"
+                ),
             ),
         )
 
@@ -3344,8 +3354,32 @@ def _residual_constraint_diagnostics(
         field_denominator = _constraint_field_metric_denominator(block)
         rms_residual = norm_residual / field_denominator
         linf_residual = _constraint_linf_residual(block, residual_values)
-        std_residual = float(np.std(residual_values)) if len(residual_values) else float("nan")
+        # STD blocks already contain sqrt(weight)-scaled, weighted-centered
+        # physical residuals. Their L2 norm / sqrt(sum(weights)) is the physical
+        # population STD; np.std of those transformed rows changes its units
+        # with an arbitrary rescaling of the weights.
+        std_residual = (
+            norm_residual / field_denominator
+            if block.metric == "std"
+            else float(np.std(residual_values))
+            if len(residual_values)
+            else float("nan")
+        )
         mean_residual = float(np.mean(residual_values)) if len(residual_values) else float("nan")
+        statistics_scope = "constraint_rows"
+        if block.row_weights is not None and len(residual_values):
+            weights = np.asarray(block.row_weights, dtype=float).reshape(-1)
+            # Undo only the reporting transform. In a STD block these values
+            # remain weighted-centered; the unconstrained DC error is absent.
+            physical_values = residual_values / np.sqrt(weights)
+            weight_sum = float(np.sum(weights))
+            mean_residual = float(np.dot(weights, physical_values) / weight_sum)
+            std_residual = float(np.sqrt(np.dot(weights, (physical_values - mean_residual) ** 2) / weight_sum))
+            rms_residual = float(norm_residual / np.sqrt(weight_sum))
+            linf_residual = float(np.max(np.abs(physical_values)))
+            statistics_scope = (
+                "weighted_centered_physical_field" if block.metric == "std" else "weighted_physical_field"
+            )
         reference = max(float(block.reference_norm), 1.0e-30)
         relative_percent = 100.0 * residual / reference
         # Gradient residuals are T/m; a field-valued T allowance cannot be added
@@ -3380,6 +3414,7 @@ def _residual_constraint_diagnostics(
                 f"{prefix}_constraint_metric": metric,
                 f"{prefix}_constraint_component": str(block.component),
                 f"{prefix}_constraint_weighting": str(block.weighting),
+                f"{prefix}_constraint_residual_statistics_scope": statistics_scope,
                 f"{prefix}_constraint_residual_norm_T": residual,
                 f"{prefix}_constraint_l2_residual_norm_T": norm_residual,
                 f"{prefix}_constraint_allowed_residual_norm_T": float(block.allowed_residual),
@@ -3392,6 +3427,11 @@ def _residual_constraint_diagnostics(
                 f"{prefix}_constraint_mean_T": float(mean_residual),
                 f"{prefix}_constraint_field_metric_T": float(field_metric),
                 f"{prefix}_constraint_allowed_field_metric_T": float(allowed_field_metric),
+                f"{prefix}_constraint_allowed_with_acceptance_field_metric_T": (
+                    float(allowed_with_acceptance) / field_denominator
+                    if metric in {"std", "rms"}
+                    else float(allowed_with_acceptance)
+                ),
                 f"{prefix}_constraint_tolerance_percent": float(block.relative_tolerance_percent),
                 f"{prefix}_constraint_absolute_tolerance_T": float(block.absolute_tolerance),
             }
@@ -3427,9 +3467,7 @@ def _residual_constraint_diagnostics(
         primary_residual = _constraint_residual_measure(primary_block, reduced_stream_function)
         primary_relative_percent = 100.0 * primary_residual / max(float(primary_block.reference_norm), 1.0e-30)
         primary_metric = str(primary_block.metric)
-        if primary_metric == "std":
-            primary_metric_value = float(np.std(primary_values))
-        elif primary_metric == "rms":
+        if primary_metric in {"std", "rms"}:
             primary_metric_value = float(np.linalg.norm(primary_values)) / _constraint_field_metric_denominator(
                 primary_block
             )

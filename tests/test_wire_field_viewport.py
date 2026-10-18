@@ -92,3 +92,24 @@ def test_evaluated_winding_geometry_is_separate_from_earlier_route(scientific_vi
     viewport.dataset.setCurrentIndex(viewport.dataset.findData("evaluated_winding"))
     assert "evaluated winding field paths" in viewport.caption.text()
     np.testing.assert_array_equal(viewport.plotter.meshes[0][0].points, centroid)
+
+
+def test_current_selector_is_inactive_for_fixed_reviewed_field_and_restored_for_wire_maps(scientific_viewport):
+    viewport = scientific_viewport
+    arrays, metadata = wire_data()
+    arrays["fabricated_points_m"] = arrays["target_points_m"]
+    arrays["fabricated_field_T"] = arrays["routed_field_at_stream_current_T"].copy()
+    metadata["fabricated_physics"] = {"current_source": "original_contour_current_no_refit"}
+    viewport.display_run(arrays, metadata)
+    viewport.dataset.setCurrentIndex(viewport.dataset.findData("routed_field"))
+    viewport.wire_current.setCurrentIndex(1)
+    assert viewport.wire_current.isEnabled()
+    viewport.dataset.setCurrentIndex(viewport.dataset.findData("fabricated"))
+    assert not viewport.wire_current.isEnabled()
+    assert "fixed saved current policy" in viewport.wire_current.toolTip()
+    np.testing.assert_array_equal(viewport._dataset_mesh.active_scalars, arrays["fabricated_field_T"][:, 2])
+    viewport.dataset.setCurrentIndex(viewport.dataset.findData("routed_field"))
+    assert viewport.wire_current.isEnabled() and viewport.wire_current.currentIndex() == 1
+    np.testing.assert_array_equal(
+        viewport._dataset_mesh.active_scalars, arrays["routed_field_at_stream_current_T"][:, 2]
+    )

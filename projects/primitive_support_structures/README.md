@@ -49,3 +49,7 @@ when launched from another working directory. Add `--headless` (or set
 `MPLBACKEND=Agg`) to retain reports while suppressing interactive windows.
 Programmatic callers can pass an explicit parameter mapping to `main(parameters)`;
 the validated design objects are reused for the solve.
+
+Set `COILGEN_OUTPUT_ROOT` to choose a fresh output base while retaining project
+and timestamped run folders. Input data paths are unchanged. See the
+[output-base instructions](../general_examples/README.md).

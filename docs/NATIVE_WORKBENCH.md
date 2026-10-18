@@ -23,6 +23,33 @@ saved with the view; unavailable geometry is grayed out with its reason.
 Saved results retain their stored support geometry, while any other-channel
 overlays are identified as current model supports.
 
+The right-hand **Design plan** panel shows every channel's requested computation
+steps vertically. Pending steps are gray; recorded completed steps use the normal
+black text. Running work is blue, execution failures red, and stopped or outdated
+evidence explicitly labeled. **Cached** means a verified checkpoint can be reused;
+steps beyond a channel's requested boundary are **Not requested**. Completion
+describes computation, while engineering failures remain separate review findings.
+
+For systems, the panel shows completed-step and channel counts, individual worker
+percentages and excluded channels. It does not average percentages from unequal
+independent studies. Double-click a channel header, or press Enter, to select its
+editor; **Follow run** explicitly attaches the plot to the indicated worker.
+**Compute enabled channels** submits each included channel's own study. **Jobs**
+and **Recompute plan** open detailed evidence. Close the dock to give the plot more
+space; **View → Design plan** restores it, and starting a computation opens it.
+Its visibility is saved with the project view. The lower-left computing indicator
+continues to cover other background operations as well.
+
+The persistent activity strip also shows worker names, current operations and
+individual percentages when the plan is closed or the plot shows an earlier run.
+**Tasks…** opens a live list of every active or queued worker and local operation,
+including field analysis, exports, model/system support previews and loading saved
+stage data. Owned CoilGen editor and evidence windows mirror the same activity,
+so a maximized analysis or settings window does not hide system computation.
+Work without a measurable total shows a busy state. Synchronous project/result
+loading, project saving and Python input exports paint their operation before
+reading, displaying or writing large data.
+
 ## Install and start
 
 From the repository environment:
@@ -42,6 +69,15 @@ the workspace is ready. To open a saved project:
 python -m coilgen.gui path/to/design.coilgen.json
 ```
 
+**File → Open** reads the project, verifies embedded results and local history,
+and checks reusable checkpoints in a background task. The status bar shows the
+current operation and **Cancel opening** while the current project remains
+usable. Editing inputs or notes, changing channel, closing the workspace, or
+starting another open cancels the pending replacement. Invalid documents retain
+the previous project and its drafts. Cancellation takes effect between verified
+operations; it cannot interrupt an individual JSON decode or atomic archive write.
+The synchronous Python `open_project(path)` API retains its existing contract.
+
 Use `--background` to open without taking keyboard focus. Automated Qt/VTK tests
 can exercise the interface without desktop mouse or keyboard input. Native
 computer-use screenshots can inspect a covered window; the computer-use input
@@ -55,17 +91,38 @@ scientific figures and existing script plotbooks.
 
 ## Scientific workflow
 
-### Detailed saved-field analysis
+### Coil results and field analysis
 
-Select a computed saved run, then open **View → Detailed field analysis…**
-or the same action in the viewport's **Inspect** menu. Target-only preparations
-and failed evidence verification keep the action disabled. Each modeless analysis
-window stays bound to its verified run while the active model or channel changes;
-pending model edits are not applied by opening it.
+Selecting a saved result automatically displays an overview above the viewport:
+RMS and peak field error, relative RMS error, recorded current, resistance,
+inductance, mass and conductor volume. The source, field component, current policy,
+sampling scope and engineering check status remain visible beside these values.
+Missing quantities are identified explicitly. Original-current winding results are
+preferred to refitted fields when that evidence exists.
+
+The overview shows **Per body** when verified body properties are available but
+no complete-circuit value is recorded. Open **Coil stats** for those rows; neither
+self-inductances nor swept mesh volumes are combined into an inferred aggregate.
+Field-budget cards use the actual positive-weight sample count and recorded
+component. Skipped electrical calculations are unavailable, rather than zero.
+
+Use the prominent **Coil results** toolbar button, the overview's direct actions,
+or the entries under **Results and provenance** in the Model Builder to open
+metrics, slices, errors, harmonics, coil properties or engineering checks. The
+existing **View → Detailed field analysis…** and viewport **Inspect** actions are
+also available. Target-only preparations disable field pages; saved electrical or
+geometry statistics remain accessible without field samples. Failed evidence
+verification disables result actions. Each modeless analysis window stays bound
+to its verified run while the active model or channel changes; pending model edits
+are not applied by opening it. Verification runs in the background, and opening
+**Coil stats** does not start field calculations. Metrics and errors use native
+samples first; physical slice evaluation starts when slices are requested.
 
 Choose continuous-sheet, routed/contour, realized-conductor, independent-validation
 or named region/pose samples where those fields were calculated. Recorded winding
 current and original stream-function current are distinct choices when both exist.
+Immutable stored field maps disable the wire-current selector and explain their
+fixed policy. Returning to a routed or contour map retains the earlier selection.
 The utility provides:
 
 - A rotatable 3D point cloud in world metres, with Bx, By, Bz, projection along the
@@ -87,6 +144,17 @@ The utility provides:
 - PNG plots, CSV sample vectors/metrics and a complete JSON analysis bound to the
   displayed selection. JSON includes sampling, units, source/current provenance,
   slice grids, unavailable masks and harmonic diagnostics.
+- **Coil stats** groups recorded circuit and per-body quantities: resistance,
+  self-inductance, current, Joule loss, path length, cross-section, material and
+  insulation settings, volume, contour/mesh counts and available loads or drive
+  data. Complete-circuit estimates and per-body values retain their scope;
+  per-body inductances are not summed without mutual coupling. Nominal
+  cross-section-times-length volume and faceted mesh volume remain distinct.
+  Rejected geometry is labelled as diagnostic evidence. Mass requires recorded
+  mass or an explicitly entered density; no material density is inferred from
+  resistivity. Density-based estimates state their assumptions and do not include
+  unmodelled insulation, feeds or formers. JSON exports keep saved statistics and
+  user density estimates separate.
 
 Slices directly reevaluate the saved geometry and unchanged signed currents when
 the source contract is available and reproduces the saved map. Otherwise the
@@ -217,10 +285,11 @@ the current support and colored target samples together. Component and units
 identify the displayed field; this is the requested target rather than a solved
 coil field. Unrelated edits preserve the chosen plot and camera.
 
-Above the plot, five passive icons track **Prepare → Sheet → Contours → Winding
-→ Evaluate**. Blue means a recorded computation boundary; a dotted **Cached**
-stage identifies verified reusable evidence for the applied model. Amber marks the next
-boundary being computed. Completed stages appear in the plot automatically,
+The right-hand plan tracks **Prepare → Sheet → Contours → Winding → Evaluate**
+for each channel. Black text means a recorded computation boundary; **Cached**
+identifies verified reusable evidence for the applied model. Blue marks current
+work, with the operation and its reported percentage shown separately. Completed
+stages appear in the plot automatically,
 including the current sheet, contours and connected/swept conductors when
 requested. **Viewing** labels these as live previews of the submitted revision.
 They do not establish final result integrity or engineering acceptance.
@@ -229,21 +298,38 @@ Finishing an older revision leaves the selected view intact and makes its result
 available through Jobs and Results. Stopped live snapshots retain their stopped status.
 Selecting another plot pauses **Follow run**; enable it to resume. Jobs stays an
 on-demand window, so submitting a computation keeps the graphics visible.
-The lower-left status bar displays **Computing (45%)** using allocated overall
-work, or **Computing…** when its percentage is unknown. Mesh nodes, field chunks,
-contours, routing work, validation samples and saved evidence advance it from
-actual completed work. Updates reach the GUI about five times per second;
-worker messages are coalesced rather than writing each numerical update to disk.
-Enabled operations receive work allocations; omitted or reused stages are
-excluded. These percentages estimate work, not elapsed time or an ETA. An opaque
-factorization or file compression keeps the completed-work percentage and shows
-a busy bar; its activity remains visible without inventing solver convergence.
-The tooltip separates overall work from the current operation's percentage and
-completed/total counts. The job reaches 100% only after saved evidence verifies.
+The lower-left status bar displays the current operation's measured percentage,
+or **Computing…** with a busy bar when that operation has no known work total.
+Mesh nodes, field chunks, contours, routing work, validation samples and saved
+evidence advance it from actual completed work. Updates reach the GUI about five
+times per second; worker messages are coalesced rather than writing each
+numerical update to disk. Allocated overall work remains explicitly labelled in
+**Tasks…** and the tooltip. Omitted or reused stages are excluded. These
+percentages estimate work, not elapsed time or an ETA; an opaque factorization
+or file compression does not invent solver convergence.
+The plan shows the named operation, its current substep, elapsed worker time,
+the age of the latest process-liveness observation and the age of the last
+reported progress. Liveness observations never advance numerical progress.
+Conductor preparation, bend resolution and provenance transfer report counted
+work and check cancellation within their longer loops. Cancellation stays busy
+and visibly says **Stopping** until the worker has stopped.
+
+A blocked job-state write shows **Job state not saved · retrying**, including
+the filesystem error and the limit on restart recovery. The monitor continues
+draining events, supervising workers and verifying completed evidence. It retries
+the latest state even after the worker exits; a successful save clears the
+warning. Windows atomic replacements retry brief access/sharing errors within a
+bounded interval, retaining the previous file if the denial persists. Explicit
+submit and cancel calls still report failed durable writes to their caller.
+The job reaches 100% only after saved evidence verifies. Automatic completed-run
+verification, history restoration and reuse checks run in the background so the
+workspace remains responsive while results become available. Integrity and
+engineering acceptance checks remain mandatory and separate from completion.
 Field analysis, harmonic fits, array studies and engineering tasks also feed
 their measured progress into this indicator. It remains visible
 while viewing an older run, switching channels or closing the project. Multiple
-workers show a count with individual progress in the tooltip. Queued jobs,
+workers show a count and individual progress in the activity strip; **Tasks…**
+lists every worker's revision, operation and measured work counters. Queued jobs,
 cancellation and other background work have distinct labels; terminal jobs clear
 the indicator. Status messages remain visible alongside it.
 Queued jobs wait without an animated computation bar. Stopped jobs with no
@@ -311,7 +397,7 @@ of 80, 86 and 92 mm radius. All use the same world-origin 40 mm spherical DSV,
 B₀ along world z, and 20 mT/m Bz gradients. The complete sheet-to-conductor
 studies are already configured. The supports have nominal 6 mm radial spacing;
 routes, feeds, coupling, stray field and combined drive qualification require
-system review. See the [cylindrical XYZ example](examples/cylindrical_xyz_gradient_README.md)
+system review. See the [cylindrical XYZ example](../examples/cylindrical_xyz_gradient_README.md)
 for conductor settings, field definitions and script usage.
 
 **File → Load template → Coil systems → Biplanar gradients + second-order shims** creates nine
@@ -324,7 +410,7 @@ channel retains its own inputs, study and completed results in the same JSON.
 The example uses a shared 40 mm DSV, 20 mT/m gradients, 100 µT Z0 and quadratic
 modes peaking at 10 µT on the reference sphere. Full evaluation requests
 contours, routing, sweeping and strict review. See the
-[example definitions and script](examples/biplanar_gradient_shim_README.md) for
+[example definitions and script](../examples/biplanar_gradient_shim_README.md) for
 layer allocation, exact harmonic signs and recorded numerical checks.
 
 The model tree separates editable **Model** inputs, **Study** controls and
@@ -521,6 +607,18 @@ separate choice. These controls map to the existing script configuration; an
 unrelated edit preserves inactive native preferences and all numerical values.
 Feed and drive-terminal completeness still require their own evidence.
 
+Open **Winding and routing → Contour smoothing** to optionally smooth closed
+contours on their current-carrying surface before cutting and interconnection.
+**Smooth on surface** exposes mesh-coupled strength, a displacement cap in mm,
+sampling interval and centerline-spacing preservation. Smaller mesh gain means
+stronger attenuation of mesh-scale oscillations. The option is off by default;
+opening the editor does not change the model. Applying a change invalidates
+contours and downstream geometry, while compatible current-sheet work remains
+reusable. The field is evaluated again at the retained contour current.
+**Resample only** adds points without rounding corners; connected routing
+defers that operation. Advanced settings contain fit/output sampling density
+and local surface-patch controls.
+
 **Results → Design acceptance** presents sheet, contours, connected winding and
 physical conductor evidence together. Saved requested/effective limits determine
 the displayed margins. A descriptive wire-field value does not inherit the sheet
@@ -690,6 +788,36 @@ limits. Each field map retains its own saved sampling grid and current policy;
 the viewer does not interpolate mismatched grids or fit currents to make results
 comparable. Metric rows identify incompatible physical scopes.
 
+The **Optimize current sheet** settings show the effective cost equation and
+solver configuration above the decision cards. The display follows native
+Tikhonov, field-budget regularization searches, native constrained objectives
+and physical power, magnetic-energy, minimax or mixture objectives. It identifies
+imported-pattern bypasses and parameters that the selected formulation ignores.
+Pending edits update this display without changing the applied model.
+
+The **Field and current limits** card exposes the relative field budget, absolute
+budget [T] and metric-specific RMS/STD limits [T]. A positive RMS/STD limit replaces
+the relative and absolute budgets for that metric; those inactive controls are
+disabled. The card reports the active limit in nT. Disabling default physical
+field constraints also disables these default budget controls, while explicitly
+configured physical constraints retain their own scope. Native Tikhonov displays
+these budgets as post-fit checks rather than hard optimization constraints.
+
+Use **Solve strategy** to choose the formulation and objective, **Solver
+configuration** for backends, tolerances, iteration limits, threads, verbosity
+and fallback policy, and **Numerical settings** for regularization, penalties
+and the stream-function basis. **All optimization parameters…** opens the
+searchable advanced editor focused on optimization. It exposes every native
+optimization setting and physical-objective parameter, including mixture weights
+and scales, field constraints, hardware limits, search bounds and backend options.
+The full configuration JSON remains available in the same editor. Optional and
+structured values retain their native representation; numerical entries accept
+scientific notation and preserve the precision of untouched loaded values.
+
+Apply validates the complete draft and creates one undoable change. Switching
+back to a native objective cannot silently discard configured physical bounds.
+Viewing the settings does not change the configuration or numerical method.
+
 The optimization allowance control edits the active solver's actual field
 acceptance slack. Independent validation's allowance is shown separately: native
 solver studies currently use the research checker's default independent allowance.
@@ -748,8 +876,9 @@ python -m coilgen run Gy.coilgen.json --stage contours --resume outputs/Gy/pipel
 python -m coilgen export-script Gy.coilgen.json replay_Gy.py
 ```
 
-GUI script exports include an adjacent self-contained project JSON with its
-owned inputs and completed evidence.
+GUI script exports include an adjacent self-contained compact or JSON project
+companion with its owned inputs. Completed evidence is optional for script
+exports; full project Save retains that evidence.
 The exported script executes the saved stage and validation controls through
 `DesignService`, without a GUI. `--require-accepted` returns exit code 2 when
 engineering acceptance is failed or unverified. Prepared, contour and routed
@@ -783,6 +912,31 @@ files into an application cache; that cache is rebuildable from the JSON. A larg
 study can produce a correspondingly large JSON because checkpoints and results
 are included. Old v1 projects and collections still load; saving migrates them
 to the self-contained v2 format.
+
+Save As also offers **Compact CoilGen bundle (`.coilgen`)**. The single ZIP file
+contains a readable JSON manifest and compressed, content-addressed input and
+evidence bytes, deduplicated across channels. Original NPZ bytes, array types,
+run owners, scientific fingerprints and artifact hashes stay unchanged. Opening
+verifies every payload before interpreting evidence; it never extracts archive
+paths or loads pickle. Save/open displays processed-byte progress. JSON remains
+available and existing JSON files still load. In Python, use
+`project.save("design.coilgen")` or `assembly.save("channels.coilgen")`.
+
+Python export includes the owned model/study inputs and omits previous completed
+results by default, since a fresh solve does not need those archives. Applied
+design hypotheses and decisions remain in the companion; UI selection and view
+state are omitted. Export does not read or capture prior result files. The export
+dialog offers compact or JSON companions. To explicitly publish prior evidence,
+use `project.export_python("design.py", compact=True, include_results=True)`;
+the equivalent workbench export methods accept the same options. Full project
+Save continues to retain completed evidence and viewing state.
+
+New archives also retain actual job submission/completion timestamps, when the
+saved job identifies the same request and project. These small provenance bytes
+are covered by the archive content identity; original result and manifest bytes
+remain unchanged. Reopening restores the dates separately from live worker IDs
+or state. Older archives with no recorded timestamps continue to show an
+unrecorded date; file modification and import times are never substituted.
 
 Script callers can explicitly attach a completed run before saving:
 
@@ -1019,6 +1173,13 @@ read-only views for inspection. `load_run(directory, array_names=...)` verifies
 all artifacts while decompressing only requested arrays. GUI display and
 comparison avoid the redundant initial full-array copy. These are in-process
 read-only contracts, not security isolation from hostile Python callers.
+
+`RunRecord.metadata` returns detached dictionaries and lists. Read-only displays
+can borrow `metadata_view`, whose nested mappings are immutable and sequences
+are tuples, without copying unrelated winding and fabrication diagnostics on
+every progress refresh. Metadata values retain their strict JSON representation.
+Passive progress displays use captured canonical source identities and recorded
+health; explicit loads, checks and evidence use still resolve and verify files.
 
 Synchronous `DesignService.run(..., progress=callback, cancel_check=predicate)`
 delivers typed `ExecutionEvent` objects using the engine's existing progress and

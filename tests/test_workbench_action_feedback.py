@@ -1,18 +1,38 @@
 """User actions acknowledge drafts, applied revisions and the correct job."""
 
 from copy import deepcopy
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEventLoop, QTimer, Qt
 from PySide6.QtTest import QTest
 
 from coilgen.gui import workbench
 from coilgen.gui.readiness import ReadinessIssue, ReadinessReport
 from coilgen.research.storage import result_metadata_digest
 from test_workbench_usability import application as application, windows as windows
+
+
+def wait_until(predicate, timeout_ms=3000):
+    """Deliver queued Qt callbacks until a bounded asynchronous condition holds."""
+    if predicate():
+        return
+    loop = QEventLoop()
+    poll, deadline = QTimer(), QTimer()
+    poll.timeout.connect(lambda: loop.quit() if predicate() else None)
+    deadline.setSingleShot(True)
+    deadline.timeout.connect(loop.quit)
+    poll.start(5)
+    deadline.start(timeout_ms)
+    try:
+        loop.exec()
+    finally:
+        poll.stop()
+        deadline.stop()
+    assert predicate(), "Asynchronous workbench condition did not settle before the deadline"
 
 
 @pytest.fixture(autouse=True)
@@ -165,7 +185,11 @@ def test_terminal_missing_progress_never_animates_and_preserves_state_tone(windo
     assert window.execution_progress.value() == 0
     assert window.execution_progress.format() == "Unreported"
     assert window.execution_label.property("semanticTone") == tone
+    # Execution has stopped; saved-checkpoint verification may still be active.
+    wait_until(lambda: not window._stopped_reuse_tasks and window.computation_indicator.isHidden())
     assert window.computation_indicator.isHidden()
+    assert window.execution_progress.maximum() == 100 and window.execution_progress.format() == "Unreported"
+    assert window.execution_label.property("semanticTone") == tone
     assert window.states[state["id"]]["status"] == status
 
 
@@ -334,14 +358,33 @@ def test_completed_source_verification_failure_has_persistent_notice_without_aut
     window.jobs.states = [state]
     window.poll_jobs()
     window.evidence.close_all()
+    entered, release = Event(), Event()
 
     def changed_evidence(_directory):
+        entered.set()
+        if not release.wait(10):
+            raise TimeoutError("Test did not release background evidence verification")
         raise ValueError("Scientific artifact checksum changed")
 
     loader = Mock(side_effect=changed_evidence)
     monkeypatch.setattr(window.service, "load_run", loader)
     state["status"] = "completed"
-    window.poll_jobs()
+    try:
+        window.poll_jobs()
+        wait_until(entered.is_set)
+        assert state["id"] in window._run_load_tasks
+        assert window.job_outcomes.selected is None
+        assert not window.evidence.any_open()
+        assert "Verifying completed results" in window.computation_indicator.toolTip()
+        assert window.computation_indicator.label.text() == "Working…"
+        heartbeat = []
+        QTimer.singleShot(0, lambda: heartbeat.append(True))
+        wait_until(lambda: bool(heartbeat))
+        assert not release.is_set()  # Qt remains responsive while the file worker is held.
+    finally:
+        release.set()
+        wait_until(lambda: not window._run_load_tasks)
+    wait_until(lambda: window.job_outcomes.selected is not None)
     assert not window.evidence.any_open()
     notice = window.job_outcomes.selected
     assert notice.job_id == state["id"] and notice.tone == "error"

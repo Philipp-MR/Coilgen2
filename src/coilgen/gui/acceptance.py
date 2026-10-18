@@ -206,6 +206,13 @@ def _constraint(index, row, metadata):
         scope = f"Continuous sheet · {sampling}" + (
             f" · {count} samples" if isinstance(count, int) and count > 0 else ""
         )
+        if sampling == "independent grid":
+            validation = metadata.get("validation") or {}
+            order = validation.get("field_quadrature_order", validation.get("quadrature_order"))
+            if isinstance(order, int) and not isinstance(order, bool) and order > 0:
+                scope += f" · quadrature order {order}"
+            if validation.get("independent_quadrature_check") is not True:
+                scope += " · mesh/quadrature convergence unverified"
         if name.startswith("standard:"):
             scope += " · solver residual contract, not an RMS field metric"
     elif stage == "sheet":

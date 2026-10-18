@@ -41,8 +41,11 @@ run from `project_run = PROJECT.last_run` before opening its plot book.
 For a headless run, add `--headless` or set `MPLBACKEND=Agg`. `NATIVE_THREADS`
 bounds BLAS threads inside CoilGen workers, independently of `cpu_workers`.
 `main(project)` accepts an explicit project variant without changing the default
-template. The default three-axis solve and all seven 64-by-64 diagnostic slices
-were executed during the example audit with one worker and one native thread.
+template. The default three-axis solve requests seven 64-by-64 diagnostic slices;
+contour-only execution checks do not validate these maps or the routed conductors.
+
+Set `COILGEN_OUTPUT_ROOT` to redirect the timestamped output base without
+changing input-data paths; see the [output-base instructions](../general_examples/README.md).
 
 ## Useful Settings
 

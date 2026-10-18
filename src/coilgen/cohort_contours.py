@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from itertools import permutations
 import json
+from math import factorial
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable, Mapping, Sequence
@@ -572,6 +573,28 @@ def design_contour_dictionary_channels(
     settings = options or ContourChannelOptions()
     if dictionary.family_count < settings.channel_count:
         raise ValueError("The contour dictionary needs at least one family per channel.")
+    # Count before evaluating fields or enumerating partitions: even a moderate
+    # dictionary can have an astronomically large exact assignment space.
+    partition_count = _stirling_partition_count(dictionary.family_count, settings.channel_count)
+    polarity_count = 2 ** (dictionary.family_count - settings.channel_count) if settings.optimize_family_polarity else 1
+    asymmetric_power_channels = bool(
+        settings.total_power_limit_W is not None
+        and settings.channel_resistance_ohm is not None
+        and not np.allclose(
+            settings.channel_resistance_ohm,
+            settings.channel_resistance_ohm[0],
+            atol=0.0,
+            rtol=1.0e-12,
+        )
+    )
+    labeling_count = factorial(settings.channel_count) if asymmetric_power_channels else 1
+    candidate_count = partition_count * polarity_count * labeling_count
+    if candidate_count > settings.maximum_candidate_count:
+        raise ValueError(
+            f"Exact contour assignment would evaluate {candidate_count} candidates, exceeding "
+            f"maximum_candidate_count={settings.maximum_candidate_count}. Reduce the family count, "
+            "pre-cluster families, or raise the explicit limit."
+        )
     scenario_weights = _design_scenario_weights(dataset, settings)
     with progress_scope(0, 50):
         family_fields = evaluate_contour_family_fields(
@@ -592,35 +615,11 @@ def design_contour_dictionary_channels(
             f"{family_metrics[1]}, below the requested {settings.channel_count} channels."
         )
 
-    partitions = tuple(_canonical_surjections(dictionary.family_count, settings.channel_count))
-    polarity_count = 2 ** (dictionary.family_count - settings.channel_count) if settings.optimize_family_polarity else 1
-    asymmetric_power_channels = bool(
-        settings.total_power_limit_W is not None
-        and settings.channel_resistance_ohm is not None
-        and not np.allclose(
-            settings.channel_resistance_ohm,
-            settings.channel_resistance_ohm[0],
-            atol=0.0,
-            rtol=1.0e-12,
-        )
-    )
-    channel_labelings = (
-        tuple(permutations(range(settings.channel_count)))
-        if asymmetric_power_channels
-        else (tuple(range(settings.channel_count)),)
-    )
-    candidate_count = len(partitions) * polarity_count * len(channel_labelings)
-    if candidate_count > settings.maximum_candidate_count:
-        raise ValueError(
-            f"Exact contour assignment would evaluate {candidate_count} candidates, exceeding "
-            f"maximum_candidate_count={settings.maximum_candidate_count}. Reduce the family count, "
-            "pre-cluster families, or raise the explicit limit."
-        )
     _emit(
         progress_callback,
-        f"Contour assignment: exact search over {len(partitions)} unlabeled partitions and "
+        f"Contour assignment: exact search over {partition_count} unlabeled partitions and "
         f"{polarity_count} relative-polarity states"
-        + (f", including {len(channel_labelings)} electrical-channel labelings" if len(channel_labelings) > 1 else "")
+        + (f", including {labeling_count} electrical-channel labelings" if labeling_count > 1 else "")
         + f" ({candidate_count} candidates).",
     )
     limits = ChannelCurrentLimits.symmetric(
@@ -634,11 +633,16 @@ def design_contour_dictionary_channels(
     completed = 0
     reporter = ProgressReporter(label="Contour dictionary assignment")
     report_interval = max(candidate_count // 20, 1)
-    for canonical_partition in partitions:
+    for canonical_partition in _canonical_surjections(dictionary.family_count, settings.channel_count):
         for polarity in _relative_polarities(
             canonical_partition,
             settings.optimize_family_polarity,
         ):
+            channel_labelings = (
+                permutations(range(settings.channel_count))
+                if asymmetric_power_channels
+                else (tuple(range(settings.channel_count)),)
+            )
             for labeling in channel_labelings:
                 partition = tuple(labeling[channel] for channel in canonical_partition)
                 completed += 1
@@ -724,7 +728,7 @@ def design_contour_dictionary_channels(
         current_limits=limits,
         scenario_weights=scenario_weights,
         diagnostics=diagnostics,
-        partition_count=len(partitions),
+        partition_count=partition_count,
         candidate_count=candidate_count,
         feasible_candidate_count=feasible_count,
         objective_T2=float(score[0]),
@@ -812,6 +816,19 @@ def save_contour_channel_design(
     )
     written.append(summary_json)
     return tuple(written)
+
+
+def _stirling_partition_count(item_count: int, group_count: int) -> int:
+    """Count unlabeled nonempty partitions exactly with O(group_count) storage."""
+
+    if group_count < 0 or item_count < group_count:
+        return 0
+    counts = [1] + [0] * group_count
+    for size in range(1, item_count + 1):
+        for groups in range(min(size, group_count), 0, -1):
+            counts[groups] = groups * counts[groups] + counts[groups - 1]
+        counts[0] = 0
+    return counts[group_count]
 
 
 def _canonical_surjections(item_count: int, group_count: int):

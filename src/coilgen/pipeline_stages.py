@@ -213,7 +213,7 @@ class PipelineCheckpoint:
     source, numerical settings, and input-content hashes before execution.
     """
 
-    SCHEMA = "coilgen.pipeline-checkpoint/2"
+    SCHEMA = "coilgen.pipeline-checkpoint/4"
 
     def __init__(
         self,
@@ -334,7 +334,8 @@ class PipelineCheckpoint:
                 raise ValueError("Checkpoint archive exceeds the permitted size.")
             manifest = json.loads(archive.read("manifest.json"))
             numerical = archive.read("arrays.npz")
-        if manifest.get("schema") != cls.SCHEMA:
+        checkpoint_schema = manifest.get("schema")
+        if checkpoint_schema not in {cls.SCHEMA, "coilgen.pipeline-checkpoint/2", "coilgen.pipeline-checkpoint/3"}:
             raise ValueError("Unsupported pipeline checkpoint schema.")
         # Stage and inputs are scientific evidence too. Numerical-array hashes
         # alone would leave a changed stage/config manifest undetected.
@@ -347,8 +348,11 @@ class PipelineCheckpoint:
         if sha256(numerical).hexdigest() != manifest.get("arrays_sha256"):
             raise ValueError("Checkpoint numerical data failed its integrity check.")
         _validate_npz(numerical, max_bytes=max_bytes)
+        encoded_payload = manifest["payload"]
+        if checkpoint_schema != cls.SCHEMA:
+            encoded_payload = _migrate_routing_config(encoded_payload, checkpoint_schema)
         with np.load(io.BytesIO(numerical), allow_pickle=False) as archive:
-            payload = _decode(manifest["payload"], archive)
+            payload = _decode(encoded_payload, archive)
         if not isinstance(payload, dict) or not isinstance(payload.get("state"), PipelineState):
             raise ValueError("Checkpoint requires a typed pipeline state.")
         if not isinstance(payload.get("config"), CoilGenConfig):
@@ -559,6 +563,38 @@ def _encode(value: Any, arrays: dict[str, np.ndarray]) -> Any:
     if isinstance(value, (list, tuple)):
         return {"$tuple" if isinstance(value, tuple) else "$list": [_encode(item, arrays) for item in value]}
     raise TypeError(f"Unsupported checkpoint value {type(value).__name__}.")
+
+
+def _migrate_routing_config(value: Any, schema: str) -> Any:
+    """Add only the known missing routing fields to authenticated old evidence.
+
+    Version 2 used physical selection; version 3 recorded its own policy. Keep
+    those policies and disable new port searches on historical evidence.
+    Unknown fields and all other missing fields still fail the strict decoder.
+    Original stage/source fingerprints are retained, so migration grants no
+    permission to resume an old numerical result under a different engine.
+    """
+    if isinstance(value, list):
+        return [_migrate_routing_config(item, schema) for item in value]
+    if not isinstance(value, dict):
+        return value
+    migrated = {key: _migrate_routing_config(item, schema) for key, item in value.items()}
+    if value.get("$class") == "CoilGenConfig":
+        additions = {
+            # Loading old evidence must not retroactively enable new port searches.
+            "joint_group_routing_port_search_count": 0,
+            "joint_group_routing_cut_span_max_factor": 1.0,
+            "joint_group_routing_seam_search_extent_rel": 0.0,
+        }
+        if schema == "coilgen.pipeline-checkpoint/2":
+            additions.update(
+                joint_group_routing_selection_policy="physical", joint_group_routing_regular_field_tolerance_rel=0.001
+            )
+        attributes = migrated.get("fields")
+        expected_legacy = {item.name for item in fields(CoilGenConfig)} - additions.keys()
+        if isinstance(attributes, dict) and set(attributes) == expected_legacy:
+            migrated["fields"] = {**attributes, **additions}
+    return migrated
 
 
 def _decode(value: Any, arrays: Any) -> Any:

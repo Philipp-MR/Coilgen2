@@ -463,11 +463,13 @@ def validate_active_shield_suppression(
     *,
     component: str = "Bz",
 ) -> ActiveShieldBenchmarkResult:
-    """Verify that an active-shielded design reduces field on suppression samples."""
+    """Compare shielded/unshielded fields on the same ordered suppression samples."""
 
     shielded_values = _component_values(np.asarray(shielded_field, dtype=float), component)
     unshielded_values = _component_values(np.asarray(unshielded_field, dtype=float), component)
-    count = int(min(len(shielded_values), len(unshielded_values)))
+    if len(shielded_values) != len(unshielded_values):
+        raise ValueError("Shielded and unshielded fields must have the same sample count on the same ordered grid.")
+    count = int(len(shielded_values))
     if count == 0:
         return ActiveShieldBenchmarkResult(
             sample_count=0,
@@ -480,8 +482,6 @@ def validate_active_shield_suppression(
             rms_reduced=False,
             peak_reduced=False,
         )
-    shielded_values = shielded_values[:count]
-    unshielded_values = unshielded_values[:count]
     unshielded_rms = float(np.sqrt(np.mean(unshielded_values**2)))
     shielded_rms = float(np.sqrt(np.mean(shielded_values**2)))
     unshielded_peak = float(np.max(np.abs(unshielded_values)))

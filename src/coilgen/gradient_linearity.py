@@ -136,6 +136,20 @@ def gradient_linearity_summary(field_T: Any, target_field: Any, config: Any) -> 
     peak_tol = _positive_config_float(config, "linearity_peak_tolerance_percent")
     cross_tol = _positive_config_float(config, "linearity_cross_gradient_tolerance_percent")
     cross_percent = float(data["cross_gradient_percent_of_desired"])
+    # A constant-field target acquires a tiny affine gradient from least-squares
+    # roundoff. Relative gradient metrics would divide by that numerical noise.
+    # Detect applicability in field units without changing the solve or its
+    # reference-scale construction. Keep the absolute field-fit diagnostics.
+    target_bz = np.asarray(target_field.b, dtype=float)[:, 2]
+    finite_target = target_bz[sample_mask & np.isfinite(target_bz)]
+    target_scale = float(np.max(np.abs(finite_target))) if len(finite_target) else float("nan")
+    gradient_scale = abs(desired) * reference_radius
+    applicable = bool(
+        np.isfinite(gradient_scale)
+        and gradient_scale > 128.0 * np.finfo(float).eps * max(target_scale, np.finfo(float).tiny)
+    )
+    if not applicable:
+        gradient_strength_error_percent = cross_percent = rms_percent = peak_percent = p95_percent = float("nan")
 
     checks = {
         "gradient_strength_met": _tolerance_met(gradient_strength_error_percent, gradient_tol),
@@ -157,10 +171,24 @@ def gradient_linearity_summary(field_T: Any, target_field: Any, config: Any) -> 
         cross_percent,
         cross_tol,
     )
+    if enabled and not applicable:
+        reasons = ["Target has no resolved affine Bz gradient; relative gradient requirements cannot be assessed."]
+
+    def check_status(key: str) -> str:
+        if not applicable:
+            return "not_applicable"
+        if not _check_enabled(key, gradient_tol, rms_tol, peak_tol, cross_tol):
+            return "not_checked"
+        return "PASS" if checks[key] else "FAIL"
 
     return {
         "linearity_enabled": bool(enabled),
-        "linearity_status": "PASS" if met else "FAIL" if enabled else "not_checked",
+        "linearity_applicable": applicable,
+        "linearity_status": ("PASS" if met else "FAIL")
+        if enabled
+        else "not_checked"
+        if applicable
+        else "not_applicable",
         "linearity_met": bool(met),
         "linearity_failure_reasons": "; ".join(reasons),
         "linearity_region": _normalise_linearity_region(getattr(config, "linearity_region", "dsv")),
@@ -176,10 +204,12 @@ def gradient_linearity_summary(field_T: Any, target_field: Any, config: Any) -> 
         "linearity_gradient_strength_error_percent": float(gradient_strength_error_percent),
         "linearity_gradient_strength_tolerance_percent": float(gradient_tol),
         "linearity_gradient_strength_met": bool(checks["gradient_strength_met"]),
+        "linearity_gradient_strength_status": check_status("gradient_strength_met"),
         "linearity_cross_gradient_T_per_m": float(data["cross_gradient_T_per_m"]),
         "linearity_cross_gradient_percent": float(cross_percent),
         "linearity_cross_gradient_tolerance_percent": float(cross_tol),
         "linearity_cross_gradient_met": bool(checks["cross_gradient_met"]),
+        "linearity_cross_gradient_status": check_status("cross_gradient_met"),
         "linearity_rms_residual_T": float(rms_residual),
         "linearity_p95_abs_residual_T": float(p95_residual),
         "linearity_peak_abs_residual_T": float(peak_residual),
@@ -190,6 +220,8 @@ def gradient_linearity_summary(field_T: Any, target_field: Any, config: Any) -> 
         "linearity_peak_tolerance_percent": float(peak_tol),
         "linearity_rms_met": bool(checks["rms_met"]),
         "linearity_peak_met": bool(checks["peak_met"]),
+        "linearity_rms_status": check_status("rms_met"),
+        "linearity_peak_status": check_status("peak_met"),
         "linearity_sample_count": int(data["sample_count"]),
     }
 

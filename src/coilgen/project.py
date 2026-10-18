@@ -231,6 +231,8 @@ class CoilChannelRun:
             "label": self.channel.display_label,
             "role": self.channel.role,
             "status": "failed" if self.exception is not None else "success",
+            "execution_status": "failed" if self.exception is not None else "completed" if self.ok else "not_run",
+            "engineering_status": "NOT_ASSESSED",
             "design_name": getattr(self.design, "name", ""),
             "target_bz_expression": getattr(
                 self.design, "target_bz_expression", self.channel.target_bz_expression or ""
@@ -244,6 +246,8 @@ class CoilChannelRun:
             row["quality_status"] = "failed"
             row["failure_type"] = type(self.exception).__name__
             row["failure_message"] = str(self.exception)
+            row["first_failure"] = str(self.exception)
+            row["failure_evidence"] = [str(path) for path in self.files]
             return row
 
         result = self.result
@@ -256,6 +260,8 @@ class CoilChannelRun:
         quality = self.quality or result_quality_status(result)
         summary = result_summary_dict(result)
         row["quality_status"] = quality.status
+        row["engineering_status"] = quality.status
+        row["first_failure"] = quality.failures[0] if quality.failures else ""
         for key in PROJECT_SUMMARY_KEYS:
             row[key] = summary.get(key, "")
         row.update(_project_drive_metrics_from_summary(row))
@@ -743,8 +749,25 @@ class CoilProject:
                 channel_run = CoilChannelRun(channel=channel, design=design, artifacts=artifacts, files=tuple(files))
                 saved_files.extend(files)
             except Exception as exc:
-                channel_run = CoilChannelRun(channel=channel, design=design, exception=exc)
+                failure_files = tuple(getattr(exc, "coilgen_failure_files", ()))
+                channel_run = CoilChannelRun(channel=channel, design=design, exception=exc, files=failure_files)
+                saved_files.extend(failure_files)
                 if not keep_going:
+                    partial_runs = (*channel_runs, channel_run)
+                    failed_run = CoilProjectRun(
+                        project=self,
+                        output_dir=output,
+                        channel_runs=partial_runs,
+                        summary_rows=tuple(run.summary_row() for run in partial_runs),
+                        files=tuple(saved_files),
+                    )
+                    self.last_run = failed_run
+                    if do_write_summary:
+                        try:
+                            failed_run.files += tuple(write_project_summary(failed_run))
+                        except Exception as summary_error:
+                            if hasattr(exc, "add_note"):
+                                exc.add_note(f"Partial project summary could not be saved: {summary_error}")
                     raise
             channel_runs.append(channel_run)
 
@@ -1433,6 +1456,9 @@ def _project_summary_metric_reference_required(column: str) -> bool:
         "label",
         "role",
         "status",
+        "execution_status",
+        "engineering_status",
+        "first_failure",
         "design_context",
         "target_bz_expression",
         "target_scale",
@@ -1973,6 +1999,9 @@ def _project_channel_summary_columns(project_run: CoilProjectRun) -> tuple[str, 
     context = _project_run_design_context(project_run)
     columns = [
         "channel",
+        "execution_status",
+        "engineering_status",
+        "first_failure",
         "design_context",
         "target_bz_expression",
         "target_scale",
@@ -2026,6 +2055,9 @@ def _project_channel_summary_sections(project_run: CoilProjectRun) -> tuple[tupl
     add(
         "Channel / Target",
         (
+            "execution_status",
+            "engineering_status",
+            "first_failure",
             "design_context",
             "target_bz_expression",
             "target_scale",
@@ -2274,6 +2306,9 @@ def _project_plot_book_short_name(spec: Any, title: str, index: int, total: int)
 def _summary_markdown(project_name: str, rows: Sequence[Mapping[str, Any]]) -> str:
     columns = (
         "channel",
+        "execution_status",
+        "engineering_status",
+        "first_failure",
         "quality_status",
         "target_bz_expression",
         "target_scale",

@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from threading import Event
 
 import numpy as np
-from PySide6.QtCore import QObject, QPointF, QRunnable, QThreadPool, Qt, Signal
+from PySide6.QtCore import QObject, QPointF, QRunnable, QSignalBlocker, QThreadPool, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -134,17 +134,21 @@ class _ArrayTask(QRunnable):
 
     def report(self, text):
         from ..progress import DesignCancelled
+        from .design_tasks import deliver_task_signal
 
         if self.cancel.is_set():
             raise DesignCancelled("Array study cancelled between numerical operations.")
-        self.signals.progress.emit(text)
+        deliver_task_signal(self.signals, "progress", text)
 
     def report_details(self, event):
-        self.signals.details.emit(event)
-        self.signals.progress.emit(str(event.get("message", "")))
+        from .design_tasks import deliver_task_signal
+
+        deliver_task_signal(self.signals, "details", event)
+        deliver_task_signal(self.signals, "progress", str(event.get("message", "")))
 
     def run(self):
         from ..progress import progress_context
+        from .design_tasks import deliver_task_signal
 
         try:
             with progress_context(self.relay.report, self.cancel.is_set):
@@ -152,10 +156,10 @@ class _ArrayTask(QRunnable):
                 self.report("Array study computation complete; publishing verified results.")
         except Exception as exc:
             self.relay.flush()
-            self.signals.finished.emit(None, f"{type(exc).__name__}: {exc}")
+            deliver_task_signal(self.signals, "finished", None, f"{type(exc).__name__}: {exc}")
         else:
             self.relay.flush()
-            self.signals.finished.emit(result, "")
+            deliver_task_signal(self.signals, "finished", result, "")
 
 
 class ArrayFieldCanvas(QWidget):
@@ -703,15 +707,29 @@ class ArrayStudyDialog(QDialog):
         self.progressDetails.emit(event)
 
     def _finished(self, result, error):
-        self.worker = None
-        self.tabs.setEnabled(True)
-        self.buttons.setEnabled(True)
-        self.progress.hide()
-        self.cancel.hide()
-        self.busyChanged.emit(False)
-        if error:
-            self.status.setText("Array study failed: " + error)
-            return
+        try:
+            if error:
+                self.status.setText("Array study failed: " + error)
+                return
+            message = "Publishing array results…"
+            self.status.setText(message)
+            self.progress.show()
+            self.cancel.setEnabled(False)
+            self.progressChanged.emit(message)
+            self._progress_details({"percent": None, "progress_indeterminate": True, "message": message})
+            self._publish_results(result)
+        except Exception as exc:
+            self.status.setText(f"Array result publication failed: {type(exc).__name__}: {exc}")
+        finally:
+            self.worker = None
+            self.tabs.setEnabled(True)
+            self.buttons.setEnabled(True)
+            self.progress.hide()
+            self.cancel.hide()
+            self.cancel.setEnabled(True)
+            self.busyChanged.emit(False)
+
+    def _publish_results(self, result):
         self.results = result
         self._computed_spec = self._pending_spec
         self.scope.setText(result["scope"])
@@ -734,7 +752,11 @@ class ArrayStudyDialog(QDialog):
             for col, value in enumerate(values):
                 self.result_table.setItem(row, col, self._item(value, False))
         self.result_table.resizeColumnsToContents()
-        self.result_table.selectRow(0)
+        # Publish directly so rendering errors are handled by _finished rather
+        # than escaping through a Qt selection callback.
+        with QSignalBlocker(self.result_table):
+            self.result_table.selectRow(0)
+        self._show_samples()
         self.export.setEnabled(True)
         self.tabs.setCurrentIndex(2)
         self.status.setText("Array study complete. Results refer to the captured case and driver contracts.")

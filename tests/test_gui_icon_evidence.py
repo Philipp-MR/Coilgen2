@@ -249,6 +249,33 @@ def test_problem_icons_retain_original_evidence_and_missing_witness_guard(widget
     assert not panel.locate.isEnabled() and not panel.navigate.isEnabled()
 
 
+def test_problem_scope_body_filter_keeps_distinct_saved_checks_and_selects_correct_owner(widgets, monkeypatch):
+    from coilgen.gui import problems
+
+    issues = (
+        ProblemIssue(
+            "first:clearance", "Clearance fails", "Pipeline failure.", body_id="first", scope="pipeline_sweep_geometry"
+        ),
+        ProblemIssue(
+            "first:clearance", "Clearance fails", "Strict review failure.", body_id="first", scope="fabrication_review"
+        ),
+        ProblemIssue("other:bend", "Bend fails", "Other body.", body_id="other", scope="fabrication_review"),
+    )
+    monkeypatch.setattr(problems, "run_problems", lambda _record: issues)
+    panel = widgets(ProblemsPanel)
+    panel.set_run(SimpleNamespace(metadata={"artifacts": [{"name": "request.json", "sha256": "a" * 64}]}))
+    assert panel.group_filter.count() == 4
+    panel.group_filter.setCurrentIndex(2)
+    assert [panel.table.isRowHidden(row) for row in range(3)] == [True, False, True]
+    assert panel._issue() is issues[1]
+    assert "Strict review failure" in panel.details.text()
+    assert not panel.locate.isEnabled()
+    panel.group_filter.setCurrentIndex(3)
+    assert panel._issue() is issues[2]
+    panel.group_filter.setCurrentIndex(0)
+    assert all(not panel.table.isRowHidden(row) for row in range(3))
+
+
 def test_readiness_icons_distinguish_blocking_inputs_from_nonblocking_notes(widgets):
     issues = (
         ReadinessIssue("Bend radius must be nonnegative", "winding", "sweep_min_bend_radius", "Set a valid radius."),

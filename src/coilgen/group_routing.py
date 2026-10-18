@@ -13,7 +13,14 @@ import numpy as np
 
 from .models import CoilPart, InterGroupCut, WirePath, WirePathGeometry, WireSegmentOwner
 from .joint_state_search import RoutingEvaluationBudgetExceeded, search_group_states
-from .routing_objective import RoutingSearchCost, search_cost_key
+from .routing_objective import (
+    RoutingSearchCost,
+    search_cost_key,
+    routing_selection_policy,
+    regularity_order_key,
+    transition_regularity,
+    REGULARITY_NAMES,
+)
 
 
 SegmentId = tuple[int, int, int]
@@ -105,11 +112,11 @@ def _evaluate_transition(evaluator, points, tangent_before, tangent_after):
     return value
 
 
-def _mutable_cost(points, identities, b0_direction, b0_weight, transition_evaluator=None):
+def _mutable_cost(points, identities, b0_direction, b0_weight, transition_evaluator=None, *, policy="physical"):
     """Charge alignment only to mutable intervals; protected turns stay fixed."""
     from .routing_objective import routing_cost
 
-    cost = 0.0
+    cost = RoutingSearchCost(0, 0.0, (0.0,) * len(REGULARITY_NAMES)) if policy == "regular" else 0.0
     start = 0
     while start < len(identities):
         mutable = identities[start] is None
@@ -127,7 +134,15 @@ def _mutable_cost(points, identities, b0_direction, b0_weight, transition_evalua
                 return math.inf
             cost += mutable_cost
         else:
-            cost += routing_cost(section, b0_direction, b0_weight) if mutable else _length(section)
+            guide = routing_cost(section, b0_direction, b0_weight) if mutable else _length(section)
+            if mutable and policy == "regular":
+                measured = transition_regularity(
+                    section,
+                    points[start] - points[start - 1] if start else None,
+                    points[end + 1] - points[end] if end < len(identities) else None,
+                )
+                guide = RoutingSearchCost(0, guide, regularity_order_key(measured))
+            cost += guide
         start = end
     return cost
 
@@ -277,7 +292,14 @@ def _group_variants(
                 owners = spiral_owners + [WireSegmentOwner("within_group_return", group_index=group_index)] * count
                 if transition_evaluator is not None and (path_ids[0] is None or path_ids[-1] is None):
                     raise ValueError("A group state must expose protected directed intervals at both ports.")
-                cost = _mutable_cost(points, path_ids, b0_direction, b0_weight, transition_evaluator)
+                cost = _mutable_cost(
+                    points,
+                    path_ids,
+                    b0_direction,
+                    b0_weight,
+                    transition_evaluator,
+                    policy=routing_selection_policy(config),
+                )
                 if progress_callback is not None:
                     completed += 1
                     progress_callback(
@@ -429,7 +451,14 @@ def propose_joint_group_routes(
         result.reason = "invalid_group_provenance"
         result.diagnostics["detail"] = str(exc)
         return result
-    solver = SurfaceGeodesicSolver(part.mesh) if _use_geodesic_inter_group_paths(config) else None
+    solver = (
+        SurfaceGeodesicSolver(
+            part.mesh,
+            refine_routes=routing_selection_policy(config) == "regular",
+        )
+        if _use_geodesic_inter_group_paths(config)
+        else None
+    )
     strict = _strict_geodesic_inter_group_paths(config)
     connections = {}
     possible_connections = (
@@ -467,6 +496,15 @@ def propose_joint_group_routes(
             if valid:
                 if transition_evaluator is None:
                     cost = routing_cost(points, b0_direction, b0_weight)
+                    if routing_selection_policy(config) == "regular":
+                        first_points = variants[first[0]][first[1]].path.v
+                        second_points = variants[second[0]][second[1]].path.v
+                        measured = transition_regularity(
+                            points,
+                            first_points[-1] - first_points[-2],
+                            second_points[1] - second_points[0],
+                        )
+                        cost = RoutingSearchCost(0, cost, regularity_order_key(measured))
                 else:
                     first_points = variants[first[0]][first[1]].path.v
                     second_points = variants[second[0]][second[1]].path.v

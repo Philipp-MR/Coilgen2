@@ -24,10 +24,22 @@ from .joint_transition_curves import (
     generate_joint_transition_curves,
 )
 from .joint_surface_curves import PLANAR_RETURN_TRIALS, generate_planar_return_curves
-from .joint_cylinder_curves import CYLINDER_TRANSITION_TRIALS, _cylinder_chart, generate_cylindrical_transition_curves
+from .joint_cylinder_curves import (
+    CYLINDER_TRANSITION_TRIALS,
+    _developable_chart,
+    generate_cylindrical_transition_curves,
+)
 from .manufacturing import _SurfaceProjector, _cross_section_envelope_radius, conductor_cross_section_points
 from .models import WirePath, WirePathGeometry
-from .routing_objective import RoutingSearchCost, routing_cost
+from .routing_objective import (
+    RoutingSearchCost,
+    routing_cost,
+    routing_selection_policy,
+    regularity_order_key,
+    transition_regularity,
+    REGULARITY_NAMES,
+    join_bend_consistency,
+)
 from .routing_jumps import raised_span_metrics
 
 
@@ -123,7 +135,7 @@ def _curve_geometry(curve):
     # support screen. Keep that contract through analytic surface realization;
     # a FREE_3D label would hold its chord below the realized cylinder while
     # neighboring retained contours move onto the analytic support.
-    nominal = getattr(curve, "profile_family", "") in {"planar_biarc_return", "cylinder_surface"}
+    nominal = getattr(curve, "profile_family", "") in {"planar_biarc_return", "cylinder_surface", "frustum_surface"}
     return [WirePathGeometry.SURFACE if nominal else WirePathGeometry.FREE_3D] * (len(curve.points) - 1)
 
 
@@ -231,10 +243,12 @@ class JointTransitionEvaluator:
         )
         self.b0_direction = tuple(config.b_0_direction)
         self.b0_weight = float(config.joint_group_routing_b0_weight)
+        self.selection_policy = routing_selection_policy(config)
         self.jump_tolerance = float(config.routing_jump_height_tolerance_m)
         self.jump_spacing = float(config.routing_jump_sample_spacing_m)
         self._jump_counts = {}
         self._jump_geometry_counts = {}
+        self._regularity_guides = {}
         routing_cost(np.zeros((2, 3)), self.b0_direction, self.b0_weight)
         self.allowed_shift = 0.0 if config.skip_normal_shift else float(config.normal_shift_length)
         envelope = _cross_section_envelope_radius(conductor_cross_section_points(config))
@@ -360,7 +374,11 @@ class JointTransitionEvaluator:
             "sweep_bend_clearance_margin",
             "min_wire_distance_m",
         )
-        return tuple(repr(getattr(config, name)) for name in names), np.asarray(profile).tobytes()
+        return (
+            tuple(repr(getattr(config, name)) for name in names),
+            np.asarray(profile).tobytes(),
+            routing_selection_policy(config),
+        )
 
     @staticmethod
     def _support_key(part):
@@ -390,16 +408,20 @@ class JointTransitionEvaluator:
         for reason in self.last_rejected_reasons:
             reasons[reason] = reasons.get(reason, 0) + 1
         witnesses = self.diagnostics["failed_transition_witnesses"]
-        if len(witnesses) < 8:
-            witnesses.append(
-                dict(
-                    endpoints_m=source[[0, -1]].tolist(),
-                    tangent_before=before.tolist(),
-                    tangent_after=after.tolist(),
-                    source_point_count=len(source),
-                    reasons=list(self.last_rejected_reasons),
-                )
-            )
+        record = dict(
+            endpoints_m=source[[0, -1]].tolist(),
+            tangent_before=before.tolist(),
+            tangent_after=after.tolist(),
+            source_point_count=len(source),
+            reasons=list(self.last_rejected_reasons),
+        )
+        if len(witnesses) < 16 and not any(
+            prior["endpoints_m"] == record["endpoints_m"]
+            and prior["tangent_before"] == record["tangent_before"]
+            and prior["tangent_after"] == record["tangent_after"]
+            for prior in witnesses
+        ):
+            witnesses.append(record)
 
     def _supported(self, generation, source, normal):
         if "budget_exceeded" in generation.reason:
@@ -609,7 +631,21 @@ class JointTransitionEvaluator:
         return count
 
     def _curve_key(self, curve):
-        return self.jump_count(curve), round(routing_cost(curve.points, self.b0_direction, self.b0_weight), 12)
+        guide = round(routing_cost(curve.points, self.b0_direction, self.b0_weight), 12)
+        if getattr(self, "selection_policy", "physical") != "regular":
+            return self.jump_count(curve), guide
+        return self.jump_count(curve), *self._regularity_key(curve), guide
+
+    def _regularity_key(self, curve):
+        points = np.asarray(curve.points, dtype=float)
+        signature = hashlib.sha256(points.tobytes()).digest()
+        cache = self.__dict__.setdefault("_regularity_guides", {})
+        record = cache.get(id(curve))
+        if record is None or record[0] is not curve or record[1] != signature:
+            record = curve, signature, regularity_order_key(transition_regularity(points))
+            if len(cache) < self.limits.maximum_shape_trials:
+                cache[id(curve)] = record
+        return record[2]
 
     def _shortlist(self, curves, maximum=16):
         """Keep jump/family alternatives at their supported height extremes.
@@ -622,7 +658,8 @@ class JointTransitionEvaluator:
         """
         ordered = sorted(curves, key=self._curve_key)
         progressive = getattr(self, "search_mode", "thorough") == "progressive"
-        if progressive:
+        regular = getattr(self, "selection_policy", "physical") == "regular"
+        if progressive or regular:
             maximum = max(maximum, 32)
         grouped = {}
         for curve in ordered:
@@ -655,6 +692,23 @@ class JointTransitionEvaluator:
             selected.append(curve)
             if len(selected) >= maximum:
                 break
+        if regular and ordered:
+            # Reserve the historical cheap guide's first sixteen alternatives,
+            # not just its leader: remote interactions can require a sibling
+            # which looks equivalent locally. New regular leaders and family /
+            # height representatives share the remaining bounded slots.
+            physical = sorted(
+                curves,
+                key=lambda curve: (
+                    self.jump_count(curve),
+                    round(routing_cost(curve.points, self.b0_direction, self.b0_weight), 12),
+                ),
+            )
+            for competing in physical[:16]:
+                if len(selected) >= maximum:
+                    break
+                if all(competing is not prior for prior in selected):
+                    selected.append(competing)
         for curve in ordered:
             if len(selected) >= maximum:
                 break
@@ -765,7 +819,7 @@ class JointTransitionEvaluator:
                         raise RoutingEvaluationBudgetExceeded(planar.reason)
                     if not hasattr(self, "_cylinder_chart_snapshot"):
                         try:
-                            self._cylinder_chart_snapshot = _cylinder_chart(self.projector)
+                            self._cylinder_chart_snapshot = _developable_chart(self.projector)
                             self._cylinder_chart_error = None
                         except (AttributeError, TypeError, ValueError) as error:
                             self._cylinder_chart_snapshot = None
@@ -874,7 +928,16 @@ class JointTransitionEvaluator:
         if not curves:
             return RoutingSearchCost(0, np.inf)
         curve = min(curves, key=self._curve_key)
-        return RoutingSearchCost(self.jump_count(curve), routing_cost(curve.points, self.b0_direction, self.b0_weight))
+        regular = (
+            regularity_order_key(transition_regularity(curve.points, tangent_before, tangent_after))
+            if getattr(self, "selection_policy", "physical") == "regular"
+            else ()
+        )
+        return RoutingSearchCost(
+            self.jump_count(curve),
+            routing_cost(curve.points, self.b0_direction, self.b0_weight),
+            regular,
+        )
 
 
 def _continuation_segments(segments, attachments, arclength, incident=None):
@@ -933,6 +996,8 @@ def _rank_curve_combinations(
     return_blocks=None,
     protected_clearance_certificate=None,
     coupling_evaluator=None,
+    selection_policy="physical",
+    join_groups=None,
 ):
     """Beam search on a conservative spatial interaction graph.
 
@@ -999,6 +1064,11 @@ def _rank_curve_combinations(
         fixed_scores.append(scores)
     diagnostics["reused_protected_clearance_certificates"] = reused_certificates
     costs = [[routing_cost(curve.points, b0_direction, b0_weight) for curve in available] for available in choices]
+    regularity = (
+        [[regularity_order_key(transition_regularity(curve.points)) for curve in available] for available in choices]
+        if selection_policy == "regular"
+        else None
+    )
     jumps = jump_counts if jump_counts is not None else [[0] * len(available) for available in choices]
     detour_metrics = [
         [_detour_curve_key(curve) if return_blocks is None or return_blocks[index] else None for curve in available]
@@ -1055,10 +1125,27 @@ def _rank_curve_combinations(
         selected, gap, cost = state
         future_bound = future_jump_bound(selected) if gap + 1e-12 >= clearance else None
         feasible = future_bound is not None
+        regular = (
+            tuple(
+                round(sum(regularity[index][option][metric] for index, option in enumerate(selected)), 10)
+                for metric in range(len(REGULARITY_NAMES))
+            )
+            if regularity is not None
+            else ()
+        )
+        if regular and join_groups is not None:
+            energy_index = REGULARITY_NAMES.index("added_bending_energy")
+            consistency_index = REGULARITY_NAMES.index("added_join_bend_consistency")
+            consistency = join_bend_consistency(
+                [regularity[index][option][energy_index] for index, option in enumerate(selected)],
+                join_groups[: len(selected)],
+            )
+            regular = regular[:consistency_index] + (round(consistency, 10),) + regular[consistency_index + 1 :]
         return (
             not feasible,
             0 if feasible else -round(gap, 12),
             sum(jumps[index][option] for index, option in enumerate(selected)) + (future_bound or 0),
+            *regular,
             round(cost, 12),
             selected,
         )
@@ -1078,6 +1165,10 @@ def _rank_curve_combinations(
         eligible = [
             state for state in ordered if (state_key(state)[0], state_key(state)[2]) == (best_key[0], best_key[2])
         ]
+        if regularity is not None:
+            physical_leader = min(eligible, key=lambda state: (round(state[2], 12), state[0]))
+            if physical_leader not in selected and len(selected) < limit:
+                selected.append(physical_leader)
         counts = {state[0]: _return_family_counts(choices, state[0], return_blocks) for state in eligible}
         if paired_detour_domains:
             representatives = _detour_rail_representatives(
@@ -1138,6 +1229,11 @@ def _rank_curve_combinations(
         forward_domain_checks=future_checks,
         forward_domain_failed_prefixes=future_failures,
         forward_domain_scope="necessary_nominal_completion_conditions_only",
+        geometric_selection_policy=selection_policy,
+        regularity_guide_scope=(
+            "directed_attachment_angles_and_normalized_added_transition_bending_"
+            "with_within_group_join_consistency_before_whole_body_realization"
+        ),
     )
     reused_pairs = (
         coupling_evaluator.diagnostics.get("coupling_pair_cache_hits", 0) - reused_pairs_before
@@ -1185,7 +1281,10 @@ def shape_joint_group_route(
     interaction queries, rather than an arbitrary winding-transition count.
     ``maximum_transitions`` remains an optional explicit caller admission limit.
     """
-    result = GroupRouteProposals(reason="no_supported_transition")
+    result = GroupRouteProposals(
+        reason="no_supported_transition",
+        diagnostics={"infeasibility_proven": False, "work_budget_exhausted": False},
+    )
     started = perf_counter()
     if transition_evaluator is not None:
         if limits is not None and limits != transition_evaluator.limits:
@@ -1207,7 +1306,12 @@ def shape_joint_group_route(
     )
     if maximum_transitions is not None and transition_count > maximum_transitions:
         result.reason = "joint_transition_budget_exceeded"
-        result.diagnostics.update(transition_count=transition_count, maximum_transitions=maximum_transitions)
+        result.diagnostics.update(
+            transition_count=transition_count,
+            maximum_transitions=maximum_transitions,
+            work_budget_exhausted=True,
+            search_failure_scope="work_budget_admission",
+        )
         return result
     # A reused evaluator already paid for its cached curves during graph search.
     # Its actual new work remains bounded by _consume_trials; a blanket estimate
@@ -1218,6 +1322,8 @@ def shape_joint_group_route(
             transition_count=transition_count,
             shape_trial_upper_bound=_TRANSITION_TRIALS * transition_count,
             maximum_shape_trials=limits.maximum_shape_trials,
+            work_budget_exhausted=True,
+            search_failure_scope="work_budget_admission",
         )
         return result
     result.diagnostics.update(
@@ -1227,7 +1333,11 @@ def shape_joint_group_route(
     )
     if len(candidate.protected_segments) > 100000:
         result.reason = "curve_input_budget_exceeded"
-        result.diagnostics["protected_segment_count"] = len(candidate.protected_segments)
+        result.diagnostics.update(
+            protected_segment_count=len(candidate.protected_segments),
+            work_budget_exhausted=True,
+            search_failure_scope="work_budget_admission",
+        )
         return result
     b0_direction = tuple(config.b_0_direction)
     b0_weight = float(config.joint_group_routing_b0_weight)
@@ -1248,6 +1358,7 @@ def shape_joint_group_route(
         evaluator.check_context(part, config, candidate.protected_segments)
     except RoutingEvaluationBudgetExceeded as error:
         result.reason = str(error)
+        result.diagnostics.update(work_budget_exhausted=True, search_failure_scope="work_budget")
         return result
     except ValueError as error:
         result.reason = "invalid_transition_evaluator_context"
@@ -1292,6 +1403,8 @@ def shape_joint_group_route(
                 elapsed_s=perf_counter() - started,
                 failed_transition_index=len(blocks),
                 source_segment_span=[index, end],
+                work_budget_exhausted=True,
+                search_failure_scope="work_budget",
             )
             return result
         except ValueError as error:
@@ -1313,6 +1426,17 @@ def shape_joint_group_route(
                 elapsed_s=perf_counter() - started,
                 failed_transition_index=len(blocks),
                 source_segment_span=[index, end],
+                failed_transition_owner=vars(connectors[0] if connectors else owners[0]).copy(),
+                failed_transition_witness={
+                    "endpoints_m": source[[0, -1]].tolist(),
+                    "tangent_before": before.tolist(),
+                    "tangent_after": after.tolist(),
+                    "owner": vars(connectors[0] if connectors else owners[0]).copy(),
+                    "reasons": list(evaluator.last_rejected_reasons),
+                },
+                search_failure_scope="bounded_local_curve_family",
+                work_budget_exhausted=False,
+                infeasibility_proven=False,
             )
             return result
         blocks.append((index, end, connectors[0] if connectors else owners[0]))
@@ -1332,6 +1456,10 @@ def shape_joint_group_route(
         owner.kind == "inter_group_connector" or getattr(owner, "connector_role", "") == "joint_return"
         for _start, _end, owner in blocks
     )
+    join_groups = tuple(
+        owner.group_index if getattr(owner, "connector_role", "") == "joint_spiral_join" else None
+        for _start, _end, owner in blocks
+    )
     try:
         combinations = _rank_curve_combinations(
             choices,
@@ -1348,6 +1476,8 @@ def shape_joint_group_route(
             return_blocks=return_blocks,
             protected_clearance_certificate=evaluator.protected_clearance_certificate,
             coupling_evaluator=evaluator,
+            selection_policy=routing_selection_policy(config),
+            join_groups=join_groups,
         )
         conflicts = result.diagnostics.get("conflicting_transition_pairs", [])
         if conflicts:
@@ -1376,6 +1506,8 @@ def shape_joint_group_route(
                 return_blocks=return_blocks,
                 protected_clearance_certificate=evaluator.protected_clearance_certificate,
                 coupling_evaluator=evaluator,
+                selection_policy=routing_selection_policy(config),
+                join_groups=join_groups,
             )
     except (_DistanceBudgetExceeded, RoutingEvaluationBudgetExceeded) as error:
         if progress_callback is not None:
@@ -1385,6 +1517,8 @@ def shape_joint_group_route(
             interaction_scores=work.interaction_scores,
             spatial_candidate_pairs=work.spatial_pairs,
             elapsed_s=perf_counter() - started,
+            work_budget_exhausted=True,
+            search_failure_scope="work_budget",
             **evaluator.work_diagnostics(),
         )
         return result
@@ -1436,6 +1570,22 @@ def shape_joint_group_route(
             )
         )
         result.candidates[-1].joint_return_family_counts = _return_family_counts(choices, selected, return_blocks)
+        energies = [
+            transition_regularity(choices[index][option].points)["added_bending_energy"]
+            for index, option in enumerate(selected)
+        ]
+        result.candidates[-1].joint_join_family_diagnostics = dict(
+            normalized_bend_variance=join_bend_consistency(energies, join_groups),
+            families=[
+                getattr(choices[index][option], "profile_family", "direct_arch")
+                if join_groups[index] is not None
+                else None
+                for index, option in enumerate(selected)
+            ],
+            groups=list(join_groups),
+            normalized_bending_energies=energies,
+            feasibility_certified=False,
+        )
         detour_key = _detour_return_key(
             [
                 _detour_curve_key(choices[index][option]) if return_blocks[index] else None
@@ -1453,7 +1603,11 @@ def shape_joint_group_route(
         candidate_return_family_counts=[candidate.joint_return_family_counts for candidate in result.candidates],
         proposed_remote_gap_scores_m=[state[1] for state in combinations],
         clearance_score_is_finite_body_certificate=False,
-        routing_objective="jump_count_then_length_plus_b0_transverse_guide",
+        routing_objective=(
+            "jump_count_then_added_regularity_with_length_b0_family_diversity"
+            if routing_selection_policy(config) == "regular"
+            else "jump_count_then_length_plus_b0_transverse_guide"
+        ),
         proposed_jump_counts=[
             sum(evaluator.jump_count(choices[index][option]) for index, option in enumerate(state[0]))
             for state in combinations
