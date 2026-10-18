@@ -130,4 +130,7 @@ def test_partial_summary_write_error_preserves_scientific_failure(monkeypatch, t
         project.solve()
     assert project.last_run is not None
     assert project.last_run.channel_runs[0].exception is caught.value
-    assert any("summary storage unavailable" in note for note in caught.value.__notes__)
+    if hasattr(BaseException, "add_note"):
+        assert any("summary storage unavailable" in note for note in caught.value.__notes__)
+    else:
+        assert not hasattr(caught.value, "__notes__")

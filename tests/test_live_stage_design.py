@@ -30,7 +30,10 @@ def test_full_owned_design_publishes_all_boundaries_and_preserves_final_project_
     project = ProjectDocument.from_config(config, name="Compact live Gy regression")
     runtime = tmp_path / "jobs"
     observed_boundaries, seen_preview_boundaries = [], set()
-    with JobManager(runtime, RuntimePolicy(timeout_seconds=90)) as jobs:
+    # This verifies completion/evidence, not speed; hosted runners need more
+    # than 90 seconds for the unchanged full numerical/fabrication pipeline.
+    timeout_seconds = 180
+    with JobManager(runtime, RuntimePolicy(timeout_seconds=timeout_seconds)) as jobs:
         submitted = DesignService.submit(
             project,
             jobs,
@@ -46,7 +49,7 @@ def test_full_owned_design_publishes_all_boundaries_and_preserves_final_project_
             "expected_project_revision": project.revision,
         }
         directory = runtime / submitted["id"]
-        deadline = time.monotonic() + 90
+        deadline = time.monotonic() + timeout_seconds + 15
         latest = None
         while time.monotonic() < deadline:
             state = jobs.get(submitted["id"])
@@ -61,7 +64,7 @@ def test_full_owned_design_publishes_all_boundaries_and_preserves_final_project_
                 break
             time.sleep(0.02)
         else:
-            pytest.fail("Compact full worker design exceeded its bounded runtime.")
+            pytest.fail(f"Compact full worker design exceeded its bounded runtime: {state}")
         assert state["status"] == "completed", state
         expected = [stage.value for stage in PipelineStage]
         assert state["completed_stages"] == observed_boundaries == expected

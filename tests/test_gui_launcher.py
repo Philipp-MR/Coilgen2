@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -113,6 +114,7 @@ def test_repository_launcher_enters_qt_event_loop_without_live_jobs(tmp_path, lo
             """
             import json
             import os
+            import sys
             from pathlib import Path
             from PySide6.QtCore import QTimer
             from PySide6.QtWidgets import QApplication
@@ -130,6 +132,7 @@ def test_repository_launcher_enters_qt_event_loop_without_live_jobs(tmp_path, lo
                     try:
                         window = self._coilgen_workbenches[0]
                         result = {
+                            'python_executable': sys.executable,
                             'event_loop_entered': True,
                             'window_visible': window.isVisible(),
                             'compute_visible': window.compute_button.isVisible(),
@@ -185,12 +188,22 @@ def test_repository_launcher_enters_qt_event_loop_without_live_jobs(tmp_path, lo
     if load_project:
         assert result["compute_visible"]
     assert result["viewport"] == "ScientificViewport"
+    project_interpreter = ROOT / ".venv" / "Scripts" / "python.exe"
+    if project_interpreter.is_file():
+        expected_interpreter = project_interpreter
+        interpreter_message = "Python: project virtual environment (.venv)"
+    else:
+        located = shutil.which("python", path=environment["PATH"])
+        assert located is not None, "The launcher requires an available Python on PATH."
+        expected_interpreter = Path(located)
+        interpreter_message = "Python: available Python on PATH"
+    assert Path(result["python_executable"]).resolve() == expected_interpreter.resolve()
     assert result["no_job_manager"]
     assert Path(result["jobs_directory"]) == jobs
     assert result["project"] == ("Saved launch design" if load_project else None)
     messages = (
         "Starting CoilGen2...",
-        "Python: project virtual environment (.venv)",
+        interpreter_message,
         "Loading GUI and scientific libraries...",
         "Initializing Qt...",
         "Initializing 3D rendering...",
