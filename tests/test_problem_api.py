@@ -310,7 +310,7 @@ class ProblemApiTest(unittest.TestCase):
 
         self.assertEqual(config.coil_mesh_file, "create cylinder mesh")
         self.assertEqual(config.surface_is_cylinder_flag, True)
-        self.assertEqual(tuple(config.cylinder_mesh_parameter_list[:4]), (0.3, 0.2, 8, 4))
+        self.assertEqual(tuple(config.cylinder_mesh_parameter_list[:4]), (0.375, 0.2, 8, 4))
         self.assertEqual(config.target_field_definition_file.startswith("memory:target:"), True)
         self.assertEqual(validate_config(config).ok, True)
 

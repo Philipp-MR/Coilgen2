@@ -1,3 +1,6 @@
 # Keep Python checkouts consistent with Ruff on every platform.
 *.py text eol=lf
 *.pyi text eol=lf
+
+# Preserve recorded checksums for generated numerical figures on Windows.
+docs/frontpage/*.svg text eol=lf

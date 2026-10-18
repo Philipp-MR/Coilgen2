@@ -176,6 +176,7 @@ def study_result_from_coilgen_result(
     summary = result_summary_dict(result)
     quality = result_quality_status(result)
     metric_specs = {
+        "layout_field_efficiency_mT_per_A": ("mT A^-1", "absolute mean DSV Bz per ampere for a uniform target"),
         "layout_gradient_efficiency_mT_per_m_per_A": ("mT m^-1 A^-1", "fitted DSV target-mode efficiency"),
         "layout_mean_rel_error_percent": ("%", "mean relative DSV target-mode error"),
         "layout_max_rel_error_percent": ("%", "peak relative DSV target-mode error"),

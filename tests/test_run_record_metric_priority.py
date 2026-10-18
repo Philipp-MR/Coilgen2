@@ -13,6 +13,9 @@ def test_compact_logs_retain_engineering_metrics_before_optional_diagnostics(
 ) -> None:
     critical = {
         "layout_gradient_efficiency_mT_per_m_per_A": 0.35,
+        "layout_field_efficiency_mT_per_A": 0.063,
+        "unconnected_contours_field_efficiency_mT_per_A": 0.064,
+        "stream_function_field_efficiency_mT_per_A": 0.065,
         "layout_needed_current_A": 12.0,
         "coil_resistance_total_ohm": 0.8,
         "coil_inductance_same_current_H": 0.0002,

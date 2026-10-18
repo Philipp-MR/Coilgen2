@@ -65,6 +65,26 @@ def check_nearly_collinear_wire():
     return rows
 
 
+def check_chunk_invariance():
+    rng = np.random.default_rng(3490)
+    angle = np.linspace(0, 4 * np.pi, 257)
+    wire = np.column_stack((0.1 * np.cos(angle), 0.1 * np.sin(angle), np.linspace(-0.15, 0.15, len(angle))))
+    targets = rng.normal(0, 0.01, size=(513, 3))
+    reference = biot_savart_wire_path(wire, targets, worker_count=1, max_chunk_memory_mb=64)
+    rows = []
+    for workers in (1, 3):
+        actual = biot_savart_wire_path(wire, targets, worker_count=workers, min_work_size=1, max_chunk_memory_mb=0.05)
+        np.testing.assert_allclose(actual, reference, rtol=3e-14, atol=1e-20)
+        rows.append(
+            {
+                "workers": workers,
+                "chunk_memory_budget_mb": 0.05,
+                "relative_L2_difference": float(np.linalg.norm(actual - reference) / np.linalg.norm(reference)),
+            }
+        )
+    return rows
+
+
 def check_uniform_sheet():
     base = np.array([[-0.1, -0.1, 0.0], [0.1, -0.1, 0.0], [0.1, 0.1, 0.0], [-0.1, 0.1, 0.0]])
     faces = np.array([[0, 1, 2], [0, 2, 3]])
@@ -136,6 +156,7 @@ if __name__ == "__main__":
         "scope": "Independent analytic field checks, finite-wire conditioning, P1 sheet gauge/current and SI scaling. No optimized-mesh convergence or hardware qualification is asserted.",
         "circular_loop_refinement": check_loop_refinement(),
         "nearly_collinear_wire": check_nearly_collinear_wire(),
+        "chunk_and_worker_invariance": check_chunk_invariance(),
         "uniform_sheet_solid_angle": check_uniform_sheet(),
     }
     destination = Path(__file__).with_suffix(".json")

@@ -41,6 +41,12 @@ from .metrics import dsv_target_mask, suppression_target_mask, target_mode_fit_p
 from .models import CoilGenResult
 from .regularization_diagnostics import regularization_selection_report
 from .report_schema import REPORT_SCHEMA_VERSION
+from .target import (
+    _fit_bz_linear_gradient,
+    _gradient_strength_for_axis,
+    _linear_fit_gradient_tolerance,
+    _target_gradient_axis,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1058,6 +1064,18 @@ def result_performance_table_rows(result: CoilGenResult) -> list[list[str]]:
         if formatted:
             rows.append([group, quantity, formatted, unit])
 
+    def add_efficiency(source: str, label: str) -> None:
+        field_key = f"{source}_field_efficiency_mT_per_A"
+        if np.isfinite(summary.get(field_key, np.nan)):
+            add("DSV field fit", f"{label} field efficiency", field_key, "mT A^-1")
+        else:
+            add(
+                "DSV field fit",
+                f"{label} gradient efficiency",
+                f"{source}_gradient_efficiency_mT_per_m_per_A",
+                "mT m^-1 A^-1",
+            )
+
     part_count = int(summary.get("part_count", 0))
     add("Execution", "status", "execution_status")
     add("Quality", "engineering acceptance", "engineering_acceptance_status")
@@ -1091,12 +1109,7 @@ def result_performance_table_rows(result: CoilGenResult) -> list[list[str]]:
         add("Gradient slice maps", "concomitant peak", "gradient_slice_map_concomitant_peak_abs_T", "T")
 
     if design_context.enabled(EvaluationFeature.TARGET_MODE_FIT):
-        add(
-            "DSV field fit",
-            "connected-wire gradient efficiency",
-            "layout_gradient_efficiency_mT_per_m_per_A",
-            "mT m^-1 A^-1",
-        )
+        add_efficiency("layout", "connected-wire")
         add("DSV field fit", "connected-wire fitted current", "layout_needed_current_A", "A")
         add("DSV field fit", "connected-wire mean relative error", "layout_mean_rel_error_percent", "%")
         add("DSV field fit", "connected-wire max relative error", "layout_max_rel_error_percent", "%")
@@ -1105,18 +1118,8 @@ def result_performance_table_rows(result: CoilGenResult) -> list[list[str]]:
         add("Gradient linearity", "cross-gradient error", "linearity_cross_gradient_percent", "%")
         add("Gradient linearity", "RMS nonlinear residual", "linearity_rms_percent", "%")
         add("Gradient linearity", "peak nonlinear residual", "linearity_peak_percent", "%")
-        add(
-            "DSV field fit",
-            "unconnected-contour gradient efficiency",
-            "unconnected_contours_gradient_efficiency_mT_per_m_per_A",
-            "mT m^-1 A^-1",
-        )
-        add(
-            "DSV field fit",
-            "stream-function gradient efficiency",
-            "stream_function_gradient_efficiency_mT_per_m_per_A",
-            "mT m^-1 A^-1",
-        )
+        add_efficiency("unconnected_contours", "unconnected-contour")
+        add_efficiency("stream_function", "stream-function")
         add("DSV field fit", "stream-function mean relative error", "stream_function_mean_rel_error_percent", "%")
     elif design_context.enabled(EvaluationFeature.FIELD_ERROR):
         add("Target field fit", "connected-wire fitted current", "layout_needed_current_A", "A")
@@ -1625,6 +1628,7 @@ def target_mode_not_applicable_summary_dict(result: CoilGenResult) -> dict[str, 
     }
     for source in ("layout", "unconnected_contours", "stream_function"):
         summary[f"{source}_gradient_efficiency_mT_per_m_per_A"] = nan
+        summary[f"{source}_field_efficiency_mT_per_A"] = nan
         summary[f"{source}_needed_current_A"] = float(result.needed_current_layout) if source == "layout" else nan
         if source in error_map:
             stem = error_map[source]
@@ -1641,6 +1645,33 @@ def target_mode_not_applicable_summary_dict(result: CoilGenResult) -> dict[str, 
     return summary
 
 
+def _target_gradient_axis_identifiable(points, target_vectors, suppressed, axis: str) -> bool:
+    """Require the reported derivative to be identifiable from DSV geometry."""
+    finite = np.all(np.isfinite(points), axis=1) & np.isfinite(target_vectors[:, 2]) & ~suppressed
+    if np.count_nonzero(finite) < 2:
+        return False
+    selected = points[finite]
+    centered = selected - np.mean(selected, axis=0, keepdims=True)
+    try:
+        _, singular_values, directions = np.linalg.svd(centered, full_matrices=False)
+    except np.linalg.LinAlgError:
+        return False
+    if not len(singular_values) or not np.isfinite(singular_values[0]) or singular_values[0] <= 0:
+        return False
+    # Derivative reports conservatively reject very thin, ill-conditioned
+    # spatial directions. Both thresholds are independent of coordinate units.
+    relative_cutoff = max(np.sqrt(np.finfo(float).eps), max(centered.shape) * np.finfo(float).eps)
+    rank = int(np.count_nonzero(singular_values > singular_values[0] * relative_cutoff))
+    if axis == "magnitude":
+        return rank == 3
+    if axis not in {"x", "y", "z"}:
+        return False
+    direction = np.eye(3)[("x", "y", "z").index(axis)]
+    rowspace = directions[:rank]
+    null_projection = direction - rowspace.T @ (rowspace @ direction)
+    return bool(np.linalg.norm(null_projection) <= 128 * np.finfo(float).eps)
+
+
 def target_mode_summary_dict(result: CoilGenResult) -> dict[str, Any]:
     """Return target-mode fit metrics for stream, contours, and routed layout."""
 
@@ -1648,6 +1679,20 @@ def target_mode_summary_dict(result: CoilGenResult) -> dict[str, Any]:
     dsv_mask = dsv_target_mask(result.target_field)
     suppressed_mask = suppression_target_mask(result.target_field)
     target_scale = float(result.input_data.target_gradient_strength)
+    target_points = np.asarray(result.target_field.coords, dtype=float)
+    target_vectors = np.asarray(result.target_field.b, dtype=float)
+    target_gradient = _fit_bz_linear_gradient(target_points, target_vectors, suppressed_mask)
+    target_diagnostics = getattr(result.target_field, "target_diagnostics", {}) or {}
+    axis = target_diagnostics.get("target_gradient_axis")
+    if axis not in {"x", "y", "z", "magnitude"}:
+        imported = str(result.input_data.target_field_definition_file).strip().lower() not in {"", "none"}
+        source = str(
+            target_diagnostics.get("target_gradient_normalization_source", "imported" if imported else "expression")
+        )
+        axis = _target_gradient_axis(result.input_data, target_gradient, source=source)
+    target_strength = abs(_gradient_strength_for_axis(target_gradient, axis))
+    gradient_tolerance = _linear_fit_gradient_tolerance(target_points, target_vectors, suppressed_mask)
+    gradient_identifiable = _target_gradient_axis_identifiable(target_points, target_vectors, suppressed_mask, axis)
     fits = {
         "layout": target_mode_fit_performance(
             result.field_layout_per1Amp,
@@ -1670,7 +1715,22 @@ def target_mode_summary_dict(result: CoilGenResult) -> dict[str, Any]:
     }
     summary: dict[str, Any] = {}
     for source, fit in fits.items():
-        summary[f"{source}_gradient_efficiency_mT_per_m_per_A"] = float(fit["gradient_efficiency_mT_per_m_per_A"])
+        current = float(fit["needed_current_A"])
+        # Targets are already in tesla. Resolve their physical affine gradient
+        # instead of interpreting an arbitrary input scale as T/m (or Hz/m).
+        # This leaves the target-mode current and residual fits unchanged.
+        gradient_available = bool(
+            np.isfinite(target_strength)
+            and gradient_identifiable
+            and target_strength > gradient_tolerance
+            and np.isfinite(current)
+            and current != 0
+            and not np.isfinite(fit["field_efficiency_mT_per_A"])
+        )
+        summary[f"{source}_gradient_efficiency_mT_per_m_per_A"] = (
+            1000.0 * target_strength / abs(current) if gradient_available else float("nan")
+        )
+        summary[f"{source}_field_efficiency_mT_per_A"] = float(fit["field_efficiency_mT_per_A"])
         summary[f"{source}_needed_current_A"] = float(fit["needed_current_A"])
         summary[f"{source}_mean_rel_error_percent"] = float(fit["mean_rel_error_percent"])
         summary[f"{source}_max_rel_error_percent"] = float(fit["max_rel_error_percent"])
@@ -2280,11 +2340,16 @@ def _inductance_matrix_rows(values: Any) -> list[dict[str, Any]]:
 
 def _magnetostatic_feasibility_values(summary: dict[str, Any], quality: ResultQuality) -> dict[str, Any]:
     display_unit = str(summary.get("field_display_units", "T"))
+    efficiency_key = (
+        "layout_field_efficiency_mT_per_A"
+        if np.isfinite(summary.get("layout_field_efficiency_mT_per_A", np.nan))
+        else "layout_gradient_efficiency_mT_per_m_per_A"
+    )
     return {
         "overall_status": quality.status,
         "target_point_count": summary.get("target_point_count", ""),
         "dsv_target_point_count": summary.get("dsv_target_point_count", ""),
-        "layout_gradient_efficiency_mT_per_m_per_A": summary.get("layout_gradient_efficiency_mT_per_m_per_A", ""),
+        efficiency_key: summary.get(efficiency_key, ""),
         "layout_needed_current_A": summary.get("layout_needed_current_A", ""),
         "layout_mean_rel_error_percent": summary.get("layout_mean_rel_error_percent", ""),
         "layout_max_rel_error_percent": summary.get("layout_max_rel_error_percent", ""),

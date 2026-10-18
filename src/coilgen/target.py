@@ -894,12 +894,17 @@ def _fit_bz_linear_gradient(points: np.ndarray, target_b: np.ndarray, suppressed
         return np.zeros(3, dtype=float)
     fit_points = points[finite]
     fit_bz = bz[finite]
-    design = np.column_stack((np.ones(len(fit_points), dtype=float), fit_points))
+    # Separate the affine intercept before fitting gradients. Large world
+    # offsets otherwise make [1,x,y,z] numerically rank deficient and can mix
+    # the field offset into its derivatives. Lstsq retains the minimum-norm
+    # gradient for spatially rank-deficient samples.
+    fit_points = fit_points - np.mean(fit_points, axis=0, keepdims=True)
+    fit_bz = fit_bz - np.mean(fit_bz)
     try:
-        coefficients, *_ = np.linalg.lstsq(design, fit_bz, rcond=None)
+        coefficients, *_ = np.linalg.lstsq(fit_points, fit_bz, rcond=None)
     except np.linalg.LinAlgError:
         return np.zeros(3, dtype=float)
-    gradient = np.asarray(coefficients[1:4], dtype=float)
+    gradient = np.asarray(coefficients, dtype=float)
     if gradient.shape != (3,) or not np.all(np.isfinite(gradient)):
         return np.zeros(3, dtype=float)
     return gradient

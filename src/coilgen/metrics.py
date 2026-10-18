@@ -48,7 +48,15 @@ def target_mode_fit_performance(
     The reported gradient efficiency is the amplitude of the requested target
     mode per ampere. Orthogonal Bz components do not increase the efficiency;
     they remain in the relative error. For Bz = G*y, the target mode is y [m]
-    and the fitted coefficient beta has units T/(m A).
+    and the fitted coefficient beta has units T/(m A). A uniform nonzero target
+    has no gradient efficiency: its field efficiency is the absolute mean
+    selected Bz per ampere [mT/A], independent of target-scale normalization.
+
+    This vector-only helper has no spatial coordinates. Its nonuniform-target
+    gradient metric assumes target_scale is an SI gradient [T/m] and that
+    target_bz/target_scale is a mode in meters with unit reference gradient.
+    Result reporting instead resolves the physical target gradient from the
+    DSV coordinates, including arbitrary target normalizations and Hz inputs.
     """
 
     prepared = _prepare_bz_vectors(field_per_amp, target_bz, sample_mask=sample_mask)
@@ -68,9 +76,14 @@ def target_mode_fit_performance(
     fitted = field_vec * current
     peak_target = max(float(np.max(np.abs(target_vec))), 1e-30)
     rel = np.abs((fitted - target_vec) / peak_target) * 100.0
+    uniform_field = bool(
+        np.max(np.abs(target_vec)) > 0
+        and np.ptp(target_vec) <= 128.0 * np.finfo(float).eps * np.max(np.abs(target_vec))
+    )
     return {
         "needed_current_A": current,
-        "gradient_efficiency_mT_per_m_per_A": 1000.0 * abs(float(beta)),
+        "gradient_efficiency_mT_per_m_per_A": float("nan") if uniform_field else 1000.0 * abs(float(beta)),
+        "field_efficiency_mT_per_A": 1000.0 * abs(float(np.mean(field_vec))) if uniform_field else float("nan"),
         "mean_rel_error_percent": float(np.mean(rel)),
         "max_rel_error_percent": float(np.max(rel)),
         "sample_count": int(len(field_vec)),
@@ -100,6 +113,7 @@ def nan_fit_performance() -> dict[str, float]:
     return {
         "needed_current_A": float("nan"),
         "gradient_efficiency_mT_per_m_per_A": float("nan"),
+        "field_efficiency_mT_per_A": float("nan"),
         "mean_rel_error_percent": float("nan"),
         "max_rel_error_percent": float("nan"),
         "sample_count": 0,

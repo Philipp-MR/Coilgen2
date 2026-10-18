@@ -59,6 +59,14 @@ class MetricRegistry:
 
 DEFAULT_METRIC_DEFINITIONS = (
     MetricDefinition(
+        "layout_field_efficiency_mT_per_A",
+        "field efficiency",
+        "mT A^-1",
+        "Absolute mean DSV Bz per ampere for a uniform nonzero target.",
+        higher_is_better=True,
+        domain="dsv",
+    ),
+    MetricDefinition(
         "layout_gradient_efficiency_mT_per_m_per_A",
         "gradient efficiency",
         "mT m^-1 A^-1",

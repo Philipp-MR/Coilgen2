@@ -46,6 +46,15 @@ design = AnnularDiscCoilDesign(
 result = design.run()
 ```
 
+`CylinderCoilDesign.length_m` and `PipelineGeometrySpec.cylinder(length_m=...)`
+specify the full physical axial span, independently of `length_divisions`.
+Earlier versions passed this value directly to the legacy cylinder generator,
+which produced a span of `length_m * n / (n + 1)` for `n` axial divisions.
+To preserve an earlier high-level design's physical span, use that old span
+as the new `length_m`. Raw `CoilGenConfig.cylinder_mesh_parameter_list` values,
+`PipelineGeometrySpec.from_config_values`, and saved raw configurations retain
+their original geometry and legacy height convention.
+
 ## Low-Level Mesh Keys
 
 The same primitives are available in `CoilGenConfig.coil_mesh_file`:

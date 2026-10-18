@@ -114,12 +114,23 @@ class PipelineGeometrySpec:
         rotation_axis: Sequence[float] = (1.0, 0.0, 0.0),
         rotation_angle_rad: float = 0.0,
     ) -> "PipelineGeometrySpec":
+        """Realize the stated full axial length independently of mesh divisions."""
+        if (
+            isinstance(length_divisions, bool)
+            or not isinstance(length_divisions, (int, np.integer))
+            or length_divisions < 1
+        ):
+            raise ValueError("Cylinder length_divisions must be a positive integer.")
+        # The legacy generator omits its final sampling ring, then recenters.
+        # Compensate only this physical-dimension API; raw config tuples retain
+        # their historical generator semantics and saved geometry.
+        height = length_m * (int(length_divisions) + 1) / int(length_divisions)
         return cls(
             "create cylinder mesh",
             True,
             {
                 "cylinder_mesh_parameter_list": (
-                    length_m,
+                    height,
                     radius_m,
                     angular_divisions,
                     length_divisions,

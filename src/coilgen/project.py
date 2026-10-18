@@ -52,14 +52,17 @@ PROJECT_SUMMARY_KEYS = (
     "needed_current_A",
     "stream_function_needed_current_A",
     "stream_function_gradient_efficiency_mT_per_m_per_A",
+    "stream_function_field_efficiency_mT_per_A",
     "stream_function_mean_rel_error_percent",
     "stream_function_max_rel_error_percent",
     "unconnected_contours_needed_current_A",
     "unconnected_contours_gradient_efficiency_mT_per_m_per_A",
+    "unconnected_contours_field_efficiency_mT_per_A",
     "unconnected_contours_mean_rel_error_percent",
     "unconnected_contours_max_rel_error_percent",
     "layout_needed_current_A",
     "layout_gradient_efficiency_mT_per_m_per_A",
+    "layout_field_efficiency_mT_per_A",
     "layout_mean_rel_error_percent",
     "layout_max_rel_error_percent",
     "shim_layout_residual_rms_T",
@@ -82,6 +85,7 @@ PROJECT_SUMMARY_KEYS = (
 PROJECT_COMPARISON_METRICS = (
     ("layout_needed_current_A", "Needed current", "A"),
     ("layout_gradient_efficiency_mT_per_m_per_A", "Gradient efficiency", "mT/m/A"),
+    ("layout_field_efficiency_mT_per_A", "Field efficiency", "mT/A"),
     ("layout_mean_rel_error_percent", "Mean rel. error", "%"),
     ("layout_max_rel_error_percent", "Max rel. error", "%"),
     ("linearity_rms_percent", "Linearity RMS", "%"),
@@ -2012,15 +2016,18 @@ def _project_channel_summary_columns(project_run: CoilProjectRun) -> tuple[str, 
             [
                 "stream_function_needed_current_A",
                 "stream_function_gradient_efficiency_mT_per_m_per_A",
+                "stream_function_field_efficiency_mT_per_A",
                 "stream_function_mean_rel_error_percent",
                 "stream_function_max_rel_error_percent",
                 "unconnected_contours_needed_current_A",
                 "unconnected_contours_gradient_efficiency_mT_per_m_per_A",
+                "unconnected_contours_field_efficiency_mT_per_A",
                 "unconnected_contours_mean_rel_error_percent",
                 "unconnected_contours_max_rel_error_percent",
                 "unconnected_contours_min_wire_distance_m",
                 "layout_needed_current_A",
                 "layout_gradient_efficiency_mT_per_m_per_A",
+                "layout_field_efficiency_mT_per_A",
                 "layout_mean_rel_error_percent",
                 "layout_max_rel_error_percent",
             ]
@@ -2039,7 +2046,12 @@ def _project_channel_summary_columns(project_run: CoilProjectRun) -> tuple[str, 
     columns.extend(("coil_length_total_m", "coil_resistance_total_ohm", "coil_inductance_same_current_H"))
     if any(math.isfinite(_safe_float(row.get("drive_voltage_target_slew_V"))) for row in project_run.summary_rows):
         columns.append("drive_voltage_target_slew_V")
-    return tuple(columns)
+    return tuple(
+        column
+        for column in columns
+        if not column.endswith("_field_efficiency_mT_per_A")
+        or any(math.isfinite(_safe_float(row.get(column))) for row in project_run.summary_rows)
+    )
 
 
 def _project_channel_summary_sections(project_run: CoilProjectRun) -> tuple[tuple[str, tuple[str, ...]], ...]:
@@ -2070,6 +2082,7 @@ def _project_channel_summary_sections(project_run: CoilProjectRun) -> tuple[tupl
             (
                 "stream_function_needed_current_A",
                 "stream_function_gradient_efficiency_mT_per_m_per_A",
+                "stream_function_field_efficiency_mT_per_A",
                 "stream_function_mean_rel_error_percent",
                 "stream_function_max_rel_error_percent",
             ),
@@ -2079,6 +2092,7 @@ def _project_channel_summary_sections(project_run: CoilProjectRun) -> tuple[tupl
             (
                 "unconnected_contours_needed_current_A",
                 "unconnected_contours_gradient_efficiency_mT_per_m_per_A",
+                "unconnected_contours_field_efficiency_mT_per_A",
                 "unconnected_contours_mean_rel_error_percent",
                 "unconnected_contours_max_rel_error_percent",
                 "unconnected_contours_min_wire_distance_m",
@@ -2089,6 +2103,7 @@ def _project_channel_summary_sections(project_run: CoilProjectRun) -> tuple[tupl
         (
             "layout_needed_current_A",
             "layout_gradient_efficiency_mT_per_m_per_A",
+            "layout_field_efficiency_mT_per_A",
             "layout_mean_rel_error_percent",
             "layout_max_rel_error_percent",
         ),
@@ -2314,6 +2329,7 @@ def _summary_markdown(project_name: str, rows: Sequence[Mapping[str, Any]]) -> s
         "target_scale",
         "layout_needed_current_A",
         "layout_gradient_efficiency_mT_per_m_per_A",
+        "layout_field_efficiency_mT_per_A",
         "layout_mean_rel_error_percent",
         "layout_max_rel_error_percent",
         "coil_inductance_same_current_H",
@@ -2414,15 +2430,18 @@ def _column_label(value: str) -> str:
         "quality_status": "quality",
         "stream_function_needed_current_A": "sf current A",
         "stream_function_gradient_efficiency_mT_per_m_per_A": "sf eff mT/m/A",
+        "stream_function_field_efficiency_mT_per_A": "sf eff mT/A",
         "stream_function_mean_rel_error_percent": "sf mean %",
         "stream_function_max_rel_error_percent": "sf max %",
         "unconnected_contours_needed_current_A": "loop current A",
         "unconnected_contours_gradient_efficiency_mT_per_m_per_A": "loop eff mT/m/A",
+        "unconnected_contours_field_efficiency_mT_per_A": "loop eff mT/A",
         "unconnected_contours_mean_rel_error_percent": "loop mean %",
         "unconnected_contours_max_rel_error_percent": "loop max %",
         "unconnected_contours_min_wire_distance_m": "loop min wire m",
         "layout_needed_current_A": "layout current A",
         "layout_gradient_efficiency_mT_per_m_per_A": "layout eff mT/m/A",
+        "layout_field_efficiency_mT_per_A": "layout eff mT/A",
         "layout_mean_rel_error_percent": "layout mean %",
         "layout_max_rel_error_percent": "layout max %",
         "shim_layout_residual_rms_T": "shim RMS T",
@@ -2448,15 +2467,18 @@ def _project_section_column_label(section_title: str, column: str) -> str:
         "quality_status": "quality",
         "stream_function_needed_current_A": "current A",
         "stream_function_gradient_efficiency_mT_per_m_per_A": "eff mT/m/A",
+        "stream_function_field_efficiency_mT_per_A": "eff mT/A",
         "stream_function_mean_rel_error_percent": "mean %",
         "stream_function_max_rel_error_percent": "max %",
         "unconnected_contours_needed_current_A": "current A",
         "unconnected_contours_gradient_efficiency_mT_per_m_per_A": "eff mT/m/A",
+        "unconnected_contours_field_efficiency_mT_per_A": "eff mT/A",
         "unconnected_contours_mean_rel_error_percent": "mean %",
         "unconnected_contours_max_rel_error_percent": "max %",
         "unconnected_contours_min_wire_distance_m": "min wire m",
         "layout_needed_current_A": "current A",
         "layout_gradient_efficiency_mT_per_m_per_A": "eff mT/m/A",
+        "layout_field_efficiency_mT_per_A": "eff mT/A",
         "layout_mean_rel_error_percent": "mean %",
         "layout_max_rel_error_percent": "max %",
         "shim_layout_residual_rms_T": "RMS T",

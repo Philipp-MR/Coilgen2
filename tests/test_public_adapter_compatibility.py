@@ -111,7 +111,8 @@ GEOMETRY_INPUTS = {
     "z_radius_pairs_m": ((-0.21, 0.14), (0.01, 0.18), (0.26, 0.13)),
 }
 
-# Old implementation output: class, factory, mesh name, cylinder flag,
+# Old implementation output, except the corrected physical cylinder length:
+# class, factory, mesh name, cylinder flag,
 # parameter key, nondefault tuple, default tuple.
 GEOMETRY_CASES = [
     (
@@ -120,8 +121,8 @@ GEOMETRY_CASES = [
         "create cylinder mesh",
         True,
         "cylinder_mesh_parameter_list",
-        (0.169, 0.351, 5, 16, 0.2, 0.3, 0.4, 0.416),
-        (0.5, 0.25, 40, 40, 1.0, 0.0, 0.0, 0.0),
+        (0.169 * 17 / 16, 0.351, 5, 16, 0.2, 0.3, 0.4, 0.416),
+        (0.5 * 41 / 40, 0.25, 40, 40, 1.0, 0.0, 0.0, 0.0),
     ),
     (
         "PlanarCoilDesign",
