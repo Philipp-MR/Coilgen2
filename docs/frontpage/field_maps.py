@@ -1,4 +1,4 @@
-"""Direct dense-plane evaluation of the saved front-page current patterns.
+"""Direct dense-plane evaluation of the smoothed front-page current patterns.
 
 Run ``python docs/frontpage/field_maps.py`` after the main figure generator.
 No optimization, interpolation or current adjustment is performed. The saved
@@ -111,7 +111,7 @@ def _verify_saved(actual: np.ndarray, expected: np.ndarray, label: str) -> dict:
 
 
 def compute(cases: list[dict], metrics: list[dict]) -> tuple[dict, dict]:
-    """Evaluate original saved current patterns on a 101 by 101 midplane grid."""
+    """Evaluate the saved processed paths on a 101 by 101 midplane grid."""
     if len(cases) != 2 or len(metrics) != 2:
         raise ValueError("The front page requires the two documented gradient cases.")
     axis = np.linspace(-0.045, 0.045, 101)
@@ -121,7 +121,7 @@ def compute(cases: list[dict], metrics: list[dict]) -> tuple[dict, dict]:
     dense = {"axis_m": axis, "inside_roi": inside, "points_m": points}
     evidence = []
     for index, (arrays, case) in enumerate(zip(cases, metrics)):
-        path = OUTPUT / f"case_{index}.npz"
+        path = OUTPUT / case.get("array_file", f"case_{index}.npz")
         with np.load(path, allow_pickle=False) as saved:
             if set(saved.files) != set(arrays) or any(not np.array_equal(saved[key], arrays[key]) for key in arrays):
                 raise ValueError(f"{path.name} does not match the provided case arrays.")
@@ -167,7 +167,7 @@ def compute(cases: list[dict], metrics: list[dict]) -> tuple[dict, dict]:
             }
         )
     metadata = {
-        "description": "Direct dense-plane fields of the saved front-page current patterns; no new solve or current fit.",
+        "description": "Direct dense-plane fields of the smoothed, filtered front-page contours and original current sheets; no current fit.",
         "grid": {
             "axis_count": len(axis),
             "axis_spacing_m": float(axis[1] - axis[0]),
@@ -299,7 +299,7 @@ def render(dense: dict, metadata: dict) -> None:
     fig.text(
         0.055,
         0.007,
-        f"Direct calculations at {metadata['grid']['evaluated_point_count_per_case']:,} points in the x = 0 plane; no interpolation. RMS values use all 912 independent volume samples.\nUnconnected contours; routing, feeds and fabrication validation remain separate design stages.",
+        f"Direct calculations at {metadata['grid']['evaluated_point_count_per_case']:,} points in the x = 0 plane; no interpolation. RMS values use 912 postprocessing acceptance samples.\nSmoothed, filtered unconnected contours; routing, feeds and fabrication validation remain separate design stages.",
         fontsize=10,
         color=MUTED,
         linespacing=1.6,
@@ -331,11 +331,9 @@ def compute_and_render(cases: list[dict], metrics: list[dict] | dict) -> dict:
 
 
 def main() -> None:
-    metrics = json.loads((OUTPUT / "metrics.json").read_text(encoding="utf-8"))
-    cases = []
-    for index in range(2):
-        with np.load(OUTPUT / f"case_{index}.npz", allow_pickle=False) as saved:
-            cases.append({key: saved[key] for key in saved.files})
+    from contour_processing import load_refined_cases
+
+    cases, metrics = load_refined_cases()
     compute_and_render(cases, metrics)
 
 

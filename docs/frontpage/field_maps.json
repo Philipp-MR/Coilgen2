@@ -1,5 +1,5 @@
 {
-  "description": "Direct dense-plane fields of the saved front-page current patterns; no new solve or current fit.",
+  "description": "Direct dense-plane fields of the smoothed, filtered front-page contours and original current sheets; no current fit.",
   "grid": {
     "axis_count": 101,
     "axis_spacing_m": 0.000899999999999998,
@@ -17,7 +17,7 @@
   "routed": false,
   "fabrication_validated": false,
   "source_tree_sha256": "b236e533f404b36085c70e78d60f34c801c370a7373bc691180aab512fab3159",
-  "generator_sha256": "ae35dd2b1a540602471df434acf513a2bde0475a1b6f10e3e3350cdfdfa30c55",
+  "generator_sha256": "85c3af2c17d38726c05ea7b81b7930964435758dbbdf117a20588fe7973d499d",
   "python_version": "3.12.14",
   "dependencies": {
     "numpy": "2.5.1",
@@ -27,8 +27,8 @@
   "cases": [
     {
       "name": "Cylindrical Gy",
-      "input_file": "case_0.npz",
-      "input_sha256": "dbebe26a93f6a36141cf8e845d62b9d2cf0d32c2e5b2db890ae88c93de892071",
+      "input_file": "refined_case_0.npz",
+      "input_sha256": "06ca714f333c9367e34daa30234c627c5481347b88af3a89e7f55fc9255cc769",
       "saved_vector_field_reproduction": {
         "sheet": {
           "relative_L2_difference": 0.0,
@@ -36,8 +36,8 @@
           "passed": true
         },
         "contours": {
-          "relative_L2_difference": 0.0,
-          "maximum_absolute_difference_T": 0.0,
+          "relative_L2_difference": 5.083095835670283e-16,
+          "maximum_absolute_difference_T": 4.0657581468206416e-19,
           "passed": true
         }
       },
@@ -48,14 +48,14 @@
       "saved_contour_multiplicities_verified_by_vector_field_reproduction": true,
       "volume_validation_sample_count": 912,
       "volume_sheet_relative_rms_Bz_error_percent": 3.4035363081050733,
-      "volume_contour_relative_rms_Bz_error_percent": 3.3812354202288377,
+      "volume_contour_relative_rms_Bz_error_percent": 3.8997970690686126,
       "dense_plane_sheet_peak_absolute_residual_uT": 30.06846926115246,
-      "dense_plane_contour_peak_absolute_residual_uT": 30.32797086255525
+      "dense_plane_contour_peak_absolute_residual_uT": 32.97469442538597
     },
     {
       "name": "Biplanar Gz",
-      "input_file": "case_1.npz",
-      "input_sha256": "b671339522edb14eacc40ab88c0e478ce6072c4169e1089cc54da125649da571",
+      "input_file": "refined_case_1.npz",
+      "input_sha256": "a54a450a2fafbf2f424060de68fe19ca4337f6c25e58aede1b771991f69eca10",
       "saved_vector_field_reproduction": {
         "sheet": {
           "relative_L2_difference": 0.0,
@@ -63,8 +63,8 @@
           "passed": true
         },
         "contours": {
-          "relative_L2_difference": 0.0,
-          "maximum_absolute_difference_T": 0.0,
+          "relative_L2_difference": 4.465471525880081e-16,
+          "maximum_absolute_difference_T": 3.7947076036992655e-19,
           "passed": true
         }
       },
@@ -76,9 +76,9 @@
       "saved_contour_multiplicities_verified_by_vector_field_reproduction": true,
       "volume_validation_sample_count": 912,
       "volume_sheet_relative_rms_Bz_error_percent": 3.0144064054800643,
-      "volume_contour_relative_rms_Bz_error_percent": 2.959151619801498,
+      "volume_contour_relative_rms_Bz_error_percent": 3.797592797126848,
       "dense_plane_sheet_peak_absolute_residual_uT": 16.242171223460726,
-      "dense_plane_contour_peak_absolute_residual_uT": 16.305513769244527
+      "dense_plane_contour_peak_absolute_residual_uT": 17.819921279139347
     }
   ],
   "rendering": {
@@ -95,8 +95,8 @@
     "png_dpi": 280
   },
   "artifact_sha256": {
-    "field_maps.npz": "b4740347a9ea435f288c2883897fce59b08a2fc0b75216e83207596d1dc3eaff",
-    "field_validation.png": "e6db1030f58a0400a880136d55fbfc66983709277fd5514ac44babe2f0eb17c0",
-    "field_validation.svg": "4a6ba70270567e8dd5d822cd3b52a3cbb54b4858ff6c8acfe6e40d9fd2e3f534"
+    "field_maps.npz": "78f843e876fdcd1c28e150af534fcf58468f3acbe93412780ff42194ecb1b78b",
+    "field_validation.png": "731c26ac7c1006f5232cc93ee740376c2c4c972f1216a114018fd1247ec6731d",
+    "field_validation.svg": "50271434275c85417dc6af7c094a7a780bc586d493a8629cc30f5f48ffc80d38"
   }
 }

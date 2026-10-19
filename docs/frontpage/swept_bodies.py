@@ -1,9 +1,8 @@
-"""Render actual conductor-boundary meshes around the saved closed contours.
+"""Render production sweep meshes around the field-validated smooth contours.
 
-The 1.8 mm diameter profile and surface mounting are illustration choices.
-Each contour remains independent: there are no fabricated joins, feeds or
-return paths, and these bodies are not released for manufacture. Field plots
-continue to use the original current-sheet and thin-wire geometries.
+The round 1.8 mm profile is an illustration choice, centered on the same
+conditioned paths used for the thin-wire field calculation. VTK shades the
+actual mesh: it never substitutes a display-only spline or inflated tube.
 """
 
 from __future__ import annotations
@@ -26,10 +25,9 @@ import matplotlib  # noqa: E402
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib import colors  # noqa: E402
 from matplotlib.patches import Polygon  # noqa: E402
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection  # noqa: E402
 import numpy as np  # noqa: E402
+import pyvista as pv  # noqa: E402
 from threadpoolctl import threadpool_limits  # noqa: E402
 
 from coilgen import CoilGenConfig  # noqa: E402
@@ -45,7 +43,16 @@ MUTED = "#a4b7c8"
 COPPER = "#e8a16f"
 TEAL = "#39c9ba"
 RADIUS_M = 0.0009
-SECTION_SIDES = 16
+SECTION_SIDES = 32
+SWEEP_SETTINGS = {
+    "conductor_mounting_mode": "centered",
+    "sweep_surface_realization": "analytic",
+    "sweep_bend_mode": "miter",
+    "sweep_frame_method": "surface_normal",
+    "sweep_path_simplification": "off",
+    "sweep_max_segment_length": 0.001,
+    "sweep_max_chord_error": 0.00001,
+}
 
 
 def _identity(cases: list[dict], info: list[dict]) -> dict:
@@ -63,16 +70,15 @@ def _identity(cases: list[dict], info: list[dict]) -> dict:
         "core_source_sha256": source_digest(ROOT / "src" / "coilgen"),
         "nominal_profile_radius_m": RADIUS_M,
         "profile_sides": SECTION_SIDES,
-        "mounting_mode": "surface_outer",
-        "bend_mode": "miter",
-        "surface_realization": "analytic",
+        "sweep_settings": SWEEP_SETTINGS,
+        "require_valid_independent_bodies": True,
         "geometry_acceleration_backend": "numpy",
     }
 
 
 def compute_bodies(cases: list[dict], metrics: dict | list) -> tuple[list[list[dict]], dict]:
     """Use the production sweep API, retaining all resulting diagnostics."""
-    info = metrics["cases"] if isinstance(metrics, dict) else metrics
+    info = metrics.get("refined_cases", metrics["cases"]) if isinstance(metrics, dict) else metrics
     identity = _identity(cases, info)
     evidence_path = OUTPUT / "swept_bodies.json"
     arrays_path = OUTPUT / "swept_bodies.npz"
@@ -111,9 +117,7 @@ def compute_bodies(cases: list[dict], metrics: dict | list) -> tuple[list[list[d
                 CoilGenConfig(**case["config"]),
                 skip_sweep=False,
                 progress_flag=False,
-                conductor_mounting_mode="surface_outer",
-                sweep_surface_realization="analytic",
-                sweep_bend_mode="miter",
+                **SWEEP_SETTINGS,
             )
             bodies, summaries = [], []
             for part_index in range(case["part_count"]):
@@ -132,25 +136,31 @@ def compute_bodies(cases: list[dict], metrics: dict | list) -> tuple[list[list[d
                         part_index=part_index + 1,
                         contour_index=contour_index + 1,
                         cross_section=section,
-                        validate=False,
+                        validate=True,
                     )
                     mesh = body.mesh
                     if not mesh.n_faces or not np.all(np.isfinite(mesh.vertices)):
                         raise RuntimeError("The core sweep returned an empty or nonfinite conductor body.")
                     if mesh.faces.min() < 0 or mesh.faces.max() >= mesh.n_vertices:
                         raise RuntimeError("The core sweep returned invalid triangle indices.")
+                    realized = body.fabrication_path.wire_points_m
+                    # The core can insert collinear support samples. Its own
+                    # two-way source-displacement audit remains authoritative.
                     summary = {
                         "part_index_zero_based": part_index,
                         "contour_index_zero_based": contour_index,
                         "vertex_count": mesh.n_vertices,
                         "triangle_count": mesh.n_faces,
                         "diagnostics": json_value(body.diagnostics),
+                        "centerline_vertex_max_displacement_m": float(np.max(np.linalg.norm(realized - points, axis=1)))
+                        if realized.shape == points.shape
+                        else None,
                     }
                     geometry = {
                         "vertices_m": mesh.vertices,
                         "faces": mesh.faces,
                         "source_points_m": points,
-                        "realized_centerline_m": body.fabrication_path.wire_points_m,
+                        "realized_centerline_m": realized,
                     }
                     prefix = f"case_{case_index}_body_{len(bodies)}"
                     cache.update({f"{prefix}_{name}": value for name, value in geometry.items()})
@@ -170,9 +180,12 @@ def compute_bodies(cases: list[dict], metrics: dict | list) -> tuple[list[list[d
                 }
             )
     np.savez_compressed(arrays_path, **cache)
+    summaries = [body for case in records for body in case["bodies"]]
+    vertex_displacements = [body["centerline_vertex_max_displacement_m"] for body in summaries]
+    same_centerline_vertices = all(value is not None and value < 1e-12 for value in vertex_displacements)
     evidence = {
         "description": "Actual production conductor-sweep triangle boundaries; illustrative independent contours.",
-        "api": "coilgen.manufacturing.create_swept_contour_body(validate=False)",
+        "api": "coilgen.manufacturing.create_swept_contour_body(validate=True)",
         "geometry_identity": identity,
         "mesh_arrays_sha256": sha256(arrays_path.read_bytes()).hexdigest(),
         "nominal_diameter_mm": 2 * RADIUS_M * 1e3,
@@ -181,42 +194,31 @@ def compute_bodies(cases: list[dict], metrics: dict | list) -> tuple[list[list[d
         "electrical_circuit_completed": False,
         "connecting_leads_and_feeds_designed": False,
         "fabrication_validated": False,
+        "independent_body_geometry_validation_passed": True,
         "geometry_diagnostics_computed": True,
         "between_body_clearance_checked": False,
-        "geometry_modified_by_core_projection_and_mounting": True,
+        "geometry_modified_by_core_projection_and_mounting": not same_centerline_vertices,
+        "field_and_sweep_centerline_vertices_agree_within_m": 1e-12 if same_centerline_vertices else None,
         "field_recomputed_for_swept_geometry": False,
+        "field_geometry": "same conditioned contour centerlines; no mounting offset",
+        "renderer": "VTK Phong lighting with smooth vertex normals on the actual production triangle mesh",
+        "body_check_counts": {
+            key: sum(bool(body["diagnostics"].get(key, False)) for body in summaries)
+            for key in (
+                "mesh_solid_ok",
+                "manufacturing_ok",
+                "sweep_mesh_self_intersection",
+                "sweep_mesh_self_intersection_truncated",
+                "sweep_self_intersection_skipped",
+                "sweep_capsule_self_intersection",
+                "sweep_final_frame_rotation_violation",
+                "sweep_curvature_envelope_violation",
+                "sweep_profile_jacobian_violation",
+            )
+        },
         "cases": records,
     }
     return all_bodies, evidence
-
-
-def _metal_triangles(ax, vertices_m, faces, color, *, focus=None) -> None:
-    triangles = vertices_m[faces] * 1e3
-    if focus is not None:
-        center, half_width = focus
-        selected = np.all(np.abs(triangles.mean(axis=1) - center) <= half_width, axis=1)
-        triangles = triangles[selected]
-    normal = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
-    normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-30)
-    light = np.array([-0.4, -0.55, 0.73])
-    light /= np.linalg.norm(light)
-    intensity = np.abs(normal @ light)
-    base = np.array(colors.to_rgb(color))
-    rgb = base[None, :] * (0.50 + 0.50 * intensity[:, None])
-    rgb += (1 - rgb) * (0.40 * intensity[:, None] ** 10)
-    collection = Poly3DCollection(triangles, facecolors=rgb, linewidth=0, edgecolors="none", zsort="average")
-    collection.set_rasterized(True)
-    ax.add_collection3d(collection)
-
-
-def _scene(ax, limits, *, elev=24, azim=-58) -> None:
-    ax.set_facecolor(NAVY)
-    for index, dimension in enumerate("xyz"):
-        getattr(ax, f"set_{dimension}lim")(*limits[index])
-    ax.set_box_aspect([high - low for low, high in limits])
-    ax.view_init(elev=elev, azim=azim)
-    ax.set_proj_type("ortho")
-    ax.set_axis_off()
 
 
 def _combine(bodies: list[dict]) -> tuple[np.ndarray, np.ndarray]:
@@ -228,66 +230,126 @@ def _combine(bodies: list[dict]) -> tuple[np.ndarray, np.ndarray]:
     return np.vstack(vertices), np.vstack(faces)
 
 
+def _render_mesh(
+    vertices_m: np.ndarray,
+    faces: np.ndarray,
+    *,
+    color: str,
+    camera: tuple,
+    scale_m: float,
+    size: tuple[int, int],
+) -> np.ndarray:
+    """Light actual core triangles; smooth normals change no vertex positions."""
+    connectivity = np.column_stack((np.full(len(faces), 3, dtype=np.int64), faces)).ravel()
+    mesh = pv.PolyData(vertices_m, connectivity)
+    plotter = pv.Plotter(off_screen=True, window_size=size, lighting="none")
+    try:
+        plotter.background_color = NAVY
+        plotter.add_mesh(
+            mesh,
+            color=color,
+            smooth_shading=True,
+            split_sharp_edges=False,
+            ambient=0.24,
+            diffuse=0.72,
+            specular=0.75,
+            specular_power=65,
+            show_edges=False,
+        )
+        plotter.add_light(pv.Light(position=(-0.45, -0.55, 0.8), focal_point=(0, 0, 0), intensity=0.9))
+        plotter.add_light(pv.Light(position=(0.5, 0.25, 0.3), focal_point=(0, 0, 0), intensity=0.55))
+        plotter.add_light(pv.Light(position=(0.1, -0.2, -0.5), focal_point=(0, 0, 0), intensity=0.3))
+        plotter.camera_position = camera
+        plotter.enable_parallel_projection()
+        plotter.camera.parallel_scale = scale_m
+        plotter.enable_anti_aliasing("ssaa")
+        return plotter.screenshot(return_img=True)
+    finally:
+        plotter.close()
+
+
+def _bend_detail(body: dict) -> tuple[np.ndarray, np.ndarray]:
+    """Rigidly orient a real rounded bend without stretching its dimensions."""
+    source = body["realized_centerline_m"][:-1]
+    before = np.roll(source, 1, axis=0)
+    after = np.roll(source, -1, axis=0)
+    tangent = after - before
+    tangent /= np.linalg.norm(tangent, axis=1, keepdims=True)
+    curvature = after - 2 * source + before
+    curvature -= np.sum(curvature * tangent, axis=1, keepdims=True) * tangent
+    # An extreme in the longest principal direction gives the U-shaped end
+    # of the winding, rather than an arbitrary low-curvature side section.
+    _, _, basis = np.linalg.svd(source - source.mean(axis=0), full_matrices=False)
+    index = int(np.argmax((source - source.mean(axis=0)) @ basis[0]))
+    x_axis = tangent[index]
+    y_axis = curvature[index] / np.linalg.norm(curvature[index])
+    z_axis = np.cross(x_axis, y_axis)
+    transform = np.column_stack((x_axis, y_axis, z_axis))
+    return (body["vertices_m"] - source[index]) @ transform, body["faces"]
+
+
+def _image(fig: plt.Figure, bounds: tuple, pixels: np.ndarray) -> None:
+    ax = fig.add_axes(bounds)
+    ax.imshow(pixels)
+    ax.set_axis_off()
+
+
 def render_all(cases: list[dict], metrics: dict | list) -> None:
     """Build/cache actual swept bodies and render their overview and details."""
     bodies, evidence = compute_bodies(cases, metrics)
     evidence.update(connecting_leads_and_feeds_designed=False, between_body_clearance_checked=False)
-    plt.rcParams.update({"font.family": "DejaVu Sans", "svg.hashsalt": "CoilGen2-swept-bodies-v1"})
-    fig = plt.figure(figsize=(16, 11.5), facecolor=NAVY)
-    fig.text(0.055, 0.948, "WINDINGS, WITH VOLUME", fontsize=11, color=TEAL, weight="bold")
-    fig.text(0.055, 0.897, "From contour lines to conductor bodies", fontsize=29, color=PALE, weight="bold")
+    plt.rcParams.update({"font.family": "DejaVu Sans", "svg.hashsalt": "CoilGen2-swept-bodies-v2"})
+    fig = plt.figure(figsize=(16, 12), facecolor=NAVY)
+    fig.text(0.055, 0.955, "SMOOTH PATHS. REAL CONDUCTOR BODIES.", fontsize=11, color=TEAL, weight="bold")
+    fig.text(0.055, 0.910, "Windings that flow", fontsize=32, color=PALE, weight="bold")
     fig.text(
         0.055,
-        0.858,
-        "Actual CoilGen2 sweep meshes  /  1.8 mm nominal diameter  /  16-sided round profile",
+        0.872,
+        "Smoothed, field-checked contours  /  1.8 mm round profile  /  actual CoilGen2 sweep meshes",
         fontsize=13,
         color=MUTED,
     )
-    locations = ((0.01, 0.32, 0.53, 0.52), (0.50, 0.32, 0.49, 0.52))
-    for index, (body_list, bounds, accent) in enumerate(
-        zip(bodies, (((-135, 135), (-135, 135), (-163, 163)), ((-165, 165), (-165, 165), (-115, 115))), (COPPER, TEAL))
-    ):
-        ax = fig.add_axes(locations[index], projection="3d")
-        _scene(ax, bounds, elev=24 if index == 0 else 30, azim=-52 if index == 0 else -58)
+    locations = ((0.025, 0.352, 0.475, 0.510), (0.50, 0.327, 0.475, 0.535))
+    cameras = (
+        ((0.5, -0.85, 0.35), (0, 0, 0), (0, 0, 1)),
+        ((0.55, -0.8, 0.65), (0, 0, 0), (0, 0, 1)),
+    )
+    for index, (body_list, accent) in enumerate(zip(bodies, (COPPER, TEAL))):
         vertices, faces = _combine(body_list)
-        _metal_triangles(ax, vertices, faces, accent)
-        if index == 0:
-            theta = np.linspace(0, 2 * np.pi, 200)
-            for z in (-150, 150):
-                ax.plot(
-                    120 * np.cos(theta), 120 * np.sin(theta), np.full_like(theta, z), color="#66839b", alpha=0.5, lw=0.7
-                )
+        pixels = _render_mesh(
+            vertices,
+            faces,
+            color=accent,
+            camera=cameras[index],
+            scale_m=0.195 if index == 0 else 0.235,
+            size=(1800, 1600),
+        )
+        _image(fig, locations[index], pixels)
         fig.text(
             0.075 + index * 0.49,
-            0.345,
+            0.342,
             "Cylindrical Gy" if index == 0 else "Biplanar Gz",
             fontsize=19,
             color=accent,
             weight="bold",
         )
         fig.text(
-            0.075 + index * 0.49, 0.315, f"{len(body_list)} independent conductor bodies", fontsize=12, color=MUTED
+            0.075 + index * 0.49, 0.313, f"{len(body_list)} independent conductor bodies", fontsize=12, color=MUTED
         )
 
-    detail = fig.add_axes((0.025, 0.045, 0.45, 0.25), projection="3d")
-    first = bodies[0][0]
-    source = first["realized_centerline_m"][:-1]
-    corner = int(np.argmax(source[:, 0]))
-    center = source[corner]
-    incoming = center - source[(corner - 1) % len(source)]
-    outgoing = source[(corner + 1) % len(source)] - center
-    incoming /= np.linalg.norm(incoming)
-    normal = np.cross(incoming, outgoing)
-    normal /= np.linalg.norm(normal)
-    local_basis = np.column_stack((incoming, np.cross(normal, incoming), normal))
-    # A rigid camera-coordinate transform shows the actual bend face-on.
-    # Geometry and conductor dimensions are never stretched for the inset.
-    local_vertices = (first["vertices_m"] - center) @ local_basis
-    _scene(detail, ((-9, 3), (-3, 9), (-2, 2)), elev=62, azim=-42)
-    _metal_triangles(detail, local_vertices, first["faces"], COPPER)
-    fig.text(0.075, 0.285, "Conductor mesh detail", color=PALE, fontsize=13, weight="bold")
+    vertices, faces = _bend_detail(bodies[0][0])
+    pixels = _render_mesh(
+        vertices,
+        faces,
+        color=COPPER,
+        camera=((0, -0.015, 0.16), (0, 0.010, 0), (0, 1, 0)),
+        scale_m=0.022,
+        size=(1400, 750),
+    )
+    _image(fig, (0.045, 0.052, 0.43, 0.225), pixels)
+    fig.text(0.075, 0.276, "Rounded bend · actual mesh detail", color=PALE, fontsize=13, weight="bold")
 
-    profile = fig.add_axes((0.51, 0.075, 0.16, 0.18))
+    profile = fig.add_axes((0.515, 0.083, 0.15, 0.16))
     profile.set_facecolor(NAVY)
     theta = np.arange(SECTION_SIDES) * 2 * np.pi / SECTION_SIDES
     section_mm = RADIUS_M * 1e3 * np.column_stack((np.cos(theta), np.sin(theta)))
@@ -296,11 +358,11 @@ def render_all(cases: list[dict], metrics: dict | list) -> None:
     profile.text(0, -1.40, "1.8 mm", color=PALE, ha="center", fontsize=11)
     profile.set(xlim=(-1.55, 1.55), ylim=(-1.65, 1.2), aspect="equal")
     profile.axis("off")
-    fig.text(0.71, 0.24, "A finite conductor profile", color=PALE, fontsize=14, weight="bold")
+    fig.text(0.70, 0.240, "A smooth, finite conductor", color=PALE, fontsize=14, weight="bold")
     fig.text(
-        0.71,
+        0.70,
         0.145,
-        "Production sweep backend\nPhysical profile dimensions\nExplicit support-normal mounting",
+        "32-sided circular cross-section\nCentered on the validated contour\nSmooth normals, true mesh geometry",
         color=MUTED,
         fontsize=12,
         linespacing=1.9,
@@ -308,7 +370,7 @@ def render_all(cases: list[dict], metrics: dict | list) -> None:
     fig.text(
         0.055,
         0.025,
-        "Illustrative profile and mounting. Contours remain independent; connecting leads and feeds are not designed. No manufacturing release.",
+        "Illustrative independent bodies. Small contours are filtered with field validation; connecting leads and feeds are not designed. No manufacturing release.",
         color=MUTED,
         fontsize=10.5,
     )
@@ -334,9 +396,7 @@ def render_all(cases: list[dict], metrics: dict | list) -> None:
 
 
 if __name__ == "__main__":
-    saved_metrics = json.loads((OUTPUT / "metrics.json").read_text(encoding="utf-8"))
-    saved_cases = []
-    for case_index in range(len(saved_metrics["cases"])):
-        with np.load(OUTPUT / f"case_{case_index}.npz", allow_pickle=False) as archive:
-            saved_cases.append({key: archive[key] for key in archive.files})
+    from contour_processing import load_refined_cases
+
+    saved_cases, saved_metrics = load_refined_cases()
     render_all(saved_cases, saved_metrics)

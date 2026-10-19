@@ -1,19 +1,19 @@
 {
-  "description": "Display-only gallery from unchanged solved field and stream-function arrays.",
+  "description": "Gallery of original solved current sheets and smoothed, filtered contours with reevaluated fields.",
   "current_refitted": false,
   "contours_connected_or_routed": false,
   "fabrication_validated": false,
   "cylinder_chart": "Per-triangle periodic unwrap, with seam triangles duplicated and axes clipped to [0, 2\u03c0R].",
   "residual_normalization": "100 * (computed Bz - requested Bz) / max(abs(requested Bz)); not pointwise relative error.",
   "source_sha256": {
-    "presentation.py": "2f090f6f86b0617ad4e7df1611dac6955b80c6071c05a40196320646290682cf",
-    "case_0.npz": "dbebe26a93f6a36141cf8e845d62b9d2cf0d32c2e5b2db890ae88c93de892071",
-    "case_1.npz": "b671339522edb14eacc40ab88c0e478ce6072c4169e1089cc54da125649da571"
+    "presentation.py": "b4e05c153d26098ff1ee16571cf2cb4dbb6c84ebc878208ef5589a01404d2c5c",
+    "refined_case_0.npz": "06ca714f333c9367e34daa30234c627c5481347b88af3a89e7f55fc9255cc769",
+    "refined_case_1.npz": "a54a450a2fafbf2f424060de68fe19ca4337f6c25e58aede1b771991f69eca10"
   },
   "cases": [
     {
       "name": "Cylindrical Gy",
-      "independent_sample_count": 912,
+      "postprocessing_acceptance_sample_count": 912,
       "peak_target_Bz_T": 0.00041250000000000016,
       "sheet_absolute_residual_peak_target_percent": {
         "median": 0.7212260725314084,
@@ -21,14 +21,14 @@
         "maximum": 5.685807465764676
       },
       "contour_absolute_residual_peak_target_percent": {
-        "median": 0.6435157734518899,
-        "p95": 4.423127823455516,
-        "maximum": 5.809394621498743
+        "median": 0.7270061646610964,
+        "p95": 4.740401151608691,
+        "maximum": 6.536141005531891
       }
     },
     {
       "name": "Biplanar Gz",
-      "independent_sample_count": 912,
+      "postprocessing_acceptance_sample_count": 912,
       "peak_target_Bz_T": 0.0004124999999999997,
       "sheet_absolute_residual_peak_target_percent": {
         "median": 0.9306318014926126,
@@ -36,18 +36,18 @@
         "maximum": 3.16805018069092
       },
       "contour_absolute_residual_peak_target_percent": {
-        "median": 0.9202250662567103,
-        "p95": 2.865910752161558,
-        "maximum": 3.2190755028861022
+        "median": 1.3933354677762992,
+        "p95": 3.436510666417773,
+        "maximum": 3.8865972068305674
       }
     }
   ],
   "artifact_sha256": {
-    "coil_designs.png": "d8427ede401b11113f979d1832dfcd6b0392375c8dd821ccc55280830f3b27a1",
-    "coil_designs.svg": "6a0b61e09f8f48b4ed03c775ed8d90bdbcd1054c09b2bd5712917bd901085a2b",
-    "stream_function.png": "ec11e2f63b6bc4d0a7b4f06b1852fb00324408bb35cdb3fe8bdea47f867553e6",
-    "stream_function.svg": "eddfa4fe6355decfaacf0a3ce507a11e5801cb67d57bdf04857599506f4cdc6d",
-    "validation_fidelity.png": "5b6dbde0f7ee8e546a4b1c31cd6621eda3445b2d2915fd54e400db49cad27e56",
-    "validation_fidelity.svg": "b079807e128fcb5b3ebddcce3bb7c3a63b0f2bc231c5a277491248ab01028c7a"
+    "coil_designs.png": "09b3a21b71e4d43a3db355495ca9d48136fbd13a1f1fbccd2db01e84539d1889",
+    "coil_designs.svg": "b95a94162052a942d76cd6026c9e4bbdbeb2b6ba41c1253bcee4ab9e27bc7f2e",
+    "stream_function.png": "6590265be04512a6e4dc0b8677e3e5626f5247997de8d20a1f807e75b199ac33",
+    "stream_function.svg": "b6b861bc40ae9131b219e0874755f0c05b024fe81166e1793f12029f96798528",
+    "validation_fidelity.png": "8078a734a0f7b83d8e7a4fc27624d40ebe6bfaf90057e359dcb92fd30c8e794e",
+    "validation_fidelity.svg": "94687266bace2550cc470f0fee4e54dcdf395ad745a7294f980db0bdea3deb88"
   }
 }

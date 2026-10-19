@@ -1,7 +1,7 @@
-"""Render the GitHub gallery from saved, unchanged scientific results.
+"""Render the GitHub gallery from verified sheets and conditioned contour paths.
 
 Run ``python docs/frontpage/presentation.py`` from the repository root. This
-display-only script never solves, refits currents, or modifies the NPZ evidence.
+script never solves, refits currents, or modifies the source NPZ evidence.
 Cylinder triangles are unwrapped separately and duplicated at the seam; no
 interpolation connects opposite sides of the periodic chart.
 """
@@ -154,16 +154,16 @@ def render_geometry(cases: list[dict], metrics: dict | list) -> None:
         fig.text(
             left + 0.02,
             0.155,
-            f"{case['sheet_relative_rms_Bz_error_percent']:.2f}%",
+            f"{case['contour_relative_rms_Bz_error_percent']:.2f}%",
             fontsize=31,
             color=accent,
             weight="bold",
         )
-        fig.text(left + 0.15, 0.17, "sheet RMS field error", fontsize=13, color="#d2e1eb")
+        fig.text(left + 0.15, 0.17, "contour RMS field error", fontsize=13, color="#d2e1eb")
         fig.text(
             left + 0.15,
             0.14,
-            f"{case['independent_point_count']} independent points · {case['unconnected_contour_count']} contours",
+            f"{case['independent_point_count']} ROI acceptance points · {case['unconnected_contour_count']} contours",
             fontsize=12,
             color="#8eabba",
         )
@@ -174,7 +174,7 @@ def render_geometry(cases: list[dict], metrics: dict | list) -> None:
     fig.text(
         0.055,
         0.037,
-        "Unconnected iso-current contours; routing, feeds and fabrication validation are subsequent design stages.",
+        "Smoothed, filtered unconnected contours; original currents retained. Routing and fabrication validation remain separate.",
         fontsize=11,
         color="#8eabba",
     )
@@ -227,7 +227,7 @@ def render_stream_function(cases: list[dict], metrics: dict | list) -> None:
     fig.text(
         0.055,
         0.865,
-        "Solved stream functions, before routing. Every line is a level of the physical current potential.",
+        "Solved current potential with retained, smoothed winding paths overlaid. Before routing.",
         fontsize=14,
         color=MUTED,
     )
@@ -282,7 +282,7 @@ def render_stream_function(cases: list[dict], metrics: dict | list) -> None:
     fig.text(
         0.055,
         0.032,
-        f"Color scales are in amperes and differ by geometry. Contour step: cylinder {info[0]['contour_currents_A'][0]:.2f} A; biplanar sheets {info[1]['contour_currents_A'][0]:.2f} A. No fabricated conductor width is implied.",
+        f"Color scales differ by geometry. Original turn current: cylinder {info[0]['contour_currents_A'][0]:.2f} A; biplanar sheets {info[1]['contour_currents_A'][0]:.2f} A. Smoothed paths differ from the raw level sets.",
         fontsize=11,
         color=MUTED,
     )
@@ -297,7 +297,7 @@ def _clean_axis(ax) -> None:
 
 
 def render_fidelity(cases: list[dict], metrics: dict | list) -> None:
-    """Compare the two saved forward solutions at all independent samples."""
+    """Compare the two forward solutions on the postprocessing acceptance grid."""
     info = _check(cases, metrics)
     _style()
     fig = plt.figure(figsize=(18, 11), facecolor=PAPER)
@@ -305,7 +305,7 @@ def render_fidelity(cases: list[dict], metrics: dict | list) -> None:
     fig.text(
         0.055,
         0.892,
-        f"{info[0]['independent_point_count']} independent spherical samples per design. Original solved currents; no field or current refit.",
+        f"{info[0]['independent_point_count']} spherical acceptance samples per design. Original currents; no field or current refit.",
         fontsize=14,
         color=MUTED,
     )
@@ -389,7 +389,7 @@ def render_all(cases: list[dict], metrics: dict | list) -> None:
     render_stream_function(cases, info)
     render_fidelity(cases, info)
     evidence = {
-        "description": "Display-only gallery from unchanged solved field and stream-function arrays.",
+        "description": "Gallery of original solved current sheets and smoothed, filtered contours with reevaluated fields.",
         "current_refitted": False,
         "contours_connected_or_routed": False,
         "fabrication_validated": False,
@@ -397,7 +397,7 @@ def render_all(cases: list[dict], metrics: dict | list) -> None:
         "residual_normalization": "100 * (computed Bz - requested Bz) / max(abs(requested Bz)); not pointwise relative error.",
         "source_sha256": {
             name: sha256((OUTPUT / name).read_bytes()).hexdigest()
-            for name in ("presentation.py", "case_0.npz", "case_1.npz")
+            for name in ("presentation.py", *(case.get("array_file", f"case_{i}.npz") for i, case in enumerate(info)))
         },
         "cases": [],
         "artifact_sha256": {
@@ -410,7 +410,7 @@ def render_all(cases: list[dict], metrics: dict | list) -> None:
         target = arrays["target_T"][:, 2]
         entry = {
             "name": case["name"],
-            "independent_sample_count": len(target),
+            "postprocessing_acceptance_sample_count": len(target),
             "peak_target_Bz_T": float(np.max(np.abs(target))),
         }
         for kind in ("sheet", "contour"):
@@ -427,13 +427,11 @@ def render_all(cases: list[dict], metrics: dict | list) -> None:
 
 
 def main() -> None:
-    metrics = json.loads((OUTPUT / "metrics.json").read_text(encoding="utf-8"))
-    cases = []
-    for index in range(2):
-        with np.load(OUTPUT / f"case_{index}.npz", allow_pickle=False) as saved:
-            cases.append({key: saved[key] for key in saved.files})
+    from contour_processing import load_refined_cases
+
+    cases, metrics = load_refined_cases()
     render_all(cases, metrics)
-    print("Rendered CoilGen2 gallery from unchanged saved numerical evidence.")
+    print("Rendered CoilGen2 gallery from verified sheets and conditioned contours.")
 
 
 if __name__ == "__main__":

@@ -1,12 +1,12 @@
 """Recompute the GitHub front-page figures from generated CoilGen2 designs.
 
 From the repository root:
-    python -m pip install -e ".[research,plot]"
+    python -m pip install -e ".[research,plot,gui]"
     python docs/frontpage/generate_figures.py
 
-The plots distinguish the optimized sheet from unconnected iso-current
-contours. Original solved currents are retained; no display-time current fit,
-routing, fabrication acceptance, or hardware safety claim is made.
+The plots distinguish the optimized sheet from smoothed, filtered unconnected
+contours. Original solved currents are retained; every processed contour field
+is reevaluated. No current fit, routing or fabrication acceptance is implied.
 """
 
 from __future__ import annotations
@@ -239,18 +239,21 @@ def main() -> None:
             ]
             cases, metrics = map(list, zip(*computed))
             data_revision = revision
+        from contour_processing import prepare_cases
         from presentation import render_all
         from field_maps import compute_and_render
         from swept_bodies import render_all as render_swept_bodies
 
-        render_all(cases, metrics)
-        compute_and_render(cases, metrics)
-        render_swept_bodies(cases, metrics)
+        refined_cases, refined_metrics = prepare_cases(cases, metrics)
+        render_all(refined_cases, refined_metrics)
+        compute_and_render(refined_cases, refined_metrics)
+        render_swept_bodies(refined_cases, refined_metrics)
     metadata = {
         "description": "Generated magnetostatic demonstration; not routed or fabrication-validated hardware.",
         "error_definition": "100 * sqrt(sum((Bz - Bz_target)^2) / sum(Bz_target^2)); equal validation weights",
         "current_refitted": False,
         "independent_sampling": True,
+        "independent_sampling_scope": "Original sheet solve versus 912 points; processed paths use those points for acceptance and a separate untouched 1472-point holdout.",
         "independent_quadrature_or_mesh_convergence": False,
         "routed": False,
         "fabrication_validated": False,
@@ -261,19 +264,20 @@ def main() -> None:
         "generator_sha256": sha256(Path(__file__).read_bytes()).hexdigest(),
         "figure_source_sha256": {
             name: sha256((OUTPUT / name).read_bytes()).hexdigest()
-            for name in ("presentation.py", "field_maps.py", "swept_bodies.py")
+            for name in ("contour_processing.py", "presentation.py", "field_maps.py", "swept_bodies.py")
         },
         "python_version": platform.python_version(),
         "dependencies": {
             package: version(package)
-            for package in ("numpy", "scipy", "cvxpy", "clarabel", "matplotlib", "threadpoolctl")
+            for package in ("numpy", "scipy", "cvxpy", "clarabel", "matplotlib", "threadpoolctl", "pyvista", "vtk")
         },
         "cases": list(metrics),
+        "refined_cases": list(refined_metrics),
         "artifact_sha256": {
             path.name: sha256(path.read_bytes()).hexdigest()
             for path in sorted(OUTPUT.glob("*"))
             if path.suffix in (".npz", ".png", ".svg")
-            or path.name in ("presentation.json", "field_maps.json", "swept_bodies.json")
+            or path.name in ("contour_processing.json", "presentation.json", "field_maps.json", "swept_bodies.json")
         },
     }
     (OUTPUT / "metrics.json").write_text(

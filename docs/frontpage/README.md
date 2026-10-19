@@ -9,13 +9,14 @@ MATLAB dependencies or synthetic decorative field maps in these figures.
 From the repository root, in an activated Python 3.10+ environment:
 
 ```bash
-python -m pip install -e ".[research,plot]"
+python -m pip install -e ".[research,plot,gui]"
 python docs/frontpage/generate_figures.py
 ```
 
-The script uses one numerical thread, a headless Matplotlib backend and strict
-CVXPY constrained optimization. It recomputes both cases, evaluates the dense
-field maps, builds illustrative swept conductor bodies, and writes high-resolution
+The script uses one numerical thread, Matplotlib, the VTK/PyVista rendering
+stack and strict CVXPY constrained optimization. It recomputes both cases,
+smooths and filters their contours, evaluates the processed fields, builds
+illustrative swept conductor bodies, and writes high-resolution
 PNG/SVG figures, compressed numerical arrays and JSON evidence next to the script.
 Small solver/library differences can change the last reported digits; use the
 recorded dependency versions when comparing a specific figure revision.
@@ -27,9 +28,10 @@ python docs/frontpage/generate_figures.py --reuse-data
 ```
 
 This mode checks the numerical source fingerprint, case configurations, array
-checksums and recorded RMS errors before reuse. The dense maps are still
-evaluated afresh. The original numerical revision and current rendering sources
-are recorded separately; no optimization or display-time current fit is made.
+checksums and recorded RMS errors before reusing the sheet solutions. Contour
+conditioning is cached by its complete inputs and settings; dense field maps
+are evaluated afresh. Raw and processed paths and their field errors remain
+separate. No optimization or display-time current fit is made.
 
 ## What was computed
 
@@ -44,23 +46,54 @@ are recorded separately; no optimization or display-time current fit is made.
 | Independent check budget | 4%, using a 0.8 design margin | Same |
 | Contouring | 16 requested levels; original signed contour current | Same |
 | Extracted contour count | 32 | 36 total |
+| Retained smoothed contours | 32 | 30 total |
 
 The generator checks the actual mesh bounds, cylinder radius and plane
 dimensions/separation before producing evidence. Its cylinder input compensates
 the legacy builder's height convention to realize the stated 300 mm length.
 Executed support extents and bounds are recorded in `metrics.json`.
 
-The independent grid contains **912** cell-centered samples inside the target
-sphere and shares no points with the design grid. Relative RMS error is
+The original solver-independent grid contains **912** cell-centered samples
+inside the target sphere and shares no points with the design grid. It is also
+used to gate contour smoothing/pruning, so it is a postprocessing acceptance
+grid. An untouched **1,472-point** cell-centered holdout is evaluated afterwards,
+with no points shared with either the solve grid or the acceptance grid.
+The retained geometry is not tuned to that holdout. Relative RMS error is
 `100 * ||Bz − Bz_target||₂ / ||Bz_target||₂`, using equal sample weights.
 This is an aggregate error, including target-zero locations without pointwise
 division. Neither sheet nor contour current is refitted to the validation data.
 
-The two continuous-sheet errors are 3.404% and 3.014%; the unconnected-contour
-errors are 3.381% and 2.959%. The modest reduction after contouring is specific
-to these examples and does not imply that discretization generally improves
-a field. A field constraint enforced on the design grid need not hold on new
-samples; the solve reserves margin explicitly.
+The two continuous-sheet errors are 3.404% and 3.014%. The original raw-contour
+errors are 3.381% and 2.959%; after smoothing and filtering they are 3.900% and
+3.798%, at unchanged currents. The displayed curves and all contour-field
+figures use these processed paths. The raw solved arrays remain available for
+comparison. A field constraint on the design grid need not hold at new samples.
+
+## Smooth and filter the contours
+
+The gallery uses the existing periodic cubic B-spline smoothing kernel in
+physical cylinder/plane coordinates. The cylinder paths lie on the analytic
+120 mm radius surface; planar paths retain their original z coordinates.
+Closed-loop orientation and the original signed turn current are preserved.
+Output points are spaced at approximately 0.75 mm along each curve.
+Tight bends receive additional samples from the same spline so adjacent
+polyline tangents turn by at most 4 degrees; this does not change the fitted curve.
+
+Low-contribution loops are considered for removal in symmetric groups, with
+a final **4% full-volume Bz RMS error limit** at the original current. Six
+small central biplanar loops are removed. The smallest cylindrical loops are
+retained because dropping them after smoothing would exceed that limit.
+The settings, retained/dropped loop identities, displacements and before/after
+fields are recorded in [contour_processing.json](contour_processing.json).
+
+| Processed-contour check | Samples | Cylindrical Gy | Biplanar Gz |
+| --- | ---: | ---: | ---: |
+| Postprocessing acceptance grid | 912 | 3.8998% | 3.7976% |
+| Untouched holdout | 1,472 | 3.8951% | 3.8845% |
+
+The holdout changes neither the retained loops nor the smoothing parameters.
+Its continuous-sheet errors are 3.4100% and 3.1388%, respectively. All values
+are relative Bz norm errors at the original solved current.
 
 The field maps evaluate the actual sheet and contour fields at 7,845 points
 on a 101 × 101 grid inside the central `x = 0` circular cross-section. Neither
@@ -74,31 +107,29 @@ function in amperes. Cylinder triangles crossing the angular seam are unwrapped
 locally and duplicated across the periodic chart boundary. The biplanar maps
 retain their actual sheet positions and signs. Color scales differ by geometry.
 
-The fidelity figure compares requested and calculated Bz at all 912 volume
+The fidelity figure compares requested and calculated Bz at all 912 acceptance
 samples, their signed residual distributions, and empirical cumulative absolute
 errors. Distribution and coverage axes divide by the peak absolute target Bz
 for that design; they do not divide pointwise by a target that crosses zero.
 Those percentages differ from the relative RMS norm used in the table above.
 
-The swept-body illustration uses the public conductor sweep on each original
-closed contour, with a **0.9 mm radius**, 16-sided circular profile. The bodies
-are mounted outside the support with a nominal 0.9 mm centerline offset along
-its normal and remain independent loops. Actual projection and displacement
-diagnostics are retained with the body meshes. The field figures evaluate
-the original thin-wire paths, not the displaced body centroids.
-The close-up shows the resulting triangular surface
-and cross-section; surface shading represents geometry, not current or field.
+The swept-body illustration uses the public conductor sweep on each retained
+smoothed contour, with a **0.9 mm radius**, 32-sided circular profile centered
+on its path. The field figures use these same processed centerlines. Actual
+projection and displacement diagnostics are retained with the body meshes.
+The VTK render uses smooth surface normals, lighting and a close-up of a
+rounded bend; geometry and profile dimensions are not exaggerated.
+Surface shading represents geometry, not current or field.
 The selected conductor size is illustrative and does not establish clearance,
 electrical connections, manufacturability or fabrication acceptance.
 
-All **68** swept boundaries are watertight with positive signed volume and
-zero open or nonmanifold edges. This does not establish geometric validity:
-four planar bodies have local self-intersections, and 64 bodies fail at least
-one per-body manufacturing diagnostic, including unresolved frame sampling.
-Those failures are retained in `swept_bodies.json`; no loops or failed checks
-are hidden. Between-body clearance and a complete fabrication review were
-not performed. These are illustrative outputs of the sweep stage, not
-released conductor designs.
+The retained boundaries and all their geometry diagnostics are saved in
+`swept_bodies.json`. All **62** bodies pass the production sweep's
+`validate=True` checks: watertight boundaries, positive volumes, and no
+self-intersection, frame, curvature-envelope or profile-Jacobian violations.
+The evaluated field paths and swept centerlines agree to roundoff.
+Between-body clearance and a complete fabrication review remain separate
+from this illustration. These are not released conductor designs.
 
 ## Files
 
@@ -107,6 +138,11 @@ released conductor designs.
 - [presentation.py](presentation.py), [presentation.json](presentation.json):
   geometry, stream-function and full-volume fidelity plots, with input hashes
   and derived residual statistics.
+- [contour_processing.py](contour_processing.py), [contour_processing.json](contour_processing.json):
+  physical spline smoothing, contribution-based pruning, and fixed-current
+  before/after field validation.
+- [refined_case_0.npz](refined_case_0.npz), [refined_case_1.npz](refined_case_1.npz):
+  retained smooth paths, original sheet solutions and reevaluated contour fields.
 - [field_maps.py](field_maps.py), [field_maps.json](field_maps.json),
   [field_maps.npz](field_maps.npz): actual dense sheet/contour evaluation,
   roundoff reconstruction checks, points and SI fields.
@@ -118,11 +154,11 @@ released conductor designs.
   checksums. The source fingerprint identifies the working tree used for the
   figures, which may include changes after the recorded base commit.
 - [case_0.npz](case_0.npz), [case_1.npz](case_1.npz): SI mesh vertices,
-  zero-based triangle indices, stream functions, contours and validation
+  zero-based triangle indices, stream functions, **raw** contours and validation
   points/target/sheet/contour fields. Load with `numpy.load(path,
   allow_pickle=False)`.
 - [coil_designs.png](coil_designs.png), [coil_designs.svg](coil_designs.svg):
-  generated supports and iso-current contours.
+  generated supports and smoothed, filtered contours.
 - [field_validation.png](field_validation.png), [field_validation.svg](field_validation.svg):
   densely evaluated central-plane fields and residuals, labeled separately
   from the full-volume error metrics.
