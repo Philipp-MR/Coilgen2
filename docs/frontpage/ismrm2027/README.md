@@ -2,13 +2,29 @@
 
 These figures and results come from the CoilGen2 ISMRM 2027 abstract package.
 Numerical results use **v26**; the gradient summaries below are derived from its
-saved fields. They are not a benchmark of the current checkout. Both PNGs are
+saved fields. They are not a benchmark of the current checkout. All PNGs are
 retained byte for byte; no field maps were redrawn.
 
 | Local figure | Abstract source |
 | --- | --- |
 | [workspace.png](workspace.png) | v26 Figure 1: graphical workspace and processing sequence |
 | [coil-examples.png](coil-examples.png) | Original v25 Figure 5 four-panel image, reused in v26; results are presented as a separate Markdown table |
+| [conductor-profiles.png](conductor-profiles.png) | v26 Figure 3: native cross-section editors, swept conductor segments and elliptical-winding field evaluation |
+
+## Conductor cross-sections and sweeping
+
+Figure 3 shows elliptical, rectangular and trapezoidal profiles applied to the
+same saved route of the generated cylindrical X²−Y² shim. Panels A–C are native
+profile-editor captures; D–F show subsets of the corresponding production sweep
+meshes. Scale bars represent 2 mm in the orthographic image plane, not arclength.
+
+Panel G evaluates **only the elliptical winding**, at its original 1.9210534195 A:
+relative RMS Bz error is 3.827% for the source route, 3.927% after path realization
+before mounting, and 4.572% for the mounted conductor centerline. These are
+thin-filament field calculations, not a comparison of finite-cross-section
+current distributions or of the three profile shapes. All three saved profile
+sweeps fail configured geometric checks; rendering them does not
+establish fabrication acceptance.
 
 ## Field evaluation through the design stages
 

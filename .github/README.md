@@ -74,6 +74,20 @@ For scripts without the GUI, install `python -m pip install -e ".[research,plot]
 The workbench and Python scripts share the numerical engine. Saved projects
 retain editable geometry, targets and processing settings.
 
+### Conductor cross-sections and sweeping
+
+Edit the cross-section in millimeters, sweep it along the winding, and choose
+centered, inner or outer mounting on the support. Profiles can be rectangular
+or custom convex polygons, including the elliptical and trapezoidal examples below.
+
+![Elliptical, rectangular and trapezoidal conductor profiles in the editor, their swept segments, and the elliptical winding's field error through realization and mounting.](../docs/frontpage/ismrm2027/conductor-profiles.png)
+
+*A–C: cross-sections. D–F: swept conductor segments. G: elliptical winding only—
+relative RMS Bz error for the source route (1), realized path (2) and mounted
+centerline (3), at unchanged current.*
+[Profile editor](../docs/NATIVE_WORKBENCH.md) ·
+[Sweep and mounting controls](../docs/PARAMETERS.md#volumetric-sweep-controls).
+
 ### Check the field after each geometry change
 
 In the abstract's three controlled smoothing examples, 3D RMS curvature fell
@@ -86,8 +100,8 @@ and mounting. These comparisons use 2,048 independent volume samples per design,
 without gain or offset fitting. [Methods, stage comparisons and provenance](../docs/frontpage/ismrm2027/README.md).
 
 These are numerical examples. Discrete winding fields use thin-filament
-Biot–Savart evaluation; the illustrated cylindrical shim conductor fails
-configured geometric checks and is not ready for fabrication.
+Biot–Savart evaluation; the illustrated profile sweeps fail
+configured geometric checks and are not ready for fabrication.
 [Physical assumptions](../docs/PHYSICAL_ASSUMPTIONS.md) ·
 [Interpreting results](../docs/RESULT_INTERPRETATION.md).
 

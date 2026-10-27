@@ -26,6 +26,43 @@
       "source_provenance": "figures/Figure_5_Provenance.json",
       "copy_policy": "Unmodified original PNG bytes",
       "source_version": "Original v25 four-panel image, reused as source artwork in v26; no embedded results table."
+    },
+    {
+      "source": "v26/figures/Figure_3_Conductor_Design.png",
+      "local": "conductor-profiles.png",
+      "sha256": "76552a8a132f3d4177372565a837f9966fd43f6258eb2283b5943a381a52854f",
+      "dimensions_px": [
+        3600,
+        2350
+      ],
+      "source_provenance": "v26/figures/Figure_3_Conductor_Design_Provenance.json",
+      "copy_policy": "Unmodified original PNG bytes",
+      "design_source": "Generated cylindrical X²−Y² shim; all three profiles use the same saved support, route and current as the workspace figure.",
+      "profiles": [
+        "elliptical",
+        "rectangular",
+        "trapezoidal"
+      ],
+      "profile_panels": "A–C: native conductor-profile editor captures",
+      "sweep_panels": "D–F: subsets of production sweep meshes; no geometry deformation for display",
+      "scale_bar_scope": "2 mm orthographic image-plane distance, not conductor arclength",
+      "field_plot": {
+        "panel": "G",
+        "shape": "elliptical",
+        "stage_order": [
+          "source_route",
+          "realized_before_mounting",
+          "mounted_centroid"
+        ],
+        "relative_RMS_Bz_error_percent": [
+          3.827171502027574,
+          3.9268316918354715,
+          4.571528473569235
+        ],
+        "interpretation": "Same fixed-current thin-filament comparisons as the prior figure; no rectangular or trapezoidal field claims."
+      },
+      "fabrication_accepted": false,
+      "finite_cross_section_field_evaluated": false
     }
   ],
   "evaluation": {
@@ -425,7 +462,8 @@
     "new_optimizer_or_field_solver_run": false,
     "curvature_values": "Copied from saved supplementary audits at 0.5 mm sampling; curvature geometry calculations were not rerun.",
     "derived_gradient_efficiency": "Affine fits on 2,048 and 4,096 saved samples; requested gradients independently recovered as 0.02 T/m; coordinate-scaled and unscaled coefficients agree within 1e-15 T/m; source fields/results hashes match the recorded snapshot.",
-    "derived_shim_efficiency": "Nine-mode degree<=2 fits on 2,048 and 4,096 saved samples; targets recovered as 0.025 and 0.004 T/m^2; normalized-Ylm conversion agrees within 1e-15 T/m^2; tenth radial-nuisance mode changes efficiencies by less than 2e-8 mT/(m^2*A). Source fields/results hashes match the recorded snapshot."
+    "derived_shim_efficiency": "Nine-mode degree<=2 fits on 2,048 and 4,096 saved samples; targets recovered as 0.025 and 0.004 T/m^2; normalized-Ylm conversion agrees within 1e-15 T/m^2; tenth radial-nuisance mode changes efficiencies by less than 2e-8 mT/(m^2*A). Source fields/results hashes match the recorded snapshot.",
+    "conductor_profile_figure": "Original figure and all ten composition sources match their recorded hashes. The three profile-geometry archives match their capture hashes; each support mesh, source route and current exactly matches the previously verified generated cylindrical shim. All three saved sweeps have manufacturing_ok=false. No optimization or field solver rerun."
   },
   "limitations": [
     "Numerical designs are not fabrication-qualified coils.",
@@ -540,6 +578,54 @@
     {
       "path": "v26/numerical/stages/conic/effective_config.json",
       "sha256": "bac517acf6bb31fa7ef952b12f91d9883a494eb2a60fea0bed4e6595336dc287"
+    },
+    {
+      "path": "v26/reproduction/compose_profile_variants.py",
+      "sha256": "637ec6207e60084029bb0cbb2b2f02e97883e5ffba0a73adb21bb61a44244762"
+    },
+    {
+      "path": "v26/figures/profile_variants_native/capture_provenance.json",
+      "sha256": "9205a80ce7ccb7166ad3627bafa639714681cc9434981e7e3f396cd73400ebf5"
+    },
+    {
+      "path": "v26/numerical/sweep_profile_variants/report.json",
+      "sha256": "c7c9cab988a7225d10943c4ebf81233ad3cf6d6589f240c7f33194bcfe97d13f"
+    },
+    {
+      "path": "v26/numerical/sweep_final/ablation_report.json",
+      "sha256": "d04bc81bdbfb30d48ed4323394c97c2d33969bb355eb4b1d198546ec95d93222"
+    },
+    {
+      "path": "v26/figures/profile_variants_native/elliptical_editor.png",
+      "sha256": "f5badfb6b99fc0b3c4716d4d7911bfbbb92cdc31486938f92e4d692e85b36873"
+    },
+    {
+      "path": "v26/figures/profile_variants_native/elliptical_sweep.png",
+      "sha256": "cfb1febe8433375239b4fc03f1bf9baba64802b97c8fd054dbb3989b85f6256b"
+    },
+    {
+      "path": "v26/figures/profile_variants_native/rectangular_editor.png",
+      "sha256": "8e0dd1f9cbc4b5fd9d5dc9488a5670a4fe1c4c8b064d46bb75fb754944f80f20"
+    },
+    {
+      "path": "v26/figures/profile_variants_native/rectangular_sweep.png",
+      "sha256": "2bbf1c78271fd066128b8d6f39b63155b756eac5ec3088e8ce8aeca0dbb78d79"
+    },
+    {
+      "path": "v26/figures/profile_variants_native/trapezoidal_editor.png",
+      "sha256": "352e8bdd0d96f5f549d2b48be5c4e268a3ab98de78bae1f531aca7f1c51d0750"
+    },
+    {
+      "path": "v26/figures/profile_variants_native/trapezoidal_sweep.png",
+      "sha256": "0d8828642b7716852741a74e6f314d376ca36135be41bc6c365c86488dfe13f5"
+    },
+    {
+      "path": "v26/figures/Figure_3_Conductor_Design_Provenance.json",
+      "sha256": "4db489906ffc1eb92157bbd62f8ee9254619543d25e6b8c015106ae40ccb6df3"
+    },
+    {
+      "path": "v26/figures/Figure_3_Conductor_Design.png",
+      "sha256": "76552a8a132f3d4177372565a837f9966fd43f6258eb2283b5943a381a52854f"
     }
   ],
   "derived_gradient_efficiency_method": {
