@@ -1,0 +1,150 @@
+{
+  "entrypoint_count": 36,
+  "entrypoints": [
+    {
+      "path": "examples/biplanar_gradient_shim_workbench.py",
+      "sha256": "5c4d34e7902ca450de918111f131f81033f15c21e29bf8f44448986fae47c37d"
+    },
+    {
+      "path": "examples/conical_harmonic_workbench.py",
+      "sha256": "96f424805ffa65fe26846d12b4ed70588f45243f53a18259746796dc5e5617f1"
+    },
+    {
+      "path": "examples/cylindrical_xyz_gradient_workbench.py",
+      "sha256": "f9ec6b08962d4dfb9c0ef4058a1cce63143a855c5e0373451fa7dcab28f13dac"
+    },
+    {
+      "path": "examples/optimization_minimax_comparison.py",
+      "sha256": "bcafbf979f60881498297e7c75a5d9b9f402cb67438c2fe521d6a10a0050584c"
+    },
+    {
+      "path": "examples/research_basic_designs.py",
+      "sha256": "e36cd26a45ee28e2c210584411be035187017db5f04c5df9037f7fe7863459f3"
+    },
+    {
+      "path": "examples/research_geometry_benchmark.py",
+      "sha256": "96466e1c5930a2504fb09a7f4cc665b64966be38ff93fcaeac4adcb6799b7e58"
+    },
+    {
+      "path": "examples/research_parallel_study.py",
+      "sha256": "ea026b4122969d95f2cffcc901bda4a8936c611fadffe03633ddabfe292636ea"
+    },
+    {
+      "path": "examples/research_tolerance_study.py",
+      "sha256": "e08dd54e77ef2c9fa1b00c10e5cf0a67bb436a9b2f5c28a69f9b2e1fa0fe7363"
+    },
+    {
+      "path": "examples/research_valid_fabrication.py",
+      "sha256": "f2490e668fc7e3f8cd4d637857a856048357f5155d4ca2cb6949615e3d9079af"
+    },
+    {
+      "path": "examples/research_valid_gradient_fabrication.py",
+      "sha256": "b99bded173c7eede08052d98d67bc867954f761e8eda29272651d2585fb41e62"
+    },
+    {
+      "path": "projects/general_examples/scripts/audit_csv_target_field_symmetry.py",
+      "sha256": "76b900a07deec95310db94352c292dad6001db9a9f3606db08f93d28ed73b566"
+    },
+    {
+      "path": "projects/general_examples/scripts/benchmark_active_shield_scaling.py",
+      "sha256": "6dbe067488c70c23a89e355b18d614cd6caa03f7d1e9839aaed0f62eddd386bf"
+    },
+    {
+      "path": "projects/general_examples/scripts/benchmark_mesh_vertex_scaling.py",
+      "sha256": "226064a59caaf831a5b459753dfdc9f71460d6d1406d0c1772f81454b0bc0f26"
+    },
+    {
+      "path": "projects/general_examples/scripts/benchmark_performance.py",
+      "sha256": "62598c89e6a1084dbabb42bf6b8269c8c2c318ddd79e046904ba15ab08c057cd"
+    },
+    {
+      "path": "projects/general_examples/scripts/benchmark_sweep_case_cache_scaling.py",
+      "sha256": "9c182ef78222273a477d09ba0e0632ab3262d20b2590c27c931f5ae0a55eac29"
+    },
+    {
+      "path": "projects/general_examples/scripts/benchmark_target_point_scaling.py",
+      "sha256": "27c229a6d3ff531b7f4a71730b9a50bf6526581b7c1b278a4072c583f73214d0"
+    },
+    {
+      "path": "projects/general_examples/scripts/conventional_cylindrical_mri_gradient.py",
+      "sha256": "f459555b2eb5dc79bc0157a8923e7566251ebb77fb2372f00d65c1e9e2893f7e"
+    },
+    {
+      "path": "projects/general_examples/scripts/create_new_geometry_api_template.py",
+      "sha256": "f1bc492c3666d4ccc539ad29ce53046ee1e10b7ad9362cad05bea2519d02a739"
+    },
+    {
+      "path": "projects/general_examples/scripts/csv_target_field.py",
+      "sha256": "a7139d66436805094a4898c24482f0fa28b4124f7c7b43643186791bc1932a28"
+    },
+    {
+      "path": "projects/general_examples/scripts/export_pcb_layout.py",
+      "sha256": "eb549fd9a9ecd9c145a2812b3d953aeeb173423555f10609d7bd92ba37e1c22a"
+    },
+    {
+      "path": "projects/general_examples/scripts/export_swept_body.py",
+      "sha256": "d0d9b8279354d1993a2092f71c501211831df2340ab45acf4f1a2eb077609c2e"
+    },
+    {
+      "path": "projects/general_examples/scripts/export_visualizations.py",
+      "sha256": "66b22645148528df23e473e27f0c919ae313bd35239bbb2f667439672dd246dd"
+    },
+    {
+      "path": "projects/general_examples/scripts/generated_parameter_sweep.py",
+      "sha256": "492ab7a5f6701157417c57170d8c32a8f17d7e769b792154de26b54e2020da04"
+    },
+    {
+      "path": "projects/general_examples/scripts/imported_target_shim_example.py",
+      "sha256": "1e62922ea8a602dbb33e6c359abc561a99b2ee239a540312d133e146d972aae7"
+    },
+    {
+      "path": "projects/general_examples/scripts/open_biplanar_gradient.py",
+      "sha256": "03c7326eb402e5cb15cf4b57bcd0e85c14e0f73e88a7cde88061142bf644b4ca"
+    },
+    {
+      "path": "projects/general_examples/scripts/preoptimized_stream_function.py",
+      "sha256": "6e9154dd4069ee00748c345a74eed7ea0203730c8b296912eba70c137dbe5ac7"
+    },
+    {
+      "path": "projects/general_examples/scripts/run_standard_examples.py",
+      "sha256": "b2aac37c9111932fd06d96e159f0159581cf2a482dff57ceb39d992bea8dfbae"
+    },
+    {
+      "path": "projects/general_examples/scripts/scientist_cylinder_y_gradient.py",
+      "sha256": "2979e786d8d69df18af3b80a11d6f72d977518044c219aef557da494a10bd5d1"
+    },
+    {
+      "path": "projects/general_examples/scripts/simple_ygradient.py",
+      "sha256": "24189508f7130050e91fb9bacc765c4ad816caf8d3df590c2964822301391354"
+    },
+    {
+      "path": "projects/general_examples/scripts/solenoid_constant_z_validation.py",
+      "sha256": "ca25e7a282021923f417b23874dc28d911c2776f3a4f21cbaf5d8c3ad9f54911"
+    },
+    {
+      "path": "projects/general_examples/scripts/split_bore_flange_smoke.py",
+      "sha256": "6c2473f0275e805446d0ec0b90ba59c09f522a138297734443ef563dd36e3866"
+    },
+    {
+      "path": "projects/general_examples/scripts/spyder_design_example.py",
+      "sha256": "3d6356a39a7a5102fcfb9f00e2999a5658bdd9b1f2f51d295f6539ad224fc040"
+    },
+    {
+      "path": "projects/halbach_cylindrical_3axis_gradient/run_halbach_cylindrical_3axis_gradient.py",
+      "sha256": "dc27cdf1d784e7b6c45be213eccbe954e2ee32a4fdc3243bc46b1f5ed73dfa26"
+    },
+    {
+      "path": "projects/halbach_cylindrical_3axis_gradient/sandbox_cylinder_contour_smoothing.py",
+      "sha256": "ba4e7b9d15e29f295780246bceac9069be91986c443a6d93353785111570c93a"
+    },
+    {
+      "path": "projects/primitive_support_structures/scripts/run_primitive_support_designs.py",
+      "sha256": "551d7380478c006703651f2950809757219fc281aded80ebff3cec7ecb94ecee"
+    },
+    {
+      "path": "projects/standard_cylindrical_3axis_gradient/run_standard_cylindrical_3axis_gradient.py",
+      "sha256": "51122a753cce21047e7a2cf749b73edca2508f22ea04f638af3f613ce9792d02"
+    }
+  ],
+  "scope": "Current guarded Python scripts, discovered without importing or executing them. Inventory is not validation."
+}

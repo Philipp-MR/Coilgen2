@@ -1,0 +1,402 @@
+{
+  "date": "2026-09-09",
+  "environment": {
+    "python": "3.12.14",
+    "numpy": "2.5.1",
+    "scipy": "1.18.0",
+    "cvxpy": "1.9.2",
+    "numba": "0.67.0",
+    "threadpoolctl": "3.6.0"
+  },
+  "source_sha256": {
+    "src/coilgen": "fbc77d37df169d8a988bb9af93bc338db6cf4ecf71bc676c24df30a769b93344",
+    "examples": "3fd15223648fa326a092d3ba8cc3df62dbbf1331ad8316c15b7abf3d55f04e35",
+    "projects": "438d8aca8a2985c5c60271bcc68990ed9cdaf50457796d871745f29cf8829d6c"
+  },
+  "scope": "Retained guarded example/project entrypoints; independent CoilGenResearch and reference code excluded.",
+  "execution_convention": "General runs used MPLBACKEND=Agg and one native thread. Default means original numerical demonstration choices except the documented example-default corrections; specialist coarse variants are explicit. Execution success is not manufacturing acceptance.",
+  "entries": [
+    {
+      "path": "examples/optimization_minimax_comparison.py",
+      "validation": "default_executed",
+      "seconds": 4.186,
+      "exit_code": 0,
+      "arguments": [
+        "--output-dir",
+        "./outputs/example_audit/optimization_minimax_comparison"
+      ],
+      "working_directory": "./tmp/example_audit_cwd"
+    },
+    {
+      "path": "examples/research_basic_designs.py",
+      "validation": "default_executed",
+      "seconds": 2.131,
+      "exit_code": 0,
+      "arguments": [
+        "--output-dir",
+        "./outputs/example_audit/research_basic_designs"
+      ],
+      "working_directory": "./tmp/example_audit_cwd"
+    },
+    {
+      "path": "examples/research_geometry_benchmark.py",
+      "validation": "default_executed",
+      "seconds": 7.938,
+      "exit_code": 0,
+      "arguments": [
+        "--output-dir",
+        "./outputs/example_audit/research_geometry_benchmark"
+      ],
+      "working_directory": "./tmp/example_audit_cwd"
+    },
+    {
+      "path": "examples/research_parallel_study.py",
+      "validation": "default_executed",
+      "seconds": 2.887,
+      "exit_code": 0,
+      "arguments": [
+        "--output-dir",
+        "./outputs/example_audit/research_parallel_study",
+        "--no-resume"
+      ],
+      "working_directory": "./tmp/example_audit_cwd"
+    },
+    {
+      "path": "examples/research_tolerance_study.py",
+      "validation": "default_executed",
+      "seconds": 1.697,
+      "exit_code": 0,
+      "arguments": [
+        "--output-dir",
+        "./outputs/example_audit/research_tolerance_study",
+        "--no-resume"
+      ],
+      "working_directory": "./tmp/example_audit_cwd"
+    },
+    {
+      "path": "examples/research_valid_fabrication.py",
+      "validation": "default_executed",
+      "seconds": 2.026,
+      "exit_code": 0,
+      "arguments": [
+        "--output-dir",
+        "./outputs/example_audit/research_valid_fabrication"
+      ],
+      "working_directory": "./tmp/example_audit_cwd"
+    },
+    {
+      "path": "projects/general_examples/scripts/audit_csv_target_field_symmetry.py",
+      "validation": "default_executed",
+      "arguments": [
+        "--headless"
+      ],
+      "seconds": 0.66,
+      "exit_code": 0,
+      "working_directory": "tmp/examples_cleanup"
+    },
+    {
+      "path": "projects/general_examples/scripts/benchmark_active_shield_scaling.py",
+      "validation": "default_executed",
+      "seconds": 2.481,
+      "exit_code": 0,
+      "arguments": [],
+      "working_directory": "unrelated directory with PYTHONPATH unset"
+    },
+    {
+      "path": "projects/general_examples/scripts/benchmark_mesh_vertex_scaling.py",
+      "validation": "default_executed",
+      "seconds": 1.48,
+      "exit_code": 0,
+      "arguments": [],
+      "working_directory": "unrelated directory with PYTHONPATH unset"
+    },
+    {
+      "path": "projects/general_examples/scripts/benchmark_performance.py",
+      "validation": "default_executed",
+      "seconds": 0.915,
+      "exit_code": 0,
+      "arguments": [],
+      "working_directory": "unrelated directory with PYTHONPATH unset"
+    },
+    {
+      "path": "projects/general_examples/scripts/benchmark_sweep_case_cache_scaling.py",
+      "validation": "default_executed",
+      "seconds": 0.958,
+      "exit_code": 0,
+      "arguments": [],
+      "working_directory": "unrelated directory with PYTHONPATH unset"
+    },
+    {
+      "path": "projects/general_examples/scripts/benchmark_target_point_scaling.py",
+      "validation": "default_executed",
+      "seconds": 1.268,
+      "exit_code": 0,
+      "arguments": [],
+      "working_directory": "unrelated directory with PYTHONPATH unset"
+    },
+    {
+      "path": "projects/general_examples/scripts/conventional_cylindrical_mri_gradient.py",
+      "validation": "default_executed",
+      "arguments": [
+        "--headless"
+      ],
+      "seconds": 3.175,
+      "exit_code": 0,
+      "working_directory": "tmp/examples_cleanup"
+    },
+    {
+      "path": "projects/general_examples/scripts/create_new_geometry_api_template.py",
+      "validation": "default_executed",
+      "arguments": [
+        "--headless"
+      ],
+      "seconds": 0.647,
+      "exit_code": 0,
+      "working_directory": "tmp/examples_cleanup"
+    },
+    {
+      "path": "projects/general_examples/scripts/csv_target_field.py",
+      "validation": "default_executed",
+      "arguments": [
+        "--headless"
+      ],
+      "seconds": 0.851,
+      "exit_code": 0,
+      "working_directory": "tmp/examples_cleanup"
+    },
+    {
+      "path": "projects/general_examples/scripts/export_pcb_layout.py",
+      "validation": "default_executed",
+      "arguments": [
+        "--headless"
+      ],
+      "seconds": 8.017,
+      "exit_code": 0,
+      "working_directory": "tmp/examples_cleanup"
+    },
+    {
+      "path": "projects/general_examples/scripts/export_swept_body.py",
+      "validation": "default_executed",
+      "arguments": [
+        "--headless"
+      ],
+      "seconds": 2.814,
+      "exit_code": 0,
+      "working_directory": "tmp/examples_cleanup"
+    },
+    {
+      "path": "projects/general_examples/scripts/export_visualizations.py",
+      "validation": "default_executed",
+      "arguments": [
+        "--headless"
+      ],
+      "seconds": 9.73,
+      "exit_code": 0,
+      "working_directory": "tmp/examples_cleanup"
+    },
+    {
+      "path": "projects/general_examples/scripts/generated_parameter_sweep.py",
+      "validation": "default_executed",
+      "seconds": 10.427,
+      "exit_code": 0,
+      "arguments": [
+        "--headless"
+      ],
+      "working_directory": "unrelated directory with PYTHONPATH unset"
+    },
+    {
+      "path": "projects/general_examples/scripts/imported_target_shim_example.py",
+      "validation": "default_executed",
+      "arguments": [
+        "--headless"
+      ],
+      "seconds": 1.811,
+      "exit_code": 0,
+      "working_directory": "tmp/examples_cleanup"
+    },
+    {
+      "path": "projects/general_examples/scripts/open_biplanar_gradient.py",
+      "validation": "default_executed",
+      "arguments": [
+        "--headless"
+      ],
+      "seconds": 2.47,
+      "exit_code": 0,
+      "working_directory": "tmp/examples_cleanup"
+    },
+    {
+      "path": "projects/general_examples/scripts/preoptimized_stream_function.py",
+      "validation": "default_executed",
+      "arguments": [
+        "--headless"
+      ],
+      "seconds": 1.08,
+      "exit_code": 0,
+      "working_directory": "tmp/examples_cleanup"
+    },
+    {
+      "path": "projects/general_examples/scripts/run_standard_examples.py",
+      "validation": "default_executed",
+      "seconds": 7.234,
+      "exit_code": 0,
+      "arguments": [
+        "--headless"
+      ],
+      "working_directory": "unrelated directory with PYTHONPATH unset"
+    },
+    {
+      "path": "projects/general_examples/scripts/scientist_cylinder_y_gradient.py",
+      "validation": "default_executed",
+      "arguments": [
+        "--headless"
+      ],
+      "seconds": 5.674,
+      "exit_code": 0,
+      "working_directory": "tmp/examples_cleanup"
+    },
+    {
+      "path": "projects/general_examples/scripts/simple_ygradient.py",
+      "validation": "default_executed",
+      "arguments": [
+        "--headless"
+      ],
+      "seconds": 11.2,
+      "exit_code": 0,
+      "working_directory": "tmp/examples_cleanup"
+    },
+    {
+      "path": "projects/general_examples/scripts/solenoid_constant_z_validation.py",
+      "validation": "default_executed",
+      "arguments": [
+        "--headless"
+      ],
+      "seconds": 3.931,
+      "exit_code": 0,
+      "working_directory": "tmp/examples_cleanup"
+    },
+    {
+      "path": "projects/general_examples/scripts/split_bore_flange_smoke.py",
+      "validation": "default_executed",
+      "arguments": [
+        "--headless"
+      ],
+      "seconds": 2.513,
+      "exit_code": 0,
+      "working_directory": "tmp/examples_cleanup"
+    },
+    {
+      "path": "projects/general_examples/scripts/spyder_design_example.py",
+      "validation": "default_executed",
+      "arguments": [
+        "--headless"
+      ],
+      "seconds": 17.295,
+      "exit_code": 0,
+      "working_directory": "tmp/examples_cleanup"
+    },
+    {
+      "path": "projects/halbach_cylindrical_3axis_gradient/run_halbach_cylindrical_3axis_gradient.py",
+      "validation": "coarse_gx_main_completed_with_fabrication_rejection",
+      "imports": "passed",
+      "reason": "Actual imported GX support explicitly coarsened; main completed optimization, routing, sweep, maps and visualization STL export. Geometry failed manufacturing checks. Full three-axis default was not executed.",
+      "overrides": {
+        "source": "./project_data/halbach_cylindrical_3axis_gradient/Octagonal Gradients - Gx Surface_remeshed.stl",
+        "source_vertices": 7164,
+        "source_faces": 14104,
+        "coarse_vertices": 392,
+        "coarse_faces": 728,
+        "cluster_voxel_size_mm": 21.253778267974855,
+        "channel": "GX",
+        "target_region_resolution": 5,
+        "diagnostic_grid_size": 12,
+        "diagnostic_slices": 3
+      },
+      "engineering_certification": "manufacturing_not_ready",
+      "pipeline_seconds": 102.9,
+      "diagnostic_slice_seconds": 0.84,
+      "log_span_seconds": 136.94627571105957,
+      "log_span_definition": "Last log modification minus file creation time; includes import, run and buffered-output time.",
+      "wall_seconds": 105.39100000006147,
+      "harness_exit_code": 1,
+      "harness_error": "After main returned successfully, scratch harness called tuple property summary_rows as a function; recovered the project-written summary without rerunning.",
+      "run_artifact_ok": true,
+      "default_preset_changed": false
+    },
+    {
+      "path": "projects/halbach_cylindrical_3axis_gradient/sandbox_cylinder_contour_smoothing.py",
+      "validation": "default_executed",
+      "imports": "passed",
+      "reason": "Default generated cylinder, smoothing, metric CSV and PNG export completed.",
+      "log_span_seconds": 3.2540154457092285,
+      "log_span_definition": "Last log modification minus file creation time; includes import, run and buffered-output time.",
+      "default_preset_changed": false
+    },
+    {
+      "path": "projects/primitive_support_structures/scripts/run_primitive_support_designs.py",
+      "validation": "default_executed_headless",
+      "imports": "passed",
+      "reason": "Unchanged default annular-disc solve; interactive display disabled only.",
+      "log_span_seconds": 0.8000576496124268,
+      "log_span_definition": "Last log modification minus file creation time; includes import, run and buffered-output time.",
+      "default_preset_changed": false
+    },
+    {
+      "path": "projects/standard_cylindrical_3axis_gradient/run_standard_cylindrical_3axis_gradient.py",
+      "validation": "default_executed_headless",
+      "imports": "passed",
+      "reason": "All GX/GY/GZ default numerical settings and 7x64x64 gradient-slice maps completed; worker/native/conic threads set to 1 for reproducible resource use.",
+      "log_span_seconds": 90.14766240119934,
+      "log_span_definition": "Last log modification minus file creation time; includes import, run and buffered-output time.",
+      "process_exit_code": 0,
+      "default_preset_changed": false
+    }
+  ],
+  "resume_runs": [
+    {
+      "example": "research_tolerance_study",
+      "command": [
+        "./.venv/Scripts/python.exe",
+        "./examples/research_tolerance_study.py",
+        "--output-dir",
+        "./outputs/example_audit/research_tolerance_study"
+      ],
+      "seconds": 0.841,
+      "reused_candidates": 3,
+      "unchanged_candidate_checksums": true,
+      "operator_assembly_count": 0
+    },
+    {
+      "example": "research_parallel_study",
+      "command": [
+        "./.venv/Scripts/python.exe",
+        "./examples/research_parallel_study.py",
+        "--output-dir",
+        "./outputs/example_audit/research_parallel_study"
+      ],
+      "seconds": 0.816,
+      "reused_candidates": 2,
+      "unchanged_candidate_checksums": true,
+      "operator_assembly_count": null
+    }
+  ],
+  "smoke_runs": [
+    {
+      "script": "generated_parameter_sweep.py",
+      "arguments": [
+        "--smoke",
+        "--headless"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 2.4
+    },
+    {
+      "script": "run_standard_examples.py",
+      "arguments": [
+        "--smoke",
+        "--headless"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 3.189
+    }
+  ]
+}
