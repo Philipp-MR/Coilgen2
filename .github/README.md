@@ -11,7 +11,24 @@ library and a desktop workbench, with field evaluation throughout the process.
 [Examples](../docs/EXAMPLES.md) ·
 [Documentation](../docs/README.md)
 
-![Generated cylindrical and biplanar surface-current examples.](../docs/frontpage/coil_designs.png)
+![Four CoilGen2 designs with calculated Bz maps: shielded y-gradient, biplanar x-gradient, cylindrical X²−Y² shim, and conical Z2 shim.](../docs/frontpage/ismrm2027/coil-examples.png)
+
+*Coil designs from the ISMRM 2027 abstract: **A** shielded y-gradient,
+**B** biplanar x-gradient, **C** cylindrical X²−Y² shim, **D** conical Z2 shim.
+Fields use the mounted conductor centerlines; field scales differ.*
+
+| Example | ROI radius (mm) | Mode efficiency | Relative RMS Bz error (%) |
+| --- | ---: | ---: | ---: |
+| A · Shielded y-gradient | 20 | 1.759 mT/m/A | 4.432 |
+| B · Biplanar x-gradient | 20 | 1.636 mT/m/A | 11.766 |
+| C · Cylindrical X²−Y² shim | 20 | 12.635 mT/(m²·A) | 4.572 |
+| D · Conical Z2 shim | 50 | 2.442 mT/(m²·A) | 10.577 |
+
+Efficiencies are fitted Bz-mode coefficients of the mounted winding per ampere,
+using the same current in each part. The linear examples target **20 mT/m**.
+Shim coefficients multiply **x²−y²** (C) and **z²−(x²+y²)/2** (D), with coordinates
+in meters; their efficiencies therefore use **mT/(m²·A)**.
+[Figure sources and numerical results](../docs/frontpage/ismrm2027/README.md).
 
 ## Installation
 
@@ -52,14 +69,25 @@ For scripts without the GUI, install `python -m pip install -e ".[research,plot]
 - **Evaluate:** compare sheet, contour and conductor-centerline fields;
   inspect spacing, bend and clearance diagnostics, resistance and inductance estimates.
 
+![CoilGen2 workbench with the model tree, cylindrical support controls, winding view, and processing sequence from surface current to field analysis.](../docs/frontpage/ismrm2027/workspace.png)
+
 The workbench and Python scripts share the numerical engine. Saved projects
 retain editable geometry, targets and processing settings.
 
 ### Check the field after each geometry change
 
-Evaluate calculated fields after contour extraction, smoothing, routing and conductor placement. Compare each processing stage against the requested target using the same stated current and evaluation region.
+In the abstract's three controlled smoothing examples, 3D RMS curvature fell
+**39.8–61.3%** at 0.5 mm arclength sampling. The smoothing-induced RMS Bz change
+stayed below **0.010% of target RMS**, with the original signed currents retained.
 
-Discrete winding fields use thin-filament Biot–Savart evaluation. Numerical examples do not establish fabricated hardware performance.
+Later operations mattered more: the biplanar example's relative RMS Bz error
+rose from **4.193%** on the connected route to **11.766%** after path realization
+and mounting. These comparisons use 2,048 independent volume samples per design,
+without gain or offset fitting. [Methods, stage comparisons and provenance](../docs/frontpage/ismrm2027/README.md).
+
+These are numerical examples. Discrete winding fields use thin-filament
+Biot–Savart evaluation; the illustrated cylindrical shim conductor fails
+configured geometric checks and is not ready for fabrication.
 [Physical assumptions](../docs/PHYSICAL_ASSUMPTIONS.md) ·
 [Interpreting results](../docs/RESULT_INTERPRETATION.md).
 
@@ -79,7 +107,8 @@ design = CylinderCoilDesign(
 result = design.run()
 ```
 
-Geometry uses meters and fields use tesla. This is a generated starter design.
+Geometry uses meters and fields use tesla. This is a starter design;
+the abstract figures use separately saved configurations.
 See [Getting started](../docs/GETTING_STARTED.md) for plots, reports and exports.
 
 ## Citation

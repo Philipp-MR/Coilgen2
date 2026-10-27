@@ -1,0 +1,589 @@
+{
+  "source_collection": "CoilGen2 ISMRM 2027 abstract package",
+  "source_version": "v26",
+  "scope": "Saved v26 abstract results and explicitly identified gradient efficiencies derived from its stored fields; not a benchmark of the current checkout or a standalone reproduction package.",
+  "source_path_base": "Paths below are relative to the supplied abstract package root.",
+  "figures": [
+    {
+      "source": "v26/figures/Figure_1_Graphical_Workspace.png",
+      "local": "workspace.png",
+      "sha256": "a223a9924d400b2e869fd64a745e2b3dc997046bd7388c6bce8ae951b1cbc057",
+      "dimensions_px": [
+        3600,
+        2240
+      ],
+      "source_provenance": "v26/figures/Figure_1_Graphical_Workspace_Provenance.json",
+      "copy_policy": "Unmodified original PNG bytes"
+    },
+    {
+      "source": "figures/Figure_5_Coil_Examples.png",
+      "local": "coil-examples.png",
+      "sha256": "ed0b5b4af0a041989733e974fb44698182422ee96ab1a9a0ba1840d4c5daf7e1",
+      "dimensions_px": [
+        5760,
+        3816
+      ],
+      "source_provenance": "figures/Figure_5_Provenance.json",
+      "copy_policy": "Unmodified original PNG bytes",
+      "source_version": "Original v25 four-panel image, reused as source artwork in v26; no embedded results table."
+    }
+  ],
+  "evaluation": {
+    "metric": "100 * RMS(Bz - target Bz) / RMS(target Bz)",
+    "metric_units": "percent",
+    "sampling_method": "scrambled Sobol sphere volume",
+    "sampling_seed": 20271017,
+    "primary_count_per_case": 2048,
+    "sensitivity_count_per_case": 4096,
+    "native_design_count_per_case": 257,
+    "volume_transform": "r=R*cbrt(u0), cos(theta)=2*u1-1, phi=2*pi*u2",
+    "sample_independence": "Held-out points were not used in optimization, filtering, smoothing, routing or current selection.",
+    "current_policy": "Native signed per-part currents and optimized stream functions remain fixed; no gain, offset or current fit.",
+    "sheet_quadrature_order": 4,
+    "wire_model": "Analytical finite-segment thin-filament Biot-Savart",
+    "stage_labels": {
+      "sheet": "Surface current",
+      "extracted": "Extracted contours",
+      "filtered": "Filtered contours",
+      "regularized": "Smoothed contours (off for conical case)",
+      "connected": "Connected route",
+      "mounted_centroid": "Mounted conductor centerline, including path realization and placement"
+    }
+  },
+  "cases": [
+    {
+      "case": "shielded",
+      "label": "Shielded y-gradient",
+      "source_results": "v26/numerical/stages/shielded/results.json",
+      "source_arrays": "v26/numerical/stages/shielded/fields.npz",
+      "ROI_radius_m": 0.02,
+      "native_signed_part_currents_A": [
+        11.071403753593085,
+        11.071403753593085
+      ],
+      "relative_RMS_Bz_error_percent": {
+        "sheet": 4.0522076823950215,
+        "extracted": 3.8264788067276867,
+        "filtered": 3.8264788067276867,
+        "regularized": 3.8285050029579035,
+        "connected": 3.8399251663835985,
+        "mounted_centroid": 4.432123921494499
+      },
+      "smoothing_enabled": true,
+      "controlled_smoothing": {
+        "source_curvature_audit": "v26/numerical/smoothing/shielded/supplementary_audit.json",
+        "curvature_sample_spacing_m": 0.0005,
+        "RMS_3D_curvature_per_m": {
+          "raw": 95.27293228308673,
+          "smoothed": 51.96585413288691,
+          "resampling_only": 95.27293228308281
+        },
+        "RMS_3D_curvature_reduction_percent": 45.455804825572564,
+        "RMS_Bz_change_over_target_RMS_percent": 0.007366533695551371
+      },
+      "derived_gradient_efficiency": {
+        "applicable": true,
+        "source_config": "v26/numerical/stages/shielded/effective_config.json",
+        "source_config_sha256": "a271bb9618a8206c17bd04f859139a672ac180032ee35f20b29feb6685246b13",
+        "requested_axis": "y",
+        "requested_gradient_T_per_m": 0.02,
+        "requested_gradient_mT_per_m": 20.0,
+        "common_part_current_A": 11.071403753593085,
+        "sample_sets": {
+          "independent_2048": {
+            "count": 2048,
+            "array_slice_start_stop": [
+              257,
+              2305
+            ],
+            "fitted_intercept_T": 1.2074191424344184e-08,
+            "gradient_xyz_T_per_m": [
+              8.035509070473696e-07,
+              0.019471181899976684,
+              -3.0880710941422597e-07
+            ],
+            "achieved_axis_gradient_mT_per_m": 19.471181899976685,
+            "achieved_axis_gradient_efficiency_mT_per_m_per_A": 1.7586913397190087,
+            "design_matrix_rank": 4,
+            "condition_number_after_coordinate_scaling": 2.2362808035171855
+          },
+          "independent_4096": {
+            "count": 4096,
+            "array_slice_start_stop": [
+              257,
+              4353
+            ],
+            "fitted_intercept_T": 1.2245583554445222e-08,
+            "gradient_xyz_T_per_m": [
+              5.085467620852355e-07,
+              0.019471171321431488,
+              -7.598066353867615e-07
+            ],
+            "achieved_axis_gradient_mT_per_m": 19.471171321431488,
+            "achieved_axis_gradient_efficiency_mT_per_m_per_A": 1.7586903842353652,
+            "design_matrix_rank": 4,
+            "condition_number_after_coordinate_scaling": 2.236339641025653
+          }
+        }
+      }
+    },
+    {
+      "case": "biplanar",
+      "label": "Biplanar x-gradient",
+      "source_results": "v26/numerical/stages/biplanar/results.json",
+      "source_arrays": "v26/numerical/stages/biplanar/fields.npz",
+      "ROI_radius_m": 0.02,
+      "native_signed_part_currents_A": [
+        12.070686027894112,
+        12.070686027894112
+      ],
+      "relative_RMS_Bz_error_percent": {
+        "sheet": 4.211660918133162,
+        "extracted": 4.187676334548161,
+        "filtered": 4.187676334548161,
+        "regularized": 4.188956076354461,
+        "connected": 4.192545642630934,
+        "mounted_centroid": 11.766350691775234
+      },
+      "smoothing_enabled": true,
+      "controlled_smoothing": {
+        "source_curvature_audit": "v26/numerical/smoothing/biplanar/supplementary_audit.json",
+        "curvature_sample_spacing_m": 0.0005,
+        "RMS_3D_curvature_per_m": {
+          "raw": 105.00675516155296,
+          "smoothed": 63.18798269551135,
+          "resampling_only": 105.00675516155111
+        },
+        "RMS_3D_curvature_reduction_percent": 39.824840222615585,
+        "RMS_Bz_change_over_target_RMS_percent": 0.009408587899661777
+      },
+      "derived_gradient_efficiency": {
+        "applicable": true,
+        "source_config": "v26/numerical/stages/biplanar/effective_config.json",
+        "source_config_sha256": "e31692ecb5d556e54176b56e3892f2d41fe478874fba3b3da65a50fed466b636",
+        "requested_axis": "x",
+        "requested_gradient_T_per_m": 0.02,
+        "requested_gradient_mT_per_m": 20.0,
+        "common_part_current_A": 12.070686027894112,
+        "sample_sets": {
+          "independent_2048": {
+            "count": 2048,
+            "array_slice_start_stop": [
+              257,
+              2305
+            ],
+            "fitted_intercept_T": -1.9637886904433926e-05,
+            "gradient_xyz_T_per_m": [
+              0.019743799984155156,
+              -3.306787013869397e-05,
+              -1.6534632045497552e-07
+            ],
+            "achieved_axis_gradient_mT_per_m": 19.743799984155157,
+            "achieved_axis_gradient_efficiency_mT_per_m_per_A": 1.635681678616217,
+            "design_matrix_rank": 4,
+            "condition_number_after_coordinate_scaling": 2.2362808035171855
+          },
+          "independent_4096": {
+            "count": 4096,
+            "array_slice_start_stop": [
+              257,
+              4353
+            ],
+            "fitted_intercept_T": -1.9644117226401824e-05,
+            "gradient_xyz_T_per_m": [
+              0.019744087540381414,
+              -3.3301871885191986e-05,
+              1.1691432670789611e-06
+            ],
+            "achieved_axis_gradient_mT_per_m": 19.744087540381415,
+            "achieved_axis_gradient_efficiency_mT_per_m_per_A": 1.6357055013074535,
+            "design_matrix_rank": 4,
+            "condition_number_after_coordinate_scaling": 2.236339641025653
+          }
+        }
+      }
+    },
+    {
+      "case": "shim",
+      "label": "Cylindrical X²−Y² shim",
+      "source_results": "v26/numerical/stages/shim/results.json",
+      "source_arrays": "v26/numerical/stages/shim/fields.npz",
+      "ROI_radius_m": 0.02,
+      "native_signed_part_currents_A": [
+        1.92105341949404
+      ],
+      "relative_RMS_Bz_error_percent": {
+        "sheet": 3.8119346268623233,
+        "extracted": 3.740170384202599,
+        "filtered": 3.740170384202599,
+        "regularized": 3.7412747476441677,
+        "connected": 3.8271715020275736,
+        "mounted_centroid": 4.571528473569232
+      },
+      "smoothing_enabled": true,
+      "controlled_smoothing": {
+        "source_curvature_audit": "v26/numerical/smoothing/shim/supplementary_audit.json",
+        "curvature_sample_spacing_m": 0.0005,
+        "RMS_3D_curvature_per_m": {
+          "raw": 124.24711303599192,
+          "smoothed": 48.02201659980285,
+          "resampling_only": 124.24711303598966
+        },
+        "RMS_3D_curvature_reduction_percent": 61.34959161112111,
+        "RMS_Bz_change_over_target_RMS_percent": 0.006708435378727352
+      },
+      "derived_gradient_efficiency": {
+        "applicable": false,
+        "reason": "Nonlinear shim target; no single first-order gradient metric. See derived_shim_efficiency for the second-order physical polynomial coefficient per ampere."
+      },
+      "derived_shim_efficiency": {
+        "source_config": "v26/numerical/stages/shim/effective_config.json",
+        "source_config_sha256": "3db3cee1d5beab18aceda3c29c173a20652125926d16f48a6abba2326c59f344",
+        "target_harmonic_expression": "1.830582465727538e-05*solid_harmonic(2,2,x,y,z,0.02,0.0,0.0,0.0)",
+        "target_mode": "C22",
+        "physical_polynomial": "x^2-y^2",
+        "target_coefficient_T_per_m2": 0.025,
+        "target_coefficient_mT_per_m2": 25.0,
+        "native_signed_current_A": 1.92105341949404,
+        "sample_sets": {
+          "independent_2048": {
+            "count": 2048,
+            "array_slice_start_stop": [
+              257,
+              2305
+            ],
+            "achieved_coefficient_T_per_m2": 0.024272216160891008,
+            "achieved_coefficient_mT_per_m2": 24.27221616089101,
+            "achieved_efficiency_mT_per_m2_per_A": 12.634847065983067,
+            "recovered_target_coefficient_T_per_m2": 0.025000000000000022,
+            "target_reconstruction_max_abs_T": 1.3552527156068805e-20,
+            "fitted_scaled_basis_coefficients_T": [
+              -2.7640018370664866e-09,
+              2.978987630100526e-10,
+              -1.126834139451601e-09,
+              7.624175373043132e-09,
+              -2.4305418931886987e-09,
+              -1.6051512629548259e-09,
+              1.9280133247266074e-10,
+              9.708886464356404e-06,
+              8.433259016732203e-10
+            ],
+            "design_matrix_rank": 9,
+            "condition_number_after_coordinate_scaling": 5.9211093906102485,
+            "normalized_Ylm_coefficient_T": 1.7772917323390264e-05,
+            "normalized_Ylm_conversion_difference_T_per_m2": 3.469446951953614e-18,
+            "full_quadratic_sensitivity": {
+              "achieved_coefficient_T_per_m2": 0.024272216139736822,
+              "achieved_efficiency_mT_per_m2_per_A": 12.634847054971303,
+              "radial_nuisance_coefficient_T_per_m2": 2.001605254511919e-07,
+              "design_matrix_condition_number": 6.952811246601379
+            }
+          },
+          "independent_4096": {
+            "count": 4096,
+            "array_slice_start_stop": [
+              257,
+              4353
+            ],
+            "achieved_coefficient_T_per_m2": 0.024272211756523835,
+            "achieved_coefficient_mT_per_m2": 24.272211756523834,
+            "achieved_efficiency_mT_per_m2_per_A": 12.634844773299724,
+            "recovered_target_coefficient_T_per_m2": 0.02499999999999998,
+            "target_reconstruction_max_abs_T": 1.6940658945086007e-20,
+            "fitted_scaled_basis_coefficients_T": [
+              -2.7617302621942244e-09,
+              -1.452376561094046e-09,
+              -1.2305183018345177e-09,
+              8.633886513505472e-09,
+              -2.381084800446334e-09,
+              -1.1501094291289722e-09,
+              1.2043670646427983e-10,
+              9.708884702609534e-06,
+              8.437317881275574e-10
+            ],
+            "design_matrix_rank": 9,
+            "condition_number_after_coordinate_scaling": 5.918883762198253,
+            "normalized_Ylm_coefficient_T": 1.777291409836734e-05,
+            "normalized_Ylm_conversion_difference_T_per_m2": 6.938893903907228e-18,
+            "full_quadratic_sensitivity": {
+              "achieved_coefficient_T_per_m2": 0.024272211721567852,
+              "achieved_efficiency_mT_per_m2_per_A": 12.634844755103465,
+              "radial_nuisance_coefficient_T_per_m2": 2.160206035055654e-07,
+              "design_matrix_condition_number": 6.950193071748159
+            }
+          }
+        }
+      }
+    },
+    {
+      "case": "conic",
+      "label": "Conical Z2 shim",
+      "source_results": "v26/numerical/stages/conic/results.json",
+      "source_arrays": "v26/numerical/stages/conic/fields.npz",
+      "ROI_radius_m": 0.05,
+      "native_signed_part_currents_A": [
+        1.6010144933322359
+      ],
+      "relative_RMS_Bz_error_percent": {
+        "sheet": 4.033099997218614,
+        "extracted": 4.720947257476492,
+        "filtered": 5.510496746289284,
+        "regularized": 5.510496746289284,
+        "connected": 5.71248246307957,
+        "mounted_centroid": 10.576898316566583
+      },
+      "smoothing_enabled": false,
+      "derived_gradient_efficiency": {
+        "applicable": false,
+        "reason": "Nonlinear shim target; no single first-order gradient metric. See derived_shim_efficiency for the second-order physical polynomial coefficient per ampere."
+      },
+      "derived_shim_efficiency": {
+        "source_config": "v26/numerical/stages/conic/effective_config.json",
+        "source_config_sha256": "bac517acf6bb31fa7ef952b12f91d9883a494eb2a60fea0bed4e6595336dc287",
+        "target_harmonic_expression": "1.5853309190424042e-05*solid_harmonic(2,0,x,y,z,0.05,0.0,0.0,0.0)",
+        "target_mode": "C20",
+        "physical_polynomial": "z^2-(x^2+y^2)/2",
+        "target_coefficient_T_per_m2": 0.004,
+        "target_coefficient_mT_per_m2": 4.0,
+        "native_signed_current_A": 1.6010144933322359,
+        "sample_sets": {
+          "independent_2048": {
+            "count": 2048,
+            "array_slice_start_stop": [
+              257,
+              2305
+            ],
+            "achieved_coefficient_T_per_m2": 0.0039093239869516854,
+            "achieved_coefficient_mT_per_m2": 3.9093239869516854,
+            "achieved_efficiency_mT_per_m2_per_A": 2.4417792613576537,
+            "recovered_target_coefficient_T_per_m2": 0.003999999999999993,
+            "target_reconstruction_max_abs_T": 2.0328790734103208e-20,
+            "fitted_scaled_basis_coefficients_T": [
+              2.79619533574187e-07,
+              3.401914420656889e-09,
+              -7.86792991420783e-10,
+              1.4869430218111802e-08,
+              -9.86275693179158e-10,
+              2.4731768639188563e-08,
+              5.48844693218941e-10,
+              6.210196177857222e-10,
+              9.773309967379215e-06
+            ],
+            "design_matrix_rank": 9,
+            "condition_number_after_coordinate_scaling": 5.921109390610248,
+            "normalized_Ylm_coefficient_T": 1.549393047267158e-05,
+            "normalized_Ylm_conversion_difference_T_per_m2": 0.0,
+            "full_quadratic_sensitivity": {
+              "achieved_coefficient_T_per_m2": 0.003909324000452435,
+              "achieved_efficiency_mT_per_m2_per_A": 2.4417792697902754,
+              "radial_nuisance_coefficient_T_per_m2": -9.77645352028547e-08,
+              "design_matrix_condition_number": 6.952811246601384
+            }
+          },
+          "independent_4096": {
+            "count": 4096,
+            "array_slice_start_stop": [
+              257,
+              4353
+            ],
+            "achieved_coefficient_T_per_m2": 0.003909321911702531,
+            "achieved_coefficient_mT_per_m2": 3.9093219117025306,
+            "achieved_efficiency_mT_per_m2_per_A": 2.441777965148804,
+            "recovered_target_coefficient_T_per_m2": 0.004000000000000001,
+            "target_reconstruction_max_abs_T": 8.470329472543003e-21,
+            "fitted_scaled_basis_coefficients_T": [
+              2.796195261441551e-07,
+              4.040354785147597e-09,
+              -7.872584034528061e-10,
+              1.4856071746345172e-08,
+              -1.5665843373712805e-09,
+              2.574984976400684e-08,
+              -9.756903614683543e-10,
+              4.4046062361646364e-10,
+              9.773304779256328e-06
+            ],
+            "design_matrix_rank": 9,
+            "condition_number_after_coordinate_scaling": 5.918883762198254,
+            "normalized_Ylm_coefficient_T": 1.5493922247779944e-05,
+            "normalized_Ylm_conversion_difference_T_per_m2": 3.469446951953614e-18,
+            "full_quadratic_sensitivity": {
+              "achieved_coefficient_T_per_m2": 0.00390932192625344,
+              "achieved_efficiency_mT_per_m2_per_A": 2.4417779742373598,
+              "radial_nuisance_coefficient_T_per_m2": -1.1054767829964937e-07,
+              "design_matrix_condition_number": 6.950193071748158
+            }
+          }
+        }
+      }
+    }
+  ],
+  "verification": {
+    "method": "Read-only recomputation of all 24 primary relative RMS Bz errors and smoothing field perturbations from archived fields.npz arrays.",
+    "metric_absolute_agreement_tolerance_percentage_points": 1e-12,
+    "heldout_coordinates_matched": true,
+    "figure_hashes_match_original_provenance": true,
+    "new_optimizer_or_field_solver_run": false,
+    "curvature_values": "Copied from saved supplementary audits at 0.5 mm sampling; curvature geometry calculations were not rerun.",
+    "derived_gradient_efficiency": "Affine fits on 2,048 and 4,096 saved samples; requested gradients independently recovered as 0.02 T/m; coordinate-scaled and unscaled coefficients agree within 1e-15 T/m; source fields/results hashes match the recorded snapshot.",
+    "derived_shim_efficiency": "Nine-mode degree<=2 fits on 2,048 and 4,096 saved samples; targets recovered as 0.025 and 0.004 T/m^2; normalized-Ylm conversion agrees within 1e-15 T/m^2; tenth radial-nuisance mode changes efficiencies by less than 2e-8 mT/(m^2*A). Source fields/results hashes match the recorded snapshot."
+  },
+  "limitations": [
+    "Numerical designs are not fabrication-qualified coils.",
+    "The illustrated elliptical shim sweep failed configured bend, clearance, frame and support checks.",
+    "No finite-cross-section current integration or hardware experiment was performed.",
+    "Connected-to-mounted differences combine path realization and placement.",
+    "Saved routing and mounting are reevaluated numerical geometries, not a controlled routing comparison.",
+    "Curvature measures depend on sampling scale and support faceting.",
+    "Source arrays and the reproduction runtime are not bundled in this compact record."
+  ],
+  "sources": [
+    {
+      "path": "v26/README.txt",
+      "sha256": "870ceb34d795e11dbe7a1204066f8301ef0160f1654c3d22a2401d9dc4b69146"
+    },
+    {
+      "path": "v26/submission/CoilGen2_ISMRM2027_Abstract_v26.txt",
+      "sha256": "19a1520367f19f43efa9a51a94daf184e65e6e2f4b974ca636400f38d9939e45"
+    },
+    {
+      "path": "v26/numerical/stages/README.txt",
+      "sha256": "00a107b074fe05496670ff36b8ec6c69b82f6a3275abdf8b311480655f963bc7"
+    },
+    {
+      "path": "v26/numerical/stages/stage_comparison_table.csv",
+      "sha256": "85cc095c9b340527e94890a34b552e3a71b21f54e09a7165d2e71213b6176f60"
+    },
+    {
+      "path": "v26/numerical/stages/stage_verification.json",
+      "sha256": "67e6c17f01aa71b7b85fd9cbb520e2c1aaaa001412f8a79021eda67e9a027ab5"
+    },
+    {
+      "path": "v26/figures/Figure_1_Graphical_Workspace.png",
+      "sha256": "a223a9924d400b2e869fd64a745e2b3dc997046bd7388c6bce8ae951b1cbc057"
+    },
+    {
+      "path": "v26/figures/Figure_1_Graphical_Workspace_Provenance.json",
+      "sha256": "6c4df74b9921294575185d892c9187f9cf9361640baf70d626563702fbc975c5"
+    },
+    {
+      "path": "figures/Figure_5_Coil_Examples.png",
+      "sha256": "ed0b5b4af0a041989733e974fb44698182422ee96ab1a9a0ba1840d4c5daf7e1"
+    },
+    {
+      "path": "figures/Figure_5_Provenance.json",
+      "sha256": "125a5c391e91aca4d55cf82d947ce3f0b623167347a1dd07ddb931851dd57779"
+    },
+    {
+      "path": "v26/numerical/stages/shielded/results.json",
+      "sha256": "6248bafdee9709a85a85b54a293ba0ae86ea595052879478389d699289ea9d61"
+    },
+    {
+      "path": "v26/numerical/stages/shielded/fields.npz",
+      "sha256": "e3b1c2ce8eea23b3be36f32657f4358527d9fd9eb3b9fb452b108aa2343cd573"
+    },
+    {
+      "path": "v26/numerical/smoothing/shielded/supplementary_audit.json",
+      "sha256": "a6fe29508cc735656a6ae9ee6299d4dd7b98d1401297530b3eea2109fa593c7d"
+    },
+    {
+      "path": "v26/numerical/stages/biplanar/results.json",
+      "sha256": "c3400ae80ec4e203114898b9c5f71859088a9d9c6c3e5b76406bab08b6870709"
+    },
+    {
+      "path": "v26/numerical/stages/biplanar/fields.npz",
+      "sha256": "640ea4e5248edc9ad9babd049dc547a3d6e804120616f64f7f95f20b46d49f1c"
+    },
+    {
+      "path": "v26/numerical/smoothing/biplanar/supplementary_audit.json",
+      "sha256": "cee77da254009cf691aa2bd7301a76d80335917c97d78ec34644979205c7a2a1"
+    },
+    {
+      "path": "v26/numerical/stages/shim/results.json",
+      "sha256": "c8dfa6c8165ee219eb046056b40f43540afb2a2bdd15afa583de5ef4bb47dca3"
+    },
+    {
+      "path": "v26/numerical/stages/shim/fields.npz",
+      "sha256": "db70432df874c3e2d7de493ad00634b6a5058fd77967cb800a3c28fc5f43887d"
+    },
+    {
+      "path": "v26/numerical/smoothing/shim/supplementary_audit.json",
+      "sha256": "0f9ea4f35e9e811fd87bf8b2bde73c5c39a9179cc559e065630691c374852acb"
+    },
+    {
+      "path": "v26/numerical/stages/conic/results.json",
+      "sha256": "591185389dba9807a2edde671ccea06cdf626462d8f9469b9f34265427582259"
+    },
+    {
+      "path": "v26/numerical/stages/conic/fields.npz",
+      "sha256": "9aaa76f91fb0ad9b8a23dba42efed7444e3e50ddc800c20a4071e350896937a4"
+    },
+    {
+      "path": "v26/numerical/stages/shielded/effective_config.json",
+      "sha256": "a271bb9618a8206c17bd04f859139a672ac180032ee35f20b29feb6685246b13"
+    },
+    {
+      "path": "v26/numerical/stages/biplanar/effective_config.json",
+      "sha256": "e31692ecb5d556e54176b56e3892f2d41fe478874fba3b3da65a50fed466b636"
+    },
+    {
+      "path": "reproduction/coilgen_source/src/coilgen/spherical_harmonics.py",
+      "sha256": "f5e7849a4bc0736c0ea19b0477d1f38fb0604bf93d7aac53390849d4320bf15d"
+    },
+    {
+      "path": "reproduction/coilgen_source/src/coilgen/target.py",
+      "sha256": "5f44184064a63d2b38c124c3f16b91db6569abd23e70850913a2a0957668d367"
+    },
+    {
+      "path": "v26/numerical/stages/shim/effective_config.json",
+      "sha256": "3db3cee1d5beab18aceda3c29c173a20652125926d16f48a6abba2326c59f344"
+    },
+    {
+      "path": "v26/numerical/stages/conic/effective_config.json",
+      "sha256": "bac517acf6bb31fa7ef952b12f91d9883a494eb2a60fea0bed4e6595336dc287"
+    }
+  ],
+  "derived_gradient_efficiency_method": {
+    "purpose": "Welcome-page achieved mounted-centerline linear gradient per ampere.",
+    "status": "New summaries of saved fields; these gradient efficiencies were not reported in the abstract.",
+    "model": "Bz = c + Gx*x + Gy*y + Gz*z",
+    "fit": "Equal-weight affine least squares using numpy.linalg.lstsq(A, Bz, rcond=None).",
+    "conditioning": "A = column_stack([ones(N), points_m / ROI_radius_m]); physical gradient_xyz_T_per_m = coefficients[1:] / ROI_radius_m.",
+    "source_field": "mounted_centroid_field_T[:, 2]",
+    "source_coordinates": "points_m",
+    "source_samples": "Use each results.json sampling.splits.independent_2048 or independent_4096 slice.",
+    "reported_coefficient": "Gy for shielded; Gx for biplanar.",
+    "reported_formula": "1000 * target_axis_gradient_T_per_m / native_signed_part_currents_A[0]",
+    "reported_units": "mT/m/A",
+    "current_policy": "Both parts have the same saved signed current. Divide the combined-field gradient by that common current, not by the sum across parts. No current or field amplitude rescaling.",
+    "RMS_error_policy": "Original RMS errors remain referenced to the original target; the fitted intercept is not removed from them."
+  },
+  "derived_shim_efficiency_method": {
+    "purpose": "Welcome-page achieved mounted-centerline second-order shim coefficient per ampere.",
+    "status": "New summaries of saved fields; these physical polynomial efficiencies were not reported in the abstract.",
+    "convention": "Unnormalized Cartesian real solid-harmonic polynomials in metre coordinates: Bz contains C22*(x^2-y^2) and C20*(z^2-(x^2+y^2)/2). Coefficients are in T/m^2, not Hessian entries.",
+    "basis_scaled_coordinates": [
+      "1",
+      "u",
+      "v",
+      "w",
+      "u*v",
+      "u*w",
+      "v*w",
+      "u^2-v^2",
+      "w^2-(u^2+v^2)/2"
+    ],
+    "coordinate_scaling": "(u,v,w) = (x,y,z) / ROI_radius_m, about the saved origin [0,0,0].",
+    "fit": "Simultaneous equal-weight least squares of all nine real solid-harmonic modes through degree 2 using numpy.linalg.lstsq(A, Bz, rcond=None).",
+    "physical_coefficient_conversion": "C22 = coefficients[7]/ROI_radius_m^2; C20 = coefficients[8]/ROI_radius_m^2.",
+    "source_field": "mounted_centroid_field_T[:, 2]",
+    "source_coordinates": "points_m",
+    "source_samples": "Use each results.json sampling.splits.independent_2048 or independent_4096 slice.",
+    "reported_formula": "1000 * physical_target_mode_coefficient_T_per_m2 / native_signed_part_currents_A[0]",
+    "reported_units": "mT/(m^2*A)",
+    "sign_policy": "Signed coefficient divided by signed saved current in the explicit polynomial convention; both reported values are positive.",
+    "normalized_Ylm_cross_check": "Frozen fit_spherical_harmonics(max_order=2, center=[0,0,0], radius=ROI_radius_m): C22 = a22*sqrt(15/(16*pi))/R^2; C20 = a20*sqrt(5/(4*pi))/R^2.",
+    "normalized_Ylm_source": "reproduction/coilgen_source/src/coilgen/spherical_harmonics.py",
+    "full_quadratic_sensitivity_check": "Add u^2+v^2+w^2 as a tenth nuisance column; compare the same C22/C20 coefficient.",
+    "field_policy": "No current, gain, offset or geometry change. The fitted modes summarize stored fields; original field-error metrics are unchanged."
+  }
+}

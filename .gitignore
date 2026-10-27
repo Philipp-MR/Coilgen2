@@ -19,3 +19,5 @@ dist/
 # Independent research repository and local investigation artifacts.
 /CoilGenResearch/
 /tmp/
+# Website deployment drafts and private review artifacts are maintained separately.
+/website-draft/
