@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from hashlib import sha256
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -25,6 +26,7 @@ from ..geometry import _read_ascii_stl, _read_binary_stl, read_stl
 from ..manufacturing import save_mesh_as_stl
 from ..models import Mesh
 from ..persistence import atomic_json, file_digest
+from ..persistence import publish_exclusive as _publish_exclusive
 from ..progress import ProgressReporter, progress_scope
 from .service import RunRecord
 from .evidence import verify_record
@@ -43,6 +45,46 @@ _UNITS_PER_M = {unit: 1 / scale for unit, scale in _STEP_PREFIX.values()}
 _STEP_UNIT = re.compile(r"SI_UNIT\s*\(\s*(\$|\.[A-Z]+\.)\s*,\s*\.METRE\.\s*\)", re.IGNORECASE)
 _STEP_POINT = re.compile(r"CARTESIAN_POINT\s*\(\s*'(?:[^']|'')*'\s*,\s*\(([^()]*)\)\s*\)", re.IGNORECASE)
 _SOLID_STEP = re.compile(r"\b(?:FACETED_BREP|MANIFOLD_SOLID_BREP)\s*\(", re.IGNORECASE)
+# Mounted conductor centerline (the swept profile's reference path).
+_PATH_SUFFIXES = ("_fabrication_centroid.csv", "_fabrication_centroid.step")
+
+
+def is_draft_artifact(name: str) -> bool:
+    """Solids written although strict fabrication checks failed."""
+    return "_DRAFT_" in PurePosixPath(name).name
+
+
+GEOMETRY_FORMAT_LABELS = {
+    "stl": "STL solid",
+    "step": "STEP solid",
+    "path_csv": "3D path · CSV",
+    "path_step": "3D path · STEP",
+}
+
+
+def geometry_option_label(option) -> str:
+    """One label for an export choice, shared by every client."""
+    kind = GEOMETRY_FORMAT_LABELS.get(option.format, option.format.upper())
+    return ("DRAFT · " if is_draft_artifact(option.name) else "") + f"{option.body_id} · {kind}"
+
+
+def default_export_selection(options) -> tuple[str, ...]:
+    """Released-candidate STL solids; drafts and paths are opt-in."""
+    return tuple(option.name for option in options if option.format == "stl" and not is_draft_artifact(option.name))
+
+
+def draft_export_notice(failure_reasons=()) -> str:
+    """Wording that must accompany any DRAFT export, in every client."""
+    reasons = list(dict.fromkeys(str(reason) for reason in failure_reasons))
+    text = (
+        "DRAFT geometry: recorded fabrication checks failed, so these files are NOT construction-released. "
+        "Use them for inspection and prototyping only, and review clearance, bend radius and penetration "
+        "before printing or winding."
+    )
+    if reasons:
+        shown = reasons[:6]
+        text += " Failed checks: " + "; ".join(shown) + (f"; … (+{len(reasons) - 6} more)" if len(reasons) > 6 else "")
+    return text
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,9 +156,9 @@ def _stl_geometry(data: bytes) -> Mesh:
     return _read_binary_stl(data, face_count) if len(data) == 84 + face_count * 50 else _read_ascii_stl(data)
 
 
-def _step_geometry(data: bytes):
+def _step_geometry(data: bytes, *, solid: bool = True):
     text = data.decode("ascii")
-    if not _SOLID_STEP.search(text) or not re.search(r"\bCLOSED_SHELL\s*\(", text, re.IGNORECASE):
+    if solid and (not _SOLID_STEP.search(text) or not re.search(r"\bCLOSED_SHELL\s*\(", text, re.IGNORECASE)):
         raise ValueError("STEP artifact is a curve or surface, not a saved faceted solid.")
     if re.search(r"\bCONVERSION_BASED_UNIT\s*\(", text, re.IGNORECASE):
         raise ValueError("Conversion-based STEP units require an explicit CAD unit parser; they are not guessed.")
@@ -125,7 +167,16 @@ def _step_geometry(data: bytes):
         raise ValueError("STEP length units must be explicit and unambiguous SI metre units.")
     unit, scale_to_m = _STEP_PREFIX[next(iter(units))]
     points = []
-    for values in _STEP_POINT.findall(text):
+    if not solid:
+        # Curve bounds come from the curve itself, not placement origins.
+        placements = set(re.findall(r"AXIS2_PLACEMENT_3D\s*\(\s*'(?:[^']|'')*'\s*,\s*#(\d+)", text, re.IGNORECASE))
+        entities = re.findall(
+            r"#(\d+)\s*=\s*CARTESIAN_POINT\s*\(\s*'(?:[^']|'')*'\s*,\s*\(([^()]*)\)\s*\)", text, re.IGNORECASE
+        )
+        values_list = [values for ident, values in entities if ident not in placements]
+    else:
+        values_list = _STEP_POINT.findall(text)
+    for values in values_list:
         coordinates = values.split(",")
         if len(coordinates) != 3:
             raise ValueError("Saved solid STEP points must be three-dimensional.")
@@ -150,7 +201,7 @@ def _body_sources(metadata: dict) -> dict[str, tuple[str, dict]]:
     return bodies
 
 
-def _geometry_catalog(record: RunRecord) -> tuple[GeometryOption, ...]:
+def _geometry_catalog(record: RunRecord, kinds=("solid",)) -> tuple[GeometryOption, ...]:
     metadata = record.metadata
     bodies = _body_sources(metadata)
     report = metadata.get("fabrication") or {}
@@ -165,9 +216,13 @@ def _geometry_catalog(record: RunRecord) -> tuple[GeometryOption, ...]:
         if not isinstance(name, str):
             raise ValueError("Malformed saved artifact name.")
         suffix = PurePosixPath(name).suffix.lower()
-        if suffix not in {".stl", ".step", ".stp"}:
-            continue
         filename = PurePosixPath(name).name
+        # The connected conductor centerline is exportable as a 3D path.
+        is_path = filename.lower().endswith(_PATH_SUFFIXES)
+        if suffix not in {".stl", ".step", ".stp"} and not is_path:
+            continue
+        if ("path" if is_path else "solid") not in kinds:
+            continue
         body_id = artifact.get("body_id")
         if body_id not in bodies:
             matches = [
@@ -178,6 +233,10 @@ def _geometry_catalog(record: RunRecord) -> tuple[GeometryOption, ...]:
                     f"{id_}_fabrication.stl",
                     f"{id_}_fabrication_faceted.step",
                     f"{id_}_fabrication_faceted.stp",
+                    f"{id_}_DRAFT_fabrication.stl",
+                    f"{id_}_DRAFT_fabrication_faceted.step",
+                    f"{id_}_fabrication_centroid.csv",
+                    f"{id_}_fabrication_centroid.step",
                     f"{id_}.stl",
                     f"{id_}_faceted.step",
                     f"{id_}_faceted.stp",
@@ -188,7 +247,7 @@ def _geometry_catalog(record: RunRecord) -> tuple[GeometryOption, ...]:
                 # absent; filenames alone cannot invent a conductor body.
                 continue
             body_id = matches[0]
-        if "centroid" in filename.lower() or "centerline" in filename.lower():
+        if not is_path and ("centroid" in filename.lower() or "centerline" in filename.lower()):
             continue
         if name in seen:
             raise ValueError(f"Duplicate saved solid artifact: {name}")
@@ -200,7 +259,16 @@ def _geometry_catalog(record: RunRecord) -> tuple[GeometryOption, ...]:
         if body.get("mesh_solid_ok", diagnostics.get("mesh_solid_ok")) is False:
             checks = False
         check_status = _status(checks)
-        if suffix == ".stl":
+        if is_path and suffix == ".csv":
+            points = np.loadtxt(io.BytesIO(data), delimiter=",", skiprows=1, ndmin=2)
+            if points.ndim != 2 or points.shape[1] != 3 or len(points) < 2 or not np.all(np.isfinite(points)):
+                raise ValueError(f"Saved conductor path is not a finite 3D polyline: {name}")
+            unit, bounds = "m", _bounds(points)
+            format_ = "path_csv"
+        elif is_path:
+            unit, _, bounds = _step_geometry(data, solid=False)
+            format_ = "path_step"
+        elif suffix == ".stl":
             mesh = _stl_geometry(data)
             if not len(mesh.faces):
                 raise ValueError(f"Saved STL has no triangles: {name}")
@@ -239,6 +307,27 @@ def geometry_catalog(record: RunRecord) -> tuple[GeometryOption, ...]:
         return _geometry_catalog(record)
 
 
+def path_catalog(record: RunRecord) -> tuple[GeometryOption, ...]:
+    """List the saved mounted conductor centerlines (3D paths) per body.
+
+    These are the sweep reference paths written by fabrication review, as CSV
+    (metres) and STEP polylines. They are available whether or not checks
+    passed; ``inspection_only`` carries the same review status as the solids.
+    """
+    with progress_scope(0, 40, "Verifying saved geometry evidence", label="CAD catalog"):
+        record = _verified_record(record)
+    with progress_scope(40, 100, "Reading saved conductor paths", label="CAD catalog"):
+        return _geometry_catalog(record, kinds=("path",))
+
+
+def export_catalog(record: RunRecord) -> tuple[GeometryOption, ...]:
+    """Every exportable choice: solids (released or DRAFT) and 3D paths."""
+    with progress_scope(0, 40, "Verifying saved geometry evidence", label="CAD catalog"):
+        record = _verified_record(record)
+    with progress_scope(40, 100, "Reading saved geometry definitions", label="CAD catalog"):
+        return _geometry_catalog(record, kinds=("solid", "path"))
+
+
 def _commit_package(stage: Path, destination: Path) -> None:
     """Reserve a new directory, publish without overwrite, commit manifest last."""
     destination.mkdir(exist_ok=False)
@@ -259,9 +348,7 @@ def _commit_package(stage: Path, destination: Path) -> None:
         files.sort(key=lambda pair: pair[1].relative_to(destination) == Path(_MANIFEST_NAME))
         task = ProgressReporter(label="CAD export").task("published package files", len(files))
         for source, target in files:
-            # Staging and destination share a filesystem. Hard-link publication
-            # is exclusive on Windows and POSIX, unlike rename-over-existing.
-            os.link(source, target)
+            _publish_exclusive(source, target)
             published.append(target)
             task.advance()
         task.done()
@@ -284,6 +371,7 @@ def export_geometry(
     unit: str = "mm",
     *,
     project=None,
+    allow_draft: bool = False,
 ) -> GeometryPackage:
     """Package selected saved solids and optional portable project companion.
 
@@ -291,14 +379,24 @@ def export_geometry(
     requested unit is applied to saved coordinates; STEP retains its own unit
     and the manifest records both requested and actual units. Inspection exports
     are allowed, with their failures and review scope retained prominently.
+    DRAFT solids (written although strict fabrication checks failed) require
+    ``allow_draft=True``, i.e. an explicit acknowledgement by the client.
     """
     if unit not in _UNIT_SCALE:
         raise ValueError("STL export unit must be 'm' or 'mm'.")
+    if not allow_draft and any(isinstance(name, str) and is_draft_artifact(name) for name in selected_names or ()):
+        failures = (record.metadata.get("fabrication") or {}).get("failure_reasons", ())
+        raise ValueError(draft_export_notice(failures) + " Confirm the DRAFT export explicitly to continue.")
     with progress_scope(0, 10, "Verifying saved geometry evidence", label="CAD export"):
         record = _verified_record(record)
     with progress_scope(10, 25, "Reading saved conductor solids", label="CAD export"):
-        catalog = {option.name: option for option in _geometry_catalog(record)}
-    names = list(catalog) if selected_names is None else list(selected_names)
+        catalog = {option.name: option for option in _geometry_catalog(record, kinds=("solid", "path"))}
+    # Without an explicit choice, export the solids that are not drafts.
+    names = (
+        [name for name, option in catalog.items() if option.format in {"stl", "step"} and not is_draft_artifact(name)]
+        if selected_names is None
+        else list(selected_names)
+    )
     if not names or any(not isinstance(name, str) or name not in catalog for name in names):
         raise ValueError("Select at least one available saved solid STL or faceted STEP artifact.")
     if len(set(names)) != len(names):
@@ -316,7 +414,9 @@ def export_geometry(
     metadata = record.metadata
     exported = []
     companion = None
-    with TemporaryDirectory(prefix=".coilgen-cad-", dir=destination.parent) as temporary:
+    # Windows indexers can briefly hold the staging directory after publication.
+    # Its cleanup must not turn a committed, verified package into a failed export.
+    with TemporaryDirectory(prefix=".coilgen-cad-", dir=destination.parent, ignore_cleanup_errors=True) as temporary:
         stage = Path(temporary)
         for body_ind, (name, filename) in enumerate(zip(names, filenames)):
             with progress_scope(
@@ -339,6 +439,18 @@ def export_geometry(
                     )
                     actual_unit = unit
                     bounds = _bounds(read_stl(target).vertices)
+                elif option.format == "path_csv":
+                    points = np.loadtxt(io.BytesIO(data), delimiter=",", skiprows=1, ndmin=2) * _UNIT_SCALE[unit]
+                    np.savetxt(
+                        target,
+                        points,
+                        delimiter=",",
+                        header=",".join(f"{axis}_{unit}" for axis in "xyz"),
+                        comments="",
+                        fmt="%.17g",
+                    )
+                    actual_unit = unit
+                    bounds = _bounds(points)
                 else:
                     target.write_bytes(data)
                     actual_unit = option.source_unit
@@ -355,6 +467,7 @@ def export_geometry(
                         "scope": option.scope,
                         "geometry_checks": option.check_status,
                         "inspection_only": option.inspection_only,
+                        "draft": is_draft_artifact(name),
                         "source_artifact": name,
                         "source_sha256": option.source_sha256,
                         "export_sha256": file_digest(target),
@@ -363,8 +476,10 @@ def export_geometry(
                         "source_unit": option.source_unit,
                         "original_bounds_m": option.bounds_m,
                         "exported_bounds": bounds,
-                        "unit_conversion_only": option.format == "stl" and unit != "m",
-                        "step_unit_policy": "preserved_declared_unit" if option.format == "step" else None,
+                        "unit_conversion_only": option.format in {"stl", "path_csv"} and unit != "m",
+                        "step_unit_policy": (
+                            "preserved_declared_unit" if option.format in {"step", "path_step"} else None
+                        ),
                     }
                 )
         with progress_scope(80, 88, "Packaging project companion", label="CAD export"):

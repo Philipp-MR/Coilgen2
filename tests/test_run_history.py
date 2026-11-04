@@ -230,12 +230,12 @@ def test_scope_aware_comparison_reads_original_request_and_retains_unknown_circu
         ("config.levels", 8, 12)
     ]
     metrics = {metric.name: metric for metric in comparison.metrics}
-    assert metrics["Sheet independent RMS error"].left == pytest.approx(0.25)
-    assert metrics["Sheet independent RMS error"].comparable
+    assert metrics["Independent stream function field RMS error"].left == pytest.approx(0.25)
+    assert metrics["Independent stream function field RMS error"].comparable
     assert metrics["Contour RMS error"].comparable
     assert metrics["Contour RMS error"].reason == ""
     assert "independent acceptance=False" in metrics["Contour RMS error"].left_scope
-    assert "continuous sheet" in metrics["Sheet independent RMS error"].left_scope
+    assert "stream function field" in metrics["Independent stream function field RMS error"].left_scope
     for name in ("Circuit current", "Circuit resistance", "Circuit inductance"):
         assert metrics[name].left is None and not metrics[name].comparable
 
@@ -252,7 +252,7 @@ def test_refitted_current_and_changed_grids_do_not_become_common_scope_improveme
     comparison = compare_runs(first, shifted)
     metrics = {metric.name: metric for metric in comparison.metrics}
     assert not metrics["Contour RMS error"].comparable
-    assert not metrics["Sheet independent RMS error"].comparable
+    assert not metrics["Independent stream function field RMS error"].comparable
     assert any("not a common-grid improvement" in note for note in comparison.notes)
 
 

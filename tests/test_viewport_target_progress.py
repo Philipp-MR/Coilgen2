@@ -288,5 +288,5 @@ def test_first_live_snapshot_displays_requested_component_then_keeps_manual_choi
 def test_live_stream_function_caption_never_claims_saved_run(scientific_viewport):
     viewport = scientific_viewport
     viewport.display_stage_preview(_saved_arrays(), {"pipeline_stage": "sheet", "target_field_component": "Bz"})
-    assert "live continuous-sheet solution" in viewport.caption.text()
+    assert "live stream function solution" in viewport.caption.text()
     assert "immutable" not in viewport.caption.text() and "run /" not in viewport.caption.text()

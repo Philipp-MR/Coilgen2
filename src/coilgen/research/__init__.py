@@ -1,6 +1,7 @@
 """Headless physical optimization, reproducible studies and fabrication checks.
 
-Use ``CoilGenConfig.research_physics`` to opt into physical convex objectives.
+Use ``CoilGenConfig.research_physics`` to select physical objectives or
+provide custom objective and constraint formulas.
 The existing ``coilgen`` API keeps its default numerical behavior. Optional
 solver and acceleration dependencies are loaded when those paths execute.
 """

@@ -27,15 +27,42 @@ from PySide6.QtWidgets import (
 )
 
 from .icons import INSPECTION_ICONS, icon
+from .view_context import PREVIEW_FEATURE_LABELS
 from .dataset_capabilities import (
     DatasetCapability,
     FIELD_KEYS,
+    PATH_PREFIXES,
     WIRE_FIELDS,
     dataset_capabilities,
     points_available,
     resolve_dataset,
 )
+from ..application.evidence import path_array_names
+from ..application.scene_spec import (
+    DATASET_GROUPS,
+    PREFERRED_RUN_PLOTS,
+    DENSITY_CMAP,
+    FIELD_CMAP,
+    SUPPORT_COLOR,
+    WINDING_COLOR,
+    model_preview,
+)
+from ..application.submitted_design import contour_fit_caption
 from ..persistence import json_value
+
+
+# Worker completion order. A verified result can arrive before the last live preview.
+_PREVIEW_FEATURE_PLOTS = {
+    "interconnections": ("routes",),
+    "realized_centerlines": ("fabrication",),
+    "sweep": ("swept",),
+    "evaluated_winding": ("routed_field", "contour_field", "evaluated_winding"),
+    "independent_field": ("validation",),
+    "review_conductor": ("review_conductor", "review_electrical"),
+    "fabricated_field": ("fabricated",),
+    "winding_validation": ("winding_validation",),
+}
+_LATEST_FEATURE_PLOTS = tuple(key for options in reversed(_PREVIEW_FEATURE_PLOTS.values()) for key in options)
 
 
 def _preview_identities(config, values=None):
@@ -100,43 +127,9 @@ def _signed_residual_limits(values):
     return -extent, extent
 
 
-def _preview_data(config, root, requirements=None):
-    """Extract backend numpy data only; VTK/Qt rendering stays on the UI thread."""
-    from ..geometry import load_mesh_from_config, load_optional_target_mesh, load_secondary_target_mesh
-    from ..target import define_target_field
-    from ..application.diagnostics import preview_diagnostics
-
-    if str(config.coil_mesh_file).strip().lower() in {"", "none"}:
-        message = "Choose a support surface to preview the model."
-        return None, {}, message, preview_diagnostics(config, None, message=message)
-    mesh = load_mesh_from_config(config, root)
-    arrays, message, target = {}, "", None
-    imported_target = str(config.target_field_definition_file).strip().lower() not in {"", "none"}
-    if requirements is not None:
-        from ..application.research_requirements import requirements_target
-
-        target = requirements_target(requirements)
-        arrays = {"target_points_m": target.coords, "target_field_T": target.b, "target_suppressed": target.suppressed}
-        message = f"{len(requirements['regions'])} named regions · registered desired vectors in SI · explicit regional bounds"
-    elif not imported_target and str(config.field_shape_function).strip().lower() in {"", "none"}:
-        message = "Choose a target field to preview it on this support."
-    elif config.target_region_resolution > 40 and config.target_field_definition_file == "none":
-        message = "Target preview omitted above resolution 40; computations retain the full grid."
-    else:
-        try:
-            target_mesh = load_optional_target_mesh(config.target_mesh_file, config, root)
-            secondary = load_secondary_target_mesh(config, root, coil_meshes=[mesh])
-            target = define_target_field([mesh], target_mesh, secondary, config)
-            arrays = {
-                "target_points_m": target.coords,
-                "target_field_T": target.b,
-                "target_suppressed": target.suppressed,
-            }
-        except Exception as exc:
-            # A failed target should not erase a valid current-carrying support
-            # or substitute samples from the previous model or saved result.
-            message = f"Target preview unavailable: {type(exc).__name__}: {exc}"
-    return mesh, arrays, message, preview_diagnostics(config, mesh, target, message=message)
+# Backend numpy data only; VTK/Qt rendering stays on the UI thread. Shared
+# with the browser workbench.
+_preview_data = model_preview
 
 
 class _PreviewSignals(QObject):
@@ -235,6 +228,7 @@ class ScientificViewport(QWidget):
         self._first_view = True
         self._closed = False
         self._actors = {}
+        self._fit_meshes = []
         self._dataset_mesh = None
         self._dataset_actor_key = None
         self._synchronous_preview = synchronous_preview
@@ -345,51 +339,15 @@ class ScientificViewport(QWidget):
         self.dataset = QComboBox()
         self.dataset.setObjectName("viewport_dataset")
         self.dataset.setAccessibleName("Displayed scientific dataset")
-        self.dataset.setToolTip(
-            "Choose current-model previews, saved conductor geometry, field maps, or fabrication-review evidence."
-        )
+        self.dataset.setToolTip("Choose model inputs, available live study outputs, or saved geometry and field maps.")
         self.dataset.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.dataset.setMinimumContentsLength(24)
-        self.dataset.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # Keep the full names in the menu while the selected label can elide on a narrow screen.
+        self.dataset.setMinimumWidth(120)
+        self.dataset.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.dataset.view().setMinimumWidth(330)
         self._dataset_headers = {}
-        for group, entries in (
-            ("CURRENT MODEL", (("Model: support", "support"), ("Model: support + target field", "preview_target"))),
-            (
-                "SAVED RUN · GEOMETRY",
-                (
-                    ("Stream function [A]", "stream_function"),
-                    ("Surface current density |K| [A/m]", "surface_current_density"),
-                    ("Contours", "contours"),
-                    ("Connected routes", "routes"),
-                    ("Evaluated winding field paths", "evaluated_winding"),
-                    ("Pipeline conductor centerlines", "fabrication"),
-                    ("Pipeline swept conductor", "swept"),
-                ),
-            ),
-            (
-                "SAVED RUN · FIELD MAPS",
-                (
-                    ("Target field", "target"),
-                    ("Continuous-sheet field", "sheet"),
-                    ("Independent sheet validation", "validation"),
-                    ("Contour wire field", "contour_field"),
-                    ("Contour residual (field − target)", "contour_residual"),
-                    ("Evaluated winding field", "routed_field"),
-                    ("Winding residual (field − target)", "routed_residual"),
-                ),
-            ),
-            (
-                "FABRICATION REVIEW",
-                (
-                    ("Review conductor centerlines", "review_conductor"),
-                    ("Review electrical field paths", "review_electrical"),
-                    ("Review field", "fabricated"),
-                    ("Independent winding validation", "winding_validation"),
-                    ("Independent winding residual", "winding_validation_residual"),
-                ),
-            ),
-        ):
+        for group, entries in DATASET_GROUPS:
             self.dataset.addItem(group)
             header = self.dataset.model().item(self.dataset.count() - 1)
             self._dataset_headers[group] = self.dataset.count() - 1
@@ -558,7 +516,6 @@ class ScientificViewport(QWidget):
         self.edges = QCheckBox("Edges")
         self.edges.setAccessibleName("Mesh edges")
         self.edges.setToolTip("Show the triangle edges of support and swept conductor meshes.")
-        self.edges.setChecked(True)
         self.clip = QCheckBox("Clip")
         self.clip.setAccessibleName("Clip plane")
         self.clip.setToolTip("Inspect a cross-section of the displayed dataset with an interactive clipping plane.")
@@ -614,6 +571,9 @@ class ScientificViewport(QWidget):
                     lambda: control.setFocus(Qt.FocusReason.PopupFocusReason) if selected.isVisible() else None,
                 )
             )
+        self._b0_direction = np.array([0.0, 0.0, 1.0])
+        self._b0_widget = None
+        self._b0_actor = None
         self.plotter = QtInteractor(self)
         self.plotter.set_background("#fafafa")
         self.plotter.enable_parallel_projection()
@@ -1081,9 +1041,65 @@ class ScientificViewport(QWidget):
         if enabled:
             self.probe.setText("Pick a world point for the scene anchor · drag to rotate")
 
+    @property
+    def b0_direction(self):
+        return self._b0_direction.copy()
+
+    def _update_b0_indicator(self):
+        """Corner B0 arrow that turns with the camera, above the x/y/z axes."""
+        interactor = getattr(getattr(self.plotter, "iren", None), "interactor", None)
+        if self._closed or interactor is None:
+            return
+        from ..application.scene_spec import B0_INDICATOR_COLOR, B0_LABEL_OFFSET, b0_indicator_mesh
+
+        mesh = b0_indicator_mesh(self._b0_direction, self.pv, label=False)
+        # Beside the upper shaft: a caption beyond the tip would be clipped by
+        # the marker viewport when B0 points up the screen.
+        tip = 0.55 * B0_LABEL_OFFSET * self._b0_direction
+        if self._b0_widget is None:
+            from vtkmodules.vtkInteractionWidgets import vtkOrientationMarkerWidget
+            from vtkmodules.vtkRenderingAnnotation import vtkCaptionActor2D
+            from vtkmodules.vtkRenderingCore import vtkPropAssembly
+
+            self._b0_actor = self.pv.Actor(mapper=self.pv.DataSetMapper(mesh))
+            self._b0_actor.prop.color = B0_INDICATOR_COLOR
+            # Screen-aligned like the triad's X/Y/Z labels, readable at any angle.
+            self._b0_caption = vtkCaptionActor2D()
+            self._b0_caption.SetCaption("B0")
+            self._b0_caption.BorderOff()
+            self._b0_caption.LeaderOff()
+            self._b0_caption.SetWidth(0.35)
+            self._b0_caption.SetHeight(0.16)
+            self._b0_caption.SetPosition(8, -10)
+            text = self._b0_caption.GetCaptionTextProperty()
+            text.SetColor(self.pv.Color(B0_INDICATOR_COLOR).float_rgb)
+            text.BoldOn()
+            text.ItalicOff()
+            text.ShadowOff()
+            marker = vtkPropAssembly()
+            marker.AddPart(self._b0_actor)
+            marker.AddPart(self._b0_caption)
+            widget = vtkOrientationMarkerWidget()
+            widget.SetOrientationMarker(marker)
+            widget.SetInteractor(interactor)
+            widget.SetViewport(0.0, 0.2, 0.17, 0.37)
+            widget.SetEnabled(1)
+            widget.InteractiveOff()
+            self._b0_widget = widget
+        else:
+            self._b0_actor.mapper.SetInputData(mesh)
+        self._b0_caption.SetAttachmentPoint(*tip)
+        self.plotter.render()
+
     def render_config(self, config, project_root: Path | None = None, *, _owner=None):
         if self._closed:
             return
+        from ..field_components import normalized_b0_direction
+
+        b0 = normalized_b0_direction(config.b_0_direction)
+        if self._b0_widget is None or not np.array_equal(b0, self._b0_direction):
+            self._b0_direction = b0
+            self._update_b0_indicator()
         support_identity, target_identity = _preview_identities(config, getattr(_owner, "values", None))
         requirements = getattr(_owner, "study", {}).get("requirements")
         if requirements is not None:
@@ -1229,7 +1245,8 @@ class ScientificViewport(QWidget):
             self._start_preview(request)
         self.activity_changed.emit()
 
-    def display_run(self, arrays, metadata=None):
+    def display_run(self, arrays, metadata=None, *, follow_latest=False):
+        keep_view = follow_latest and self._live_stage_preview and bool(self._actors)
         self._stage_arrays, self._stage_metadata = {}, {}
         self._live_stage_preview = False
         self._clear_inspection_task()
@@ -1239,8 +1256,10 @@ class ScientificViewport(QWidget):
         self._rebuild_capabilities()
         self._located_issue = None
         self._before_issue_view = None
-        self._first_view = True
-        preferred = self._preferred_run_dataset()
+        self._first_view = not keep_view
+        preferred = (
+            self._preferred_run_dataset(_LATEST_FEATURE_PLOTS) if follow_latest else self._preferred_run_dataset()
+        )
         self._source_notice = ""
         if preferred in {"support", "preview_target"}:
             catalog = dataset_capabilities(self._arrays, original=self.wire_current.currentIndex() == 1)
@@ -1250,12 +1269,14 @@ class ScientificViewport(QWidget):
             )
             self._source_notice = "Saved run has no available plot data: " + reason
             self.error.emit(self._source_notice)
-        with QSignalBlocker(self.dataset):
+        with QSignalBlocker(self.dataset), QSignalBlocker(self.roi_layer):
             self.dataset.setCurrentIndex(self.dataset.findData(preferred))
+            if not keep_view and (preferred in PATH_PREFIXES or preferred == "swept"):
+                self.roi_layer.setChecked(False)
         self._render()
 
-    def display_stage_preview(self, arrays, metadata):
-        """Display verified stage outputs without creating or replacing a run.
+    def display_stage_preview(self, arrays, metadata, *, follow=True):
+        """Offer each new dataset and follow the latest recorded feature.
 
         The caller owns job/revision verification. No interpolation, field solve,
         current fitting or acceptance inference occurs in this rendering adapter.
@@ -1267,7 +1288,12 @@ class ScientificViewport(QWidget):
         first_snapshot = not self._live_stage_preview or any(
             metadata.get(name) != self._stage_metadata.get(name) for name in identity_fields
         )
-        self._clear_inspection_task()
+        current = self.dataset.currentData()
+        model_view = current in {"support", "preview_target"}
+        if not follow and first_snapshot and (self._live_stage_preview or not model_view):
+            return  # A background refresh cannot replace another job's displayed data.
+        previous_feature = self._stage_metadata.get("preview_feature")
+        old_catalog = self._capabilities[self.wire_current.currentIndex() == 1]
         self._stage_arrays = {name: np.array(value, copy=True) for name, value in arrays.items()}
         self._stage_metadata = {**deepcopy(metadata), "live_stage_preview": True, "acceptance_claim": False}
         self._live_stage_preview = True
@@ -1275,18 +1301,34 @@ class ScientificViewport(QWidget):
         if first_snapshot:
             self._stage_execution_status = "running"
         self._rebuild_capabilities()
-        self._located_issue = None
-        self._before_issue_view = None
         self._first_view = not had_scene
-        preferred = self._preferred_run_dataset(self._stage_arrays)
-        with QSignalBlocker(self.dataset), QSignalBlocker(self.support_layer), QSignalBlocker(self.roi_layer):
-            self.dataset.setCurrentIndex(self.dataset.findData(preferred))
-            self.support_layer.setChecked(True)
-            self.roi_layer.setChecked(True)
-        if first_snapshot and metadata.get("target_field_component") in {"Bx", "By", "Bz"}:
-            with QSignalBlocker(self.component):
-                self.component.setCurrentText(metadata["target_field_component"])
+        preferred = self._preferred_run_dataset()
+        feature = metadata.get("preview_feature")
+        if feature is None:
+            # A checkpoint can repeat the geometry already published by a feature.
+            advance = not old_catalog[preferred].available
+        else:
+            advance = feature != previous_feature and preferred in _PREVIEW_FEATURE_PLOTS.get(feature, ())
+        advance = follow and (first_snapshot or advance)
+        if advance or (not model_view and not self._capability(current).available):
+            self._clear_inspection_task()
+            self._located_issue = None
+            self._before_issue_view = None
+            with QSignalBlocker(self.dataset):
+                self.dataset.setCurrentIndex(self.dataset.findData(preferred))
+        if follow and first_snapshot:
+            with QSignalBlocker(self.support_layer), QSignalBlocker(self.roi_layer), QSignalBlocker(self.component):
+                self.support_layer.setChecked(True)
+                self.roi_layer.setChecked(True)
+                if metadata.get("target_field_component") in {"Bx", "By", "Bz"}:
+                    self.component.setCurrentText(metadata["target_field_component"])
         self._render()
+
+    def follow_latest_stage_preview(self):
+        """Return to the latest available plot for this live source."""
+        if self._live_stage_preview:
+            preferred = self._preferred_run_dataset()
+            self.dataset.setCurrentIndex(self.dataset.findData(preferred))
 
     @property
     def stage_preview_metadata(self):
@@ -1305,28 +1347,13 @@ class ScientificViewport(QWidget):
             self.dataset.setCurrentIndex(self.dataset.findData(self._model_dataset()))
         self._render()
 
-    def _preferred_run_dataset(self, arrays=None):
-        """Show the latest saved geometry without reconstructing missing stages."""
-        arrays = self._arrays if arrays is None else arrays
-        original = self.wire_current.currentIndex() == 1
-        active = self._stage_arrays if self._live_stage_preview else self._arrays
-        catalog = self._capabilities[original] if arrays is active else dataset_capabilities(arrays, original=original)
-        for key in (
-            "review_conductor",
-            "swept",
-            "fabrication",
-            "evaluated_winding",
-            "routes",
-            "contours",
-            "stream_function",
-            "target",
-            "sheet",
-            "validation",
-            "routed_field",
-            "contour_field",
-            "fabricated",
-            "review_electrical",
-        ):
+    def _preferred_run_dataset(self, preferred=()):
+        """Select from verified arrays under the displayed current policy."""
+        catalog = self._capabilities[self.wire_current.currentIndex() == 1]
+        if self._live_stage_preview:
+            feature = self._stage_metadata.get("preview_feature")
+            preferred = _PREVIEW_FEATURE_PLOTS.get(feature, ())
+        for key in preferred + PREFERRED_RUN_PLOTS:
             if catalog[key].available:
                 return key
         return self._model_dataset()
@@ -1406,10 +1433,10 @@ class ScientificViewport(QWidget):
                     "contour_residual",
                     "Contour residual on its saved design samples; connected-winding evidence is unavailable.",
                 ),
-                ("validation", "Independent sheet validation field; final winding evidence is unavailable."),
+                ("validation", "Stream function field on independent samples; final winding evidence is unavailable."),
                 (
                     "sheet",
-                    "Continuous-sheet field on design samples; independent and winding evidence are unavailable.",
+                    "Stream function field on design samples; independent and winding evidence are unavailable.",
                 ),
                 (
                     "routed_field",
@@ -1706,6 +1733,7 @@ class ScientificViewport(QWidget):
 
     def _add(self, mesh, key, **options):
         actor = self.plotter.add_mesh(mesh, reset_camera=False, **options)
+        self._fit_meshes.append(mesh)
         self._actors[self._actor_key(actor)] = key
         return actor
 
@@ -1822,19 +1850,20 @@ class ScientificViewport(QWidget):
 
     def _field_caption(self, key):
         if key not in {"contour_field", "contour_residual", "routed_field", "routed_residual"}:
-            if self._live_stage_preview and key != "preview_target":
-                return {
-                    "target": "stage requested target",
-                    "sheet": "stage continuous-sheet field on design samples",
-                    "validation": "stage independent continuous-sheet grid",
-                    "fabricated": "stage field samples; scope unverified",
-                }[key]
+            if key == "fabricated":
+                metadata = self._stage_metadata if self._live_stage_preview else self._metadata
+                source = (metadata.get("fabricated_physics") or {}).get("current_source")
+                current = (
+                    "original signed per-body contour currents, no refit"
+                    if source == "original_contour_current_no_refit"
+                    else "current provenance unavailable"
+                )
+                return f"fabrication-review thin-wire field · {current} · design samples"
             return {
                 "preview_target": "current model target",
-                "target": "immutable run target",
-                "sheet": "immutable continuous-sheet field on design samples",
-                "validation": "independent continuous-sheet grid; unchanged solved current",
-                "fabricated": "fabrication-review thin-wire field; original contour current; design samples",
+                "target": "stage requested target" if self._live_stage_preview else "immutable run target",
+                "sheet": "immutable stream function field on design samples",
+                "validation": "independent stream function validation grid; unchanged solved current",
                 "winding_validation": "recorded electrical paths; independent samples; original signed current; no refit",
                 "winding_validation_residual": "independent thin-wire residual; original signed current; no refit",
             }[key]
@@ -1885,6 +1914,7 @@ class ScientificViewport(QWidget):
         widgets.plane_clipped_meshes.clear()
         self.plotter.clear()
         self._actors.clear()
+        self._fit_meshes.clear()
         self._dataset_mesh = None
         self._dataset_actor_key = None
         self.probe.setText("Probe: —")
@@ -1905,9 +1935,20 @@ class ScientificViewport(QWidget):
         )
         self.component.setEnabled(is_field)
         self.units.setEnabled(is_field)
-        self.field_controls.setVisible(is_field or has_wire_maps)
+        # The current only selects field maps. Keep it reachable on a path view
+        # if changing policy unlocks a map unavailable at the current setting.
+        original = self.wire_current.currentIndex() == 1
+        geometry = key in PATH_PREFIXES or key == "swept"
+        show_current = has_wire_maps and (
+            not geometry
+            or any(
+                self._capability(field, original=not original).available and not self._capability(field).available
+                for field in WIRE_FIELDS
+            )
+        )
+        self.field_controls.setVisible(is_field or show_current)
         self.field_options.setVisible(is_field)
-        self.current_controls.setVisible(has_wire_maps)
+        self.current_controls.setVisible(show_current)
         self.component.setToolTip(
             "Display a stored Cartesian field component or vector magnitude."
             if is_field
@@ -1925,7 +1966,7 @@ class ScientificViewport(QWidget):
             if fixed_field_current
             else "Select already computed wire maps; no current fitting or field recalculation."
         )
-        self.wire_current.setVisible(has_wire_maps)
+        self.wire_current.setVisible(show_current)
         self.slice_axis.setEnabled(is_field)
         self.slice_position.setEnabled(is_field and self.slice_axis.currentText() != "All points")
         self.slice_controls.setVisible(is_field)
@@ -1945,9 +1986,15 @@ class ScientificViewport(QWidget):
                 self._add(
                     support,
                     "geometry",
-                    color="#79949d",
+                    color=SUPPORT_COLOR,
                     show_edges=self.edges.isChecked(),
-                    opacity=0.04 if locating else 0.24 if key == "preview_target" else 0.15,
+                    opacity=0.04
+                    if locating
+                    else 0.38
+                    if key in PATH_PREFIXES
+                    else 0.24
+                    if key == "preview_target"
+                    else 0.15,
                 )
             if self.support_layer.isChecked():
                 colors = ("#4b869f", "#c48a53", "#82985d", "#947aaa", "#579c90")
@@ -1966,14 +2013,22 @@ class ScientificViewport(QWidget):
                     )
                     system_count += 1
             points_available = self._model_points_available if model else self._source_points_available
-            if self.roi_layer.isChecked() and points_available and key not in {"target", "preview_target"}:
+            target_is_primary = key in {"target", "preview_target"}
+            if live:
+                # A second colored actor on the same points would obscure the computed field.
+                target_is_primary = target_is_primary or key in WIRE_FIELDS or key == "sheet"
+                if key == "fabricated":
+                    target_is_primary = "fabricated_points_m" not in arrays or np.array_equal(
+                        arrays["fabricated_points_m"], arrays.get("target_points_m")
+                    )
+            if self.roi_layer.isChecked() and points_available and not target_is_primary:
                 if live and self._capability("target", comparison=False).available:
                     points = self._field_mesh(arrays, "target")
                     self._add(
                         points,
                         "target",
                         scalars=points.active_scalars_name,
-                        cmap="coolwarm",
+                        cmap=FIELD_CMAP,
                         show_scalar_bar=False,
                         point_size=6,
                         opacity=0.7,
@@ -1985,30 +2040,33 @@ class ScientificViewport(QWidget):
             if key == "support":
                 mesh = self._support if self._active_support_visible() else None
                 caption += " · support hidden" if hidden_support else " · current model support"
-                options = {"color": "#79949d", "show_edges": self.edges.isChecked(), "opacity": 0.72}
+                options = {"color": SUPPORT_COLOR, "show_edges": self.edges.isChecked(), "opacity": 0.72}
             elif key == "stream_function" and {"vertices_m", "faces", "stream_function_A"} <= arrays.keys():
                 mesh = self._mesh(arrays["vertices_m"], arrays["faces"])
                 values = np.asarray(arrays["stream_function_A"], dtype=float).reshape(-1)
                 if len(values) != mesh.n_points or not np.all(np.isfinite(values)):
                     raise ValueError("Stream function does not match the run mesh.")
                 mesh["Stream function [A]"] = values
-                options = {"scalars": "Stream function [A]", "cmap": "coolwarm", "show_edges": self.edges.isChecked()}
-                caption += (
-                    " · live continuous-sheet solution" if live else " · immutable run / continuous-sheet solution"
-                )
+                options = {"scalars": "Stream function [A]", "cmap": FIELD_CMAP, "show_edges": self.edges.isChecked()}
+                caption += " · live stream function solution" if live else " · immutable run / stream function solution"
                 if self._system_channels and not self._active_support_visible():
                     mesh = None
                     caption += " · active support mesh hidden"
             elif key == "surface_current_density" and available:
                 mesh = self.pv.PolyData(np.asarray(arrays["sheet_current_density_points_m"], dtype=float))
                 mesh["|K| [A/m]"] = np.linalg.norm(arrays["sheet_current_density_A_per_m"], axis=1)
-                options = {"scalars": "|K| [A/m]", "cmap": "viridis", "point_size": 6, "render_points_as_spheres": True}
-                caption += " · recorded face current density; continuous sheet; not copper volume density"
+                options = {
+                    "scalars": "|K| [A/m]",
+                    "cmap": DENSITY_CMAP,
+                    "point_size": 6,
+                    "render_points_as_spheres": True,
+                }
+                caption += " · surface current density from the stream function [A/m]"
             elif is_field:
                 mesh = self._field_mesh(arrays, key)
                 options = {
                     "scalars": mesh.active_scalars_name if mesh is not None else None,
-                    "cmap": "coolwarm",
+                    "cmap": FIELD_CMAP,
                     "point_size": 8,
                     "render_points_as_spheres": True,
                 }
@@ -2024,12 +2082,13 @@ class ScientificViewport(QWidget):
                     if not body.n_points or not body.n_cells:
                         continue
                     options = {
-                        "color": "#205a75",
+                        "color": WINDING_COLOR,
                         "show_edges": self.edges.isChecked(),
                         "opacity": 0.18 if locating else 1,
                     }
                     if self.clip.isChecked():
                         actor = widgets.add_mesh_clip_plane(body, reset_camera=False, **options)
+                        self._fit_meshes.append(body)
                         if actor is not None:
                             self._actors[self._actor_key(actor)] = "winding"
                     else:
@@ -2041,32 +2100,15 @@ class ScientificViewport(QWidget):
                     if swept_count
                     else " · pipeline swept conductor unavailable in this run; centerlines remain separate datasets"
                 )
-            elif key in {
-                "contours",
-                "routes",
-                "evaluated_winding",
-                "fabrication",
-                "review_conductor",
-                "review_electrical",
-            }:
-                prefix = {
-                    "contours": "contour_",
-                    "routes": "route_",
-                    "evaluated_winding": "evaluated_winding_",
-                    "fabrication": "fabrication_",
-                    "review_conductor": "review_conductor_",
-                    "review_electrical": "review_electrical_",
-                }[key]
-                paths = [
-                    value for name, value in arrays.items() if name.startswith(prefix) and name.endswith("_points_m")
-                ]
-                for path in paths:
-                    path = np.asarray(path, dtype=float)
+            elif key in PATH_PREFIXES:
+                paths = path_array_names(arrays, key)
+                for name in paths:
+                    path = np.asarray(arrays[name], dtype=float)
                     if path.ndim == 2 and path.shape[1] == 3 and len(path) > 1 and np.all(np.isfinite(path)):
                         self._add(
                             self.pv.lines_from_points(path),
                             "winding",
-                            color="#205a75",
+                            color=WINDING_COLOR,
                             line_width=3,
                             opacity=0.18 if locating else 1,
                         )
@@ -2082,6 +2124,10 @@ class ScientificViewport(QWidget):
                     else key
                 )
                 caption += f" · immutable {scope} centerlines" + (" unavailable at this stage" if not paths else "")
+                if key == "review_conductor":
+                    caption += " after path realization and mounting"
+                if key in {"contours", "review_conductor"} and not live:
+                    caption += " · " + (contour_fit_caption(self._metadata) or "Contour-fit outcome unrecorded.")
             if mesh is not None and mesh.n_points:
                 if options.get("scalars") is not None:
                     if self._colour_limits is not None:
@@ -2103,6 +2149,7 @@ class ScientificViewport(QWidget):
                 selection = "target" if is_field else "optimization" if key == "stream_function" else "geometry"
                 if self.clip.isChecked():
                     actor = widgets.add_mesh_clip_plane(mesh, reset_camera=False, **options)
+                    self._fit_meshes.append(mesh)
                 else:
                     actor = self._add(mesh, selection, **options)
                 if actor is not None:
@@ -2180,8 +2227,12 @@ class ScientificViewport(QWidget):
                     grid=False,
                 )
             if live:
-                stage = str(self._stage_metadata.get("stage", self._stage_metadata.get("pipeline_stage", "")))
-                stage = stage.replace("_", " ") or "stage output"
+                stage = self._stage_metadata.get("stage", self._stage_metadata.get("pipeline_stage", "stage output"))
+                feature = PREVIEW_FEATURE_LABELS.get(self._stage_metadata.get("preview_feature"))
+                if feature:
+                    stage = f"{feature} complete"
+                elif stage == "sheet":
+                    stage = "stream function"
                 caption = caption.replace("immutable", "stage").replace("saved samples", "stage samples")
                 prefix = (
                     f"Run snapshot · {self._stage_execution_status}"
@@ -2212,7 +2263,7 @@ class ScientificViewport(QWidget):
                 if unavailable:
                     caption += " · support unavailable: " + ", ".join(unavailable) + " (see System meshes)"
             self.caption.setText(caption)
-            if self._first_view and (mesh is not None or support is not None or swept_count or system_count):
+            if self._first_view and (self._actors or widgets.plane_clipped_meshes):
                 self._fit_view()
                 self._first_view = False
             else:
@@ -2246,9 +2297,14 @@ class ScientificViewport(QWidget):
             return
         right /= length
         up = np.cross(right, direction)
+        focus = np.asarray(camera.focal_point)
+        axes = np.column_stack((right * (size[1] / size[0]), up))
         corners = np.asarray([[x, y, z] for x in bounds[:2] for y in bounds[2:4] for z in bounds[4:]])
-        scale = 1.25 * max(np.ptp(corners @ up), np.ptp(corners @ right) / (size[0] / size[1])) / 2
-        if np.isfinite(scale) and 0 < scale < camera.parallel_scale:
+        sources = [mesh.points for mesh in self._fit_meshes if mesh.n_points] or [corners]
+        scale = 1.25 * max((np.abs((points - focus) @ axes).max() for points in sources), default=0.0)
+        # The coordinate labels sit beyond the corners of the world-axis box.
+        scale = max(scale, 1.20 * np.abs((corners - focus) @ axes).max())
+        if np.isfinite(scale) and scale > 0:
             camera.parallel_scale = float(scale)
             self.plotter.render()
 
@@ -2269,6 +2325,8 @@ class ScientificViewport(QWidget):
     def closeEvent(self, event):
         if not self._closed:
             self._closed = True
+            if self._b0_widget is not None:
+                self._b0_widget.SetEnabled(0)
             self.inspection_menu.hide()
             self.layers_menu.hide()
             self.system_meshes_menu.hide()

@@ -1,7 +1,7 @@
 """Focused modeless editors over the workbench's existing draft widgets.
 
-Sections move complete form rows, including their error labels. Opening or
-closing an editor neither copies values nor commits a model revision.
+Sections move complete form rows, including their error labels. Cancel restores
+the draft at entry without committing a model revision.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -24,8 +26,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from shiboken6 import isValid
 
 from .colors import tone_color
+from .conductor_profile import ConductorProfileEditor
+from .controls import ScientificSpinBox
 from .icons import icon
 
 
@@ -33,10 +38,13 @@ class FocusedFormSection(QWidget):
     """A compact launcher for one owned editor, preserving widget identity."""
 
     opened = Signal()
+    discarded = Signal(object)
 
     def __init__(self, form, controls, *, title, icon_name="settings", summary=None, parent=None, apply_callback=None):
         super().__init__(parent or form.parentWidget())
         self.controls = tuple(controls)
+        self.related_controls = ()
+        self._entry = {}
         self._summary = summary
         self._title, self._icon_name = title, icon_name
         self._step = None
@@ -57,7 +65,7 @@ class FocusedFormSection(QWidget):
         self.button.setIcon(icon(icon_name))
         self.button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.button.setAccessibleName("Edit " + title.lower())
-        self.button.setToolTip("Open the focused editor. Closing it keeps pending edits.")
+        self.button.setToolTip("Open the focused editor. Cancel discards changes made here.")
         row.addWidget(self.button)
         self.summary_label = QLabel(self)
         self.summary_label.setWordWrap(True)
@@ -100,12 +108,18 @@ class FocusedFormSection(QWidget):
                 self.form.addRow(label, wrapper)
             self.form.setRowVisible(wrapper, visible)
             self._observe(control)
-        footer = self.footer = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, self.dialog)
-        footer.rejected.connect(self.dialog.hide)
+        footer = self.footer = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel, self.dialog)
+        footer.rejected.connect(self.dialog.reject)
+        self.dialog.rejected.connect(self._discard)
         if apply_callback is not None:
             apply = QPushButton("Apply & preview", self.dialog)
             apply.setIcon(icon("model-tree"))
-            apply.clicked.connect(apply_callback)
+
+            def apply_edits():
+                if apply_callback() is not False and isValid(self.dialog) and self.dialog.isVisible():
+                    self._capture_entry()
+
+            apply.clicked.connect(apply_edits)
             footer.addButton(apply, QDialogButtonBox.ButtonRole.ApplyRole)
         dialog_layout.addWidget(footer)
         # Small editors should feel focused. The scroll area still owns all
@@ -194,7 +208,7 @@ class FocusedFormSection(QWidget):
             if pending
             else ""
         )
-        self.setAccessibleDescription("Open this decision independently. Closing keeps pending edits." + status)
+        self.setAccessibleDescription("Open this decision independently. Cancel discards changes made here." + status)
         self.setProperty("draftState", "error" if error else "pending" if pending else "normal")
 
     def set_direct_choice(self, control):
@@ -229,7 +243,7 @@ class FocusedFormSection(QWidget):
         self.button.setText("Choose…")
         self.button.setIcon(icon("support-gallery"))
         self.button.setAccessibleName(self._title)
-        self.button.setToolTip("Open the graphical choices. Closing keeps pending edits.")
+        self.button.setToolTip("Open the graphical choices. Cancel discards changes made here.")
         bounds = self.dialog.screen().availableGeometry()
         self.dialog.resize(min(650, bounds.width() - 24), min(530, bounds.height() - 64))
 
@@ -404,6 +418,8 @@ class FocusedFormSection(QWidget):
             control.currentTextChanged.connect(self.refresh_summary)
         elif isinstance(control, QLineEdit):
             control.textEdited.connect(self.refresh_summary)
+        elif isinstance(control, QPlainTextEdit):
+            control.textChanged.connect(self.refresh_summary)
         elif hasattr(control, "toggled"):
             control.toggled.connect(self.refresh_summary)
         elif hasattr(control, "changed"):
@@ -418,12 +434,33 @@ class FocusedFormSection(QWidget):
         self.summary_label.setToolTip(text)
 
     def open(self, *_args):
+        # Moving to another decision hides this dialog while retaining its
+        # draft. Reopening it must retain the same cancellation baseline.
+        if not self._entry:
+            self._capture_entry()
         self._hide_choice_summary()
         self.dialog.show()
         self.dialog.raise_()
         self.dialog.activateWindow()
         self._focus_direct_choice()
         self.opened.emit()
+
+    def _capture_entry(self):
+        self._entry = {control: _draft_value(control) for control in (*self.controls, *self.related_controls)}
+
+    def _discard(self):
+        # Restore selectors first: their signals may change units, numeric
+        # bounds or dependent controls. Then restore the exact numeric/text draft.
+        changed = []
+        for control in sorted(self._entry, key=lambda item: not isinstance(item, (QComboBox, QCheckBox))):
+            value = self._entry[control]
+            if _draft_value(control) != value:
+                _restore_value(control, value)
+                changed.append(control)
+        self._entry.clear()
+        if changed:
+            self.discarded.emit(tuple(changed))
+            self.refresh_summary()
 
     def open_for(self, control):
         if control not in self.controls:
@@ -443,6 +480,41 @@ class FocusedFormSection(QWidget):
         self.dialog.hide()
         self.dialog.deleteLater()
         self.deleteLater()
+
+
+def _draft_value(control):
+    if isinstance(control, QAbstractSpinBox):
+        return control.value(), control.lineEdit().text(), control.lineEdit().isModified()
+    if isinstance(control, QComboBox):
+        return control.currentIndex()
+    if isinstance(control, QCheckBox):
+        return control.isChecked()
+    if isinstance(control, ConductorProfileEditor):
+        return control.capture_draft()
+    if isinstance(control, QPlainTextEdit):
+        return control.toPlainText()
+    return control.text()
+
+
+def _restore_value(control, value):
+    if isinstance(control, QAbstractSpinBox):
+        number, text, modified = value
+        control.setValue(number)
+        if isinstance(control, ScientificSpinBox):
+            control.restore_draft_text(text)
+        else:
+            control.lineEdit().setText(text)
+        control.lineEdit().setModified(modified)
+    elif isinstance(control, QComboBox):
+        control.setCurrentIndex(value)
+    elif isinstance(control, QCheckBox):
+        control.setChecked(value)
+    elif isinstance(control, ConductorProfileEditor):
+        control.restore_draft(value)
+    elif isinstance(control, QPlainTextEdit):
+        control.setPlainText(value)
+    else:
+        control.setText(value)
 
 
 def group_form_controls(window, form, title, keys, *, icon_name="settings", summary=None, apply_callback=None):

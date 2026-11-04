@@ -1300,8 +1300,8 @@ def refine_cohort_channel_basis(
     """Bound-aware alternating refinement of a physically scaled channel basis.
 
     Current fitting is convex for fixed channels.  The channel update is convex
-    for fixed currents and constrains every per-ampere channel so its sheet
-    current at the maximum hardware current respects CoilGen's configured limit.
+    for fixed currents and constrains every per-ampere channel so its surface
+    current density at the maximum hardware current respects CoilGen's configured limit.
     The overall bilinear problem is not globally convex, so the returned history
     explicitly records each alternating step.
     """

@@ -1,0 +1,96 @@
+.cg-center-panel {
+  min-width: 0;
+  color: #1e2933;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.cg-center-panel > * { flex-shrink: 0; }
+.cg-plot { display: flex; flex-direction: column; flex: 1 0 auto; min-width: 0; }
+.cg-plot > * { flex-shrink: 0; }
+.cg-context, .cg-board-heading, .cg-buttons, .cg-view-tools, .cg-plot-bar, .cg-component, .cg-legend, .cg-dialog-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.cg-context, .cg-board-heading, .cg-dialog-head { justify-content: space-between; }
+.cg-context, .cg-buttons, .cg-view-tools, .cg-plot-bar { flex-wrap: wrap; }
+.cg-context { margin-bottom: 8px; }
+.cg-context-heading { min-width: 0; font-size: 13px; font-weight: 600; }
+.cg-viewing { color: #285473; font-size: 12px; font-weight: 400; overflow-wrap: anywhere; }
+.cg-overview, .cg-model-guide, .cg-plot-bar {
+  background: #f5f6f8;
+  border: 1px solid #c1c7cd;
+  border-radius: 5px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+.cg-model-guide { font-size: 13px; }
+.cg-model-guide strong { font-size: 14px; }
+.cg-board-heading { font-size: 14px; margin-bottom: 5px; }
+.cg-metrics {
+  display: grid;
+  grid-template-columns: repeat(4,minmax(0,1fr));
+  gap: 5px;
+}
+.cg-metrics > div { padding: 4px 7px; border: 1px solid #bbc4cc; background: #fff; border-radius: 4px; }
+.cg-metrics span, .cg-metrics strong { display: block; }
+.cg-metrics span { font-size: 11px; }
+.cg-metrics strong { color: #18232e; font-size: clamp(14px,1.35vw,22px); line-height: 1.18; }
+.cg-metrics .cg-unavailable { font-size: 13px; font-weight: 600; }
+.cg-scope { font-size: 11px; line-height: 1.35; white-space: pre-line; overflow-wrap: anywhere; margin: 4px 0; }
+.cg-overview > .cg-buttons { margin-top: 6px; }
+.cg-plot-bar { margin-bottom: 4px; border-left: 3px solid #1474ad; }
+.cg-plot-bar label, .cg-dialog-body label { font-size: 12px; }
+.cg-plot-bar > select { flex: 1 1 160px; }
+.cg-plot-bar select, .cg-dialog-body select {
+  appearance: auto;
+  background: #fff;
+  color: #18232e;
+  border: 1px solid #9ba8b3;
+  border-radius: 3px;
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+  height: 32px;
+  padding: 0 5px;
+  font: inherit;
+  font-size: 13px;
+}
+.cg-view-tools { margin: 4px 0; }
+.cg-b0 { margin-left: auto; font-size: 12px; color: #97400e; }
+.cg-support-visibility { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer; }
+.cg-viewport { flex: 1 0 185px; min-height: 185px; min-width: 0; position: relative; background: #fafafa; }
+.cg-legend { justify-content: center; flex-wrap: wrap; font-size: 12px; }
+.cg-ramp { display: inline-block; width: 85px; height: .65em; border: 1px solid #77838e; }
+.cg-attempt { padding: 8px; margin-bottom: 8px; border-left: 3px solid #b4640c; background: #fff5df; font-size: 13px; }
+.cg-dialog-head { padding: 12px 18px; border-bottom: 1px solid #c8cdd2; }
+.cg-dialog-head h2 { font-size: 17px; }
+.cg-dialog-body { font-size: 14px; overflow-wrap: anywhere; }
+.cg-dialog-body details { padding: 6px 0; }
+.cg-dialog-body summary { cursor: pointer; font-weight: 600; }
+.cg-dialog-body ul { padding-left: 1.3rem; }
+.cg-dialog-body li { margin-bottom: 5px; }
+.cg-dialog-body select { width: 100%; }
+.cg-shielding-controls { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.cg-shielding-controls > div { flex: 1 1 160px; }
+.cg-shielding-image {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: max(380px, calc(100dvh - 225px));
+  object-fit: contain;
+}
+.cg-shielding-note { white-space: pre-line; }
+.cg-dialog-body p { margin-bottom: 8px; }
+.cg-detail-note { font-size: 12px; color: #43566a; }
+.cg-stats { width: 100%; font-size: 13px; border-collapse: collapse; }
+.cg-stats caption, .cg-stats th { text-align: left; }
+.cg-stats th { font-weight: 500; }
+.cg-stats td, .cg-stats th { border-bottom: 1px solid #d7dce1; padding: 5px 6px; }
+.cg-stats td:last-child { text-align: right; }
+@media (max-width: 620px) {
+  .cg-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .cg-viewport { flex-basis: 220px; min-height: 220px; }
+  .cg-context-heading { flex-basis: 100%; }
+}

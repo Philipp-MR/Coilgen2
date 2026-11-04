@@ -5,6 +5,52 @@ from __future__ import annotations
 import numpy as np
 
 
+def shielding_geometry_arrays(target, secondary_mesh) -> dict:
+    """Faces index the saved subset only when it is the exact secondary mesh."""
+    mask = target.suppressed
+    if not np.any(mask):
+        return {}
+    arrays = {}
+    if secondary_mesh is not None and np.array_equal(secondary_mesh.vertices, target.coords[mask]):
+        arrays["shielding_surface_faces"] = secondary_mesh.faces
+    if target.suppression_normals is not None:
+        arrays["shielding_surface_normals"] = target.suppression_normals[mask]
+    if target.suppression_area_weights is not None:
+        arrays["shielding_surface_area_weights_m2"] = target.suppression_area_weights[mask]
+    return arrays
+
+
+def shielding_contribution_arrays(parts, target, source, *, current_A=None) -> dict:
+    """Sum the signed contributions of explicitly identified winding supports.
+
+    The sheet uses the solved stream function in A. Wire operators already
+    include oriented path signs and contour multiplicities, but are in T/A.
+    """
+    mask = target.suppressed
+    roles = [getattr(getattr(part, "mesh", None), "metadata", {}).get("role") for part in parts]
+    if set(roles) != {"primary", "active_shield"} or not np.any(mask):
+        return {}
+    if source not in {"sheet", "contour", "routed"}:
+        raise ValueError(f"Unknown shielding field source {source!r}.")
+    fields = {role: np.zeros((np.count_nonzero(mask), 3)) for role in set(roles)}
+    for part, role in zip(parts, roles):
+        if source == "sheet":
+            if part.sensitivity_matrix is None or part.stream_function is None:
+                return {}
+            # Contract before indexing to avoid a potentially large advanced-indexing copy.
+            contribution = np.einsum("ctv,v->tc", part.sensitivity_matrix, part.stream_function)[mask]
+        else:
+            per_amp = part.field_by_loops if source == "contour" else part.field_by_layout
+            if per_amp is None or current_A is None or not np.isfinite(current_A):
+                return {}
+            contribution = per_amp[mask] * current_A
+        fields[role] += contribution
+    return {
+        f"shielding_{source}_primary_T": fields["primary"],
+        f"shielding_{source}_shield_T": fields["active_shield"],
+    }
+
+
 def path_provenance_arrays(prefix, path) -> dict:
     """Retain typed interval ownership alongside its exact saved coordinates."""
     arrays = {}

@@ -55,7 +55,8 @@ def test_geometry_only_export_preserves_pending_model_draft(windows, tmp_path, m
     monkeypatch.setattr(cad, "export_geometry", export)
     assert window.export_selected_geometry(tmp_path / "cad", include_project=False) == "geometry-package"
     assert window.project is project and window._draft_dirty
-    export.assert_called_once_with(record, tmp_path / "cad", None, unit="mm", project=None)
+    # The export panel only submits DRAFT files after explicit acknowledgement.
+    export.assert_called_once_with(record, tmp_path / "cad", None, unit="mm", project=None, allow_draft=True)
 
 
 def test_undefined_cylinder_rotation_cannot_be_applied_or_submitted(windows):
@@ -100,13 +101,14 @@ def test_gui_geometry_writer_runs_off_ui_thread_and_restores_action(windows, tmp
         "0" * 64,
     )
     monkeypatch.setattr(cad, "geometry_catalog", lambda record: (option,))
+    monkeypatch.setattr(cad, "export_catalog", lambda record: (option,))
     directory = tmp_path / "package"
     package = SimpleNamespace(
         paths=(directory / "body.stl",), directory=directory, manifest_path=directory / "geometry_manifest.json"
     )
     calls = []
 
-    def write(record, path, names, *, unit, project):
+    def write(record, path, names, *, unit, project, allow_draft=False):
         calls.append((QThread.currentThread() == application.thread(), record, names, unit, project))
         return package
 

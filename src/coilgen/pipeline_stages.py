@@ -88,6 +88,7 @@ _CONTOUR_FIELDS = frozenset(
 _ROUTING_FIELDS = frozenset(
     {
         "interconnection_cut_width",
+        "interconnection_axis",
         "within_group_cut_width",
         "inter_group_cut_width",
         "interconnection_method",
@@ -204,6 +205,7 @@ class PipelineState:
     regularization_diagnostics: dict[str, Any] = field(default_factory=dict)
     primary_surface_index: int = 0
     result: CoilGenResult | None = None
+    shielding_arrays: dict[str, np.ndarray] = field(default_factory=dict)
 
 
 class PipelineCheckpoint:
@@ -213,7 +215,7 @@ class PipelineCheckpoint:
     source, numerical settings, and input-content hashes before execution.
     """
 
-    SCHEMA = "coilgen.pipeline-checkpoint/4"
+    SCHEMA = "coilgen.pipeline-checkpoint/6"
 
     def __init__(
         self,
@@ -254,6 +256,11 @@ class PipelineCheckpoint:
     @property
     def result(self) -> CoilGenResult | None:
         return deepcopy(self._state.result)
+
+    @property
+    def shielding_arrays(self) -> dict[str, np.ndarray]:
+        """Detach saved suppression-surface evidence without copying the field operators."""
+        return deepcopy(self._state.shielding_arrays)
 
     @property
     def config(self) -> CoilGenConfig:
@@ -335,7 +342,13 @@ class PipelineCheckpoint:
             manifest = json.loads(archive.read("manifest.json"))
             numerical = archive.read("arrays.npz")
         checkpoint_schema = manifest.get("schema")
-        if checkpoint_schema not in {cls.SCHEMA, "coilgen.pipeline-checkpoint/2", "coilgen.pipeline-checkpoint/3"}:
+        if checkpoint_schema not in {
+            cls.SCHEMA,
+            "coilgen.pipeline-checkpoint/2",
+            "coilgen.pipeline-checkpoint/3",
+            "coilgen.pipeline-checkpoint/4",
+            "coilgen.pipeline-checkpoint/5",
+        }:
             raise ValueError("Unsupported pipeline checkpoint schema.")
         # Stage and inputs are scientific evidence too. Numerical-array hashes
         # alone would leave a changed stage/config manifest undetected.
@@ -350,7 +363,7 @@ class PipelineCheckpoint:
         _validate_npz(numerical, max_bytes=max_bytes)
         encoded_payload = manifest["payload"]
         if checkpoint_schema != cls.SCHEMA:
-            encoded_payload = _migrate_routing_config(encoded_payload, checkpoint_schema)
+            encoded_payload = _migrate_config(encoded_payload, checkpoint_schema)
         with np.load(io.BytesIO(numerical), allow_pickle=False) as archive:
             payload = _decode(encoded_payload, archive)
         if not isinstance(payload, dict) or not isinstance(payload.get("state"), PipelineState):
@@ -381,7 +394,7 @@ class PipelineCheckpoint:
             if not isinstance(state.combined_mesh, Mesh) or state.sf_b_field is None:
                 raise ValueError("Solved checkpoint is missing its combined mesh or stream-function field.")
             if np.asarray(state.sf_b_field).shape != np.asarray(state.target_field.b).shape:
-                raise ValueError("Checkpoint sheet field does not match its target sample shape.")
+                raise ValueError("Checkpoint stream function field does not match its target sample shape.")
             if any(
                 part.stream_function is None or len(part.stream_function) != part.mesh.n_vertices
                 for part in state.parts
@@ -467,8 +480,8 @@ def _field_identity(name: str, value: Any) -> str:
 
 
 def _level_settings_affect_sheet(config: CoilGenConfig) -> bool:
-    # Coupling includes preoptimized-sheet hardware rescaling and automatic
-    # factor selection. Reusing a sheet is permitted only when every linked
+    # Coupling includes hardware rescaling of the preoptimized stream function and automatic
+    # factor selection. Reusing a stream function is permitted only when every linked
     # current/spacing/contour-step guard is disabled.
     controls = (
         "max_current_A",
@@ -565,8 +578,8 @@ def _encode(value: Any, arrays: dict[str, np.ndarray]) -> Any:
     raise TypeError(f"Unsupported checkpoint value {type(value).__name__}.")
 
 
-def _migrate_routing_config(value: Any, schema: str) -> Any:
-    """Add only the known missing routing fields to authenticated old evidence.
+def _migrate_config(value: Any, schema: str) -> Any:
+    """Add only the known missing config fields to authenticated old evidence.
 
     Version 2 used physical selection; version 3 recorded its own policy. Keep
     those policies and disable new port searches on historical evidence.
@@ -575,22 +588,31 @@ def _migrate_routing_config(value: Any, schema: str) -> Any:
     permission to resume an old numerical result under a different engine.
     """
     if isinstance(value, list):
-        return [_migrate_routing_config(item, schema) for item in value]
+        return [_migrate_config(item, schema) for item in value]
     if not isinstance(value, dict):
         return value
-    migrated = {key: _migrate_routing_config(item, schema) for key, item in value.items()}
-    if value.get("$class") == "CoilGenConfig":
-        additions = {
-            # Loading old evidence must not retroactively enable new port searches.
-            "joint_group_routing_port_search_count": 0,
-            "joint_group_routing_cut_span_max_factor": 1.0,
-            "joint_group_routing_seam_search_extent_rel": 0.0,
-        }
+    migrated = {key: _migrate_config(item, schema) for key, item in value.items()}
+    if value.get("$class") == "PipelineState" and "shielding_arrays" not in migrated["fields"]:
+        migrated["fields"]["shielding_arrays"] = {"$dict": []}
+    if value.get("$class") == "CoilGenConfig" and schema != "coilgen.pipeline-checkpoint/5":
+        additions = (
+            {}
+            if schema == "coilgen.pipeline-checkpoint/4"
+            else {
+                # Loading old evidence must not retroactively enable new port searches.
+                "joint_group_routing_port_search_count": 0,
+                "joint_group_routing_cut_span_max_factor": 1.0,
+                "joint_group_routing_seam_search_extent_rel": 0.0,
+            }
+        )
         if schema == "coilgen.pipeline-checkpoint/2":
             additions.update(
                 joint_group_routing_selection_policy="physical", joint_group_routing_regular_field_tolerance_rel=0.001
             )
         attributes = migrated.get("fields")
+        if isinstance(attributes, dict) and "contour_smoothing_local_fallback" in attributes:
+            raise ValueError("Checkpoint data-class fields do not match the historical schema.")
+        additions["contour_smoothing_local_fallback"] = False
         expected_legacy = {item.name for item in fields(CoilGenConfig)} - additions.keys()
         if isinstance(attributes, dict) and set(attributes) == expected_legacy:
             migrated["fields"] = {**attributes, **additions}

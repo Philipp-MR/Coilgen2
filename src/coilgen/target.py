@@ -859,7 +859,13 @@ def _target_gradient_axis(config: CoilGenConfig, raw_fit: np.ndarray, *, source:
         if expression_axis is not None:
             return expression_axis
     if np.all(np.isfinite(raw_fit)) and np.linalg.norm(raw_fit) > 1.0e-30:
-        return ("x", "y", "z")[int(np.argmax(np.abs(raw_fit)))]
+        magnitudes = np.abs(np.asarray(raw_fit, dtype=float))
+        # A combined gradient such as x+y has no single axis; picking the
+        # largest (or, on a tie, the first) component would silently report
+        # only G_x. Use |G| whenever more than one component is significant.
+        if np.count_nonzero(magnitudes > 1.0e-6 * float(np.max(magnitudes))) > 1:
+            return "magnitude"
+        return ("x", "y", "z")[int(np.argmax(magnitudes))]
     return "magnitude"
 
 

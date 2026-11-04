@@ -118,5 +118,5 @@ def test_sheet_inspection_keeps_independent_scope_when_wire_field_absent(scienti
     )
     assert viewport.inspect_task("field")
     assert viewport.dataset.currentData() == "validation"
-    assert "Independent sheet" in viewport.inspection_note.text()
+    assert "Stream function field on independent samples" in viewport.inspection_note.text()
     assert "final winding evidence is unavailable" in viewport.inspection_note.text()

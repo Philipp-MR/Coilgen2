@@ -20,7 +20,7 @@ from .runtime_feedback import RuntimeFeedback, fraction_percent as _percent, run
 
 _STAGES = (
     ("prepared", "Prepare", "Prepare model and target samples", "mesh"),
-    ("sheet", "Sheet", "Optimize the continuous current sheet", "stream-function"),
+    ("sheet", "Stream function", "Optimize the stream function", "stream-function"),
     ("contours", "Contours", "Generate contour winding paths", "contours"),
     ("routed", "Winding", "Connect and sweep conductors according to the chosen winding settings", "conductor-sweep"),
     (

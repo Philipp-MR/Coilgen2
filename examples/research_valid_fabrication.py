@@ -51,7 +51,7 @@ def main(argv=None):
             layout_target_error_rms_limit_T=2e-8,
         )
         # A separate, explicit model for a locally parallel layer with 4 mm pitch.
-        # This affects a future sheet optimization, not this turn's exact R/P.
+        # This material assumption applies to a future stream function optimization.
         material = WireSheetMaterial(wire_area_m2=_polygon_area(profile), pitch_m=0.004)
         config = material.apply_to(config)
         heights = np.array([0.01, 0.02, 0.03, 0.04])

@@ -4,7 +4,7 @@ From the repository root:
     python -m pip install -e ".[research,plot,gui]"
     python docs/frontpage/generate_figures.py
 
-The plots distinguish the optimized sheet from smoothed, filtered unconnected
+The plots distinguish the optimized stream function from smoothed, filtered unconnected
 contours. Original solved currents are retained; every processed contour field
 is reevaluated. No current fit, routing or fabrication acceptance is implied.
 """
@@ -122,7 +122,7 @@ def compute_case(config: CoilGenConfig, name: str, index: int) -> tuple[dict, di
     support = support_evidence(result.coil_parts, index)
     validation = validate_on_independent_grid(result, resolution=12, design_margin=0.8)
     if not validation["available"] or not validation["passed"]:
-        raise RuntimeError(f"{name}: independent sheet validation failed: {validation}")
+        raise RuntimeError(f"{name}: independent stream function field validation failed: {validation}")
     points, target = validation["points_m"], validation["target_T"]
     arrays = {
         "validation_points_m": points,
@@ -178,7 +178,7 @@ def compute_case(config: CoilGenConfig, name: str, index: int) -> tuple[dict, di
         "solver_status": diagnostics.get("constrained_solver_status"),
     }
     print(
-        f"{name}: sheet {metrics['sheet_relative_rms_Bz_error_percent']:.3f}%, "
+        f"{name}: stream function {metrics['sheet_relative_rms_Bz_error_percent']:.3f}%, "
         f"unconnected contours {metrics['contour_relative_rms_Bz_error_percent']:.3f}% RMS Bz error",
         flush=True,
     )
@@ -253,7 +253,7 @@ def main() -> None:
         "error_definition": "100 * sqrt(sum((Bz - Bz_target)^2) / sum(Bz_target^2)); equal validation weights",
         "current_refitted": False,
         "independent_sampling": True,
-        "independent_sampling_scope": "Original sheet solve versus 912 points; processed paths use those points for acceptance and a separate untouched 1472-point holdout.",
+        "independent_sampling_scope": "Original stream function field evaluated at 912 points; processed paths use those points for acceptance and a separate untouched 1472-point holdout.",
         "independent_quadrature_or_mesh_convergence": False,
         "routed": False,
         "fabrication_validated": False,

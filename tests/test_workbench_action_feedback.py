@@ -56,6 +56,17 @@ def test_native_numeric_draft_marks_clean_document_without_changing_model(window
     assert window.project is original and window.undo_stack.count() == 0
 
 
+def test_opening_another_settings_editor_cannot_commit_the_active_draft(windows):
+    window = windows()
+    original = window.project
+    window._draft_controls["radius_mm"].setValue(174)
+    window._gradient_requirements_dialog()
+    window._advanced_dialog()
+    assert "Apply or discard" in window.statusBar().currentMessage()
+    assert window.project is original and window.undo_stack.count() == 0
+    assert window._draft_dirty and window._draft_controls["radius_mm"].value() == 174
+
+
 def test_returning_field_to_original_clears_pending_title_and_status(windows):
     window = windows()
     window.undo_stack.setClean()
@@ -69,6 +80,35 @@ def test_returning_field_to_original_clears_pending_title_and_status(windows):
     assert window.pending_panel.isHidden()
     assert "Pending settings" not in window.statusBar().currentMessage()
     assert window.project is original and window.undo_stack.count() == 0
+
+
+@pytest.mark.parametrize("dismiss", ["cancel", "close", "escape", "view-menu"])
+def test_dismissing_settings_dock_discards_unapplied_edits(windows, dismiss):
+    from PySide6.QtWidgets import QDockWidget, QPushButton
+
+    window = windows()
+    window.show()
+    window._show_dock("settings_dock")
+    dock = window.findChild(QDockWidget, "settings_dock")
+    baseline = window.project
+    window._draft_controls["radius_mm"].setValue(174)
+    assert window._draft_dirty
+    if dismiss == "cancel":
+        dock.findChild(QPushButton, "cancel_settings").click()
+    elif dismiss == "escape":
+        dock.activateWindow()
+        QTest.qWait(10)
+        QTest.keyClick(dock, Qt.Key.Key_Escape)
+    elif dismiss == "view-menu":
+        dock.toggleViewAction().trigger()
+    else:
+        dock.close()
+    assert dock.isHidden() and not window._has_input_drafts()
+    assert not window.isWindowModified()
+    assert window.apply_settings() and window.project is baseline and window.undo_stack.count() == 0
+    assert window._draft_controls["radius_mm"].value() == pytest.approx(
+        baseline.config.cylinder_mesh_parameter_list[1] * 1000
+    )
 
 
 def test_apply_undo_redo_acknowledge_actual_revision_without_stale_pending(windows):
@@ -453,7 +493,7 @@ def test_verified_engineering_failure_notice_keeps_its_exact_scope_after_project
     window.poll_jobs()
     notice = window.job_outcomes.selected
     assert notice.tone == "error" and "engineering checks failed" in notice.title
-    assert "1 failed" in notice.detail and "Saved sheet checks: Failed" in notice.detail
+    assert "1 failed" in notice.detail and "Saved stream function checks: Failed" in notice.detail
     window._clear_project()
     assert window.runs == {} and window.project is None
     assert window.job_outcomes.action_button.text() == "View job"

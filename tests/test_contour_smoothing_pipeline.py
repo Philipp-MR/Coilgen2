@@ -50,7 +50,7 @@ def test_smoothing_reuses_the_sheet_but_invalidates_old_contours_and_roundtrips(
     assert invalidated_stage(original, smoothing) is PipelineStage.CONTOURS
 
     def unexpected_sheet(*_args):
-        pytest.fail("Changing contour smoothing must not resolve the current sheet")
+        pytest.fail("Changing contour smoothing must not recompute the stream function")
 
     monkeypatch.setattr(CoilGenPipeline, "_solve_sheet", unexpected_sheet)
     with pytest.raises(ValueError, match="Cannot reuse contours"):

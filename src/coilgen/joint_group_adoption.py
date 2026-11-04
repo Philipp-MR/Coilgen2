@@ -28,6 +28,7 @@ from .group_routing import (
 from .group_route_support import check_group_route_support_domain, certify_group_route_support
 from .joint_route_shapes import JointTransitionEvaluator, _detour_rail_representatives, shape_joint_group_route
 from .joint_cut_variants import propose_joint_cut_variants, prepare_joint_group_context
+from .layout import interconnection_axis
 from .manufacturing import (
     _SurfaceProjector,
     _required_centerline_clearance,
@@ -90,7 +91,10 @@ def _route_metrics(part, config, *, complete_provenance=False):
         mutable = np.zeros(len(points) - 1, dtype=bool)
         lower_bound = True
     values = routing_metrics(
-        points, config.b_0_direction, config.joint_group_routing_b0_weight, mutable_segments=mutable
+        points,
+        interconnection_axis(config, part.mesh),
+        config.joint_group_routing_b0_weight,
+        mutable_segments=mutable,
     )
     explicit_added = (
         np.array(
@@ -845,7 +849,9 @@ def improve_group_routes(parts, config, target_field):
                             maximum_sample_spacing_m=config.routing_jump_sample_spacing_m,
                         )
                         guide = routing_metrics(
-                            candidate.path.v, config.b_0_direction, config.joint_group_routing_b0_weight
+                            candidate.path.v,
+                            interconnection_axis(config, part.mesh),
+                            config.joint_group_routing_b0_weight,
                         )
                     except (ValueError, AttributeError) as error:
                         diagnostics["attempts"].append(

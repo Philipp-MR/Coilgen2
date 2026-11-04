@@ -29,6 +29,20 @@ class ProblemIssue:
         return bool(self.points_m)
 
 
+def recorded_stage(metadata):
+    summary = metadata.get("summary") or {}
+    return (
+        metadata.get("pipeline_stage")
+        or summary.get("pipeline_stage")
+        or {
+            "prepared_geometry": "prepared",
+            "unconnected_contours": "contours",
+            "realized_winding": "routed",
+            "fabrication_review": "evaluated",
+        }.get(summary.get("scope"))
+    )
+
+
 def run_verdicts(metadata) -> dict[str, str]:
     """Label distinct saved checks without broadening their engineering scope."""
 
@@ -50,7 +64,13 @@ def run_verdicts(metadata) -> dict[str, str]:
     sweep_status = verdict(sweeps.get("checks_passed"))
     if sweeps.get("body_count") == 0 and (metadata.get("config") or {}).get("skip_sweep") is True:
         sweep_status = "Not run"
-    return {"sheet": verdict(sheet), "sweeps": sweep_status, "fabrication": review}
+    stage = recorded_stage(metadata)
+    sheet_status = "Not run" if stage == "prepared" else verdict(sheet)
+    if stage in {"prepared", "sheet", "contours"}:
+        sweep_status = "Not run"
+    if stage in {"prepared", "sheet", "contours", "routed"}:
+        review = "Not run"
+    return {"sheet": sheet_status, "sweeps": sweep_status, "fabrication": review}
 
 
 def preview_diagnostics(config, mesh, target=None, *, message="") -> dict:
@@ -184,6 +204,23 @@ def _frame_witness(frames, diagnostics, kind):
         description = (
             "Saved minimum-clearance interval pair; mounted profile origins recovered from saved centroid frames."
         )
+    elif kind == "copper":
+        pairs = diagnostics.get("copper_clearance_witness_intervals", ())
+        candidates = [
+            p
+            for p in pairs
+            if isinstance(p, (tuple, list))
+            and len(p) == 3
+            and interval(p[0]) is not None
+            and interval(p[1]) is not None
+            and _finite_number(p[2]) is not None
+        ]
+        if not candidates:
+            return (), (), "No matching facet intervals were saved."
+        i, j, _ = min(candidates, key=lambda p: p[2])
+        selected = points[[*interval(i), *interval(j)]]
+        segments = ((0, 1), (2, 3))
+        description = "Mounted winding intervals containing the measured copper-facet witness."
     elif kind == "bend":
         index = diagnostics.get("sweep_final_min_bend_point_index")
         if (
@@ -255,6 +292,22 @@ def _frame_witness(frames, diagnostics, kind):
 
 
 _BODY_REASONS = {
+    "insufficient_copper_gap": (
+        "Insufficient copper surface separation",
+        "Two distinct winding stretches have less copper-to-copper clearance than required for insulation and tolerance.",
+        "copper_gap_minimum_lower_bound_m",
+        "required_copper_gap_m",
+        "m",
+        "copper",
+    ),
+    "swept_mesh_self_intersection": (
+        "Copper surfaces intersect",
+        "The swept conductor boundary has a contact beyond a shared mesh edge or vertex.",
+        "sweep_mesh_self_intersection_count",
+        None,
+        "facet pairs",
+        "copper",
+    ),
     "minimum_bend_radius_violation": (
         "Conductor bend radius is too small",
         "The saved final centroid path violates its configured minimum bend radius.",
@@ -265,7 +318,7 @@ _BODY_REASONS = {
     ),
     "route_topology_failure": (
         "Route continuity or topology failed",
-        "The recorded route topology precheck failed. Continuous-sheet acceptance does not certify a connected winding.",
+        "The recorded route topology precheck failed. A connected winding requires a separate continuity check after stream function optimization.",
         None,
         None,
         "",

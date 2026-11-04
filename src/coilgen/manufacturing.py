@@ -16,11 +16,12 @@ from .geometry_collision import (
     _segment_bvh_candidate_pairs,
     accelerated_mesh_collision_diagnostics,
 )
-from .geometry_kernels import active_geometry_backend, segment_distance as _segment_distance
+from .geometry_kernels import active_geometry_backend, segment_pair_distances
+from .geometry_kernels import segment_distance as _segment_distance  # noqa: F401 - retained scalar distance API
 from .geometry import combine_meshes, compute_face_normals, compute_vertex_normals, rotation_matrix_by_vector
 from .models import CoilGenResult, CoilPart, ContourLine, FabricationPath, Mesh, SweptBody, WirePath, WirePathGeometry
 from .progress import ProgressReporter, progress_scope
-from .wire_provenance import nearest_source_segment_indices, transfer_segment_geometry
+from .wire_provenance import nearest_source_segment_indices, ordered_source_stations, transfer_segment_geometry
 
 _DEFAULT_MESH_AREA_TOLERANCE_M2 = 1e-12
 _WIRE_TRACE_STEP_MIN_SEGMENT_LENGTH_M = 1e-12
@@ -705,15 +706,21 @@ def _finalize_manufacturing_diagnostics(part: CoilPart) -> None:
         reasons.append("invalid_mesh_solid")
     if route_topology_reasons:
         reasons.append("route_topology_failure")
-    if bool(diagnostics.get("sweep_route_clearance_violation", False)):
+    # A bounding capsule can overlap even when oriented rectangular copper
+    # meets the required insulation gap. Retain the raw screens for review.
+    exact = diagnostics.get("exact_collision_completed", False)
+    copper_failure = diagnostics.get("copper_clearance_failure", "")
+    if copper_failure and copper_failure != "swept_mesh_self_intersection":
+        reasons.append(copper_failure)
+    if not exact and bool(diagnostics.get("sweep_route_clearance_violation", False)):
         reasons.append("route_clearance_violation")
-    if bool(diagnostics.get("sweep_capsule_clearance_violation", False)):
+    if not exact and bool(diagnostics.get("sweep_capsule_clearance_violation", False)):
         reasons.append("sweep_clearance_violation")
-    if bool(diagnostics.get("sweep_capsule_self_intersection", False)):
+    if not exact and bool(diagnostics.get("sweep_capsule_self_intersection", False)):
         reasons.append("sweep_self_intersection")
     if bool(diagnostics.get("sweep_mesh_self_intersection", False)):
         reasons.append("swept_mesh_self_intersection")
-    if bool(diagnostics.get("sweep_self_intersection_skipped", False)):
+    if not exact and bool(diagnostics.get("sweep_self_intersection_skipped", False)):
         reasons.append("self_intersection_check_skipped")
     if bool(diagnostics.get("sweep_min_bend_radius_violation", False)) or bool(
         diagnostics.get("sweep_final_min_bend_radius_violation", False)
@@ -945,6 +952,30 @@ def _realize_wire_path(
         source_closed=closed_path,
         target_closed=closed_path,
     )
+    crossing_layers = part.normal_shift_provenance.get("method") == "arclength_crossing_layers"
+    if (
+        (config.sweep_corner_cluster_max_source_deviation_m > 0 or crossing_layers)
+        and part.mesh.n_faces
+        and part.wire_path.segment_owners
+        and _normalised_text(config.sweep_bend_mode) == "fillet"
+    ):
+        from .sweep_fold_relief import repair_reversed_sweep
+
+        repair = repair_reversed_sweep(
+            part,
+            points,
+            final_segment_geometry,
+            vertices,
+            cross_section,
+            config,
+            closed=closed_path,
+            mounting_offset=mounting_offset,
+            radius=path_diagnostics["sweep_required_bend_radius_m"],
+        )
+        if repair is not None:
+            rings, final_segment_geometry, relief_diagnostics = repair
+            points, tangents, normals, binormals, vertices, ring_repair_diagnostics = rings
+            path_diagnostics.update(relief_diagnostics)
     path_diagnostics.update(ring_repair_diagnostics)
     ProgressReporter.from_config(config, label="Conductor realization").report(
         None, "Audit final conductor frames and profile", force=True
@@ -988,11 +1019,14 @@ def _realize_wire_path(
     ProgressReporter.from_config(config, label="Conductor realization").report(
         None, "Map physical path ownership and source displacement", force=True
     )
-    centroid = _polygon_centroid(cross_section)
-    mounted_points = points + (mounting_offset + centroid[1]) * normals + centroid[0] * binormals
+    reference = _path_reference_point(cross_section, config)
+    mounted_points = points + (mounting_offset + reference[1]) * normals + reference[0] * binormals
     physical_points = np.vstack((mounted_points, mounted_points[0])) if closed_path else mounted_points
     final_support_points = np.vstack((points, points[0])) if closed_path else points
-    source_indices = nearest_source_segment_indices(source_points, final_support_points)
+    if crossing_layers and closed_path:
+        source_indices, _ = ordered_source_stations(source_points, final_support_points)
+    else:
+        source_indices = nearest_source_segment_indices(source_points, final_support_points)
     part.fabrication_path = FabricationPath(
         points_m=mounted_points,
         tangents=tangents,
@@ -1009,7 +1043,10 @@ def _realize_wire_path(
     diagnostics.update(_final_path_bend_diagnostics(mounted_points, cross_section, config, closed=closed_path))
     diagnostics.update(_source_path_displacement_diagnostics(source_points, physical_points, source_indices))
     diagnostics["sweep_surface_realization"] = getattr(config, "sweep_surface_realization", "analytic")
-    diagnostics["sweep_physics_geometry"] = "mounted_profile_centroid"
+    diagnostics["sweep_physics_geometry"] = (
+        "mounted_profile_origin" if _uses_profile_origin(config) else "mounted_profile_centroid"
+    )
+    diagnostics["conductor_path_reference"] = "profile_origin" if _uses_profile_origin(config) else "centroid"
     ProgressReporter.from_config(config, label="Conductor realization").report(
         100, "Physical centerline complete", force=True
     )
@@ -1043,7 +1080,14 @@ def _sweep_wire_path_with_diagnostics(
         )
     loft_diagnostics["sweep_diagonal_optimization_skip_reason"] = ""
 
-    if not closed_path:
+    if not closed_path and not _is_convex_profile(np.asarray(cross_section, dtype=float)):
+        # A centre fan would leave a concave profile's notch; clip ears instead.
+        end_base = (ring_count - 1) * section_count
+        # Same winding as the centre fan: start cap in profile order, end reversed.
+        for a, b, c in _ear_clip_triangles(np.asarray(cross_section, dtype=float)):
+            faces.append([a, b, c])
+            faces.append([end_base + a, end_base + c, end_base + b])
+    elif not closed_path:
         # A cap-centre fan avoids the severe sliver triangles produced by using
         # one polygon corner as the fan origin, especially for round profiles.
         start_base = 0
@@ -1080,7 +1124,32 @@ def _sweep_wire_path_with_diagnostics(
     with progress_scope(80, 90, "Validate conductor support conformity"):
         diagnostics.update(_support_conformity_diagnostics(part, mesh, points, config))
     with progress_scope(90, 100, "Check swept conductor collision"):
-        diagnostics.update(_final_mesh_collision_diagnostics(part, mesh, diagnostics))
+        from .swept_clearance import required_copper_gap
+
+        gap = required_copper_gap(config)
+        routed_connection = any(
+            o.kind in {"inter_group_connector", "within_group_return"} or o.connector_role == "joint_spiral_join"
+            for o in fabrication_path.segment_owners
+        )
+        if (gap > 0 or routed_connection) and str(config.sweep_self_intersection_check).lower() != "off":
+            from .group_route_validation import GroupRouteValidationLimits, _exact_collision_audit
+
+            certificate, reason = _exact_collision_audit(
+                mesh, GroupRouteValidationLimits(), fabrication_path=fabrication_path, required_gap_m=gap
+            )
+            diagnostics.update(certificate)
+            diagnostics.update(
+                copper_clearance_failure=reason,
+                sweep_mesh_self_intersection=bool(certificate.get("exact_intersection_count", 0)),
+                sweep_mesh_self_intersection_count=certificate.get("exact_intersection_count", 0),
+                sweep_mesh_collision_broad_phase="ordered_loft_triangle_bounds",
+                sweep_mesh_collision_candidate_pair_count=certificate.get("exact_collision_near_pair_count", 0),
+                sweep_mesh_self_intersection_truncated=not certificate["exact_collision_completed"],
+                sweep_mesh_collision_check_skipped=not certificate["exact_collision_completed"],
+                sweep_mesh_collision_status="checked" if certificate["exact_collision_completed"] else "unverified",
+            )
+        else:
+            diagnostics.update(_final_mesh_collision_diagnostics(part, mesh, diagnostics))
     return mesh, diagnostics
 
 
@@ -1173,15 +1242,19 @@ def _final_path_bend_diagnostics(points, cross_section, config, *, closed):
     if reversal:
         minimum = 0.0
         worst_point = int(np.argmax(angles)) + (0 if closed else 1)
-    # This check uses the physical centroid trace, so its enclosing radius
-    # must also be centred on the profile centroid rather than the CAD origin.
-    envelope = _cross_section_envelope_radius(cross_section - _polygon_centroid(cross_section))
+    # This check uses the physical reference trace, so its enclosing radius
+    # must be centred on the same profile point (centroid or profile origin).
+    envelope = _cross_section_envelope_radius(cross_section - _path_reference_point(cross_section, config))
     ratio = envelope / minimum if minimum > 0.0 else np.inf
     return {
         "sweep_final_min_bend_radius_m": minimum if np.isfinite(minimum) else None,
         "sweep_final_min_bend_point_index": worst_point,
         "sweep_final_bend_point_count": int(len(points)),
-        "sweep_final_bend_radius_reference": "mounted_profile_centroid_after_ring_repair",
+        "sweep_final_bend_radius_reference": (
+            "mounted_profile_origin_after_ring_repair"
+            if _uses_profile_origin(config)
+            else "mounted_profile_centroid_after_ring_repair"
+        ),
         "sweep_final_min_bend_radius_violation": bool(radius > 0.0 and minimum < 0.99 * radius),
         "sweep_final_collinear_reversal": reversal,
         "sweep_final_zero_length_interval": bool(np.any(lengths <= 1e-12)),
@@ -2029,15 +2102,15 @@ def _build_sweep_rings(
         # Ring coarsening may improve triangle aspect ratios while damaging a
         # previously valid bend on the mounted conductor. Keep the physical
         # postcondition when choosing an otherwise reversible mesh repair.
-        centroid = _polygon_centroid(cross_section)
+        reference = _path_reference_point(cross_section, config)
         current_bends = _final_path_bend_diagnostics(
-            points + (mounting_offset + centroid[1]) * normals + centroid[0] * binormals,
+            points + (mounting_offset + reference[1]) * normals + reference[0] * binormals,
             cross_section,
             config,
             closed=closed,
         )
         trial_bends = _final_path_bend_diagnostics(
-            next_points + (mounting_offset + centroid[1]) * trial_normals + centroid[0] * trial_binormals,
+            next_points + (mounting_offset + reference[1]) * trial_normals + reference[0] * trial_binormals,
             cross_section,
             config,
             closed=closed,
@@ -2806,8 +2879,30 @@ def _surface_adaptive_resample(
     support_projector = analytic_surface if analytic_surface is not None else projector
     if support_projector is None:
         return points, segment_geometry, diagnostics
-    _projected, support_normals = support_projector.project(points)
     surface_tolerance = max(0.1 * max_chord_error, 1e-9)
+    if projector is None:
+        _, support_normals = support_projector.project(points)
+    else:
+        projected, support_normals, face_normals = projector.project_with_face_normals(points)
+        # Subdivision puts every interior midpoint of an attached interval on
+        # the carrier. Use that same surface for its original interior knots.
+        # Otherwise refinement converges on an isolated off-surface input knot
+        # from either side and the finite-width profile reverses there.
+        interior = np.zeros(len(points), dtype=bool)
+        if closed:
+            interior = surface_segments & np.roll(surface_segments, 1)
+        else:
+            interior[1:-1] = surface_segments[:-1] & surface_segments[1:]
+        delta = points - projected
+        normal_distance = np.einsum("ij,ij->i", delta, face_normals)
+        tangential = delta - normal_distance[:, None] * face_normals
+        interior &= np.linalg.norm(tangential, axis=1) <= surface_tolerance
+        interior &= np.abs(normal_distance) > surface_tolerance
+        if np.any(interior):
+            points = points.copy()
+            points[interior] = projected[interior]
+        diagnostics["sweep_retracted_surface_knot_count"] = int(np.count_nonzero(interior))
+        diagnostics["sweep_retracted_surface_knot_max_m"] = float(np.max(np.abs(normal_distance[interior]), initial=0))
     samples = [support_normals[index] for index in range(len(points))]
     output: list[np.ndarray] = [points[0].copy()]
     output_geometry: list[WirePathGeometry] = []
@@ -5086,7 +5181,9 @@ def save_mesh_as_stl(mesh: Mesh, path: str | Path, *, solid_name: str = "coil_bo
             output.write(f"  facet normal {normal[0]:.9e} {normal[1]:.9e} {normal[2]:.9e}\n")
             output.write("    outer loop\n")
             for vertex in mesh.vertices[face]:
-                output.write(f"      vertex {vertex[0]:.9e} {vertex[1]:.9e} {vertex[2]:.9e}\n")
+                # Round-trip binary64 coordinates: rounding nearly coincident
+                # stations after validation can change the exported topology.
+                output.write(f"      vertex {vertex[0]:.17g} {vertex[1]:.17g} {vertex[2]:.17g}\n")
             output.write("    endloop\n  endfacet\n")
         output.write(f"endsolid {solid_name}")
     return path
@@ -6344,7 +6441,6 @@ def _capsule_clearance_diagnostics(
     starts = np.asarray(points, dtype=float)
     ends = np.roll(starts, -1, axis=0) if closed else starts[1:]
     starts = starts if closed else starts[:-1]
-    segment_count = len(starts)
     broad_phase_distance = max(float(required_clearance), float(conductor_diameter), 0.0)
     reporter = ProgressReporter(label="Conductor clearance")
     reporter.report(None, "Build conductor clearance broad phase", force=True)
@@ -6364,36 +6460,30 @@ def _capsule_clearance_diagnostics(
     violation_count = 0
     intersection_count = 0
     evaluated_count = 0
-    for candidate_index, (i, j) in enumerate(candidates):
+    segments = np.stack((starts, ends), axis=1)
+    for candidate_index in range(0, len(candidates), 4096):
         if task is not None:
             task.update(candidate_index)
-        i = int(i)
-        j = int(j)
-        if j - i <= 1 or (closed and i == 0 and j == segment_count - 1):
-            continue
+        i, j = candidates[candidate_index : candidate_index + 4096].T
         # Measure only the route lying *between* the two segments. Including
         # half of each tested segment incorrectly classifies segments i and
         # i+2 as remote when either neighbouring segment is long, even though
         # only one short continuation segment separates them.
-        arclength_separation = max(float(cumulative[j] - cumulative[i + 1]), 0.0)
+        arclength_separation = cumulative[j] - cumulative[i + 1]
         if closed:
-            wrap_separation = max(float(total_length - (cumulative[j + 1] - cumulative[i])), 0.0)
-            arclength_separation = min(arclength_separation, wrap_separation)
-        if arclength_separation <= local_exclusion_length:
-            # Neighbouring capsules along the same physical tube overlap by
-            # construction. Local folding is governed by the curvature/radius
-            # constraint; collision checks are for topologically remote segments.
+            arclength_separation = np.minimum(arclength_separation, total_length - cumulative[j + 1] + cumulative[i])
+        remote = (j - i > 1) & (arclength_separation > local_exclusion_length)
+        i, j = i[remote], j[remote]
+        if not len(i):
             continue
-        evaluated_count += 1
-        distance = _segment_distance(starts[i], ends[i], starts[j], ends[j])
-        if distance < min_distance:
-            min_distance = distance
-            min_i = i
-            min_j = j
-        if distance < required_clearance:
-            violation_count += 1
-        if distance < conductor_diameter:
-            intersection_count += 1
+        evaluated_count += len(i)
+        distance = segment_pair_distances(segments[i], segments[j]).values_m
+        nearest = np.argmin(distance)
+        if distance[nearest] < min_distance:
+            min_distance = distance[nearest]
+            min_i, min_j = i[nearest], j[nearest]
+        violation_count += np.count_nonzero(distance < required_clearance)
+        intersection_count += np.count_nonzero(distance < conductor_diameter)
     finite_min = float(min_distance) if np.isfinite(min_distance) else 0.0
     if task is not None:
         task.done()
@@ -6423,6 +6513,22 @@ def _polygon_signed_area(points: np.ndarray) -> float:
     x = points[:, 0]
     y = points[:, 1]
     return 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+
+
+def _uses_profile_origin(config) -> bool:
+    return _normalised_text(getattr(config, "conductor_path_reference", "centroid")) == "profile_origin"
+
+
+def _path_reference_point(cross_section, config) -> np.ndarray:
+    """Profile point followed by the exported path, field source and bend checks.
+
+    ``centroid`` (default) follows the conductor's area centroid. With
+    ``profile_origin`` the profile is swept about its (0, 0) point, e.g. a round
+    litz wire at the origin inside a printed omega-shaped holder profile.
+    """
+    if _uses_profile_origin(config):
+        return np.zeros(2, dtype=float)
+    return _polygon_centroid(np.asarray(cross_section, dtype=float))
 
 
 def _polygon_centroid(points: np.ndarray) -> np.ndarray:
@@ -6481,14 +6587,53 @@ def _validated_cross_section(points: np.ndarray) -> np.ndarray:
     following_edges = np.roll(edges, -1, axis=0)
     turns = edges[:, 0] * following_edges[:, 1] - edges[:, 1] * following_edges[:, 0]
     turn_tolerance = max(1e-12 * scale**2, 1e-30)
-    if np.any(np.abs(turns) <= turn_tolerance) or not (
-        np.all(turns > turn_tolerance) or np.all(turns < -turn_tolerance)
-    ):
+    if np.any(np.abs(turns) <= turn_tolerance):
         raise ValueError(
-            "Conductor cross-section must be strictly convex; concave or collinear profiles "
-            "require a general polygon triangulator."
+            "Conductor cross-section has a collinear corner; remove the redundant point. "
+            "Simple concave profiles (for example omega holders) are supported."
         )
     return _orient_cross_section_counterclockwise(profile)
+
+
+def _is_convex_profile(profile: np.ndarray) -> bool:
+    edges = np.roll(profile, -1, axis=0) - profile
+    following = np.roll(edges, -1, axis=0)
+    turns = edges[:, 0] * following[:, 1] - edges[:, 1] * following[:, 0]
+    return bool(np.all(turns > 0) or np.all(turns < 0))
+
+
+def _ear_clip_triangles(profile: np.ndarray) -> list[tuple[int, int, int]]:
+    """Triangulate a simple counterclockwise polygon by ear clipping."""
+    remaining = list(range(len(profile)))
+    triangles: list[tuple[int, int, int]] = []
+
+    def cross(a, b, c):
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+    guard = 0
+    while len(remaining) > 3 and guard < 10 * len(profile) ** 2:
+        guard += 1
+        for position, current in enumerate(remaining):
+            previous = remaining[position - 1]
+            following = remaining[(position + 1) % len(remaining)]
+            a, b, c = profile[previous], profile[current], profile[following]
+            if cross(a, b, c) <= 0:
+                continue  # Reflex corner: not an ear.
+            if any(
+                cross(a, b, profile[other]) >= 0
+                and cross(b, c, profile[other]) >= 0
+                and cross(c, a, profile[other]) >= 0
+                for other in remaining
+                if other not in (previous, current, following)
+            ):
+                continue
+            triangles.append((previous, current, following))
+            remaining.pop(position)
+            break
+        else:
+            raise ValueError("Conductor cross-section could not be triangulated for its end caps.")
+    triangles.append(tuple(remaining))
+    return triangles
 
 
 def _polygon_has_self_intersections(points: np.ndarray, tolerance: float) -> bool:

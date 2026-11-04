@@ -247,7 +247,7 @@ def test_harmonic_fit_preserves_exact_basis_coefficients_shared_target_and_resid
     error_coefficients = rng.normal(size=16) * 1e-9
     target = np.column_stack((np.zeros((150, 2)), basis @ desired_coefficients))
     actual = target + np.column_stack((np.zeros((150, 2)), basis @ error_coefficients))
-    source = FieldDataset("sheet", "Sheet", points, actual, target)
+    source = FieldDataset("sheet", "Stream function", points, actual, target)
     progress = []
     report = analyze_harmonics(
         source,

@@ -323,6 +323,9 @@ class ManufacturingSettings:
         return asdict(self)
 
 
+INTERCONNECTION_AXIS_MODES = ("b0", "support_axis")
+
+
 @dataclass(slots=True)
 class CoilGenConfig:
     """Configuration matching the main MATLAB CoilGen name-value inputs."""
@@ -553,6 +556,11 @@ class CoilGenConfig:
     iteration_num_mesh_refinement: int = 0
     b_0_direction: Sequence[float] = (0.0, 0.0, 1.0)
     b_0_strength_T: float = 1.0
+    # Direction followed by opening cuts, return rails and the routing guide:
+    # "b0", "support_axis" (cylinder/bore axis from the mesh boundaries; needed
+    # when the bore is perpendicular to B0, e.g. transverse-field Halbach) or an
+    # explicit vector. Field targets and field metrics always use b_0_direction.
+    interconnection_axis: str | Sequence[float] = "b0"
     geometry_source_path: Path | None = None
     imported_mesh_length_scale_to_m: float = 1.0
     output_directory: Path | None = None
@@ -576,6 +584,7 @@ class CoilGenConfig:
     contour_smoothing_patch_rings: int = 4
     contour_smoothing_max_displacement: float = 0.0
     contour_smoothing_preserve_min_turn_distance: bool = True
+    contour_smoothing_local_fallback: bool = False
     parallel_worker_count: int = 0
     parallel_min_work_size: int = 50000
     sensitivity_chunks_per_worker: int = 4
@@ -665,6 +674,9 @@ class CoilGenConfig:
     conductor_cross_section_width: float = 0.002
     conductor_cross_section_height: float = 0.002
     conductor_mounting_mode: str = "centered"
+    # Profile point followed by the exported 3D path, fabricated field source
+    # and bend checks: "centroid" or "profile_origin" (sweep about (0, 0)).
+    conductor_path_reference: str = "centroid"
     sweep_path_simplification: str = "off"
     sweep_surface_realization: str = "analytic"
     sweep_collinearity_tolerance: float = 1e-8
@@ -675,8 +687,8 @@ class CoilGenConfig:
     sweep_max_frame_rotation_deg: float = 10.0
     sweep_bend_mode: str = "miter"
     sweep_min_bend_radius: float = 0.0
-    # Explicit two-way source corridor for compound intrinsic corner fillets.
-    # Zero retains the existing per-corner realization without this fallback.
+    # Two-way source corridor for compound fillets and local relief of attached foil folds.
+    # Raised crossing handoffs are also bounded by the normal lift and half the connector cut width.
     sweep_corner_cluster_max_source_deviation_m: float = 0.0
     sweep_bend_arc_angle_deg: float = 5.0
     sweep_corner_detection_angle_deg: float = 15.0

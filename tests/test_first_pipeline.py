@@ -3991,19 +3991,19 @@ class FirstPipelineTest(unittest.TestCase):
         self.assertEqual(part.manufacturing_diagnostics["sweep_cross_section_axis_0"], "surface_transverse")
         self.assertEqual(part.manufacturing_diagnostics["sweep_cross_section_axis_1"], "surface_normal")
 
-    def test_sweep_rejects_cross_sections_that_cap_fan_cannot_safely_triangulate(self) -> None:
-        with self.assertRaisesRegex(ValueError, "strictly convex"):
-            conductor_cross_section_points(
-                CoilGenConfig(
-                    cross_sectional_points=(
-                        (-0.002, -0.001),
-                        (0.002, -0.001),
-                        (0.0, 0.0),
-                        (0.002, 0.001),
-                        (-0.002, 0.001),
-                    )
+    def test_sweep_accepts_simple_concave_and_rejects_self_intersecting_sections(self) -> None:
+        concave = conductor_cross_section_points(
+            CoilGenConfig(
+                cross_sectional_points=(
+                    (-0.002, -0.001),
+                    (0.002, -0.001),
+                    (0.0, 0.0),
+                    (0.002, 0.001),
+                    (-0.002, 0.001),
                 )
             )
+        )
+        self.assertEqual(len(concave), 5)
         with self.assertRaisesRegex(ValueError, "non-self-intersecting"):
             conductor_cross_section_points(
                 CoilGenConfig(

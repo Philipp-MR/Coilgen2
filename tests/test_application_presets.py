@@ -1,6 +1,7 @@
 """Example studies use explicit physical targets and qualified evidence scopes."""
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -8,8 +9,9 @@ import pytest
 from coilgen.application.presets import EXAMPLE_TITLES, PRESET_NAMES, preset_config, preset_description, preset_study
 from coilgen.application.project import ProjectDocument
 from coilgen.application.service import DesignService
+from coilgen.application.templates import template_assembly
 from coilgen.cli import main
-from coilgen.research.application import run_design
+from coilgen.research.application import _contour_smoothing_evidence, run_design
 from coilgen.research.requests import ResearchRequest
 from coilgen.research.storage import json_value
 
@@ -78,18 +80,54 @@ def test_prepared_conical_target_matches_absolute_z2_in_world_coordinates(tmp_pa
     assert config.surface_is_cylinder_flag is False and config.target_gradient_normalization == "off"
 
 
-def test_cli_can_create_the_same_independent_turn_project(tmp_path):
-    path = tmp_path / "independent_turns.coilgen.json"
+def test_cli_can_create_the_same_biplanar_project(tmp_path):
+    path = tmp_path / "biplanar.coilgen.json"
 
-    assert main(["new", "--preset", "independent_turns", "--output", str(path)]) == 0
+    assert main(["new", "--preset", "biplanar", "--output", str(path)]) == 0
 
     project = ProjectDocument.load(path)
-    assert json_value(asdict(project.config)) == json_value(asdict(preset_config("independent_turns")))
-    assert {key: project.study[key] for key in preset_study("independent_turns")} == preset_study("independent_turns")
+    assert json_value(asdict(project.config)) == json_value(asdict(preset_config("biplanar")))
+    assert {key: project.study[key] for key in preset_study("biplanar")} == preset_study("biplanar")
 
 
-def test_evaluated_independent_turn_demo_saves_four_passing_sweeps_without_drive_feed_claim(tmp_path):
-    request = ResearchRequest.from_config(preset_config("independent_turns"), **preset_study("independent_turns"))
+def test_partial_historical_smoothing_diagnostics_do_not_claim_a_support_outcome():
+    incomplete = {"contour_path_smoothing_method": "harmonic_parameterized_periodic_bspline"}
+    second = {
+        **incomplete,
+        "contour_path_smoothing_contour_count": 3,
+        "contour_path_smoothing_failed_count": 1,
+        "contour_path_smoothing_spacing_rejected_count": 2,
+        "contour_path_smoothing_max_applied_displacement_m": 0.0003,
+    }
+    records = _contour_smoothing_evidence(
+        [SimpleNamespace(contour_level_diagnostics=values) for values in (incomplete, second)]
+    )
+    assert records == [
+        dict(
+            part_index=2,
+            smoothed_count=3,
+            fit_rejected_count=1,
+            spacing_rejected_count=2,
+            max_displacement_m=0.0003,
+            failure_reasons={},
+        )
+    ]
+
+
+def test_custom_closed_turn_project_verifies_every_sweep_and_body_pair(tmp_path):
+    source = template_assembly("shim_z0").channels[0].project
+    config = replace(
+        source.config,
+        cylinder_mesh_parameter_list=(0.2125, 0.08, 32, 16, 1, 0, 0, 0),
+        levels=6,
+        pot_offset_factor=0.25,
+        skip_postprocessing=True,
+        contour_only_sweep_mode=True,
+    )
+    path = tmp_path / "custom-z0.coilgen"
+    ProjectDocument.from_config(config, name="Custom Z0").update_study(source.study).save(path)
+    restored = ProjectDocument.load(path)
+    request = ResearchRequest.from_config(restored.config, **restored.study)
 
     result = run_design(request, tmp_path)
     record = DesignService.load_run(tmp_path)
@@ -102,6 +140,12 @@ def test_evaluated_independent_turn_demo_saves_four_passing_sweeps_without_drive
     np.testing.assert_allclose(record.arrays["vertices_m"][:, 2].max(), 0.1, atol=1e-15)
     assert result["summary"]["relative_field_error"] <= 0.04
     assert result["validation"]["relative_field_error"] <= 0.05
+    smoothed = result["contour_smoothing"]
+    assert smoothed == record.metadata["contour_smoothing"]
+    assert len(smoothed) == 1 and smoothed[0]["part_index"] == 1
+    assert smoothed[0]["smoothed_count"] == config.levels
+    assert smoothed[0]["fit_rejected_count"] == smoothed[0]["spacing_rejected_count"] == 0
+    assert smoothed[0]["max_displacement_m"] <= 0.0005
     np.testing.assert_array_equal(record.arrays["target_field_T"][:, :2], 0.0)
     np.testing.assert_allclose(record.arrays["target_field_T"][:, 2], 1e-4, rtol=0, atol=0)
     contour = result["wire_fields"]["contour"]
@@ -111,7 +155,7 @@ def test_evaluated_independent_turn_demo_saves_four_passing_sweeps_without_drive
     assert record.metadata["pipeline_sweeps"] == result["pipeline_sweeps"]
     sweeps = result["pipeline_sweeps"]
     assert sweeps["scope"] == "pipeline_sweep_geometry"
-    assert sweeps["body_count"] == sweeps["checked_body_count"] == 4
+    assert sweeps["body_count"] == sweeps["checked_body_count"] == config.levels
     assert sweeps["checks_passed"] is True
     for index, body in enumerate(sweeps["bodies"], 1):
         assert body["contour_index"] == index and body["source_kind"] == "contour"
@@ -120,7 +164,7 @@ def test_evaluated_independent_turn_demo_saves_four_passing_sweeps_without_drive
     assert not any(key.startswith("route_") for key in record.arrays)
     assert result["wire_fields"]["routed"]["available"] is False
     assert result["fabrication"]["ready"] is True
-    assert result["fabrication"]["assembly_clearance"]["checked_body_pairs"] == 6
+    assert result["fabrication"]["assembly_clearance"]["checked_body_pairs"] == config.levels * (config.levels - 1) // 2
     assert result["fabrication"]["assembly_clearance"]["passed"] is True
     assert result["fabrication"]["field_metrics"]["current_source"] == "original_contour_step_no_refit"
     assert result["fabrication"]["field_metrics"]["dsv_relative_residual_percent"] < 5

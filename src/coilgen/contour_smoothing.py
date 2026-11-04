@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .models import ContourLine, Mesh
+from .geometry_kernels import segment_distances
 from .progress import DesignCancelled, ProgressReporter
 
 
@@ -188,6 +189,69 @@ class MeshContourBSplineSmoother:
                 continue
         raise ValueError("No valid local harmonic chart could be constructed.")
 
+    def round_available_corners(
+        self,
+        contour: ContourLine,
+        neighbors: list[ContourLine],
+        cap: float,
+        required_spacing: float,
+        target_length: float,
+        output_samples_per_mesh_length: int,
+    ) -> ParameterizedContourSmoothingResult | None:
+        """Round the parts of a rejected contour that have room in the original mesh.
+
+        Neighboring mesh-edge crossings supply the tangent directions. A quadratic
+        Bézier segment joins them at each corner. At limiting gaps the trim goes to
+        zero. The entire traced contour must still satisfy the original guards.
+        """
+        points = contour.v
+        lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
+        if cap <= 0 or np.any(lengths <= 1e-14):
+            return None
+        _report_smoothing_activity("checking space for local contour fits")
+        chart = self._build_chart(contour)
+        uv = _contour_uv(chart, contour)
+        mesh_scale = _contour_mesh_scale(self.mesh, contour, lengths)
+        if mesh_scale > 0:
+            target_length = min(target_length, mesh_scale / max(2, output_samples_per_mesh_length))
+        allowance = _corner_allowance(points, neighbors, cap, required_spacing)
+        tangent = np.diff(points, axis=0) / lengths[:, None]
+        sin_half_angle = 0.5 * np.linalg.norm(tangent - np.roll(tangent, 1, axis=0), axis=1)
+        # Equal trim distances give a corner-to-midpoint deviation of
+        # trim * sin(turn / 2) / 2 in a Euclidean chart. Check the traced
+        # world-space curve as well, since a general harmonic chart is distorted.
+        trim = np.minimum(
+            0.49 * np.minimum(lengths, np.roll(lengths, 1)), 2 * allowance / np.maximum(sin_half_angle, 1e-12)
+        )
+        for fraction in (1.0, 0.5, 0.25):
+            proposal = _corner_arcs(uv, lengths, fraction * trim, target_length)
+            if proposal is None or _reverses_closed_orientation(uv, proposal) or _polyline_self_intersects(proposal):
+                continue
+            fitted = _trace_uv_polyline(chart, proposal, contour, target_segment_length_m=0.0)
+            if fitted is None or _has_disconnected_face_passages(fitted.segment_faces):
+                continue
+            move = max(
+                _max_point_to_polyline_distance(points[:-1], fitted.v),
+                _max_point_to_polyline_distance(fitted.v[:-1], points),
+            )
+            if not 1e-12 < move <= cap * (1.0 + 1e-6):
+                continue
+            return ParameterizedContourSmoothingResult(
+                contour=fitted,
+                applied=True,
+                reason="bounded_local_fit",
+                parameterization=chart.parameterization,
+                patch_face_count=len(np.unique(chart.global_faces)),
+                output_segment_count=len(fitted.v) - 1,
+                max_displacement_m=move,
+                segment_length_cv_before=_coefficient_of_variation(lengths),
+                segment_length_cv_after=_coefficient_of_variation(np.linalg.norm(np.diff(fitted.v, axis=0), axis=1)),
+                mesh_scale_m=mesh_scale,
+                scale_mode="local",
+                output_target_segment_length_m=target_length,
+            )
+        return None
+
     def _fit_with_backtracking(
         self,
         contour: ContourLine,
@@ -319,6 +383,61 @@ def smooth_contour_on_parameterized_mesh(
         work_samples_per_mesh_length=work_samples_per_mesh_length,
         output_samples_per_mesh_length=output_samples_per_mesh_length,
     )
+
+
+def _corner_allowance(points, neighbors, cap, required_spacing):
+    """Bound corner motion by the spare clearance of both incident segments."""
+    count = len(points) - 1
+    if not np.isfinite(required_spacing):
+        return np.full(count, cap)
+    starts, ends = points[:-1], points[1:]
+    lower, upper = np.minimum(starts, ends), np.maximum(starts, ends)
+    cutoff = required_spacing + 2 * cap
+    nearest = np.full(count, cutoff)
+    for neighbor in neighbors:
+        other = neighbor.v
+        low = np.minimum(other[:-1], other[1:])
+        high = np.maximum(other[:-1], other[1:])
+        # Bound work even when resampling has produced thousands of segments.
+        step = max(1, 100_000 // len(low))
+        for start in range(0, count, step):
+            _report_smoothing_activity("checking neighboring contour segments")
+            block = slice(start, start + step)
+            gap = np.maximum(np.maximum(lower[block, None] - high, low - upper[block, None]), 0.0)
+            i, j = np.nonzero(np.einsum("ijk,ijk->ij", gap, gap) <= cutoff**2)
+            if len(i):
+                i += start
+                distances = segment_distances(starts[i], ends[i] - starts[i], other[j], other[j + 1] - other[j])
+                np.minimum.at(nearest, i, distances)
+    return np.clip(0.5 * (np.minimum(nearest, np.roll(nearest, 1)) - required_spacing), 0.0, cap)
+
+
+def _corner_arcs(uv, lengths, trim, target_length):
+    """Join disjoint quadratic corner arcs by the unchanged straight spans."""
+    # With a seam-crossing developed chart the final UV is an integer chart
+    # period from the first even though they are the same physical point.
+    period = uv[-1] - uv[0]
+    directions = np.diff(uv, axis=0) / lengths[:, None]
+    corners = uv[:-1]
+    left = corners - trim[:, None] * np.roll(directions, 1, axis=0)
+    right = corners + trim[:, None] * directions
+    pieces = []
+    total = 0
+    for index, corner in enumerate(corners):
+        length = trim[index]
+        count = max(8, int(np.ceil(2 * length / target_length))) if length > 1e-12 else 0
+        straight_length = max(0.0, lengths[index] - length - trim[(index + 1) % len(trim)])
+        straight_count = max(1, int(np.ceil(straight_length / target_length)))
+        total += count + straight_count
+        if total > 32768:
+            return None
+        if count:
+            t = np.arange(count)[:, None] / count
+            pieces.append((1 - t) ** 2 * left[index] + 2 * t * (1 - t) * corner + t**2 * right[index])
+        following = left[index + 1] if index + 1 < len(trim) else left[0] + period
+        t = np.arange(straight_count)[:, None] / straight_count
+        pieces.append(right[index] + t * (following - right[index]))
+    return np.vstack([*pieces, left[0] + period])
 
 
 def _unchanged(contour: ContourLine, reason: str) -> ParameterizedContourSmoothingResult:

@@ -9,7 +9,7 @@ return is supplied. Mesh geometry and winding/circuit readiness are separate.
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
 
@@ -407,6 +407,8 @@ class FabricationReport:
     failure_reasons: list[str]
     artifacts: list[str]
     strict: bool
+    # Solids written although strict checks failed; never construction-released.
+    draft_artifacts: list[str] = field(default_factory=list)
 
     @property
     def ready(self):
@@ -416,6 +418,7 @@ class FabricationReport:
         return {
             "ready": self.ready,
             "strict": self.strict,
+            "draft_artifacts": self.draft_artifacts,
             "failure_reasons": self.failure_reasons,
             "assembly_clearance": self.assembly_clearance,
             "field_metrics": self.field_metrics,
@@ -739,6 +742,21 @@ def compile_fabrication(
                 solid_step = output / f"{record.body_id}_fabrication_faceted.step"
                 save_mesh_as_step(record.mesh, solid_step, solid_name=record.body_id)
                 report.artifacts.append(str(solid_step.resolve()))
+            elif record.mesh is not None and len(record.mesh.faces):
+                # Failed strict checks still yield explicitly labelled drafts for
+                # inspection and prototyping; they are never construction-released.
+                name = f"DRAFT_{record.body_id}"
+                for path, writer in (
+                    (output / f"{record.body_id}_DRAFT_fabrication.stl", save_mesh_as_stl),
+                    (output / f"{record.body_id}_DRAFT_fabrication_faceted.step", save_mesh_as_step),
+                ):
+                    try:
+                        writer(record.mesh, path, solid_name=name)
+                    except (ValueError, OSError) as exc:
+                        report.failure_reasons.append(f"{record.body_id}: draft solid not written ({exc})")
+                        continue
+                    report.artifacts.append(str(path.resolve()))
+                    report.draft_artifacts.append(str(path.resolve()))
         for plan in plans:
             if plan["body_id"] not in leads and plan["body_id"] not in circuits:
                 continue

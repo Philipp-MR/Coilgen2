@@ -8,7 +8,7 @@ in [Object Model](OBJECT_MODEL.md),
 [Headless physical design](RESEARCH_PHYSICS_API.md).
 
 Preserve existing mathematical contracts while extending the model. Compare
-continuous-sheet, contour, routed-wire and fabricated-conductor results at the
+stream function, contour, routed-wire and fabricated-conductor results at the
 same current and useful-field budgets; a successful solve does not establish
 build readiness.
 

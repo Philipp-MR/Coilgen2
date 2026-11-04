@@ -1,0 +1,376 @@
+{
+  "terminology_note": "Stream function labels have been updated to the current workbench terminology. The observations and test results refer to the recorded review.",
+  "qt_platform": "offscreen",
+  "font": "Segoe UI",
+  "virtual_screen_px": [
+    800,
+    800
+  ],
+  "menus_inspected": {
+    "File": [
+      "New project…",
+      "Open project…",
+      "Load template",
+      "Save project",
+      "Save project as…",
+      "Open completed run…",
+      "Import model inputs",
+      "Export conductor geometry…",
+      "Export Python and run files",
+      "Close project",
+      "Exit"
+    ],
+    "Edit": [
+      "Undo",
+      "Redo",
+      "Advanced settings…",
+      "Rename project…"
+    ],
+    "Gradient engineering": [
+      "Gradient requirements…",
+      "Primary, shield and external region…",
+      "Queue convergence study…",
+      "Review convergence study…",
+      "Terminals, feeds and drive waveform…",
+      "Compare measured field…"
+    ],
+    "Channels": [
+      "Channel overview…",
+      "Duplicate active channel…",
+      "Remove active channel",
+      "Compute enabled channels independently"
+    ],
+    "Research studies": [
+      "Named targets, validation and poses…",
+      "Review regional / scenario results…",
+      "Queue nominal and robust comparison",
+      "Review nominal and robust comparison…",
+      "Spatial scene and route anchors…",
+      "Review spatial constraints…",
+      "Array currents and cohort design…",
+      "Circuit references and coupled physics…",
+      "Review waveform and coupled physics…"
+    ],
+    "View": [
+      "Detailed field analysis…",
+      "Inspect interconnections…",
+      "Design plan",
+      "Model Builder",
+      "Settings",
+      "Design status…",
+      "Physical design brief…",
+      "Open evidence window"
+    ],
+    "Help": [
+      "About CoilGen2…",
+      "Contact / Kontakt…",
+      "Impressum…"
+    ]
+  },
+  "templates_loaded_via_File_menu": [
+    {
+      "template": "cylinder_gx",
+      "channels": 1,
+      "compute_button": "Compute full design"
+    },
+    {
+      "template": "cylinder",
+      "channels": 1,
+      "compute_button": "Compute full design"
+    },
+    {
+      "template": "cylinder_gz",
+      "channels": 1,
+      "compute_button": "Compute full design"
+    },
+    {
+      "template": "halbach_gx",
+      "channels": 1,
+      "compute_button": "Compute full design"
+    },
+    {
+      "template": "halbach_gy",
+      "channels": 1,
+      "compute_button": "Compute full design"
+    },
+    {
+      "template": "halbach_gz",
+      "channels": 1,
+      "compute_button": "Compute full design"
+    },
+    {
+      "template": "shielded_gy",
+      "channels": 1,
+      "compute_button": "Compute full design"
+    },
+    {
+      "template": "biplanar_gx",
+      "channels": 1,
+      "compute_button": "Compute full design"
+    },
+    {
+      "template": "biplanar",
+      "channels": 1,
+      "compute_button": "Compute full design"
+    },
+    {
+      "template": "biplanar_gz",
+      "channels": 1,
+      "compute_button": "Compute full design"
+    },
+    {
+      "template": "shim_z0",
+      "channels": 1,
+      "compute_button": "Compute full design"
+    },
+    {
+      "template": "shim_z2",
+      "channels": 1,
+      "compute_button": "Compute full design"
+    },
+    {
+      "template": "shim_xz",
+      "channels": 1,
+      "compute_button": "Compute full design"
+    },
+    {
+      "template": "shim_yz",
+      "channels": 1,
+      "compute_button": "Compute full design"
+    },
+    {
+      "template": "shim_x2_y2",
+      "channels": 1,
+      "compute_button": "Compute full design"
+    },
+    {
+      "template": "shim_xy",
+      "channels": 1,
+      "compute_button": "Compute full design"
+    },
+    {
+      "template": "conical_harmonic",
+      "channels": 1,
+      "compute_button": "Compute full design"
+    },
+    {
+      "template": "cylindrical_xyz_gradient",
+      "channels": 3,
+      "compute_button": "Compute full design"
+    },
+    {
+      "template": "biplanar_gradient_shim",
+      "channels": 9,
+      "compute_button": "Compute full design"
+    }
+  ],
+  "layout_widths_px": [
+    {
+      "requested": 800,
+      "actual": 800,
+      "viewport": 496
+    },
+    {
+      "requested": 1000,
+      "actual": 1000,
+      "viewport": 696
+    },
+    {
+      "requested": 1280,
+      "actual": 1280,
+      "viewport": 610
+    }
+  ],
+  "model_sections_and_editor_cards": {
+    "Geometry and mesh": [
+      "Choose support",
+      "Surface dimensions",
+      "Placement",
+      "Mesh"
+    ],
+    "Target field and regions": [
+      "Choose field",
+      "Field expression",
+      "Target scaling",
+      "Choose field region",
+      "Region dimensions",
+      "Sampling"
+    ],
+    "Conductor and material": [
+      "Cross-section profile",
+      "Nominal dimensions",
+      "Insulation",
+      "Physical placement",
+      "Continuous-sheet material"
+    ],
+    "Stream function optimization": [
+      "Solve strategy",
+      "Field and current limits",
+      "Solver configuration",
+      "Numerical settings"
+    ],
+    "Winding and routing": [
+      "Circuit intention",
+      "Contour policy",
+      "Contour smoothing",
+      "Clearance and bend limits",
+      "Conductor solids",
+      "Interconnection direction (connected circuit)"
+    ],
+    "Validation settings": [
+      "Independent sampling",
+      "Validation limits",
+      "Fabrication review"
+    ],
+    "Results and provenance": [],
+    "Export conductor geometry": []
+  },
+  "study_boundaries": [
+    {
+      "output": "Prepare model",
+      "button": "Prepare model"
+    },
+    {
+      "output": "Optimize stream function",
+      "button": "Optimize stream function"
+    },
+    {
+      "output": "Generate contours",
+      "button": "Generate contours"
+    },
+    {
+      "output": "Connect / sweep conductors",
+      "button": "Connect / sweep"
+    },
+    {
+      "output": "Full design evaluation",
+      "button": "Compute full design"
+    }
+  ],
+  "evidence_windows": {
+    "Jobs": [
+      780,
+      680
+    ],
+    "Design acceptance": [
+      780,
+      740
+    ],
+    "Checks": [
+      780,
+      680
+    ],
+    "Run comparison": [
+      780,
+      680
+    ],
+    "Wire fields": [
+      780,
+      680
+    ],
+    "Recompute plan": [
+      780,
+      680
+    ],
+    "Messages": [
+      780,
+      680
+    ],
+    "Problems": [
+      780,
+      740
+    ],
+    "Project history": [
+      780,
+      680
+    ]
+  },
+  "coverage": {
+    "widget_sweep": "The 19 retained File menu example actions loaded in an offscreen Qt workbench. Focused card buttons and View menu evidence actions opened their owned windows. This sweep used the real ScientificViewport, a renderless QtInteractor and an injected job service; it submitted no jobs.",
+    "expert_windows": "Opened and inspected with offscreen Qt. Closed authoring windows without applying changes. Field and routing analysis used a previously computed full cylindrical Gy result.",
+    "limits": "The offscreen pass verifies Qt navigation, layout and data selection. It does not measure native GPU rendering performance, physical display appearance or platform-native file pickers."
+  },
+  "dialogs_inspected_px": {
+    "Advanced settings": [
+      780,
+      750
+    ],
+    "Primary, shield and external region": [
+      700,
+      750
+    ],
+    "Gradient requirements": [
+      680,
+      660
+    ],
+    "Regional requirements and finite physical scenarios": [
+      770,
+      570
+    ],
+    "Spatial scene, exclusions and route anchors": [
+      780,
+      720
+    ],
+    "Multichannel array and cohort studies": [
+      780,
+      720
+    ],
+    "Coupled circuits and external analysis evidence": [
+      780,
+      750
+    ],
+    "Channel overview": [
+      780,
+      290
+    ],
+    "About CoilGen2": [
+      580,
+      660
+    ],
+    "Coil results": [
+      780,
+      750
+    ],
+    "Interconnections": [
+      780,
+      750
+    ]
+  },
+  "regression_results": {
+    "broad_run": {
+      "files": 107,
+      "passed": 1942,
+      "failed": 2,
+      "seconds": 1029.74,
+      "failed_cases": {
+        "tests/test_native_workbench.py::test_resume_and_export_use_verified_selected_run": "Windows refused the hard link used to publish a verified run artifact. Artifact export now uses exclusive publication that supports this filesystem.",
+        "tests/test_workbench_design_plan.py::test_plan_is_a_right_dock_with_persisted_user_visibility": "This test expected the wide layout even on an 800 px virtual screen. It now opens a wide window, while a separate test checks the compact sidebar and actual width."
+      }
+    },
+    "affected_file_rerun": {
+      "passed": 136,
+      "failed": 0,
+      "seconds": 97.25,
+      "files": [
+        "test_gui_export_panel.py",
+        "test_native_workbench.py",
+        "test_workbench_design_plan.py",
+        "test_workbench_results_overview.py",
+        "test_gui_results_overview.py",
+        "test_workbench_state_actions.py"
+      ]
+    },
+    "additional_final_checks": "56/56 compact layout, design reader, activity-window and result-board checks passed. A further 60/60 native gallery, empty-workspace, compact-window and saved-result tests passed, including the current-model requirement for authoring feeds. These focused sets overlap the broader run.",
+    "environment": "Qt ran on the offscreen platform. Pytest used a dedicated writable temporary directory after the sandbox default temp directory could not create fixtures."
+  },
+  "reproduction_tests": [
+    "tests/test_workbench_empty.py",
+    "tests/test_workbench_compact_compute.py",
+    "tests/test_workbench_templates.py",
+    "tests/test_workbench_state_actions.py",
+    "tests/test_workbench_results_overview.py",
+    "tests/test_workbench_sequence_engineering.py",
+    "tests/test_gui_activity_feedback.py",
+    "tests/test_gui_acceptance_panel.py"
+  ]
+}

@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import test_workbench_usability as usability
 
-from PySide6.QtWidgets import QDockWidget
+from PySide6.QtWidgets import QDockWidget, QFileDialog, QInputDialog
 from PySide6.QtTest import QTest
 
 from coilgen.application import ProjectDocument
@@ -60,6 +60,7 @@ def _field(window, mesh=None):
 def _choose_region(window, shape):
     gallery = _gallery(window)
     gallery.setCurrentIndex(gallery.findData(shape))
+    assert window.apply_settings()
 
 
 def _surface_file(tmp_path, *, closed=False):
@@ -143,6 +144,7 @@ def test_surface_and_volume_sampling_are_distinct_world_field_snapshots(windows)
     half = np.asarray(window.project.config.target_region_geometry["size_m"]) / 2
     assert np.all(np.abs(volume.coords) < half)
     _sampling(window).setCurrentIndex(_sampling(window).findData("surface"))
+    assert window.apply_settings()
     surface = _field(window)
     assert "angular or face resolution" in window._draft_controls["target_region_resolution"].toolTip()
     assert window.project.config.target_region_geometry["sampling"] == "surface"
@@ -227,6 +229,33 @@ def test_missing_enclosing_mesh_blocks_compute_with_target_action(windows):
         for issue in issues
     )
     assert not window.findChild(QDockWidget, "settings_dock").isHidden()
+
+
+def test_cancel_enclosing_mesh_file_choice_then_apply_with_other_edits(windows, tmp_path, monkeypatch):
+    window = _target_window(windows)
+    original = window.project
+    window._draft_controls["target_region_resolution"].setValue(9)
+    window._draft_controls["target_mode"].setCurrentText("Spherical harmonic")
+    gallery = _gallery(window)
+    gallery.setCurrentIndex(gallery.findData("enclosing_mesh"))
+
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: ("", ""))
+    assert not window.apply_settings()
+    assert window.project is original and window.undo_stack.count() == 0
+    assert window._draft_dirty
+
+    path, _ = _surface_file(tmp_path)
+    selected = iter([(str(path), "")])
+    answers = iter([("mm", True), ("Surface only (open surface allowed)", True)])
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: next(selected))
+    monkeypatch.setattr(QInputDialog, "getItem", lambda *args: next(answers))
+    assert window._import_region_dialog()
+    assert window.undo_stack.count() == 1 and window.project.revision == original.revision + 1
+    assert window.project.config.target_region_geometry == {"shape": "enclosing_mesh", "sampling": "surface"}
+    assert window.project.config.target_region_resolution == 9
+    assert recognize_solid_harmonic_target(window.project.config.field_shape_function) is not None
+    window.undo_stack.undo()
+    assert window.project is original
 
 
 def test_surface_region_import_is_owned_scaled_once_and_portable_after_source_deletion(windows, tmp_path):
@@ -341,6 +370,7 @@ def test_switch_from_legacy_centroid_region_retains_support_world_center(windows
     else:
         sampling = _sampling(window)
         sampling.setCurrentIndex(sampling.findData("surface"))
+        assert window.apply_settings()
     region = window.project.config.target_region_geometry
     np.testing.assert_array_equal(region["center_m"], physical_center)
     assert not window.project.config.set_roi_into_mesh_center
@@ -353,7 +383,7 @@ def test_switch_from_legacy_centroid_region_retains_support_world_center(windows
 
 
 @pytest.mark.parametrize("selector", ("primitive", "sampling"))
-def test_region_choice_preserves_incomplete_numeric_draft_and_previous_selection(windows, selector):
+def test_region_choice_and_numeric_edits_commit_together_only_after_valid_input(windows, selector):
     window = _target_window(windows)
     original = window.project
     radius = window._draft_controls["target_region_radius"]
@@ -361,20 +391,25 @@ def test_region_choice_preserves_incomplete_numeric_draft_and_previous_selection
     QTest.keyClicks(radius.lineEdit(), "1e")
     window._draft_controls["target_region_resolution"].setValue(21)
     if selector == "primitive":
-        _choose_region(window, "box")
+        gallery = _gallery(window)
+        gallery.setCurrentIndex(gallery.findData("box"))
     else:
         sampling = _sampling(window)
         sampling.setCurrentIndex(sampling.findData("surface"))
     assert window.project is original and window.undo_stack.count() == 0
-    assert _gallery(window).currentData() == "sphere"
-    assert _sampling(window).currentData() == "volume"
+    assert not window.apply_settings()
+    assert _gallery(window).currentData() == ("box" if selector == "primitive" else "sphere")
+    assert _sampling(window).currentData() == ("surface" if selector == "sampling" else "volume")
     assert radius.lineEdit().text().startswith("1e")
     assert window._draft_controls["target_region_resolution"].value() == 21
     assert window._draft_dirty and not window.draft_error_label.isHidden()
     radius.lineEdit().selectAll()
     QTest.keyClicks(radius.lineEdit(), "25")
     assert window.apply_settings()
-    assert window.project.config.target_region_geometry is None
+    region = window.project.config.target_region_geometry
+    assert region["shape"] == ("box" if selector == "primitive" else "sphere")
+    assert region["sampling"] == ("surface" if selector == "sampling" else "volume")
+    assert window.undo_stack.count() == 1
     assert window.project.config.target_region_radius == pytest.approx(0.025)
     assert window.project.config.target_region_resolution == 21
 
@@ -409,10 +444,10 @@ def test_imported_map_preserves_ignored_malformed_region_without_parsing_or_repa
     assert window._target_region_editor.region == ignored_region
     assert not window._draft_controls["target_region_radius"].isEnabled()
     assert not window._draft_controls["target_region_resolution"].isEnabled()
-    window._reset_region_choices()
-    assert _gallery(window).currentData() == "imported_map"
-    window._switch_target_region("box")
-    window._switch_target_region_sampling("surface")
+    assert not _gallery(window).isEnabled()
+    assert not _sampling(window).isEnabled()
+    assert "target_region_shape" not in window._draft_controls
+    assert "target_region_sampling" not in window._draft_controls
     assert window.project is original
     assert window.apply_settings()
     assert window.project is original

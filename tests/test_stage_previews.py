@@ -4,6 +4,7 @@ from dataclasses import replace
 from hashlib import sha256
 import io
 import json
+from types import SimpleNamespace
 import zipfile
 
 import numpy as np
@@ -13,6 +14,8 @@ from coilgen.application.presets import preset_config
 from coilgen.application.stage_preview import (
     MANIFEST_NAME,
     load_stage_preview,
+    publish_evaluation_preview,
+    publish_feature_preview,
     publish_stage_preview,
     read_stage_preview_manifest,
 )
@@ -116,6 +119,175 @@ def test_scientific_array_accessor_does_not_copy_operators_or_share_mutable_data
     assert not np.all(original.scientific_arrays()["route_0_points_m"] == 456)
     with pytest.raises(ValueError, match="permitted size"):
         original.scientific_arrays(max_bytes=1)
+
+
+def test_feature_snapshots_publish_cumulative_geometry_before_routed_checkpoint(tmp_path):
+    original = checkpoint(tmp_path, "routed")
+    state = original.state
+    part = state.parts[0]
+    part.fabrication_path = SimpleNamespace(wire_points_m=part.wire_path.v + 1e-4)
+
+    # The live writer must only visit scientific arrays, even for large operators.
+    class NeverCopy:
+        def __deepcopy__(self, memo):
+            raise AssertionError("Unexpected solver state copy")
+
+    part.sensitivity_matrix = NeverCopy()
+    keys = ("route_0_points_m", "fabrication_0_points_m", "swept_0_0_vertices_m")
+    expected = (part.wire_path.v, part.fabrication_path.wire_points_m, part.swept_body.vertices)
+    publish_stage_preview(tmp_path, checkpoint(tmp_path, "contours"), request(), DIGEST)
+    for index, feature in enumerate(("interconnections", "realized_centerlines", "sweep")):
+        publish_feature_preview(tmp_path, state, feature, request(), DIGEST)
+        loaded = load_stage_preview(tmp_path, **identity())
+        assert loaded.metadata["preview_feature"] == feature
+        assert loaded.metadata["scope"] == "completed_feature_preview"
+        assert loaded.metadata["pipeline_stage"] == "contours"
+        assert loaded.metadata["completed_stages"] == ["prepared", "sheet", "contours"]
+        assert loaded.metadata["acceptance_claim"] is False
+        assert loaded.metadata["array_file"] == f"stage_previews/{feature}.npz"
+        for key, value in zip(keys[: index + 1], expected):
+            np.testing.assert_array_equal(loaded.arrays[key], value)
+        assert not set(keys[index + 1 :]).intersection(loaded.arrays)
+        assert "contour_0_0_points_m" in loaded.arrays and "stream_function_A" in loaded.arrays
+    publish_stage_preview(tmp_path, original, request(), DIGEST)
+    assert "preview_feature" not in load_stage_preview(tmp_path, **identity()).metadata
+
+
+def test_missing_or_malformed_feature_cannot_advance_announcement(tmp_path):
+    state = checkpoint(tmp_path, "contours").state
+    publish_stage_preview(tmp_path, checkpoint(tmp_path, "contours"), request(), DIGEST)
+    with pytest.raises(ValueError, match="no recorded geometry"):
+        publish_feature_preview(tmp_path, state, "interconnections", request(), DIGEST)
+    assert "preview_feature" not in manifest(tmp_path)
+    state.parts[0].wire_path = WirePath(state.parts[0].mesh.vertices.copy())
+    publish_feature_preview(tmp_path, state, "interconnections", request(), DIGEST)
+    arrays = dict(load_stage_preview(tmp_path, **identity()).arrays)
+    arrays["fabrication_0_points_m"] = arrays["route_0_points_m"]
+    _replace_arrays(tmp_path, arrays)
+    with pytest.raises(ValueError, match="later feature"):
+        load_stage_preview(tmp_path, **identity())
+    changed = manifest(tmp_path)
+    changed["pipeline_stage"] = "routed"
+    rewrite(tmp_path, changed)
+    with pytest.raises(ValueError, match="feature or scientific scope"):
+        read_stage_preview_manifest(tmp_path, **identity())
+
+
+def evaluated_arrays(tmp_path, *, routed=True):
+    completed = checkpoint(tmp_path, "routed")
+    state = completed.state
+    state.parts[0].contour_step = 2.5
+    completed.config.field_evaluation_current_source = "target_fit"
+    result = SimpleNamespace(
+        coil_parts=state.parts,
+        target_field=state.target_field,
+        input_data=completed.config,
+        needed_current_layout=3.25,
+        field_by_unconnected_loops=state.target_field.b * 0.98,
+        field_by_layout=state.target_field.b * 0.96,
+        field_loops_per1Amp=state.target_field.b * 0.30,
+        field_layout_per1Amp=state.target_field.b * 0.29,
+    )
+    result.input_data.research_physics = None
+    result.input_data.skip_postprocessing = not routed
+    wire, evidence = research._wire_field_evidence(result)
+    return {**completed.scientific_arrays(), **wire}, evidence
+
+
+def test_evaluation_features_preserve_exact_sampling_currents_and_cumulative_plot_data(tmp_path):
+    arrays, wire = evaluated_arrays(tmp_path)
+    # These result-only arrays are deliberately outside the plotting contract.
+    arrays["review_conductor_0_owner_kind"] = np.array(["connector"])
+    coordinates = arrays["target_points_m"]
+    independent = np.vstack([coordinates, [0.011, 0.002, 0]])
+    features = {
+        "evaluated_winding": {},
+        "independent_field": dict(
+            validation_points_m=independent, validation_field_T=independent * 0.2, validation_target_T=independent * 0.3
+        ),
+        "review_conductor": dict(
+            review_conductor_0_points_m=coordinates * 1.2, review_electrical_0_points_m=coordinates * 1.3
+        ),
+        "fabricated_field": dict(fabricated_points_m=coordinates.copy(), fabricated_field_T=coordinates * 0.1),
+        "winding_validation": dict(
+            winding_validation_points_m=independent[::-1],
+            winding_validation_field_T=independent * 0.4,
+            winding_validation_target_T=independent * 0.32,
+        ),
+    }
+    for feature, additions in features.items():
+        arrays.update(additions)
+        policy = "original_contour_current_no_refit" if "fabricated_field_T" in arrays else None
+        publish_evaluation_preview(
+            tmp_path, arrays, feature, request("evaluated"), DIGEST, wire_fields=wire, fabricated_current_source=policy
+        )
+        preview = load_stage_preview(tmp_path, **identity())
+        assert preview.metadata["completed_stages"] == [stage.value for stage in PipelineStage]
+        assert preview.metadata["pipeline_stage"] == "evaluated"
+        assert preview.metadata["preview_feature"] == feature and preview.metadata["acceptance_claim"] is False
+        assert preview.metadata["wire_fields"] == wire
+        assert preview.metadata.get("fabricated_physics") == ({"current_source": policy} if policy else None)
+        assert preview.arrays.keys() == arrays.keys() - {"review_conductor_0_owner_kind"}
+        for key, value in preview.arrays.items():
+            np.testing.assert_array_equal(value, arrays[key])
+            assert not value.flags.writeable
+
+
+def test_contour_only_winding_preview_does_not_advertise_a_connected_field(tmp_path):
+    arrays, wire = evaluated_arrays(tmp_path, routed=False)
+    publish_evaluation_preview(tmp_path, arrays, "evaluated_winding", request("evaluated"), DIGEST, wire_fields=wire)
+    preview = load_stage_preview(tmp_path, **identity())
+    assert "contour_field_T" in preview.arrays and "routed_field_T" not in preview.arrays
+    assert not preview.metadata["wire_fields"]["routed"]["available"]
+
+
+@pytest.mark.parametrize("invalid", ["current", "refit", "grid", "geometry", "scope", "future", "unreported"])
+def test_loader_rejects_mismatched_wire_evidence_and_sampling(tmp_path, invalid):
+    arrays, wire = evaluated_arrays(tmp_path)
+    publish_evaluation_preview(tmp_path, arrays, "evaluated_winding", request("evaluated"), DIGEST, wire_fields=wire)
+    info = manifest(tmp_path)
+    if invalid == "current":
+        info["wire_fields"]["contour"]["current_A"] = None
+    elif invalid == "refit":
+        info["wire_fields"]["routed"]["at_stream_current"]["current_refitted"] = True
+    elif invalid == "scope":
+        info["wire_fields"]["routed"]["acceptance_claim"] = True
+    elif invalid == "grid":
+        arrays["routed_field_T"] = arrays["routed_field_T"][:1]
+    elif invalid == "geometry":
+        arrays["evaluated_winding_0_points_m"] = arrays["evaluated_winding_0_points_m"] + 0.01
+    elif invalid == "unreported":
+        info.pop("wire_fields")
+    else:
+        arrays["review_electrical_0_points_m"] = arrays["target_points_m"]
+    rewrite(tmp_path, info)
+    _replace_arrays(tmp_path, arrays)
+    with pytest.raises(ValueError):
+        load_stage_preview(tmp_path, **identity())
+
+
+@pytest.mark.parametrize("feature", ["independent_field", "fabricated_field", "winding_validation"])
+def test_incomplete_field_or_unknown_current_preserves_last_preview(tmp_path, feature):
+    original = checkpoint(tmp_path, "evaluated")
+    publish_stage_preview(tmp_path, original, request("evaluated"), DIGEST)
+    arrays = original.scientific_arrays()
+    prefix = {"independent_field": "validation", "fabricated_field": "fabricated"}.get(feature, feature)
+    arrays[prefix + "_field_T"] = arrays["sheet_field_T"]
+    if feature == "fabricated_field":
+        arrays["fabricated_points_m"] = arrays["target_points_m"] + 1e-5
+    with pytest.raises(ValueError):
+        publish_evaluation_preview(tmp_path, arrays, feature, request("evaluated"), DIGEST)
+    if feature == "fabricated_field":
+        with pytest.raises(ValueError):
+            publish_evaluation_preview(
+                tmp_path,
+                arrays,
+                feature,
+                request("evaluated"),
+                DIGEST,
+                fabricated_current_source="original_contour_current_no_refit",
+            )
+    assert "preview_feature" not in load_stage_preview(tmp_path, **identity()).metadata
 
 
 def test_no_publication_and_partially_written_npz_leave_previous_boundary_visible(tmp_path):
@@ -410,8 +582,9 @@ def test_optional_preview_failure_does_not_change_result_or_retained_checkpoints
         def __init__(self, *_args, **_kwargs):
             pass
 
-        def run_stage(self, stage, resumed, *, checkpoint_callback):
+        def run_stage(self, stage, resumed, *, checkpoint_callback, feature_callback, **_callbacks):
             callbacks.append(checkpoint_callback)
+            feature_callback("interconnections", completed.state)
             checkpoint_callback(completed)
             return completed
 
@@ -421,6 +594,7 @@ def test_optional_preview_failure_does_not_change_result_or_retained_checkpoints
     result = {"scientific": "unchanged"}
     monkeypatch.setattr(research, "CoilGenPipeline", FakePipeline)
     monkeypatch.setattr(research, "publish_stage_preview", storage_failure)
+    monkeypatch.setattr(research, "publish_feature_preview", storage_failure)
     monkeypatch.setattr(research, "_save_partial_result", lambda *_args: result)
     events = []
     with progress_context(events.append):
@@ -430,6 +604,9 @@ def test_optional_preview_failure_does_not_change_result_or_retained_checkpoints
     assert (tmp_path / "run" / "pipeline_checkpoint.cgstage").is_file()
     boundary = next(event for event in events if event.get("completed_stage") == "prepared")
     assert "stage_preview" not in boundary and error_type.__name__ in boundary["stage_preview_error"]
+    assert any(
+        f"Live interconnections preview unavailable: {error_type.__name__}" in event["message"] for event in events
+    )
 
 
 def test_same_stage_resume_announces_only_after_pipeline_compatibility_check(tmp_path, monkeypatch):
@@ -441,9 +618,10 @@ def test_same_stage_resume_announces_only_after_pipeline_compatibility_check(tmp
         def __init__(self, *_args, **_kwargs):
             pass
 
-        def run_stage(self, stage, resumed, *, checkpoint_callback):
+        def run_stage(self, stage, resumed, *, resume_callback, **_callbacks):
             assert not (tmp_path / "run" / MANIFEST_NAME).exists()
             checked.append(True)
+            resume_callback(resumed)
             return resumed
 
     monkeypatch.setattr(research, "CoilGenPipeline", FakePipeline)

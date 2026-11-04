@@ -460,7 +460,7 @@ def _field_operator(
         points, np.zeros_like(points), np.ones(len(points)), np.zeros(len(points), bool), np.zeros(len(points), int)
     )
     with progress_scope(20, 100):
-        reporter.report(0, "Evaluating regional current-sheet field operator")
+        reporter.report(0, "Building the regional field operator for the stream function")
         calculate_sensitivity_matrix(copies, target, config)
     return np.concatenate([part.sensitivity_matrix for part in copies], axis=2)
 
@@ -470,7 +470,7 @@ def _reject_sheet_samples(mesh, points):
     from ..geometry_kernels import _point_triangle_sq_numpy
     from ..progress import ProgressReporter
 
-    task = ProgressReporter(label="Regional fields").task("Checking samples against the current sheet", len(points))
+    task = ProgressReporter(label="Regional fields").task("Checking samples against the coil surface", len(points))
 
     triangles = mesh.vertices[mesh.faces]
     centres = triangles.mean(axis=1)
@@ -486,12 +486,12 @@ def _reject_sheet_samples(mesh, points):
             task.update(min(start + 256, len(points)))
             continue
         if int(counts.sum()) > 1_000_000:
-            raise ValueError("Sheet-sample proximity candidates exceed the explicit safety budget.")
+            raise ValueError("Surface proximity candidates exceed the explicit safety budget.")
         ids = np.concatenate([np.asarray(ids, dtype=int) for ids in candidates])
         query = np.repeat(samples, counts, axis=0)
         if np.any(_point_triangle_sq_numpy(query, triangles[ids]) <= tolerance**2):
             raise FieldSamplingError(
-                "A desired sample lies on the current-sheet surface; move it off the singular sheet."
+                "Move the desired sample off the coil surface, where the field kernel is singular."
             )
         task.update(min(start + 256, len(points)))
 
@@ -677,7 +677,7 @@ def _metrics(field, target, points, region, config, *, design_margin=1.0):
 def evaluate_requirements(
     parts, config, spec, *, current_A=None, fabrication=None, complete_paths=None, design_margin=1.0
 ):
-    """Evaluate saved sheet and routed geometry at unchanged signed currents.
+    """Evaluate fields from the saved stream function and routes at unchanged signed currents.
 
     ``complete_paths`` optionally maps body IDs to (XYZ path, current A), for
     caller-verified complete electrical circuits. Otherwise only saved routed
@@ -778,7 +778,9 @@ def evaluate_requirements(
                 sheet_reason = "Saved nodal stream function is unavailable."
                 try:
                     with progress_scope(start, start + 0.45 * span, overall=True):
-                        reporter.report(0, f"Reviewing {region.name} · {pose_name} · {sampling}: sheet field")
+                        reporter.report(
+                            0, f"Reviewing {region.name} · {pose_name} · {sampling} · stream function field"
+                        )
                         sensitivity = _field_operator(parts, points, config, support, scale, centre) if sheet else None
                 except FieldSamplingError as exc:
                     sensitivity = None

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -111,9 +112,15 @@ def test_mounted_centroid_export_matches_swept_rings_and_field(tmp_path):
     assert report.electrical_metrics["bodies"][0]["cross_section_area_m2"] == pytest.approx(2e-6)
     assert report.electrical_metrics["bodies"][0]["length_m"] == pytest.approx(record.path.length_m)
     assert not report.ready
-    assert not list(tmp_path.glob("*.stl"))
+    assert not [path for path in tmp_path.glob("*_fabrication.stl") if "_DRAFT_" not in path.name]
+    drafts = sorted(path.name for path in tmp_path.glob("*_DRAFT_*"))
+    assert drafts == ["part001_body0001_DRAFT_fabrication.stl", "part001_body0001_DRAFT_fabrication_faceted.step"]
+    assert sorted(Path(path).name for path in report.draft_artifacts) == drafts
+    assert b"DRAFT_" in (tmp_path / drafts[0]).read_bytes()[:200]
     assert any("external_return_not_modeled" in reason for reason in report.failure_reasons)
-    assert json.loads((tmp_path / "fabrication_report.json").read_text())["ready"] is False
+    saved = json.loads((tmp_path / "fabrication_report.json").read_text())
+    assert saved["ready"] is False
+    assert [Path(path).name for path in saved["draft_artifacts"]] == drafts
 
 
 def test_valid_closed_loop_exports_strict_solids_and_closing_step(tmp_path):

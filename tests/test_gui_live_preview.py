@@ -217,6 +217,34 @@ def test_optional_loader_failure_always_finishes_and_can_load_a_new_commit(contr
     assert controller.error is None and len(calls) == 2
 
 
+def test_pinning_during_load_delivers_current_and_pending_geometry(controllers, application):
+    jobs, create, releases = controllers
+    state = _state()
+    _write_manifest(jobs, state, "interconnections")
+    reading, release = Event(), Event()
+    releases.append(release)
+
+    def loader(path, **_identity):
+        feature = (path / MANIFEST_NAME).read_text(encoding="utf-8")
+        reading.set()
+        assert release.wait(3)
+        return _preview(path, feature)
+
+    ready = []
+    controller = create(loader)
+    controller.preview_ready.connect(lambda _job, preview: ready.append(preview.metadata["pipeline_stage"]))
+    controller.start(state)
+    assert reading.wait(3)
+    controller.pin_plot()
+    assert controller.watching and not controller.following
+    _write_manifest(jobs, state, "sweep")
+    controller.refresh(state)
+    release.set()
+    _wait(application, lambda: not controller.loading and len(ready) == 2)
+    controller.resume()
+    assert controller.following and ready == ["interconnections", "sweep"]
+
+
 def test_pause_keeps_last_snapshot_and_resume_reads_latest_commit(controllers, application):
     jobs, create, _releases = controllers
     state, calls = _state(), []

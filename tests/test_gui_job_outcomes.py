@@ -83,7 +83,7 @@ def test_stopped_execution_retains_only_recorded_stages_without_certifying_resum
     )
     assert outcome.tone == "warning"
     assert outcome.action_label == "View job"
-    assert "Earlier recorded stages retained: Prepare, Sheet." in outcome.detail
+    assert "Earlier recorded stages retained: Prepare, Stream function." in outcome.detail
     assert "must be verified before resuming" in outcome.detail
     assert "Contours" not in outcome.detail
 
@@ -114,7 +114,7 @@ def test_engineering_failures_count_exact_recorded_constraint_verdicts():
     assert outcome.tone == "error"
     assert outcome.action_label == "Review checks"
     assert "1 failed, 2 unverified, 4 total" in outcome.detail
-    assert "Saved sheet checks: Passed" in outcome.detail
+    assert "Saved stream function checks: Passed" in outcome.detail
     assert "pipeline conductor geometry: Passed" in outcome.detail
     assert "fabrication review: Passed" in outcome.detail
     assert "do not establish construction release" in outcome.detail
@@ -124,7 +124,7 @@ def test_failed_conductor_geometry_cannot_borrow_a_passing_sheet_or_invent_probl
     outcome = build_job_outcome(state(), record(pipeline_sweeps={"checks_passed": False}))
     assert "engineering checks failed" in outcome.title
     assert outcome.tone == "error"
-    assert "Saved sheet checks: Passed" in outcome.detail
+    assert "Saved stream function checks: Passed" in outcome.detail
     assert "pipeline conductor geometry: Failed" in outcome.detail
     assert "Recorded constraints" not in outcome.detail
 
@@ -134,7 +134,7 @@ def test_sparse_engineering_evidence_never_becomes_a_passed_result():
     assert outcome.tone == "warning"
     assert outcome.action_label == "Review checks"
     assert "engineering checks incomplete" in outcome.title
-    assert "sheet checks: Unverified" in outcome.detail
+    assert "stream function checks: Unverified" in outcome.detail
 
 
 def test_unverified_constraint_remains_visible_even_when_other_scopes_pass():
@@ -151,7 +151,7 @@ def test_verified_partial_study_finishes_without_claiming_downstream_acceptance(
     assert "Prepare study" in outcome.title
     assert outcome.tone == "info"
     assert outcome.action_label == "View result"
-    assert "sheet checks: Unverified" in outcome.detail
+    assert "stream function checks: Not run" in outcome.detail
 
 
 def test_known_saved_passes_remain_scoped_and_keep_channel_provenance():

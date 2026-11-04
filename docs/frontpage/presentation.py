@@ -1,4 +1,4 @@
-"""Render the GitHub gallery from verified sheets and conditioned contour paths.
+"""Render the GitHub gallery from verified stream functions and conditioned contour paths.
 
 Run ``python docs/frontpage/presentation.py`` from the repository root. This
 script never solves, refits currents, or modifies the source NPZ evidence.
@@ -323,7 +323,7 @@ def render_fidelity(cases: list[dict], metrics: dict | list) -> None:
         residuals = [100 * (arrays[f"{kind}_field_T"][:, 2] - target) / peak for kind in ("sheet", "contour")]
         edge = max(np.max(np.abs(values)) for values in residuals) * 1.05
         bins = np.linspace(-edge, edge, 32)
-        for kind, label, color, residual in zip(("sheet", "contour"), ("Sheet", "Contours"), (SHEET, WIRE), residuals):
+        for kind, label, color, residual in zip(("sheet", "contour"), ("Stream function", "Contours"), (SHEET, WIRE), residuals):
             actual = arrays[f"{kind}_field_T"][:, 2]
             rms = case[f"{kind}_relative_rms_Bz_error_percent"]
             ax_scatter.scatter(
@@ -389,7 +389,7 @@ def render_all(cases: list[dict], metrics: dict | list) -> None:
     render_stream_function(cases, info)
     render_fidelity(cases, info)
     evidence = {
-        "description": "Gallery of original solved current sheets and smoothed, filtered contours with reevaluated fields.",
+        "description": "Gallery of original stream functions and smoothed, filtered contours with reevaluated fields.",
         "current_refitted": False,
         "contours_connected_or_routed": False,
         "fabrication_validated": False,
@@ -431,7 +431,7 @@ def main() -> None:
 
     cases, metrics = load_refined_cases()
     render_all(cases, metrics)
-    print("Rendered CoilGen2 gallery from verified sheets and conditioned contours.")
+    print("Rendered CoilGen2 gallery from verified stream functions and conditioned contours.")
 
 
 if __name__ == "__main__":

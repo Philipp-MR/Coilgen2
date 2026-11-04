@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 pytest.importorskip("PySide6")
-from PySide6.QtWidgets import QApplication, QFileDialog
+from PySide6.QtWidgets import QApplication, QDialogButtonBox, QFileDialog
 
 from coilgen.application.array_studies import ArrayCase, ArrayStudySpec, CohortControls
 from coilgen.gui.array_studies import ArrayCaseDialog, ArrayStudyDialog
@@ -89,7 +89,7 @@ def test_array_publication_retains_activity_until_field_ready_and_releases_on_er
     dialog._pending_spec = _spec()
     dialog.worker = _ArrayTask(lambda _progress: {})
     dialog.tabs.setEnabled(False)
-    dialog.buttons.setEnabled(False)
+    dialog.buttons.button(QDialogButtonBox.StandardButton.Apply).setEnabled(False)
     dialog.progress.show()
     dialog.cancel.show()
     events, details = [], []
@@ -118,16 +118,18 @@ def test_array_publication_retains_activity_until_field_ready_and_releases_on_er
     dialog.close()
 
 
-def test_busy_study_cannot_delete_running_worker(application):
+def test_closing_busy_study_waits_for_worker_then_discards_inputs(application):
     from coilgen.gui.array_studies import _ArrayTask
 
     dialog = ArrayStudyDialog(None)
     dialog.worker = _ArrayTask(lambda _progress: {})
-    dialog.reject()
+    dialog.show()
+    dialog.close()
+    assert dialog.isVisible()
     assert dialog.worker.cancel.is_set()
     assert "Cancellation requested" in dialog.status.text()
-    dialog.worker = None
-    dialog.close()
+    dialog._finished(None, "cancelled")
+    assert not dialog.isVisible() and dialog.result_value is None and dialog.worker is None
 
 
 def test_cohort_controls_persist_and_individual_edits_survive_removal(application):

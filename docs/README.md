@@ -4,6 +4,19 @@ Created and maintained by **Philipp Amrein — MRI hardware engineer**.
 [Project source](https://github.com/Philipp-MR/Coilgen2).
 [Kontakt and project information](CONTACT.md).
 
+For a first desktop design on Windows, run `Setup CoilGen2.cmd`, open
+`Start CoilGen2 GUI.cmd`, and choose **Browse examples… → Gradients → Cylindrical Y gradient (Gy)**. Click **Compute full design**.
+After completion, open **Jobs → View results → Run design choices** to inspect
+the submitted revision, including which contour fits were accepted. The
+[desktop guide](NATIVE_WORKBENCH.md) and [browser guide](BROWSER_WORKBENCH.md)
+cover the two interfaces. See the [winding gallery](../validation/gui_winding_quality_2026-11-03/README.md)
+for a same-scale comparison of the previous and updated X²−Y² mounted wire.
+
+For active shielding, load the **Actively shielded XYZ foil gradient system**
+under **Coil systems**. Open a channel result and choose **Shielding surface**
+to compare its primary, shield and net leakage fields on the external cylinder.
+See the [shielded XYZ example](../examples/shielded_xyz_gradient_README.md).
+
 This is the geodesic-topology fork of the class-based Python CoilGen
 translation. CoilGen is intended to become a powerful, easy-to-use
 magnetostatic coil-design tool: users describe a support surface, a target
@@ -80,6 +93,7 @@ assign authorship of a user's coil design.
 The main guides are collected in `docs/`. Run the commands in these guides from
 the repository root, where `pyproject.toml` and `Start CoilGen2 GUI.cmd` live.
 
+- Load a cylindrical gradient in the browser to compute its winding, inspect its field and download the project. [Browser workbench](BROWSER_WORKBENCH.md)
 - [Native scientific workbench](NATIVE_WORKBENCH.md): Qt/VTK desktop workflow,
   portable projects, staged execution, channel projects and script compatibility.
 - [Installation](INSTALL.md): Python environment setup and dependency options.
@@ -158,14 +172,25 @@ python -m pytest -q
 
 ## Quick Run
 
+On Windows, run `Setup CoilGen2.cmd` from the repository folder. It creates or
+updates the shared Python environment at `%USERPROFILE%\.coilgen2\venv`.
+Open `Start CoilGen2 Browser.cmd`. Choose **Browse examples…**, select
+**Gradients · Cylindrical Y gradient (Gy)** and click **Load template**.
+Click **Compute full design**, follow the job in **Design plan**, then open
+**Run design choices** above the result plot. To keep the editable inputs and
+verified result, open **File → Save / download**, click **Save project**, then
+**Download project**.
+The browser guide includes team setup, stage
+selection and CAD export. [Browser workbench](BROWSER_WORKBENCH.md)
+
 For the native model editor, install `python -m pip install -e ".[gui,plot]"`
-and run `python -m coilgen.gui`, or use `Start CoilGen2 GUI.cmd` on Windows.
-Existing script workflows remain available independently of GUI dependencies.
-Startup opens an empty workspace. Use **File → New project…** for a blank design,
-**Open project…** for a saved JSON, or the upper-left **File → Load template** menu to
-choose cylindrical or biplanar Gx/Gy/Gz, an actively shielded Gy, uniform or
-second-order shims, or the complete biplanar gradient and shim system. Templates
-create editable inputs for the full study and save as a self-contained JSON.
+and run `python -m coilgen.gui`, or use `Start CoilGen2 GUI.cmd` on Windows
+after the shared setup. Existing script workflows run independently of the GUI.
+The desktop opens a welcome screen. Choose **New blank project** to define a
+support and target, **Open project…** for an existing `.coilgen` or project JSON,
+or **Browse examples…** for a gradient, shim or coil system. Use **File → Load
+template** after opening a project. **Save project** keeps the editable model
+and its available runs together.
 
 Use the project virtual environment after following the installation steps:
 
@@ -468,9 +493,11 @@ project README before interpreting its figures or tables.
   mesh normals.
 - Geodesic distances use robust Dijkstra-style graph distances on the surface
   mesh. Fast Marching or Heat Method distances are not implemented.
-- Final contour smoothness is mesh-resolution limited. Finer meshes and more
-  target samples improve visual smoothness and field evaluation quality but
-  increase matrix size and runtime.
+- Contour smoothness depends on the mesh used for the stream function and the permitted displacement.
+  Refining the mesh changes the solved current distribution and can alter the
+  extracted turns; compare winding topology, original-current field and final
+  conductor checks after refinement. Increasing target sample count alone does
+  not remove a corner in the conductor.
 
 ## CSV Target Fields
 

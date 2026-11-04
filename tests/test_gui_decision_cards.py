@@ -298,7 +298,7 @@ def test_direct_graphical_choice_embeds_original_tiles_and_preserves_draft_row(a
         section.dialog.close()
         section.open()
         application.processEvents()
-        assert combo.currentText() == "Shim" and changes == ["Shim"]
+        assert combo.currentText() == "Gradient" and changes == ["Shim", "Gradient"]
         error.show()
         assert section.open_for(combo)
         application.processEvents()

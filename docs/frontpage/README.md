@@ -28,7 +28,7 @@ python docs/frontpage/generate_figures.py --reuse-data
 ```
 
 This mode checks the numerical source fingerprint, case configurations, array
-checksums and recorded RMS errors before reusing the sheet solutions. Contour
+checksums and recorded RMS errors before reusing the stream functions. Contour
 conditioning is cached by its complete inputs and settings; dense field maps
 are evaluated afresh. Raw and processed paths and their field errors remain
 separate. No optimization or display-time current fit is made.
@@ -61,9 +61,9 @@ with no points shared with either the solve grid or the acceptance grid.
 The retained geometry is not tuned to that holdout. Relative RMS error is
 `100 * ||Bz − Bz_target||₂ / ||Bz_target||₂`, using equal sample weights.
 This is an aggregate error, including target-zero locations without pointwise
-division. Neither sheet nor contour current is refitted to the validation data.
+division. Neither the stream function amplitude nor the contour current is refitted to the validation data.
 
-The two continuous-sheet errors are 3.404% and 3.014%. The original raw-contour
+The two stream function field errors are 3.404% and 3.014%. The original raw-contour
 errors are 3.381% and 2.959%; after smoothing and filtering they are 3.900% and
 3.798%, at unchanged currents. The displayed curves and all contour-field
 figures use these processed paths. The raw solved arrays remain available for
@@ -92,12 +92,12 @@ fields are recorded in [contour_processing.json](contour_processing.json).
 | Untouched holdout | 1,472 | 3.8951% | 3.8845% |
 
 The holdout changes neither the retained loops nor the smoothing parameters.
-Its continuous-sheet errors are 3.4100% and 3.1388%, respectively. All values
+Its stream function field errors are 3.4100% and 3.1388%, respectively. All values
 are relative Bz norm errors at the original solved current.
 
-The field maps evaluate the actual sheet and contour fields at 7,845 points
+The field maps evaluate the fields from the stream functions and contours at 7,845 points
 on a 101 × 101 grid inside the central `x = 0` circular cross-section. Neither
-field is interpolated. Before that evaluation, the reconstructed sheet and
+field is interpolated. Before that evaluation, the reconstructed stream function and
 contour operators must reproduce all 912 saved volume samples to roundoff.
 Field panels share one color scale; all residual panels share another. The
 reported relative RMS errors continue to use the separate full-volume grid.
@@ -142,9 +142,9 @@ from this illustration. These are not released conductor designs.
   physical spline smoothing, contribution-based pruning, and fixed-current
   before/after field validation.
 - [refined_case_0.npz](refined_case_0.npz), [refined_case_1.npz](refined_case_1.npz):
-  retained smooth paths, original sheet solutions and reevaluated contour fields.
+  retained smooth paths, original stream functions and reevaluated contour fields.
 - [field_maps.py](field_maps.py), [field_maps.json](field_maps.json),
-  [field_maps.npz](field_maps.npz): actual dense sheet/contour evaluation,
+  [field_maps.npz](field_maps.npz): dense field evaluation for the stream functions and contours,
   roundoff reconstruction checks, points and SI fields.
 - [swept_bodies.py](swept_bodies.py), [swept_bodies.json](swept_bodies.json),
   [swept_bodies.npz](swept_bodies.npz): conductor sweep inputs, triangle bodies
@@ -155,7 +155,7 @@ from this illustration. These are not released conductor designs.
   figures, which may include changes after the recorded base commit.
 - [case_0.npz](case_0.npz), [case_1.npz](case_1.npz): SI mesh vertices,
   zero-based triangle indices, stream functions, **raw** contours and validation
-  points/target/sheet/contour fields. Load with `numpy.load(path,
+  points and target, stream function and contour fields. Load with `numpy.load(path,
   allow_pickle=False)`.
 - [coil_designs.png](coil_designs.png), [coil_designs.svg](coil_designs.svg):
   generated supports and smoothed, filtered contours.

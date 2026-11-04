@@ -1,0 +1,144 @@
+{
+  "baseline": {
+    "request_sha256": "8ed843f5f4898b84909e0c4b6c6463df98beea24b59591e0b627e9e3e53a8c83",
+    "source_hash": "ecf9159a1eb3345f772e4aec3b8285962b10d308c8b244b113410e1ac0511dc9",
+    "fixed_current_A": 1.9210534194378994,
+    "contour_rms_percent": 3.915713680054104,
+    "review_rms_percent": 5.018734480680404,
+    "review_p95_deg": 19.806558573289035,
+    "min_bend_mm": 2.723731693585374,
+    "length_m": 11.719806313889487,
+    "fabrication_pass": false,
+    "sheet_pass": true,
+    "pipeline_sweep": false,
+    "reason": [
+      "part001_body0001:route_clearance_violation;sweep_clearance_violation;sweep_self_intersection;minimum_bend_radius_violation;unresolved_frame_sampling"
+    ],
+    "route_search": {
+      "status": "baseline_retained",
+      "reason": "no_validated_improvement",
+      "selected_route_status": "invalid",
+      "selected_manufacturing_failure_reasons": "route_clearance_violation;sweep_clearance_violation;sweep_self_intersection;minimum_bend_radius_violation;curvature_envelope_violation;unresolved_frame_sampling;support_surface_penetration",
+      "selection_policy": "regular",
+      "candidate_count": 0,
+      "accepted_improvement_found_within_budget": false,
+      "infeasibility_proven": false
+    },
+    "review_distances": {
+      "sweep_configured_min_bend_radius_m": 0.003,
+      "sweep_min_bend_radius_violation": true,
+      "sweep_required_centerline_clearance_m": 0.001664213562373095,
+      "sweep_route_clearance_margin_m": -0.001663009721350584,
+      "sweep_route_clearance_violation": true,
+      "sweep_capsule_clearance_violation_count": 1392,
+      "sweep_capsule_clearance_violation": true,
+      "sweep_final_min_bend_radius_m": 0.002723731693585374,
+      "sweep_final_min_bend_point_index": 154,
+      "sweep_final_min_bend_radius_violation": true
+    },
+    "pipeline_bend": {
+      "sweep_final_min_bend_radius_m": 0.001079517625694795,
+      "sweep_bend_infeasible_count": 4,
+      "sweep_bend_trim_conflict_count": 4,
+      "sweep_bend_window_envelope_count": 12,
+      "sweep_final_min_bend_point_index": 2294
+    },
+    "changes": {}
+  },
+  "lift": {
+    "request_sha256": "25e4ed6823ce5fe093757f0c003d02f79bb999288d1f738173ea055d9a687ba9",
+    "source_hash": "0e8be9c253a4c769e3acfd118704ac9ba95fca54313851613bf340a532da4df1",
+    "fixed_current_A": 1.9210534194378994,
+    "contour_rms_percent": 3.915713680054104,
+    "review_rms_percent": 5.044007950496991,
+    "review_p95_deg": 20.27947887252978,
+    "min_bend_mm": 2.0843390656151377,
+    "length_m": 11.741544967090615,
+    "fabrication_pass": false,
+    "sheet_pass": true,
+    "pipeline_sweep": false,
+    "reason": [
+      "part001_body0001:route_clearance_violation;minimum_bend_radius_violation;unresolved_frame_sampling"
+    ],
+    "route_search": {
+      "status": "baseline_retained",
+      "reason": "no_validated_improvement",
+      "selected_route_status": "invalid",
+      "selected_manufacturing_failure_reasons": "route_clearance_violation;minimum_bend_radius_violation;curvature_envelope_violation;unresolved_frame_sampling;support_surface_penetration",
+      "selection_policy": "regular",
+      "candidate_count": 0,
+      "accepted_improvement_found_within_budget": false,
+      "infeasibility_proven": false
+    },
+    "review_distances": {
+      "sweep_configured_min_bend_radius_m": 0.003,
+      "sweep_min_bend_radius_violation": true,
+      "sweep_required_centerline_clearance_m": 0.001664213562373095,
+      "sweep_route_clearance_margin_m": -0.001663009721350584,
+      "sweep_route_clearance_violation": true,
+      "sweep_capsule_clearance_violation_count": 0,
+      "sweep_capsule_clearance_violation": false,
+      "sweep_final_min_bend_radius_m": 0.0020843390656151376,
+      "sweep_final_min_bend_point_index": 1359,
+      "sweep_final_min_bend_radius_violation": true
+    },
+    "pipeline_bend": {
+      "sweep_final_min_bend_radius_m": 0.0010726168157286784,
+      "sweep_bend_infeasible_count": 24,
+      "sweep_bend_trim_conflict_count": 24,
+      "sweep_bend_window_envelope_count": 16,
+      "sweep_final_min_bend_point_index": 5926
+    },
+    "changes": {
+      "normal_shift_length": 0.0025
+    }
+  },
+  "opening": {
+    "request_sha256": "16f5972dc04e217deb4059d214ea06dec155d820237a9ee1ca9f2aa5c2181939",
+    "source_hash": "0e8be9c253a4c769e3acfd118704ac9ba95fca54313851613bf340a532da4df1",
+    "fixed_current_A": 1.9210534194378994,
+    "contour_rms_percent": 3.915713680054104,
+    "review_rms_percent": 5.157036303040131,
+    "review_p95_deg": 16.24310595441191,
+    "min_bend_mm": 0.13623620473832446,
+    "length_m": 11.700976743411179,
+    "fabrication_pass": false,
+    "sheet_pass": true,
+    "pipeline_sweep": false,
+    "reason": [
+      "part001_body0001:route_topology_failure;route_clearance_violation;sweep_clearance_violation;sweep_self_intersection;minimum_bend_radius_violation;curvature_envelope_violation;folded_sweep_quad;local_profile_inversion;unresolved_frame_sampling;poor_sweep_triangle_quality;adaptive_sampling_depth_limit;support_surface_penetration"
+    ],
+    "route_search": {
+      "status": "baseline_retained",
+      "reason": "no_validated_improvement",
+      "selected_route_status": "invalid",
+      "selected_manufacturing_failure_reasons": "route_topology_failure;route_clearance_violation;sweep_clearance_violation;sweep_self_intersection;minimum_bend_radius_violation;curvature_envelope_violation;unresolved_frame_sampling;support_surface_penetration",
+      "selection_policy": "regular",
+      "candidate_count": 0,
+      "accepted_improvement_found_within_budget": false,
+      "infeasibility_proven": false
+    },
+    "review_distances": {
+      "sweep_configured_min_bend_radius_m": 0.003,
+      "sweep_min_bend_radius_violation": true,
+      "sweep_required_centerline_clearance_m": 0.001664213562373095,
+      "sweep_route_clearance_margin_m": -0.001663009721350584,
+      "sweep_route_clearance_violation": true,
+      "sweep_capsule_clearance_violation_count": 1187,
+      "sweep_capsule_clearance_violation": true,
+      "sweep_final_min_bend_radius_m": 0.00013623620473832447,
+      "sweep_final_min_bend_point_index": 3696,
+      "sweep_final_min_bend_radius_violation": true
+    },
+    "pipeline_bend": {
+      "sweep_final_min_bend_radius_m": 0.001036017973209997,
+      "sweep_bend_infeasible_count": 4,
+      "sweep_bend_trim_conflict_count": 4,
+      "sweep_bend_window_envelope_count": 20,
+      "sweep_final_min_bend_point_index": 910
+    },
+    "changes": {
+      "interconnection_cut_width": 0.009
+    }
+  }
+}

@@ -22,7 +22,7 @@ from .metrics import dsv_target_mask
 from .models import CoilPart, ContourLine, Mesh, TargetField, WirePath
 from .parallel import parallel_map, resolve_worker_count, should_parallelize
 from .physics import biot_savart_wire_path
-from .progress import ProgressReporter, progress_scope
+from .progress import DesignCancelled, ProgressReporter, progress_scope
 from .symmetry import (
     absolute_tolerance as _symmetry_absolute_tolerance,
     generated_candidate_symmetric_part_pairs as _symmetry_candidate_part_pairs,
@@ -2278,6 +2278,7 @@ def regularize_contour_paths(parts: list[CoilPart], config: CoilGenConfig) -> li
         smoothing_work_sample_counts: list[int] = []
         smoothing_output_target_lengths: list[float] = []
         smoothing_failure_reasons: dict[str, int] = {}
+        local_fit_count = 0
         proposed_min_distance = original_min_distance
         if do_smoothing:
             smoother = MeshContourBSplineSmoother(part.mesh, patch_rings=patch_rings)
@@ -2301,7 +2302,8 @@ def regularize_contour_paths(parts: list[CoilPart], config: CoilGenConfig) -> li
             proposed_min_distance = _part_min_centerline_distance(smoothed)
             proposed = [result.applied for result in smoothing_results]
             accepted = list(proposed)
-            if any(proposed) and bool(getattr(config, "contour_smoothing_preserve_min_turn_distance", True)):
+            guard_spacing = bool(getattr(config, "contour_smoothing_preserve_min_turn_distance", True))
+            if any(proposed) and guard_spacing:
                 smoothed, accepted = _accept_spacing_safe_smoothed_contours(
                     candidate_contours,
                     smoothed,
@@ -2310,11 +2312,22 @@ def regularize_contour_paths(parts: list[CoilPart], config: CoilGenConfig) -> li
                     original_min_distance,
                     config,
                 )
-                smoothing_spacing_rejected_count = sum(
-                    proposed_flag and not accepted_flag for proposed_flag, accepted_flag in zip(proposed, accepted)
+            if mesh_coupled and max_displacement > 0 and guard_spacing and config.contour_smoothing_local_fallback:
+                _recover_local_contour_fits(
+                    smoother,
+                    candidate_contours,
+                    smoothed,
+                    smoothing_results,
+                    accepted,
+                    original_min_distance,
+                    config,
                 )
-                smoothing_rejected = smoothing_spacing_rejected_count > 0
+            smoothing_spacing_rejected_count = sum(
+                result.applied and not accepted_flag for result, accepted_flag in zip(smoothing_results, accepted)
+            )
+            smoothing_rejected = smoothing_spacing_rejected_count > 0
             smoothing_contour_count = sum(accepted)
+            local_fit_count = sum(result.reason == "bounded_local_fit" for result in smoothing_results)
             smoothing_failed_count = sum(not result.applied for result in smoothing_results)
             for result in smoothing_results:
                 if not result.applied:
@@ -2344,10 +2357,14 @@ def regularize_contour_paths(parts: list[CoilPart], config: CoilGenConfig) -> li
                 if accepted_flag and result.mesh_scale_m > 0.0
             ]
             smoothing_mesh_gains = [
-                result.mesh_gain_applied for result, accepted_flag in zip(smoothing_results, accepted) if accepted_flag
+                result.mesh_gain_applied
+                for result, accepted_flag in zip(smoothing_results, accepted)
+                if accepted_flag and result.reason != "bounded_local_fit"
             ]
             smoothing_work_sample_counts = [
-                result.work_sample_count for result, accepted_flag in zip(smoothing_results, accepted) if accepted_flag
+                result.work_sample_count
+                for result, accepted_flag in zip(smoothing_results, accepted)
+                if accepted_flag and result.reason != "bounded_local_fit"
             ]
             smoothing_output_target_lengths = [
                 result.output_target_segment_length_m
@@ -2380,9 +2397,10 @@ def regularize_contour_paths(parts: list[CoilPart], config: CoilGenConfig) -> li
                 "contour_path_smoothing_applied": bool(smoothing_applied),
                 "contour_path_smoothing_rejected": bool(smoothing_rejected),
                 "contour_path_smoothing_scope": "unconnected_contours",
-                "contour_path_smoothing_method": _contour_smoothing_method(
-                    do_smoothing,
-                    smoothing_parameterizations,
+                "contour_path_smoothing_method": (
+                    "surface_periodic_bspline_with_local_corner_fits"
+                    if local_fit_count
+                    else _contour_smoothing_method(do_smoothing, smoothing_parameterizations)
                 ),
                 "contour_path_smoothing_parameterizations": tuple(sorted(set(smoothing_parameterizations))),
                 "contour_path_smoothing_factor": float(smoothing_factor),
@@ -2404,6 +2422,7 @@ def regularize_contour_paths(parts: list[CoilPart], config: CoilGenConfig) -> li
                 "contour_path_smoothing_max_displacement_m": float(max_displacement),
                 "contour_path_smoothing_displacement_cap_enabled": bool(max_displacement > 0.0),
                 "contour_path_smoothing_contour_count": int(smoothing_contour_count if smoothing_applied else 0),
+                "contour_path_smoothing_local_fit_count": local_fit_count,
                 "contour_path_smoothing_failed_count": int(smoothing_failed_count),
                 "contour_path_smoothing_failure_reasons": dict(sorted(smoothing_failure_reasons.items())),
                 "contour_path_smoothing_spacing_rejected_count": int(smoothing_spacing_rejected_count),
@@ -2437,6 +2456,43 @@ def _contour_smoothing_method(enabled: bool, parameterizations: list[str]) -> st
     if selected <= {"harmonic_local_patch"}:
         return "harmonic_parameterized_periodic_bspline"
     return "mixed_surface_parameterized_periodic_bspline"
+
+
+def _recover_local_contour_fits(smoother, originals, paths, results, accepted, original_spacing, config):
+    """Offer a local fit only where a valid global fit exhausted its physical or topological room."""
+    requested = float(config.min_turn_distance)
+    required = min(original_spacing, requested) if requested > 0 else original_spacing
+    for index, result in enumerate(results):
+        if accepted[index] or result.reason not in {
+            "applied",
+            "displacement_limit_exceeded",
+            "fitted_curve_repeated_face_passages",
+        }:
+            continue
+        source = originals[index]
+        others = paths[:index] + paths[index + 1 :]
+        target_length = float(config.contour_resample_target_segment_length) or source.length / (
+            4 * (len(source.v) - 1)
+        )
+        try:
+            fit = smoother.round_available_corners(
+                source,
+                others,
+                config.contour_smoothing_max_displacement,
+                required,
+                target_length,
+                config.contour_smoothing_output_samples_per_mesh_length,
+            )
+        except DesignCancelled:
+            raise
+        except (ValueError, RuntimeError, FloatingPointError, np.linalg.LinAlgError):
+            continue
+        if fit is None:
+            continue
+        tolerance = max(1e-9, 1e-4 * required)
+        if any(_contour_pair_min_distance(fit.contour.v, other.v) + tolerance < required for other in others):
+            continue
+        paths[index], results[index], accepted[index] = fit.contour, fit, True
 
 
 def _normalise_contour_path_regularization_mode(value: object) -> str:

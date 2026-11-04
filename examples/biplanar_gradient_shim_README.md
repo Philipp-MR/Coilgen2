@@ -7,7 +7,7 @@ Their requested fields span all Cartesian Bz harmonics through degree two.
 
 All target coordinates are world metres. B₀ is 3 T along world z. Every channel
 uses the same world-origin spherical ROI with radius **R = 20 mm**, a 40 mm DSV,
-the same 257-point design grid, and a distinct denser independent sheet grid.
+the same 257-point design grid, and a denser independent grid for validating the field from the stream function.
 
 | Channel | Requested Bz in tesla | Normalization |
 |---|---|---|
@@ -41,13 +41,13 @@ The initial support mesh uses 14 × 14 subdivisions on each plane. Refine it and
 the field grids before claiming convergence; the starting discretization makes
 the complete collection practical to investigate.
 
-Each saved study requests a power-minimizing continuous sheet, a 4% design RMS
-budget and 5% independent-sheet budget, 16 gradient or 12 shim contour levels,
-routing within each support circuit, physical conductor sweeping, field
+Each saved study minimizes Joule power over the stream function, with a 4% RMS
+field error budget on the design grid and 5% on the independent grid. It requests
+16 gradient or 12 shim contour levels, routing within each support circuit, conductor sweeping, field
 evaluation at the original solved current and strict fabrication review.
-Contour/wire errors and manufacturing failures remain visible even when a sheet
-passes. The default does not supply amplifier-current, voltage, cooling or
-duty-cycle limits; those must be added for the intended hardware.
+Contour/wire errors and manufacturing failures remain visible even when the field
+from the stream function passes validation. Set the amplifier-current, voltage,
+cooling and duty-cycle limits for the intended hardware.
 
 The channels are designed independently. Neither layer separation nor a
 per-channel pass establishes inter-channel clearance, mutual inductance,
@@ -78,9 +78,9 @@ and winding complexity.
 
 ## Recorded numerical smoke
 
-The nine default sheet studies completed with independent-grid RMS errors of
-3.980–4.310%, within their saved 5% sheet budgets. Their aggregate numerical
-runtime was about 40 s on the local single-thread smoke run. This checks sheet
+The nine default stream function solves completed with independent-grid RMS errors of
+3.980–4.310%, within their saved 5% budgets. Their aggregate numerical
+runtime was about 40 s on the local single-thread smoke run. This checks field
 feasibility on these grids; mesh convergence and realized-wire acceptance are
 separate questions. The common target basis has rank nine and condition number
 approximately one after column normalization. That measures target sampling,
@@ -88,7 +88,7 @@ not the conditioning of the surface-current optimization operator.
 
 Two full studies also completed without weakening the geometry checks:
 
-| Channel | Independent sheet RMS | Contour RMS | Routed-centroid RMS | Original evaluation current | Runtime | Strict geometry |
+| Channel | Stream function RMS error (independent grid) | Contour RMS | Routed-centroid RMS | Original evaluation current | Runtime | Strict geometry |
 |---|---|---|---|---|---|---|
 | Gy | 4.1071% | 4.0084% | 4.1161% | 20.6454 A | 172 s | Failed |
 | Z2 | 3.9828% | 4.1146% | 6.8729% | 5.59844 A | 195 s | Failed |

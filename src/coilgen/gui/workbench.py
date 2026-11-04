@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDockWidget,
-    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -83,11 +82,13 @@ from ..application.design_studies import (
     set_study_notes_batch,
 )
 from ..attribution import AUTHOR_CREDIT, AUTHOR_ROLE, PROJECT_URL, software_attribution
+from ..application.session import PIPELINE_STAGES, request_controls, stage_study_changes, submit_design
+from ..config import INTERCONNECTION_AXIS_MODES
 from ..persistence import atomic_text, json_value
 from ..research.jobs import JobManager, RuntimePolicy
 from ..research.storage import result_metadata_digest
 from .viewport import create_viewport
-from .controls import ScientificSpinBox, SettingsPanel
+from .controls import ScientificSpinBox, SettingsDock, SettingsPanel
 from .editors import SUPPORT_EDITORS
 from .history import HistoryPanel
 from .problems import ProblemsPanel
@@ -113,7 +114,8 @@ from .export_panel import (
 )
 from .job_history import job_origin, format_job_timestamp
 from .winding_intent import WINDING_INTENTS, winding_intent, winding_overrides
-from .icons import TARGET_MODE_ICONS, WINDING_ICONS, icon
+from .icons import TARGET_MODE_ICONS, icon
+from .pictograms import NODE_ICONS, model_node_icons, target_icon as _target_icon
 from .visual_selectors import CircuitSelector, SurfaceGallery
 from .channels_panel import ChannelOverview
 from .target_regions import TargetRegionEditor, default_region
@@ -126,11 +128,11 @@ from .conductor_preview import ConductorPreview
 from .conductor_profile import ConductorProfileEditor
 from .design_progress import ComputationIndicator
 from .activity_feedback import ComputationFeedback
-from .design_plan import build_design_plan
+from .design_plan import build_design_plan, recorded_stage_keys
 from .design_plan_panel import DesignPlanPanel
 from .live_preview import LivePreviewController
 from .run_loading import CompletedRunLoadTask, StoppedReuseTask
-from .run_metadata import read_run_metadata
+from .run_metadata import has_saved_request, read_run_metadata
 from .results_overview import ResultsOverviewPanel
 from .optimization_summary import (
     build_optimization_summary,
@@ -142,18 +144,19 @@ from .about import AboutDialog
 from .branding import LogoLabel
 
 
-STAGES = (
-    ("Prepare model", "prepared"),
-    ("Optimize current sheet", "sheet"),
-    ("Generate contours", "contours"),
-    ("Connect / sweep conductors", "routed"),
-    ("Full design evaluation", "evaluated"),
-)
+STAGES = tuple((label, key) for key, label in PIPELINE_STAGES)
+COMPUTE_CAPTIONS = {
+    "prepared": "Prepare model",
+    "sheet": "Optimize stream function",
+    "contours": "Generate contours",
+    "routed": "Connect / sweep",
+    "evaluated": "Compute full design",
+}
 NODES = (
     ("geometry", "Geometry and mesh"),
     ("target", "Target field and regions"),
     ("material", "Conductor and material"),
-    ("optimization", "Continuous-sheet optimization"),
+    ("optimization", "Stream function optimization"),
     ("winding", "Winding and routing"),
     ("validation", "Validation settings"),
     ("results", "Results and provenance"),
@@ -170,16 +173,6 @@ WORKFLOW_PAGES = (
     "results",
     "export",
 )
-NODE_ICONS = {
-    "geometry": "mesh",
-    "target": "target-gradient",
-    "material": "conductor-profile",
-    "optimization": "stream-function",
-    "winding": "connected-winding",
-    "validation": "independent-validation",
-    "results": "field-error",
-    "export": "export-conductor",
-}
 STAGE_ICONS = {
     "prepared": "mesh",
     "sheet": "stream-function",
@@ -195,6 +188,28 @@ QPushButton:pressed { background: #04386d; }
 QPushButton:focus { border: 2px solid #002d5c; }
 QPushButton:disabled { background: #dce3eb; color: #596777; border-color: #b9c5d2; }
 """
+# Desktop implementation of each shared session action (application/session.py
+# ACTIONS). The browser binds the same ids; tests/test_browser_workbench.py checks both.
+SESSION_ACTION_METHODS = {
+    "new_project": "new_project",
+    "load_template": "load_template",
+    "open_project": "open_project",
+    "save_project": "save_project",
+    "import_support_mesh": "import_mesh",
+    "undo": "undo_action",
+    "redo": "redo_action",
+    "apply_settings": "apply_settings",
+    "advanced_settings": "_advanced_dialog",
+    "select_channel": "_channel_changed",
+    "duplicate_channel": "_add_channel_dialog",
+    "remove_channel": "remove_active_channel",
+    "compute": "compute",
+    "compute_channels": "compute_channels",
+    "cancel_job": "cancel_selected_job",
+    "open_run": "_open_run_dialog",
+    "show_dataset": "viewport",
+    "export_geometry": "export_selected_geometry",
+}
 CONTROL_FIELDS = {
     "resistivity": "specific_conductivity_conductor",
     "sheet_thickness": "conductor_thickness",
@@ -215,31 +230,8 @@ CONTROL_FIELDS = {
 }
 
 
-def _target_icon(config):
-    """Use a signed mode pictogram only for a recognized positive Bz mode."""
-    if config.target_field_definition_file != "none":
-        return "target-map"
-    if config.target_field_component != "Bz":
-        return "field-component"
-    recipe = recognize_solid_harmonic_target(config.field_shape_function)
-    if recipe is not None:
-        if any(getattr(config, key) != value for key, value in recipe.to_config_overrides().items()):
-            return "target-harmonic"
-        modes = {0: ("Z2", 1), 1: ("XZ", -1), -1: ("YZ", -1), 2: ("X2-Y2", 1), -2: ("XY", 1)}
-        if recipe.degree == 2 and recipe.order in modes:
-            mode, sign = modes[recipe.order]
-            if sign * recipe.coefficient_T > 0:
-                return TARGET_MODE_ICONS[mode]
-        return "target-harmonic"
-    expression = str(config.field_shape_function).strip()
-    if expression in {"x", "y", "z"} and config.target_gradient_strength > 0:
-        return TARGET_MODE_ICONS[f"G{expression}"]
-    try:
-        if float(expression) > 0:
-            return TARGET_MODE_ICONS["Z0"]
-    except ValueError:
-        pass
-    return "field-component"
+def _checkpoint_label(stage):
+    return "stream function" if stage.value == "sheet" else stage.value
 
 
 class ProjectEdit(QUndoCommand):
@@ -380,6 +372,7 @@ class CoilGenWorkbench(QMainWindow):
         self._design_study_task_label = ""
         self._saved_settings_task = None
         self._acceptance_refresh_key = None
+        self._circuit_available = False
         self._restoring_panels = False
         self._closing = False
         self._panel_views = {}
@@ -407,13 +400,12 @@ class CoilGenWorkbench(QMainWindow):
         self.live_preview.changed.connect(self._refresh_computation_indicator)
         if hasattr(self.viewport, "activity_changed"):
             self.viewport.activity_changed.connect(self._refresh_computation_indicator)
-        for name in ("dataset", "inspection_task"):
-            control = getattr(self.viewport, name, None)
-            if control is not None:
-                control.activated.connect(self._pause_live_follow)
+        inspection = getattr(self.viewport, "inspection_task", None)
+        if inspection is not None:
+            inspection.activated.connect(self.live_preview.pin_plot)
         actions = getattr(self.viewport, "inspection_actions", {})
         for action in actions.values():
-            action.triggered.connect(self._pause_live_follow)
+            action.triggered.connect(self.live_preview.pin_plot)
         self.timer = QTimer(self)
         self.timer.setInterval(200)
         self.timer.timeout.connect(self.poll_jobs)
@@ -433,6 +425,7 @@ class CoilGenWorkbench(QMainWindow):
         self.poll_jobs()
         if self.screen() is not None:
             bounds = self.screen().availableGeometry()
+            self._fit_sidebar_columns(min(1440, bounds.width()))
             self.resize(min(1440, bounds.width()), min(930, bounds.height()))
 
     def _build_central(self):
@@ -497,6 +490,7 @@ class CoilGenWorkbench(QMainWindow):
         self.view_context = ViewContextHeader(self)
         self.view_context.history_requested.connect(lambda: self._open_evidence(self.history_panel))
         self.view_context.model_requested.connect(self._view_applied_model)
+        self.view_context.design_requested.connect(lambda: self._inspect_selected_saved_settings(None))
         layout.addWidget(self.view_context)
         self.results_overview = ResultsOverviewPanel(center)
         self.results_overview.action_requested.connect(self._results_action)
@@ -579,21 +573,27 @@ class CoilGenWorkbench(QMainWindow):
         logo.setObjectName("welcome_logo")
         welcome.addWidget(logo, alignment=Qt.AlignmentFlag.AlignHCenter)
         welcome.addSpacing(24)
-        subtitle = QLabel("Create a coil design, open a saved project, or start from a template.", self.welcome)
+        subtitle = QLabel(
+            "Choose a gradient, shim coil or coil system in Browse examples.\n"
+            "After loading a design, click Compute full design.",
+            self.welcome,
+        )
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setWordWrap(True)
         welcome.addWidget(subtitle)
         for label, symbol, callback, name in (
-            ("New project…", "project-json", self._new_project_dialog, "welcome_new_project"),
+            ("Browse examples…", "load-template", self._welcome_template_menu, "welcome_load_template"),
             ("Open project…", "open", self._open_dialog, "welcome_open_project"),
-            ("Load template…", "load-template", self._welcome_template_menu, "welcome_load_template"),
+            ("New blank project…", "project-json", self._new_project_dialog, "welcome_new_project"),
         ):
             button = QPushButton(label, self.welcome)
             button.setObjectName(name)
             button.setIcon(icon(symbol))
             button.setIconSize(QSize(26, 26))
             button.setMinimumHeight(48)
-            button.setMaximumWidth(340)
+            button.setFixedWidth(300)
+            if name == "welcome_load_template":
+                button.setStyleSheet(PRIMARY_ACTION_STYLE)
             button.clicked.connect(callback)
             welcome.addWidget(button, alignment=Qt.AlignmentFlag.AlignHCenter)
         welcome.addStretch(1)
@@ -664,7 +664,7 @@ class CoilGenWorkbench(QMainWindow):
             self.stage_items[stage] = item
         model.setExpanded(True)
         study.setExpanded(True)
-        self.tree_items["results"].setExpanded(True)
+        self.tree_items["results"].setExpanded(False)
         self.result_tree_items = {}
         for key, label, symbol in (
             ("metrics", "Field results and metrics", "field-error"),
@@ -701,16 +701,26 @@ class CoilGenWorkbench(QMainWindow):
         record = self.runs.get(self._selected_run) if self.project is not None else None
         error = self._run_verification_error(record) if record is not None else ""
         key = (id(record), id(self.project), error)
-        if getattr(self, "_results_overview_key", None) == key:
+        previous_key = getattr(self, "_results_overview_key", None)
+        if previous_key == key:
             return
+        if previous_key is None or (previous_key[0] == id(None)) != (record is None):
+            self.tree_items["results"].setExpanded(record is not None)
         self._results_overview_key = key
         stale = False
+        self._circuit_available = False
         if record is not None:
             metadata = read_run_metadata(record)
             owner = metadata.get("project_id")
             fingerprint = metadata.get("project_fingerprint")
             stale = bool(
                 (owner and owner != self.project.id) or (fingerprint and fingerprint != self.project.fingerprint)
+            )
+            self._circuit_available = bool(
+                not error
+                and metadata.get("winding_steps")
+                and owner == self.project.id
+                and metadata.get("project_model_fingerprint") == self.project.model_fingerprint
             )
         self.results_overview.set_record(record, source_error=error, stale=stale)
 
@@ -785,9 +795,12 @@ class CoilGenWorkbench(QMainWindow):
                 if state.get("id") != self.live_preview.job_id:
                     self._begin_live_follow(state)
                 else:
+                    was_pinned = self.live_preview.watching and not self.live_preview.following
                     self.live_preview.resume()
+                    if was_pinned and hasattr(self.viewport, "follow_latest_stage_preview"):
+                        self.viewport.follow_latest_stage_preview()
         else:
-            self.live_preview.pause()
+            self.live_preview.pin_plot()
 
     def _begin_live_follow(self, state):
         if not self._live_owner_matches(state):
@@ -801,13 +814,13 @@ class CoilGenWorkbench(QMainWindow):
     def _show_live_preview(self, job_id, preview):
         if (
             job_id != self.live_preview.job_id
-            or not self.live_preview.following
+            or not self.live_preview.watching
             or not self._live_owner_matches(self.live_preview.state)
-            or job_id in self.runs
+            or (job_id == self._selected_run and job_id in self.runs)
         ):
             return
         if hasattr(self.viewport, "display_stage_preview"):
-            self.viewport.display_stage_preview(preview.arrays, preview.metadata)
+            self.viewport.display_stage_preview(preview.arrays, preview.metadata, follow=self.live_preview.following)
         self._refresh_view_context()
         self._refresh_design_progress()
         self._refresh_stage_status(refresh_reuse=False)
@@ -983,11 +996,15 @@ class CoilGenWorkbench(QMainWindow):
         self.apply_settings_button.setObjectName("apply_settings")
         self.apply_settings_button.setIcon(icon("check"))
         self.apply_settings_button.clicked.connect(self.apply_settings)
-        self.revert_settings_button = QPushButton("Revert")
+        self.revert_settings_button = QPushButton("Revert draft")
         self.revert_settings_button.setIcon(icon("undo"))
         self.revert_settings_button.clicked.connect(self.revert_draft)
         footer.addWidget(self.apply_settings_button, 1)
         footer.addWidget(self.revert_settings_button)
+        cancel = QPushButton("Cancel")
+        cancel.setObjectName("cancel_settings")
+        cancel.setToolTip("Close settings and discard unapplied edits.")
+        footer.addWidget(cancel)
         layout.addLayout(footer)
         self.page_label = QLabel()
         self.page_label.setObjectName("workflow_page")
@@ -1004,9 +1021,16 @@ class CoilGenWorkbench(QMainWindow):
         navigation.addWidget(self.back_button)
         navigation.addWidget(self.next_button)
         layout.addLayout(navigation)
-        dock = QDockWidget("Settings", self)
+        dock = SettingsDock("Settings", self)
         dock.setObjectName("settings_dock")
         dock.setWidget(container)
+        cancel.clicked.connect(dock.close)
+        escape = QAction(dock)
+        escape.setShortcut(QKeySequence(Qt.Key.Key_Escape))
+        escape.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        escape.triggered.connect(dock.close)
+        dock.addAction(escape)
+        dock.dismissed.connect(self._discard_settings_page)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         self.resizeDocks([dock], [360], Qt.Orientation.Horizontal)
         dock.setFloating(True)
@@ -1058,12 +1082,12 @@ class CoilGenWorkbench(QMainWindow):
         self.runs_table = self._table(
             [
                 "Run",
-                "Sheet checks",
+                "Stream function checks",
                 "Sweep checks",
                 "Fabrication review",
                 "Sheet P [W]",
-                "Sheet Kmax [A/m]",
-                "Independent sheet RMS [%]",
+                "Peak |K| [A/m]",
+                "Independent stream function field RMS [%]",
                 "Revision",
             ]
         )
@@ -1234,19 +1258,21 @@ class CoilGenWorkbench(QMainWindow):
                 "Save project as…", lambda: self._save_dialog(True), QKeySequence.StandardKey.SaveAs, icon_name="save"
             )
         )
-        file_menu.addAction(self._action("Export active channel Python…", self._export_dialog, icon_name="export"))
-        file_menu.addAction(
-            self._action("Export enabled channels Python…", self._export_assembly_dialog, icon_name="export")
-        )
         file_menu.addAction(self._action("Open completed run…", self._open_run_dialog, icon_name="run-history"))
-        file_menu.addAction(self._action("Import support mesh…", self._import_mesh_dialog, icon_name="support-import"))
-        file_menu.addAction(self._action("Import target map…", self._import_target_dialog, icon_name="target-map"))
-        file_menu.addAction(self._action("Export selected run artifacts…", self._export_run_dialog, icon_name="export"))
+        imports = file_menu.addMenu("Import model inputs")
+        imports.addAction(self._action("Import support mesh…", self._import_mesh_dialog, icon_name="support-import"))
+        imports.addAction(self._action("Import target map…", self._import_target_dialog, icon_name="target-map"))
         file_menu.addAction(
             self._action(
                 "Export conductor geometry…", lambda: self.navigate_workflow("export"), icon_name="export-conductor"
             )
         )
+        exports = file_menu.addMenu("Export Python and run files")
+        exports.addAction(self._action("Active channel Python script…", self._export_dialog, icon_name="export"))
+        exports.addAction(
+            self._action("Enabled channels Python script…", self._export_assembly_dialog, icon_name="export")
+        )
+        exports.addAction(self._action("Selected run files…", self._export_run_dialog, icon_name="export"))
         file_menu.addSeparator()
         self.close_project_action = self._action("Close project", self.close_project)
         file_menu.addAction(self.close_project_action)
@@ -1355,6 +1381,13 @@ class CoilGenWorkbench(QMainWindow):
         )
         self.field_analysis_action.setEnabled(False)
         view_menu.addAction(self.field_analysis_action)
+        self.shielding_action = self._action(
+            "Plot shielding surface…",
+            lambda: self._field_analysis_dialog(view="shielding"),
+            icon_name="shielded-gradient",
+        )
+        self.shielding_action.setEnabled(False)
+        view_menu.addAction(self.shielding_action)
         self.routing_analysis_action = self._action(
             "Inspect interconnections…", self._routing_analysis_dialog, icon_name="connected-winding"
         )
@@ -1374,6 +1407,7 @@ class CoilGenWorkbench(QMainWindow):
         if inspection_menu is not None:
             inspection_menu.addSeparator()
             inspection_menu.addAction(self.field_analysis_action)
+            inspection_menu.addAction(self.shielding_action)
             inspection_menu.addAction(self.routing_analysis_action)
         panel_icons = {
             "model_dock": "model-tree",
@@ -1589,8 +1623,7 @@ class CoilGenWorkbench(QMainWindow):
         self._set_project(self.assembly.channel(id_).project)
 
     def _channels_dialog(self):
-        if not self.apply_settings():
-            self._focus_draft_error()
+        if self.project is None:
             return
         previous = getattr(self, "channels_window", None)
         if previous is not None:
@@ -1796,8 +1829,7 @@ class CoilGenWorkbench(QMainWindow):
             with QSignalBlocker(self.tree):
                 self.tree.setCurrentItem(self.stage_items[stage])
         if hasattr(self.project, "update_study"):
-            changes = {"pipeline_stage": stage, "fabricate": self._full_fabrication if stage == "evaluated" else False}
-            self.apply_study(changes)
+            self.apply_study(stage_study_changes(stage, self._full_fabrication))
 
     def apply_study(self, changes):
         return self.apply_inputs(study_changes=changes, label="Edit study controls")
@@ -2032,7 +2064,34 @@ class CoilGenWorkbench(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._fit_sidebar_columns(event.size().width())
         self._adapt_toolbars()
+
+    def _fit_sidebar_columns(self, width):
+        """Share a tabbed sidebar when two dock columns would crowd the plot."""
+        if not hasattr(self, "design_plan_dock"):
+            return
+        model = self.findChild(QDockWidget, "model_dock")
+        compact = width < 1150
+        if (
+            model is None
+            or model.isFloating()
+            or self.design_plan_dock.isFloating()
+            or compact == getattr(self, "_compact_sidebar", None)
+        ):
+            return
+        show_model, show_plan = not model.isHidden(), not self.design_plan_dock.isHidden()
+        self._compact_sidebar = compact
+        if compact:
+            self.tabifyDockWidget(model, self.design_plan_dock)
+            if show_model:
+                model.raise_()
+        else:
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.design_plan_dock)
+        if not show_model:
+            model.hide()
+        if not show_plan:
+            self.design_plan_dock.hide()
 
     def navigate_page(self, offset):
         key = self._workflow_page()
@@ -2139,11 +2198,6 @@ class CoilGenWorkbench(QMainWindow):
         self.pending_label.setObjectName("pending_changes")
         self.pending_label.setWordWrap(True)
         pending_layout.addWidget(self.pending_label)
-        revert = QPushButton("Revert draft")
-        revert.setIcon(icon("undo"))
-        revert.setObjectName("revert_draft")
-        revert.clicked.connect(self.revert_draft)
-        pending_layout.addWidget(revert)
         pending.hide()
         self.pending_panel = pending
         layout.addWidget(pending)
@@ -2205,7 +2259,7 @@ class CoilGenWorkbench(QMainWindow):
             scope.setWordWrap(True)
             descriptions = {
                 "prepared": "Inspect support meshes, target samples and field operators.",
-                "sheet": "Optimize the continuous current sheet and check its field independently.",
+                "sheet": "Optimize the stream function and check the resulting field on independent samples.",
                 "contours": "Discretize the stream function into wire-current contours using the chosen policy.",
                 "routed": "Run the requested interconnections and conductor sweeping. Circuit and solids settings determine the geometry.",
                 "evaluated": "Evaluate the requested winding fields and electrical estimates. Review geometry and validation before export.",
@@ -2219,25 +2273,12 @@ class CoilGenWorkbench(QMainWindow):
             for label, boundary in STAGES:
                 selector.addItem(label, boundary)
             selector.setCurrentIndex(selector.findData(stage))
-            form.addRow("Requested output", selector)
-            selector.currentIndexChanged.connect(
-                lambda: self.stage_selector.setCurrentIndex(self.stage_selector.findData(selector.currentData()))
-            )
-            scope_window = PanelWindow("Requested study operations", scope, container, size=(640, 420))
-            scope_button = QPushButton("Requested operations…")
-            scope_button.setIcon(icon("compute-study"))
-            scope_button.clicked.connect(scope_window.open_panel)
-            layout.addWidget(scope_button)
-            button = QPushButton("Use this study step")
-            button.setIcon(icon("compute-study"))
-            button.setObjectName("compute_through_stage")
-            button.clicked.connect(
-                lambda _checked=False, selected=stage: self.stage_selector.setCurrentIndex(
-                    self.stage_selector.findData(selected)
-                )
-            )
-            # Retain the programmatic action inside the detailed scope window.
-            scope_window.layout().insertWidget(scope_window.layout().count() - 1, button)
+            self._register(form, "study_boundary", "Requested output", selector)
+            layout.addWidget(scope)
+            instruction = QLabel(f"When ready, click {COMPUTE_CAPTIONS[stage]} in the main window.")
+            instruction.setObjectName("study_compute_instruction")
+            instruction.setWordWrap(True)
+            layout.addWidget(instruction)
             note(
                 "Saved solutions retain their settings and checks. Execution completion does not imply engineering acceptance."
             )
@@ -2253,9 +2294,8 @@ class CoilGenWorkbench(QMainWindow):
                 selector.addItem("Imported / custom support", config.coil_mesh_file)
                 selected = selector.count() - 1
             selector.setCurrentIndex(selected)
-            form.addRow(QLabel("Winding support surface"))
-            form.addRow(selector)
-            selector.currentIndexChanged.connect(lambda: self._switch_support(selector.currentData()))
+            self._register(form, "support_type", "Winding support surface", selector)
+            self._draft_builder = dict
             editor = next((entry for entry in SUPPORT_EDITORS if entry.source == config.coil_mesh_file), None)
             if editor:
                 values = list(getattr(config, editor.parameter_field))
@@ -2270,7 +2310,8 @@ class CoilGenWorkbench(QMainWindow):
                 def geometry_changes():
                     return {
                         editor.parameter_field: editor.apply_edits(
-                            values, {key: self._value(key) for key in self._changed_controls}
+                            values,
+                            {f.key: self._value(f.key) for f in editor.fields if f.key in self._changed_controls},
                         )
                     }
 
@@ -2289,7 +2330,7 @@ class CoilGenWorkbench(QMainWindow):
                 self._draft_builder = lambda: {
                     "imported_mesh_length_scale_to_m": self._value("imported_mesh_length_scale_to_m")
                 }
-            import_button = QPushButton("Import support mesh…")
+            import_button = QPushButton("Import and apply support mesh…")
             import_button.setObjectName("import_support")
             import_button.setIcon(icon("support-import"))
             import_button.clicked.connect(self._import_mesh_dialog)
@@ -2343,6 +2384,18 @@ class CoilGenWorkbench(QMainWindow):
             self._draft_controls["conductor_mounting_mode"].setToolTip(
                 "Centered keeps the profile relative to the routed path. Outer/inner mounting offsets the conductor along the support normal. The saved fabrication centroid and field source must be reviewed."
             )
+            self._combo(
+                form,
+                "conductor_path_reference",
+                "Sweep reference point",
+                ["centroid", "profile_origin"],
+                config.conductor_path_reference,
+            )
+            self._draft_controls["conductor_path_reference"].setToolTip(
+                "Profile point that the exported 3D path, the fabricated field source and the bend checks follow. "
+                "centroid: area centre of the profile. profile_origin: the profile's (0, 0) point, e.g. a round "
+                "litz wire centre inside an omega-shaped printed holder."
+            )
             self._check(form, "return_path_lift", "Lift crossing return paths", not config.skip_normal_shift)
             self._number(
                 form, "normal_shift_mm", "Return-path lift", config.normal_shift_length * 1000, " mm", 0, 10000
@@ -2367,6 +2420,7 @@ class CoilGenWorkbench(QMainWindow):
                 "sweep_insulation_thickness": self._value("insulation") / 1000,
                 "cross_sectional_points": self._value("cross_sectional_points"),
                 "conductor_mounting_mode": self._value("conductor_mounting_mode"),
+                "conductor_path_reference": self._value("conductor_path_reference"),
                 "skip_normal_shift": not self._value("return_path_lift"),
                 "normal_shift_length": self._value("normal_shift_mm") * 1e-3,
             }
@@ -2447,10 +2501,11 @@ class CoilGenWorkbench(QMainWindow):
             snapshot = QGroupBox("Cost function and solver")
             snapshot.setObjectName("optimization_summary")
             snapshot_layout = QVBoxLayout(snapshot)
-            summary_title, summary_equation, summary_solver = QLabel(), QLabel(), QLabel()
+            summary_title, summary_equation, summary_bounds, summary_solver = QLabel(), QLabel(), QLabel(), QLabel()
             for label, object_name in (
                 (summary_title, "optimization_summary_title"),
                 (summary_equation, "optimization_cost_equation"),
+                (summary_bounds, "optimization_constraints"),
                 (summary_solver, "optimization_solver_summary"),
             ):
                 label.setObjectName(object_name)
@@ -2472,6 +2527,11 @@ class CoilGenWorkbench(QMainWindow):
             snapshot_layout.addWidget(all_parameters)
             # Keep the mathematical objective visible above the decision cards.
             layout.insertWidget(layout.count() - 1, snapshot)
+            formula_button = QPushButton("Custom formula…")
+            formula_button.setObjectName("edit_custom_formula")
+            formula_button.setIcon(icon("stream-function"))
+            formula_button.setToolTip("Edit the stream function objective and add formula constraints.")
+            layout.insertWidget(layout.indexOf(snapshot) + 1, formula_button)
             objective = (
                 native_objective
                 if config.research_physics is None
@@ -2481,12 +2541,67 @@ class CoilGenWorkbench(QMainWindow):
                 form,
                 "objective",
                 "Objective family",
-                [native_objective, "power", "minimax", "magnetic_energy", "mixture"],
+                [native_objective, "power", "minimax", "magnetic_energy", "mixture", "custom"],
                 objective,
             )
             self._draft_controls["objective"].setToolTip(
                 "Native preserves the implemented matrix cost. Power minimizes sheet Joule loss [W]; minimax minimizes peak K [A/m]; magnetic energy minimizes stored energy [J]. Mixture uses editable dimensionless weights and physical reference scales in All optimization parameters."
             )
+            from ..research.formulas import FORMULA_EXAMPLE_CONSTRAINTS, FORMULA_EXAMPLE_OBJECTIVE
+
+            physics = config.research_physics or {}
+            regional_fields = self.project.study.get("requirements") is not None
+            self._text(form, "custom_objective", "Minimize scalar expression", physics.get("custom_objective") or "")
+            formula = self._draft_controls["custom_objective"]
+            formula.setPlaceholderText(FORMULA_EXAMPLE_OBJECTIVE)
+            constraints = QPlainTextEdit()
+            saved_constraints = physics.get("custom_constraints") or ()
+            constraints.setPlainText(
+                saved_constraints if isinstance(saved_constraints, str) else "\n".join(saved_constraints)
+            )
+            constraints.setPlaceholderText(FORMULA_EXAMPLE_CONSTRAINTS)
+            constraints.setTabChangesFocus(True)
+            constraints.setFixedHeight(86)
+            self._register(form, "custom_constraints", "Additional constraints (one per line)", constraints)
+            self._combo(
+                form,
+                "custom_solver",
+                "Formula solver",
+                ["auto", "conic", "local"],
+                physics.get("custom_solver", "auto"),
+            )
+            self._draft_controls["custom_solver"].setToolTip(
+                "Auto uses a conic solve for disciplined convex formulas and constrained SLSQP for other formulas. "
+                "Local starts from a constrained power solution and searches for a local optimum."
+            )
+            self._check(
+                form,
+                "include_default_field_constraints",
+                "Include configured field budgets",
+                not regional_fields and physics.get("include_default_field_constraints", True),
+            )
+            self._draft_controls["include_default_field_constraints"].setToolTip(
+                "Adds the configured design and suppression field budgets to the formula constraints. "
+                "Studies with named regions use their region and pose constraints."
+            )
+            for name in (
+                "custom_objective",
+                "custom_constraints",
+                "custom_solver",
+                "include_default_field_constraints",
+            ):
+                self._draft_fields[name] = ("research_physics",)
+
+            def open_formula():
+                section = self._settings_decisions["Solve strategy"]
+                section.open()  # Capture the previous strategy for Cancel, Escape, or window close.
+                if normalize_optimization_method(self._value("sf_opt_method")) != "constrained_quadratic":
+                    self._draft_controls["sf_opt_method"].setCurrentText("constrained_quadratic")
+                if self._value("objective") == native_objective or not self._value("custom_constraints").strip():
+                    self._draft_controls["objective"].setCurrentText("custom")
+                section.open_for(formula if self._value("objective") == "custom" else constraints)
+
+            formula_button.clicked.connect(open_formula)
             effective_method = "constrained_quadratic" if config.research_physics is not None else config.sf_opt_method
             self._combo(
                 form,
@@ -2533,13 +2648,34 @@ class CoilGenWorkbench(QMainWindow):
                     or self._value("objective") == native_objective
                 ):
                     return None
-                return {**(config.research_physics or {}), "objective": self._value("objective")}
+                family = self._value("objective")
+                draft = {**physics, "objective": family}
+                if family == "custom":
+                    draft["custom_objective"] = self._value("custom_objective").strip()
+                elif physics.get("objective") == "custom":
+                    draft.pop("custom_objective", None)
+                if "custom_constraints" in self._changed_controls:
+                    draft["custom_constraints"] = [
+                        line.strip() for line in self._value("custom_constraints").splitlines() if line.strip()
+                    ]
+                if "include_default_field_constraints" in self._changed_controls:
+                    draft["include_default_field_constraints"] = self._value("include_default_field_constraints")
+                if "custom_solver" in self._changed_controls:
+                    draft["custom_solver"] = self._value("custom_solver")
+                return draft
 
             def show_mode(_text=None):
                 method = normalize_optimization_method(self._raw_value("sf_opt_method"))
                 tikhonov = method == "tikhonov"
                 physical = selected_physics() is not None
+                has_formulas = physical and (
+                    self._value("objective") == "custom" or bool(self._value("custom_constraints").strip())
+                )
                 self._draft_controls["objective"].setEnabled(method == "constrained_quadratic")
+                formula.setEnabled(physical and self._value("objective") == "custom")
+                constraints.setEnabled(physical)
+                self._draft_controls["custom_solver"].setEnabled(has_formulas)
+                self._draft_controls["include_default_field_constraints"].setEnabled(physical and not regional_fields)
                 self._draft_controls["tikonov_reg_factor"].setEnabled(method != "constrained_quadratic")
                 self._draft_controls["regularization_selection_method"].setEnabled(tikhonov and not physical)
                 self._draft_controls["stream_function_cost_function"].setEnabled(not physical)
@@ -2579,7 +2715,9 @@ class CoilGenWorkbench(QMainWindow):
                     if explicit_key in self._draft_controls
                     else getattr(config, explicit_key, 0)
                 )
-                default_budgets = not physical or selected_physics().get("include_default_field_constraints", True)
+                default_budgets = not regional_fields and (
+                    not physical or self._value("include_default_field_constraints")
+                )
                 for name in ("target_error_constraint_metric", "target_error_rms_limit_T", "target_error_std_limit_T"):
                     if name in self._draft_controls:
                         self._draft_controls[name].setEnabled(default_budgets)
@@ -2592,14 +2730,25 @@ class CoilGenWorkbench(QMainWindow):
                 overrides["research_physics"] = selected_physics()
                 if "current_limit" in self._draft_controls:
                     overrides["surface_current_density_limit_A_per_m"] = self._value("current_limit")
+                # Allowance display depends only on its unit map, even while a formula is incomplete.
+                policy = {key: physics[key] for key in ("acceptance_absolute_by_unit",) if key in physics}
+                policy_config = replace(config, research_physics=policy if physical else None)
                 if "acceptance_slack" in self._changed_controls:
-                    candidate = replace(config, **overrides)
-                    overrides.update(
-                        field_acceptance_slack_overrides(candidate, self._value("acceptance_slack") * 1e-9)
-                    )
-                description = build_optimization_summary(config, overrides if self._changed_controls else None)
+                    allowance = field_acceptance_slack_overrides(policy_config, self._value("acceptance_slack") * 1e-9)
+                    policy_config = replace(policy_config, **allowance)
+                    if physical:
+                        overrides["research_physics"].update(allowance["research_physics"])
+                    else:
+                        overrides.update(allowance)
+                description = build_optimization_summary(
+                    config,
+                    overrides if self._changed_controls else None,
+                    requirements=self.project.study.get("requirements"),
+                )
                 summary_title.setText(description.title + (" · pending draft" if self._changed_controls else ""))
                 summary_equation.setText(description.equation)
+                summary_bounds.setText("\n".join(description.constraint_lines))
+                summary_bounds.setVisible(bool(description.constraint_lines))
                 summary_solver.setText(description.solver_text)
                 snapshot.setToolTip("\n".join((*description.terms, *description.notes)))
                 if tikhonov:
@@ -2608,36 +2757,34 @@ class CoilGenWorkbench(QMainWindow):
                     message = f"Native quadratic objective: mode={self._value('constrained_quadratic_objective_mode')!r}; cost function={self._value('stream_function_cost_function')!r}. Configured native quadratic penalties remain active; the Tikhonov factor is used only by a requested scan fallback; no research physical objective is configured. Selecting a physical objective switches to the physical convex solver. Full controls are available in All optimization parameters."
                 elif method == "constrained_quadratic":
                     budgets = (
-                        "configured default field budgets and explicit physical/scenario bounds"
-                        if selected_physics().get("include_default_field_constraints", True)
+                        "the field limits for each region and pose, and configured physical/scenario bounds"
+                        if regional_fields
+                        else "configured default field budgets and explicit physical/scenario bounds"
+                        if default_budgets
                         else "explicit physical/scenario bounds; default native field budgets are disabled"
                     )
-                    message = f"The physical convex solver uses {budgets} while minimizing the selected objective. Solver feasibility and independent field validation are reported separately. Magnetic energy is in joules; Joule power is in watts; peak surface current is in A/m."
+                    message = f"The physical solver uses {budgets} while minimizing the selected objective. Solver feasibility and independent field validation are reported separately."
+                    if has_formulas:
+                        message += " Enter one scalar objective and one comparison per constraint line. In Auto mode, disciplined convex formulas use the conic backend. Other formulas use a local constrained solve."
                 elif method == "target_error_constrained_efficiency":
                     message = "The native field-budget search selects a feasible regularized candidate with the lowest configured resistance norm. It is a factor search, rather than a direct conic optimality certificate. Factor range, candidate count and retry controls are editable in All optimization parameters."
                 else:
                     message = f"The imported formulation {method!r} remains active. Its controls are available in Advanced settings. Choose constrained_quadratic to configure physical convex objectives."
                 mode_info.setText(message)
                 if "acceptance_slack" in self._draft_controls:
-                    candidate = replace(config, **overrides)
                     if "acceptance_slack" not in self._changed_controls:
-                        allowance = field_acceptance_slack_T(candidate) * 1e9
+                        allowance = field_acceptance_slack_T(policy_config) * 1e9
                         widget = self._draft_controls["acceptance_slack"]
                         with QSignalBlocker(widget):
                             widget.setValue(allowance)
                         self._widget_initial["acceptance_slack"] = widget.value()
                         self._draft_initial["acceptance_slack"] = allowance
-                    else:
-                        candidate = replace(
-                            candidate,
-                            **field_acceptance_slack_overrides(candidate, self._value("acceptance_slack") * 1e-9),
-                        )
-                    independent = independent_field_acceptance_slack_T(candidate) * 1e9
+                    independent = independent_field_acceptance_slack_T(policy_config) * 1e9
                     acceptance_info.setText(
                         "This control edits the selected solver's absolute field allowance. "
                         + (
                             "The physical solver and independent check use the same policy. "
-                            if candidate.research_physics is not None
+                            if physical
                             else "The native solver allowance and independent research check use separate existing policies. "
                         )
                         + f"Selected-policy independent-grid allowance: {independent:.6g} nT. Relative budgets remain additional constraints."
@@ -2645,6 +2792,10 @@ class CoilGenWorkbench(QMainWindow):
 
             self._draft_controls["sf_opt_method"].currentTextChanged.connect(show_mode)
             self._draft_controls["objective"].currentTextChanged.connect(show_mode)
+            formula.textChanged.connect(show_mode)
+            constraints.textChanged.connect(show_mode)
+            self._draft_controls["custom_solver"].currentTextChanged.connect(show_mode)
+            self._draft_controls["include_default_field_constraints"].toggled.connect(show_mode)
             show_mode()
             self._number(
                 form,
@@ -2791,15 +2942,10 @@ class CoilGenWorkbench(QMainWindow):
             )
 
             def optimization_changes():
-                physics = dict(config.research_physics or {})
-                objective = self._value("objective")
-                if objective != native_objective:
-                    physics["objective"] = objective
                 method = self._value("sf_opt_method")
-                if (
-                    selected_physics() is None
-                    and config.research_physics is not None
-                    and ("sf_opt_method" in self._changed_controls or "objective" in self._changed_controls)
+                draft = selected_physics()
+                if draft is None and (
+                    "sf_opt_method" in self._changed_controls or "objective" in self._changed_controls
                 ):
                     constrained = [
                         name
@@ -2814,6 +2960,8 @@ class CoilGenWorkbench(QMainWindow):
                         if physics.get(name) is not None
                     ]
                     constrained.extend(name for name in ("field_constraints", "scenarios") if physics.get(name))
+                    if self._value("custom_constraints").strip():
+                        constrained.append("custom_constraints")
                     if constrained:
                         raise ValueError(
                             (
@@ -2825,9 +2973,15 @@ class CoilGenWorkbench(QMainWindow):
                             + ", ".join(constrained)
                             + ". Explicitly remove them in Advanced settings before switching formulations; the current model is unchanged."
                         )
+                if draft is not None and "custom_constraints" in self._changed_controls:
+                    from ..research.formulas import parse_formulas
+
+                    # Retain editor line numbers in syntax errors and store canonical nonempty constraints.
+                    program = parse_formulas(draft.get("custom_objective", ""), self._value("custom_constraints"))
+                    draft["custom_constraints"] = list(program.constraint_lines)
                 changes = {
                     **{name: self._value(name) for name in primary_keys},
-                    "research_physics": selected_physics(),
+                    "research_physics": draft,
                     "sf_opt_method": method,
                     "tikonov_reg_factor": self._value("tikonov_reg_factor"),
                     "target_error_tolerance_percent": self._value("target_error_tolerance_percent"),
@@ -2961,8 +3115,19 @@ class CoilGenWorkbench(QMainWindow):
                 config.contour_smoothing_preserve_min_turn_distance,
             )
             self._draft_controls["contour_smoothing_preserve_min_turn_distance"].setToolTip(
-                "Reject proposed contour changes that violate the backend's minimum centerline-spacing guard. "
-                "Physical conductor clearance and field accuracy still require evaluation."
+                "Reject fits below the requested spacing. With zero spacing, or when the original turns "
+                "already miss the limit, preserve their original minimum separation. Final copper clearance "
+                "and field accuracy are evaluated separately."
+            )
+            self._check(
+                form,
+                "contour_smoothing_local_fallback",
+                "Try local fits when a whole-loop fit fails",
+                config.contour_smoothing_local_fallback,
+            )
+            self._draft_controls["contour_smoothing_local_fallback"].setToolTip(
+                "Requires local mesh smoothing, a positive displacement limit and spacing protection. "
+                "Try a bounded local fit before keeping an extracted loop. Tight corners can stay pinned."
             )
             contour_info = QLabel(
                 "Smoothing changes closed contour paths before cutting and interconnection. "
@@ -2994,6 +3159,18 @@ class CoilGenWorkbench(QMainWindow):
                 10000,
             )
             self._number(form, "min_bend", "Minimum bend radius", config.sweep_min_bend_radius * 1000, " mm", 0, 10000)
+            if not config.skip_postprocessing and not config.contour_only_sweep_mode:
+                self._combo(
+                    form,
+                    "interconnection_axis",
+                    "Interconnection direction",
+                    list(INTERCONNECTION_AXIS_MODES),
+                    config.interconnection_axis,
+                )
+                self._draft_controls["interconnection_axis"].setToolTip(
+                    "Direction of the cuts, return rails and connectors. Choose b0 for the main field "
+                    "or support_axis for the support's bore axis. Field targets and errors use the B₀ direction."
+                )
             self._check(form, "sweep", "Generate conductor solids", not config.skip_sweep)
             winding_info = QLabel()
             winding_info.setObjectName("winding_scope")
@@ -3050,13 +3227,20 @@ class CoilGenWorkbench(QMainWindow):
                 "contour_smoothing_preserve_min_turn_distance": self._value(
                     "contour_smoothing_preserve_min_turn_distance"
                 ),
+                "contour_smoothing_local_fallback": self._value("contour_smoothing_local_fallback"),
                 "min_turn_distance": self._value("min_turn_distance") / 1000,
                 "sweep_min_bend_radius": self._value("min_bend") / 1000,
+                "interconnection_axis": (
+                    self._value("interconnection_axis")
+                    if "interconnection_axis" in self._draft_controls
+                    and self._value("interconnection_axis") in INTERCONNECTION_AXIS_MODES
+                    else config.interconnection_axis
+                ),
                 "skip_sweep": not self._value("sweep"),
                 **winding_overrides(config, self._value("winding_intent")),
             }
             note(
-                "Contour step Δψ gives the wire current [A]; sheet current K is [A/m]. Feed/return conductors and drive terminals require explicit definition. Geometry closure alone does not establish a complete driven circuit."
+                "Contour step Δψ gives the wire current [A]; surface current density K is [A/m]. Feed/return conductors and drive terminals require explicit definition. Geometry closure alone does not establish a complete driven circuit."
             )
         elif key == "validation":
             self._integer(
@@ -3072,10 +3256,10 @@ class CoilGenWorkbench(QMainWindow):
             record = self.runs.get(self._selected_run)
             options, diagnostic = (), self._run_verification_error(self._selected_run)
             if record is not None and not diagnostic:
-                from ..application.cad import geometry_catalog
+                from ..application.cad import export_catalog
 
                 try:
-                    options = geometry_catalog(record)
+                    options = export_catalog(record)
                 except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
                     diagnostic = f"Saved geometry verification failed: {exc}"
             self.geometry_export_panel = GeometryExportPanel(
@@ -3087,15 +3271,15 @@ class CoilGenWorkbench(QMainWindow):
             self.geometry_export_panel.set_context(
                 self.project, assembly=self.assembly, pending=self._has_input_drafts()
             )
-            if record is not None and not self._owns_export_run(record):
+            if record is not None and not self._has_export_source(record):
                 self.geometry_export_panel.include_project.setChecked(False)
                 self.geometry_export_panel.include_project.setEnabled(False)
                 self.geometry_export_panel.include_project.setToolTip(
-                    "Open the run's owning project to include its inputs and results in the export package."
+                    "Open this run’s exact source revision to include it, or export geometry alone."
                 )
                 self.geometry_export_panel.scope.setText(
                     self.geometry_export_panel.scope.text()
-                    + " Open its owning project to include a project JSON with this run."
+                    + " Exact source revision unavailable; geometry-only export is available."
                 )
             self.geometry_export_panel.export_button.setStyleSheet(PRIMARY_ACTION_STYLE)
             self.geometry_export_panel.export_button.setIcon(icon("export-conductor", foreground="primary"))
@@ -3125,6 +3309,7 @@ class CoilGenWorkbench(QMainWindow):
         self._group_settings(key, form, layout)
         self.apply_settings_button.setVisible(bool(self._draft_controls))
         self.revert_settings_button.setVisible(bool(self._draft_controls))
+        self.revert_settings_button.setEnabled(self._draft_dirty)
         if notes:
             help_text = QLabel("\n\n".join(notes))
             help_text.setWordWrap(True)
@@ -3146,20 +3331,18 @@ class CoilGenWorkbench(QMainWindow):
             engineering_button.setObjectName("gradient_engineering_" + key)
             engineering_button.clicked.connect(operation)
             if key == "winding":
-                record = self.runs.get(self._selected_run)
-                engineering_button.setEnabled(
-                    bool(
-                        record
-                        and read_run_metadata(record).get("winding_steps")
-                        and not self._run_verification_error(record)
-                    )
+                self._refresh_results_overview()
+                engineering_button.setEnabled(self._circuit_available)
+                engineering_button.setToolTip(
+                    "Requires verified winding evidence for this channel's applied numerical model."
                 )
-                engineering_button.setToolTip("Requires a verified Fabrication review for the applied numerical model.")
             layout.addWidget(engineering_button)
-        advanced = QPushButton("Advanced settings…")
-        advanced.setIcon(icon("settings"))
-        advanced.clicked.connect(self._advanced_dialog)
-        layout.addWidget(advanced)
+        if key in {"geometry", "target", "material", "optimization", "winding", "validation"}:
+            advanced = QPushButton("Advanced model settings…")
+            advanced.setIcon(icon("settings"))
+            advanced.setToolTip("Edit the active project's native parameters.")
+            advanced.clicked.connect(self._advanced_dialog)
+            layout.addWidget(advanced)
         layout.addStretch()
         old = self.settings.takeWidget()
         self.settings.setWidget(container)
@@ -3182,7 +3365,7 @@ class CoilGenWorkbench(QMainWindow):
         index = [key for _label, key in STAGES].index(stage)
         lines = ["Support mesh, target samples and field operators."]
         if index >= 1:
-            lines.append("Current-sheet optimization and independent sheet-field check.")
+            lines.append("Optimize the stream function and check the resulting field on independent samples.")
         if index >= 2:
             from ..engineering_limits import engineering_contouring_enabled, max_wire_current_A, min_wire_distance_m
 
@@ -3223,21 +3406,7 @@ class CoilGenWorkbench(QMainWindow):
             lines.append("Partial solution: final winding acceptance remains unverified.")
         return "Requested outputs and scope:\n" + "\n".join(f"• {line}" for line in lines)
 
-    def _switch_support(self, source):
-        if source == self.project.config.coil_mesh_file:
-            return
-        if not self.apply_settings():
-            self._node_changed(self._current_node)
-            return
-        editor = next((entry for entry in SUPPORT_EDITORS if entry.source == source), None)
-        if editor:
-            self.apply_config(
-                {"coil_mesh_file": source, "surface_is_cylinder_flag": editor.cylindrical},
-                f"Use {editor.label.lower()} support",
-            )
-
-    def _new_target_region(self, shape, sampling="volume"):
-        config = self.project.config
+    def _new_target_region(self, config, shape, sampling):
         region = default_region(config, shape, sampling)
         if (
             config.target_region_geometry is None
@@ -3251,84 +3420,27 @@ class CoilGenWorkbench(QMainWindow):
             region["center_m"] = np.mean(mesh.vertices, axis=0).tolist()
         return region
 
-    def _reset_region_choices(self):
+    def _region_choice_changes(self, config):
         editor = self._target_region_editor
-        config = self.project.config
-        region = config.target_region_geometry if isinstance(config.target_region_geometry, dict) else {}
-        shape = region.get("shape", "sphere")
-        if config.target_field_definition_file != "none":
-            shape = "imported_map"
-        elif config.target_region_geometry is None and config.target_mesh_file != "none":
-            shape = "legacy_mesh"
-        sampling = region.get("sampling", "volume")
-        for selector, value in ((editor.gallery, shape), (editor.sampling, sampling)):
-            with QSignalBlocker(selector):
-                selector.setCurrentIndex(selector.findData(value))
+        if not editor.gallery.isEnabled():
+            return {}
+        shape = editor.gallery.currentData()
+        sampling = editor.sampling.currentData()
+        if "target_region_shape" in self._changed_controls or not config.target_region_geometry:
+            region = self._new_target_region(config, shape, sampling)
+        else:
+            region = {**config.target_region_geometry, "sampling": sampling}
+        changes = {"target_region_geometry": region, "set_roi_into_mesh_center": False}
+        if shape != "enclosing_mesh":
+            changes["target_mesh_file"] = "none"
+        elif config.target_mesh_file != "none":
+            from ..geometry import load_optional_target_mesh
+            from ..target_regions import validate_target_region_mesh
 
-    def _switch_target_region(self, shape):
-        if self.project.config.target_field_definition_file != "none":
-            self._reset_region_choices()
-            return
-        if shape in {"imported_map", "legacy_mesh"}:
-            return
-        if not self.apply_settings():
-            self._reset_region_choices()
-            return
-        config = self.project.config
-        previous = config.target_region_geometry if isinstance(config.target_region_geometry, dict) else {}
-        if shape == "enclosing_mesh" and config.target_mesh_file == "none":
-            self._import_region_dialog()
-            self._reset_region_choices()
-            return
-        sampling = previous.get("sampling", "volume")
-        if not isinstance(sampling, str) or sampling not in {"volume", "surface"}:
-            sampling = "volume"
-        try:
-            region = self._new_target_region(shape, sampling)
-            changes = {"target_region_geometry": region, "set_roi_into_mesh_center": False}
-            if shape != "enclosing_mesh":
-                changes["target_mesh_file"] = "none"
-            else:
-                from ..geometry import load_optional_target_mesh
-                from ..target_regions import validate_target_region_mesh
-
-                validate_target_region_mesh(
-                    load_optional_target_mesh(config.target_mesh_file, config, self.project.project_root), sampling
-                )
-            self.apply_config(changes, f"Use {shape.replace('_', ' ')} target region")
-        except (ValueError, TypeError, OSError, KeyError) as exc:
-            self._error(f"Target region rejected: {exc}")
-        self._reset_region_choices()
-
-    def _switch_target_region_sampling(self, sampling):
-        if self.project.config.target_field_definition_file != "none":
-            self._reset_region_choices()
-            return
-        if not self.apply_settings():
-            self._reset_region_choices()
-            return
-        config = self.project.config
-        try:
-            region = (
-                dict(config.target_region_geometry)
-                if config.target_region_geometry
-                else self._new_target_region("sphere")
+            validate_target_region_mesh(
+                load_optional_target_mesh(config.target_mesh_file, config, self.project.project_root), sampling
             )
-            if region.get("sampling") == sampling:
-                return
-            region["sampling"] = sampling
-            changes = {"target_region_geometry": region, "set_roi_into_mesh_center": False}
-            if region["shape"] == "enclosing_mesh":
-                from ..geometry import load_optional_target_mesh
-                from ..target_regions import validate_target_region_mesh
-
-                validate_target_region_mesh(
-                    load_optional_target_mesh(config.target_mesh_file, config, self.project.project_root), sampling
-                )
-            self.apply_config(changes, f"Sample target region {sampling}")
-        except (ValueError, TypeError, OSError, KeyError) as exc:
-            self._error(f"Target sampling rejected: {exc}")
-        self._reset_region_choices()
+        return changes
 
     def _build_run_inspector(self, layout, note):
         metadata = self.runs[self._selected_run].metadata
@@ -3336,7 +3448,7 @@ class CoilGenWorkbench(QMainWindow):
         fabrication = metadata.get("fabrication") or {}
         sweeps = metadata.get("pipeline_sweeps") or {}
         verdicts = run_verdicts(metadata)
-        note(f"Continuous-sheet acceptance: {verdicts['sheet']}. Scope: {summary.get('scope', 'unverified')}.")
+        note(f"Stream function acceptance: {verdicts['sheet']}. Scope: {summary.get('scope', 'unverified')}.")
         note(
             f"Pipeline sweep geometry: {verdicts['sweeps']}. "
             + (
@@ -3345,14 +3457,29 @@ class CoilGenWorkbench(QMainWindow):
                 else "No sweep-check evidence was saved in this run."
             )
         )
-        rows = [("Continuous sheet", "Power [W]", summary.get("power_w"))]
+        rows = [("Stream function model", "Power [W]", summary.get("power_w"))]
         independent = summary.get("validated_relative_field_error")
         rows.append(
-            ("Independent sheet grid", "Relative RMS error [%]", None if independent is None else independent * 100)
+            (
+                "Independent stream function validation grid",
+                "Relative RMS error [%]",
+                None if independent is None else independent * 100,
+            )
         )
         contour = metadata.get("wire_fields", {}).get("contour", {})
-        if contour.get("current_A") is not None:
-            rows.append(("Original contours", "Current [A]", contour["current_A"]))
+        original = contour.get("at_stream_current") or {}
+        has_original = original.get("available") is True and original.get("current_A") is not None
+        if has_original:
+            rows.append(("Contours before routing", "Original contour current [A]", original["current_A"]))
+        if contour.get("current_A") is not None and (not has_original or contour.get("current_refitted") is not False):
+            label = (
+                "Refitted evaluation current [A]"
+                if contour.get("current_refitted") is True
+                else "Original contour current [A]"
+                if contour.get("current_refitted") is False
+                else "Recorded current [A] (policy unrecorded)"
+            )
+            rows.append(("Contours before routing", label, contour["current_A"]))
         for body in fabrication.get("electrical_metrics", {}).get("bodies", []):
             scope = f"Review: {body.get('body_id', 'conductor')}"
             for key, label, scale in (
@@ -3426,7 +3553,7 @@ class CoilGenWorkbench(QMainWindow):
         diagnostics.setMaximumHeight(180)
         layout.addWidget(diagnostics)
         note(
-            "Failures identify the affected physical conductor. A sheet-field pass does not certify routing, conductor solids or the fabricated field. Review current and electrical metrics retain the report's geometry and circuit assumptions."
+            "Failures identify the affected physical conductor. A passing stream function field check does not certify routing, conductor solids or the fabricated field. Review current and electrical metrics retain the report's geometry and circuit assumptions."
         )
         terminal_assumptions = []
         for step in metadata.get("winding_steps", []):
@@ -3532,9 +3659,9 @@ class CoilGenWorkbench(QMainWindow):
             selector.setCurrentIndex(-1)
         else:
             selector.setCurrentText(mode)
-        form.addRow("Target definition", selector)
-        selector.currentTextChanged.connect(self._switch_target_mode)
-        import_button = QPushButton("Import target map…")
+        self._register(form, "target_mode", "Target definition", selector)
+        self._draft_builder = dict
+        import_button = QPushButton("Import and apply target map…")
         import_button.setObjectName("import_target")
         import_button.setIcon(icon("target-map"))
         import_button.clicked.connect(self._import_target_dialog)
@@ -3643,7 +3770,16 @@ class CoilGenWorkbench(QMainWindow):
                 config.target_gradient_normalization,
             )
             self._combo(
-                form, "target_gradient_axis", "Gradient axis", ["x", "y", "z", "auto"], config.target_gradient_axis
+                form,
+                "target_gradient_axis",
+                "Gradient axis",
+                ["x", "y", "z", "magnitude", "auto"],
+                config.target_gradient_axis,
+            )
+            self._draft_controls["target_gradient_axis"].setToolTip(
+                "Axis whose gradient the amplitude sets and the efficiency reports. Use magnitude (|G|) for "
+                "combined targets such as x+y or x-y; auto selects magnitude when the target gradient has more "
+                "than one component. The needed current and field error always use the complete target expression."
             )
             self._combo(
                 form, "target_field_units", "Field expression/map units", ["T", "Hz"], config.target_field_units
@@ -3866,74 +4002,46 @@ class CoilGenWorkbench(QMainWindow):
             "Suppression regions, B₀ direction and coordinate transforms are in Advanced settings. Import an Nx3 field map for Bx, By or vector targets; selecting a component does not move scalar expression values between components."
         )
 
-    def _switch_target_mode(self, mode):
-        if not self.apply_settings():
-            self._node_changed(self._current_node)
-            return
-        config = self.project.config
+    def _apply_target_mode(self, mode, config, changes, commit):
+        expression_fields = (
+            "field_shape_function",
+            "target_gradient_normalization",
+            "target_gradient_strength",
+            "target_gradient_axis",
+            "target_field_units",
+            "target_field_component",
+            "design_context",
+        )
+        remember_expression = False
         if mode == "Linear gradient":
             axis = str(config.field_shape_function).strip()
             is_linear = axis in {"x", "y", "z"} and config.target_gradient_normalization in {"auto", "linear_fit"}
-            if not is_linear:
-                self._expression_targets[self._active_channel_id] = {
-                    key: getattr(config, key)
-                    for key in (
-                        "field_shape_function",
-                        "target_gradient_normalization",
-                        "target_gradient_strength",
-                        "target_gradient_axis",
-                        "target_field_units",
-                        "target_field_component",
-                        "design_context",
-                    )
-                }
+            remember_expression = not is_linear
             axis = axis if axis in {"x", "y", "z"} else "y"
-            self._expression_editor_fingerprint = None
-            self.apply_config(
-                {
-                    "field_shape_function": axis,
-                    "target_gradient_axis": axis,
-                    "target_field_definition_file": "none",
-                    "target_field_component": "Bz",
-                    "target_field_units": "T",
-                    "target_gradient_normalization": "linear_fit",
-                    "design_context": "mr_gradient",
-                    "target_gradient_strength": config.target_gradient_strength
-                    if is_linear and config.target_field_units == "T"
-                    else 0.02,
-                },
-                "Use linear gradient target",
+            changes.update(
+                field_shape_function=axis,
+                target_gradient_axis=axis,
+                target_field_definition_file="none",
+                target_field_component="Bz",
+                target_field_units="T",
+                target_gradient_normalization="linear_fit",
+                design_context="mr_gradient",
+                target_gradient_strength=config.target_gradient_strength
+                if is_linear and config.target_field_units == "T"
+                else 0.02,
             )
         elif mode == "Spherical harmonic":
-            previous_recipe = recognize_solid_harmonic_target(config.field_shape_function)
-            if not previous_recipe or any(
-                getattr(config, key) != value for key, value in previous_recipe.to_config_overrides().items()
-            ):
-                self._expression_targets[self._active_channel_id] = {
-                    key: getattr(config, key)
-                    for key in (
-                        "field_shape_function",
-                        "target_gradient_normalization",
-                        "target_gradient_strength",
-                        "target_gradient_axis",
-                        "target_field_units",
-                        "target_field_component",
-                        "design_context",
-                    )
-                }
-            recipe = recognize_solid_harmonic_target(config.field_shape_function) or solid_harmonic_target(
-                2, 0, 100e-6, config.target_region_radius
+            recipe = recognize_solid_harmonic_target(config.field_shape_function)
+            remember_expression = not recipe or any(
+                getattr(config, key) != value for key, value in recipe.to_config_overrides().items()
             )
-            self._expression_editor_fingerprint = None
-            self.apply_config(recipe.to_config_overrides(), "Use spherical harmonic target")
+            recipe = recipe or solid_harmonic_target(2, 0, 100e-6, config.target_region_radius)
+            changes.update(recipe.to_config_overrides())
         elif mode == "Analytic expression":
-            changes = {
-                "target_field_definition_file": "none",
-                **self._expression_targets.get(self._active_channel_id, {}),
-            }
+            changes.update(
+                self._expression_targets.get(self._active_channel_id, {}), target_field_definition_file="none"
+            )
             if str(changes.get("field_shape_function", config.field_shape_function)).strip().lower() in {"", "none"}:
-                # An explicit choice creates an editable absolute-field example.
-                # Its units and scaling are shown in the target controls.
                 changes.update(
                     field_shape_function="1e-4",
                     target_field_units="T",
@@ -3941,12 +4049,50 @@ class CoilGenWorkbench(QMainWindow):
                     target_gradient_normalization="none",
                     design_context="mr_shim",
                 )
-            self._expression_editor_fingerprint = (
-                self._active_channel_id,
-                changes.get("field_shape_function", config.field_shape_function),
+
+        # The same native expression can appear in the harmonic or expression editor.
+        # Install that display choice before a successful commit rebuilds the controls.
+        previous = self._expression_editor_fingerprint
+        self._expression_editor_fingerprint = (
+            (self._active_channel_id, changes.get("field_shape_function", config.field_shape_function))
+            if mode == "Analytic expression"
+            else None
+        )
+        original = self.project
+        if not commit(changes, f"Use {mode.lower()} target"):
+            self._expression_editor_fingerprint = previous
+            return False
+        if remember_expression:
+            self._expression_targets[self._active_channel_id] = {key: getattr(config, key) for key in expression_fields}
+        if self.project is original:
+            self._node_changed(self._current_node)
+        return True
+
+    def _apply_config_draft(self, changes, commit):
+        if "support_type" in self._changed_controls:
+            source = self._draft_controls["support_type"].currentData()
+            editor = next(entry for entry in SUPPORT_EDITORS if entry.source == source)
+            changes.update(coil_mesh_file=source, surface_is_cylinder_flag=editor.cylindrical)
+        if self._changed_controls.intersection({"target_region_shape", "target_region_sampling"}):
+            config = replace(self.project.config, **changes)
+            changes.update(self._region_choice_changes(config))
+        if "target_mode" in self._changed_controls:
+            return self._apply_target_mode(
+                self._value("target_mode"), replace(self.project.config, **changes), changes, commit
             )
-            self.apply_config(changes, "Use analytic expression target")
-        self._node_changed(self._current_node)
+        return commit(changes, "Edit scientific model")
+
+    def _region_choice_needs_file(self):
+        return (
+            "target_region_shape" in self._changed_controls
+            and self._draft_controls["target_region_shape"].currentData() == "enclosing_mesh"
+            and self.project.config.target_mesh_file == "none"
+        )
+
+    def _commit_config_changes(self, changes, label):
+        if self._region_choice_needs_file():
+            return bool(self._import_region_dialog(config_changes=changes))
+        return self.apply_config(changes, label)
 
     def _number(self, form, key, label, value, suffix, minimum, maximum):
         widget = ScientificSpinBox()
@@ -4039,6 +4185,8 @@ class CoilGenWorkbench(QMainWindow):
             if isinstance(widget, QCheckBox)
             else widget.currentTextChanged
             if isinstance(widget, QComboBox)
+            else widget.textChanged
+            if isinstance(widget, QPlainTextEdit) or key == "custom_objective"
             else widget.textEdited
             if isinstance(widget, QLineEdit)
             else widget.changed
@@ -4073,6 +4221,7 @@ class CoilGenWorkbench(QMainWindow):
 
     def _update_pending(self):
         self.pending_panel.setVisible(self._draft_dirty)
+        self.revert_settings_button.setEnabled(self._draft_dirty)
         for key, widget in self._draft_controls.items():
             base = widget.property("baseDraftStyle") or ""
             border = f"border: 1px solid {tone_color('warning', self.palette()).name()}"
@@ -4100,7 +4249,16 @@ class CoilGenWorkbench(QMainWindow):
     def revert_draft(self):
         self._draft_dirty = False
         self._node_changed(self._current_node)
+        self._update_title()
+        self._refresh_view_context()
         self.statusBar().showMessage("Draft reverted; model revision unchanged", 5000)
+
+    def _discard_settings_page(self):
+        sections = [*self._focused_sections, *getattr(self._target_region_editor, "focused_sections", ())]
+        for section in sections:
+            section.dialog.hide()
+        if self.project is not None and self._draft_controls:
+            self.revert_draft()
 
     def _show_draft_error(self, message):
         self._draft_error = message
@@ -4217,9 +4375,14 @@ class CoilGenWorkbench(QMainWindow):
             return widget.currentText()
         if isinstance(widget, QLineEdit):
             return widget.text()
+        if isinstance(widget, QPlainTextEdit):
+            return widget.toPlainText()
         return widget.value()
 
     def apply_settings(self):
+        return self._apply_settings(self._commit_config_changes)
+
+    def _apply_settings(self, commit_config):
         if self.project is None:
             return True
         # Interpret only edited text: the concise display deliberately has
@@ -4251,6 +4414,11 @@ class CoilGenWorkbench(QMainWindow):
         if not self._changed_controls:
             self._update_pending()
             return True
+        if "study_boundary" in self._changed_controls:
+            stage = self._draft_controls["study_boundary"].currentData()
+            accepted = self.apply_study(stage_study_changes(stage, self._full_fabrication))
+            self._draft_dirty = not accepted
+            return accepted
         if self._draft_builder is not None:
             try:
                 fields = {
@@ -4261,8 +4429,8 @@ class CoilGenWorkbench(QMainWindow):
                 if "sf_opt_method" in fields:
                     fields.add("research_physics")
                 changes = {key: value for key, value in self._draft_builder().items() if key in fields}
-                accepted = self.apply_config(changes)
-            except (ValueError, TypeError, KeyError) as exc:
+                accepted = self._apply_config_draft(changes, commit_config)
+            except (ValueError, TypeError, KeyError, OSError) as exc:
                 self._show_draft_error(str(exc))
                 self._error(f"Model edit rejected: {exc}", open_window=False)
                 accepted = False
@@ -4294,8 +4462,7 @@ class CoilGenWorkbench(QMainWindow):
             existing.show()
             existing.raise_()
             return
-        if not self.apply_settings():
-            self._focus_draft_error()
+        if not self._settings_ready_for_editor():
             return
         owner, identity = self.project.id, self.project.model_fingerprint
 
@@ -4320,10 +4487,7 @@ class CoilGenWorkbench(QMainWindow):
         self._expert_model_fingerprint = identity
         self.expert_window.draft_changed.connect(self._refresh_input_drafts)
         self.expert_window.setWindowTitle(f"{self.project.name} · revision {self.project.revision} — Advanced settings")
-        for buttons in self.expert_window.findChildren(QDialogButtonBox):
-            cancel = buttons.button(QDialogButtonBox.StandardButton.Cancel)
-            if cancel is not None:
-                cancel.setText("Close")
+        self.expert_window.finished.connect(self._finish_expert_window)
         reload_button = QPushButton("Discard expert draft & reload current model", self.expert_window)
         reload_button.clicked.connect(self._reload_expert)
         self.expert_window.layout().addWidget(reload_button)
@@ -4332,6 +4496,10 @@ class CoilGenWorkbench(QMainWindow):
             self.expert_window.focus_optimization()
         self.expert_window.show()
         self.expert_window.raise_()
+
+    def _finish_expert_window(self):
+        self._dispose_expert_window()
+        self._refresh_input_drafts()
 
     def _dispose_expert_window(self):
         expert = getattr(self, "expert_window", None)
@@ -4376,6 +4544,14 @@ class CoilGenWorkbench(QMainWindow):
     def _has_input_drafts(self):
         expert = getattr(self, "expert_window", None)
         return self._draft_dirty or (expert is not None and expert.pending_changes)
+
+    def _settings_ready_for_editor(self):
+        if self.project is None:
+            return False
+        if self._has_input_drafts():
+            self.statusBar().showMessage("Apply or discard the open settings draft before opening another editor.")
+            return False
+        return True
 
     def _expert_draft_note(self):
         expert = getattr(self, "expert_window", None)
@@ -4441,6 +4617,14 @@ class CoilGenWorkbench(QMainWindow):
                 self._reuse_plan = ReusePlan((), (), (str(exc),))
             self._reuse_plan_fingerprint = self.project.fingerprint
         available = {entry.stage.value for entry in self._reuse_plan.available}
+        recorded = {}
+        for id_, record in self.runs.items():
+            metadata = read_run_metadata(record)
+            if not self._live_owner_matches(metadata) or self._run_verification_error(id_):
+                continue
+            for stage in recorded_stage_keys(metadata):
+                if stage not in recorded or id_ == self._selected_run:
+                    recorded[stage] = metadata
         active = [state for state in self.states.values() if self._live_owner_matches(state)]
         live = self.live_preview.state
         if not self._live_owner_matches(live) or live.get("id") in self.runs:
@@ -4451,9 +4635,12 @@ class CoilGenWorkbench(QMainWindow):
         for stage, item in self.stage_items.items():
             status = "Cached" if stage in available else "Stale" if stage in self._reuse_plan.stale else "Not computed"
             tooltip = "Compute through this boundary; source, inputs and dependencies are verified before reuse."
+            if stage in recorded and stage not in available:
+                status = "Computed"
+                tooltip += "\nCompleted in a verified run of this revision. No reusable checkpoint for this stage."
             candidate = self._reuse_plan.through(stage)
             if candidate:
-                tooltip += f"\nReusable {candidate.stage.value}: {candidate.path}"
+                tooltip += f"\nReusable {_checkpoint_label(candidate.stage)}: {candidate.path}"
             # A previous execution failure cannot erase a verified compatible
             # checkpoint. Current active execution is shown independently.
             stage_jobs = sorted(
@@ -4484,14 +4671,9 @@ class CoilGenWorkbench(QMainWindow):
                     "\nRecorded completed checkpoint of the submitted revision. "
                     "Live plot availability, final result integrity and engineering acceptance are separate."
                 )
-            if stage == "evaluated" and status == "Cached":
-                matching = [
-                    record
-                    for record in self.runs.values()
-                    if read_run_metadata(record).get("project_fingerprint") == self.project.fingerprint
-                ]
-                if matching:
-                    metadata = read_run_metadata(matching[-1])
+            if stage == "evaluated" and status in {"Cached", "Computed"}:
+                if stage in recorded:
+                    metadata = recorded[stage]
                     verdict = metadata.get("summary", {}).get("accepted")
                     checks = run_verdicts(metadata)
                     status = (
@@ -4501,8 +4683,8 @@ class CoilGenWorkbench(QMainWindow):
                         if verdict is True
                         else "Unverified"
                     )
-                    tooltip += f"\nSheet: {checks['sheet']}; pipeline sweeps: {checks['sweeps']}; fabrication review: {checks['fabrication']}."
-                else:
+                    tooltip += f"\nStream function: {checks['sheet']}; pipeline sweeps: {checks['sweeps']}; fabrication review: {checks['fabrication']}."
+                elif status == "Cached":
                     status = "Review needed"
             if status == "Stale":
                 tooltip += (
@@ -4838,7 +5020,13 @@ class CoilGenWorkbench(QMainWindow):
                 self._update_result_state()
             self._error("Saved settings inspection failed: " + error)
         elif task is not None and self.project is not None:
-            dialog = SavedSettingsDialog(request, task.project, task.node, self)
+            dialog = SavedSettingsDialog(
+                request,
+                task.project,
+                task.node,
+                self,
+                smoothing=read_run_metadata(task.record).get("contour_smoothing") or (),
+            )
             dialog.show()
             self.statusBar().showMessage("Verified saved settings opened read-only", 5000)
 
@@ -4952,7 +5140,13 @@ class CoilGenWorkbench(QMainWindow):
                 archive = (
                     replace(previous, alias=aliases.get(directory, previous.alias))
                     if previous is not None
-                    else RunArchive.capture(record, alias=aliases.get(directory))
+                    else RunArchive.capture(
+                        record,
+                        alias=aliases.get(directory),
+                        source_project=self._export_source(record)
+                        if self._has_export_source(record, retained_only=True)
+                        else None,
+                    )
                 )
                 saved[archive.id] = archive
                 paths[directory] = archive.id
@@ -5246,18 +5440,21 @@ class CoilGenWorkbench(QMainWindow):
             name, selected_filter = QFileDialog.getSaveFileName(
                 self,
                 "Save CoilGen project",
-                f"{self.project.name}.coilgen.json",
-                "CoilGen JSON (*.json);;Compact CoilGen bundle (*.coilgen)",
+                f"{self.project.name}.coilgen",
+                "Compact CoilGen bundle (*.coilgen);;CoilGen JSON (*.json)",
             )
             if not name:
                 return False
             path = Path(name)
-            if "Compact" in selected_filter and path.suffix.lower() != ".coilgen":
-                path = (
-                    path.with_suffix("")
-                    if path.name.lower().endswith(".coilgen.json")
-                    else path.with_suffix(".coilgen")
-                )
+            if "JSON" in selected_filter and path.suffix.lower() != ".json":
+                path = Path(str(path) + ".json")
+            elif "Compact" in selected_filter and path.suffix.lower() != ".coilgen":
+                if path.name.lower().endswith(".coilgen.json"):
+                    path = path.with_suffix("")
+                elif path.suffix.lower() == ".json":
+                    path = path.with_suffix(".coilgen")
+                else:
+                    path = Path(str(path) + ".coilgen")
         try:
             self.save_project(path)
             return True
@@ -5353,6 +5550,19 @@ class CoilGenWorkbench(QMainWindow):
 
     def import_region_mesh(self, path, *, length_scale_to_m=1.0, sampling="surface"):
         """Own an SI target surface independently of the winding-support units."""
+        if self._region_choice_needs_file():
+            # Use the supplied mesh for the pending region instead of opening another file picker.
+            def commit_mesh(changes, _label):
+                return self._commit_region_mesh(path, length_scale_to_m, sampling, changes)
+
+            if not self._apply_settings(commit_mesh):
+                raise ValueError("Correct pending settings before importing a target surface.")
+            return self.project
+        if not self.apply_settings():
+            raise ValueError("Correct pending settings before importing a target surface.")
+        return self._commit_region_mesh(path, length_scale_to_m, sampling, {})
+
+    def _commit_region_mesh(self, path, length_scale_to_m, sampling, changes):
         from ..geometry import read_mesh_npz, read_stl
         from ..models import Mesh
         from ..target_regions import validate_target_region_mesh
@@ -5366,8 +5576,6 @@ class CoilGenWorkbench(QMainWindow):
             raise ValueError("Source coordinate scale must be a finite positive number of metres per source unit.")
         if path.suffix.lower() == ".npz" and length_scale_to_m != 1.0:
             raise ValueError("CoilGen mesh NPZ coordinates are already metres; use source scale 1.")
-        if not self.apply_settings():
-            raise ValueError("Correct pending settings before importing a target surface.")
         if self.project.config.target_field_definition_file != "none":
             raise ValueError(
                 "Choose an analytic target before importing a generated field region; map coordinates are authoritative."
@@ -5383,13 +5591,15 @@ class CoilGenWorkbench(QMainWindow):
         candidate = self.project.with_mesh(
             mesh,
             field="target_mesh_file",
-            changes={"target_region_geometry": region, "set_roi_into_mesh_center": False},
+            changes={**changes, "target_region_geometry": region, "set_roi_into_mesh_center": False},
         )
+        if changes:
+            candidate.validate_config(allow_incomplete=True)
         self.undo_stack.push(ProjectEdit(self, self.project, candidate, "Import target region surface"))
         self.select_node("target")
         return candidate
 
-    def _import_region_dialog(self):
+    def _import_region_dialog(self, *, config_changes=None):
         path, _ = QFileDialog.getOpenFileName(self, "Import target region surface", "", "Target surface (*.stl *.npz)")
         if not path:
             return
@@ -5412,9 +5622,10 @@ class CoilGenWorkbench(QMainWindow):
         if not accepted:
             return
         try:
-            self.import_region_mesh(
-                path, length_scale_to_m=scale, sampling="volume" if choice.startswith("Volume") else "surface"
-            )
+            sampling = "volume" if choice.startswith("Volume") else "surface"
+            if config_changes is not None:
+                return self._commit_region_mesh(path, scale, sampling, config_changes)
+            return self.import_region_mesh(path, length_scale_to_m=scale, sampling=sampling)
         except (ValueError, TypeError, OSError, KeyError, RuntimeError) as exc:
             self._error(f"Target region import rejected: {exc}")
 
@@ -5693,6 +5904,7 @@ class CoilGenWorkbench(QMainWindow):
             if existing is not None and resume_checkpoint is None and not isinstance(self.service, DesignService):
                 self._begin_live_follow(existing)
                 self.design_plan_dock.show()
+                self.design_plan_dock.raise_()
                 self._focus_job(existing["id"], open_window=False)
                 self.statusBar().showMessage(
                     f"This revision is already {existing['status']}; showing its design progress.", 10000
@@ -5703,29 +5915,25 @@ class CoilGenWorkbench(QMainWindow):
                 self._own_jobs = True
             self._snapshot_existing_jobs()
             self._refresh_stage_status()
-            plan = plan_execution(
+            # The browser workbench submits through the same shared function.
+            from ..application.session_evidence import retain_revision
+
+            retain_revision(self.jobs_directory.parent, self.project)
+            state = submit_design(
                 self.project,
+                self.jobs,
+                self._request_controls(),
+                service=self.service,
                 reuse=self._reuse_plan,
-                **self._request_controls(),
-                **({"resume_checkpoint": resume_checkpoint} if resume_checkpoint else {}),
+                resume_checkpoint=resume_checkpoint,
             )
-            plan.require_current(self.project)
-            if isinstance(self.service, DesignService):
-                state = self.service.submit_plan(self.project, self.jobs, plan)
-            else:
-                state = self.service.submit(self.project, self.jobs, **plan.request_controls())
-            state.setdefault("pipeline_stage", self.stage_selector.currentData())
-            state.setdefault("project_id", self.project.id)
-            state.setdefault("project_fingerprint", self.project.fingerprint)
-            state.setdefault("project_revision", self.project.revision)
-            for key, value in self._request_controls().items():
-                state.setdefault(key, value)
             reused = state["id"] in self.states
             self.states[state["id"]] = state
             if not reused:
                 self._session_job_ids.add(state["id"])
             self._begin_live_follow(state)
             self.design_plan_dock.show()
+            self.design_plan_dock.raise_()
             self.statusBar().showMessage(
                 f"This revision is already {state['status']}; showing its design progress."
                 if reused
@@ -5746,19 +5954,18 @@ class CoilGenWorkbench(QMainWindow):
         return matches_active_request(state, self.project, self._request_controls())
 
     def _request_controls(self):
-        return {
-            **({"engineering": self.project.study["engineering"]} if "engineering" in self.project.study else {}),
-            "pipeline_stage": self.stage_selector.currentData(),
-            "validation_resolution": self.validation_resolution,
-            "design_margin": self.design_margin,
-            "fabricate": self.fabricate,
-            "kernel_backend": self.project.study["kernel_backend"],
-        }
+        return request_controls(
+            self.project,
+            pipeline_stage=self.stage_selector.currentData(),
+            validation_resolution=self.validation_resolution,
+            design_margin=self.design_margin,
+            fabricate=self.fabricate,
+        )
 
     def _gradient_requirements_dialog(self):
         from .gradient_tools import GradientRequirementsDialog
 
-        if self.project is None or not self._apply_document_inputs():
+        if not self._settings_ready_for_editor():
             return
         project = self.project
         dialog = GradientRequirementsDialog(project, self)
@@ -5771,7 +5978,7 @@ class CoilGenWorkbench(QMainWindow):
     def _gradient_geometry_dialog(self):
         from .gradient_tools import GradientGeometryDialog
 
-        if self.project is None or not self._apply_document_inputs():
+        if not self._settings_ready_for_editor():
             return
         project = self.project
         try:
@@ -5804,7 +6011,7 @@ class CoilGenWorkbench(QMainWindow):
     def _research_requirements_dialog(self):
         from .research_requirements import ResearchRequirementsDialog
 
-        if self.project is None or not self._apply_document_inputs():
+        if not self._settings_ready_for_editor():
             return
         project = self.project
         dialog = ResearchRequirementsDialog(project.study.get("requirements"), self)
@@ -5987,7 +6194,7 @@ class CoilGenWorkbench(QMainWindow):
             self._update_execution_feedback()
 
     def _research_verified_review(self, key, display, label):
-        if self.project is None or not self._apply_document_inputs():
+        if not self._settings_ready_for_editor():
             return
         record = self.runs.get(self._selected_run)
         if record is None or self._run_verification_error(record):
@@ -6018,7 +6225,7 @@ class CoilGenWorkbench(QMainWindow):
     def _research_robust_comparison(self):
         from ..application.research_requirements import ResearchRequirements, nominal_requirements
 
-        if self.project is None or not self._apply_document_inputs():
+        if not self._settings_ready_for_editor():
             return
         spec = self.project.study.get("requirements")
         if spec is None or not any(p.membership == "design" for p in ResearchRequirements.from_dict(spec).scenarios):
@@ -6089,7 +6296,7 @@ class CoilGenWorkbench(QMainWindow):
         from ..application.comparison import compare_runs
         from .research_review import ResearchComparisonDialog
 
-        if self.project is None or not self._apply_document_inputs():
+        if not self._settings_ready_for_editor():
             return
         path = (
             getattr(self, "_research_robust_path", None)
@@ -6147,7 +6354,7 @@ class CoilGenWorkbench(QMainWindow):
         from .spatial_scene import SpatialSceneDialog
         from ..application.spatial_scene import SpatialScene
 
-        if self.project is None or not self._apply_document_inputs():
+        if not self._settings_ready_for_editor():
             return
         previous = getattr(self, "_scene_editor", None)
         if previous is not None:
@@ -6223,7 +6430,7 @@ class CoilGenWorkbench(QMainWindow):
     def _research_array_dialog(self):
         from .array_studies import ArrayStudyDialog
 
-        if self.project is None or not self._apply_document_inputs():
+        if not self._settings_ready_for_editor():
             return
         project = self.project
         dialog = ArrayStudyDialog(
@@ -6322,7 +6529,7 @@ class CoilGenWorkbench(QMainWindow):
     def _research_dynamic_dialog(self):
         from .dynamic_studies import DynamicStudyDialog
 
-        if self.project is None or not self._apply_document_inputs():
+        if not self._settings_ready_for_editor():
             return
         project = self.project
         record = self.runs.get(self._selected_run)
@@ -6357,7 +6564,7 @@ class CoilGenWorkbench(QMainWindow):
     def _research_dynamic_review(self):
         from .dynamic_studies import DynamicReviewDialog
 
-        if self.project is None or not self._apply_document_inputs():
+        if not self._settings_ready_for_editor():
             return
         record = self.runs.get(self._selected_run)
         if record is None or self._run_verification_error(record):
@@ -6406,7 +6613,7 @@ class CoilGenWorkbench(QMainWindow):
         from .gradient_tools import ConvergenceDialog
         from ..application.gradient_studies import convergence_candidates, submit_convergence
 
-        if self.project is None or not self._apply_document_inputs():
+        if not self._settings_ready_for_editor():
             return
         dialog = ConvergenceDialog(self.project, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -6466,7 +6673,7 @@ class CoilGenWorkbench(QMainWindow):
     def _gradient_convergence_review(self):
         from ..application.gradient_studies import ConvergenceCriterion, StudyCandidate, summarize_convergence
 
-        if self.project is None or not self._apply_document_inputs():
+        if not self._settings_ready_for_editor():
             return
         path = getattr(self, "_gradient_convergence_path", None)
         if path is None:
@@ -6509,7 +6716,7 @@ class CoilGenWorkbench(QMainWindow):
                 records,
                 criteria=(
                     ConvergenceCriterion(
-                        "Sheet independent RMS error",
+                        "Independent stream function field RMS error",
                         criteria["relative_tolerance"],
                         criteria["absolute_tolerance_T"] * 1e6,
                     ),
@@ -6565,7 +6772,7 @@ class CoilGenWorkbench(QMainWindow):
     def _gradient_circuit_dialog(self):
         from .gradient_tools import CircuitDriveDialog
 
-        if self.project is None or not self._apply_document_inputs():
+        if not self._settings_ready_for_editor():
             return
         record = self.runs.get(self._selected_run)
         if record is None or self._run_verification_error(record):
@@ -6609,7 +6816,7 @@ class CoilGenWorkbench(QMainWindow):
         from .gradient_tools import MeasuredFieldDialog
         from ..application.gradient_studies import saved_winding_currents
 
-        if self.project is None or not self._apply_document_inputs():
+        if not self._settings_ready_for_editor():
             return
         record = self.runs.get(self._selected_run)
         if record is None or self._run_verification_error(record):
@@ -6769,10 +6976,15 @@ class CoilGenWorkbench(QMainWindow):
                 self.jobs = JobManager(self.jobs_directory, RuntimePolicy())
                 self._own_jobs = True
             self._snapshot_existing_jobs()
+            from ..application.session_evidence import retain_revision
+
+            for channel in enabled:
+                retain_revision(self.jobs_directory.parent, channel.project)
             states = self.service.submit_assembly(self.assembly, self.jobs)
             self._session_job_ids.update(state["id"] for state in states.values())
             self.states.update({state["id"]: state for state in states.values()})
             self.design_plan_dock.show()
+            self.design_plan_dock.raise_()
             active_state = next((state for state in states.values() if self._live_owner_matches(state)), None)
             if active_state is not None:
                 self._begin_live_follow(active_state)
@@ -7320,15 +7532,22 @@ class CoilGenWorkbench(QMainWindow):
         self._refresh_design_plan()
         if hasattr(self, "field_analysis_action"):
             from ..application.field_analysis import field_analysis_available
+            from ..application.shielding import shielding_sources
 
             record = self.runs.get(self._selected_run)
             verified = record is not None and not self._run_verification_error(record)
             cached = getattr(self, "_field_analysis_capability", None)
             if cached is None or cached[0] is not record:
-                cached = (record, bool(record is not None and field_analysis_available(record)))
+                cached = (
+                    record,
+                    bool(record is not None and field_analysis_available(record)),
+                    bool(record is not None and shielding_sources(record)),
+                )
                 self._field_analysis_capability = cached
             available = verified and cached[1]
             self.field_analysis_action.setEnabled(available)
+            self.shielding_action.setEnabled(bool(verified and cached[2]))
+            self.shielding_action.setToolTip("Compare saved field contributions on the external suppression surface.")
             if hasattr(self, "routing_analysis_action"):
                 from ..application.routing_analysis import routing_analysis_available
 
@@ -7343,18 +7562,38 @@ class CoilGenWorkbench(QMainWindow):
             )
             self._refresh_results_overview()
             self.results_overview.set_analysis_available(available)
+            self.view_context.show_design_action(
+                record is not None, bool(verified and has_saved_request(record)), self._run_verification_error(record)
+            )
             self.field_results_button.setEnabled(
                 bool(verified and (available or self.results_overview.has_coil_statistics))
             )
+            self.field_results_button.setVisible(record is not None)
             self.field_results_button.setToolTip(
                 "Review saved coil properties, field metrics, slices, errors and harmonics."
                 if self.field_results_button.isEnabled()
                 else "Compute or select verified saved coil results."
             )
             for name, item in self.result_tree_items.items():
-                enabled = bool(verified) if name in {"coil", "checks"} else available
+                enabled = (
+                    bool(verified)
+                    if name == "checks"
+                    else self.field_results_button.isEnabled()
+                    if name == "coil"
+                    else available
+                )
                 item.setDisabled(not enabled)
-                item.setText(1, "Available" if enabled else "Unverified" if record is not None else "Not computed")
+                status = (
+                    "Available"
+                    if enabled
+                    else "Not computed"
+                    if record is None
+                    else "Verification failed"
+                    if not verified
+                    else "Not recorded"
+                )
+                item.setText(1, status)
+                item.setToolTip(1, status if enabled else f"{item.text(0)} · {status.lower()} for the selected run.")
         if hasattr(self, "research_actions"):
             record = self.runs.get(self._selected_run)
             verified = record is not None and not self._run_verification_error(record)
@@ -7384,9 +7623,12 @@ class CoilGenWorkbench(QMainWindow):
         if hasattr(self, "gradient_actions"):
             record = self.runs.get(self._selected_run)
             verified = record is not None and not self._run_verification_error(record)
-            self.gradient_actions["_gradient_circuit_dialog"].setEnabled(
-                bool(verified and read_run_metadata(record).get("winding_steps"))
-            )
+            can_author = self._circuit_available
+            self.gradient_actions["_gradient_circuit_dialog"].setEnabled(can_author)
+            if self._workflow_page() == "winding" and self.settings.widget() is not None:
+                button = self.settings.widget().findChild(QPushButton, "gradient_engineering_winding")
+                if button is not None:
+                    button.setEnabled(can_author)
             self.gradient_actions["_gradient_measured_dialog"].setEnabled(
                 bool(
                     verified
@@ -7425,9 +7667,11 @@ class CoilGenWorkbench(QMainWindow):
                 self.project is not None and (self._selected_run is not None or bool(selected_state))
             )
             self.resume_action.setEnabled(can_resume)
-            self.resume_action.setText(f"Resume from {resume.value}" if resume is not None else "Resume selected run")
+            self.resume_action.setText(
+                f"Resume from {_checkpoint_label(resume)}" if resume is not None else "Resume selected run"
+            )
             self.resume_action.setToolTip(
-                f"Continue using the verified {resume.value} checkpoint; worker compatibility is checked again."
+                f"Continue using the verified {_checkpoint_label(resume)} checkpoint; worker compatibility is checked again."
                 if resume is not None
                 else (
                     resume_plan.diagnostics[0]
@@ -7632,7 +7876,10 @@ class CoilGenWorkbench(QMainWindow):
                 action_key="resolve_expert",
                 tone="warning",
             )
-        self.design_status_label.setText(state.title)
+        hint = ""
+        if state.action_key in {"compute_full", "recompute"}:
+            hint = f"\nClick {COMPUTE_CAPTIONS[stage]} at the top of the main window."
+        self.design_status_label.setText(state.title + hint)
         self.design_status_label.setToolTip(state.detail)
         apply_tone(self.design_status_label, state.tone)
         self._guidance_state = state
@@ -7645,7 +7892,7 @@ class CoilGenWorkbench(QMainWindow):
         outputs = ["Mesh", "Target samples"]
         boundary = [key for _label, key in STAGES].index(stage)
         if boundary >= 1:
-            outputs += ["Sheet", "Independent check"]
+            outputs += ["Stream function", "Independent check"]
         if boundary >= 2:
             outputs += ["Contours"]
         if boundary >= 3:
@@ -7662,15 +7909,7 @@ class CoilGenWorkbench(QMainWindow):
         self.output_scope_label.setToolTip(self._study_scope(stage, self.project.config))
         self._refresh_design_progress()
         if hasattr(self, "compute_button"):
-            self.compute_button.setText(
-                {
-                    "prepared": "Prepare model",
-                    "sheet": "Optimize sheet",
-                    "contours": "Generate contours",
-                    "routed": "Connect / sweep",
-                    "evaluated": "Compute full design",
-                }[stage]
-            )
+            self.compute_button.setText(COMPUTE_CAPTIONS[stage])
             self.compute_button.setToolTip(
                 self._study_scope(stage, self.project.config) + "\nCtrl+Enter · pending settings are validated first."
             )
@@ -7719,15 +7958,7 @@ class CoilGenWorkbench(QMainWindow):
             icon(action_icon, foreground="primary" if action_style else "default")
         )
         blocking_nodes = {issue.node for issue in self._guidance_readiness.blocking}
-        node_icons = dict(NODE_ICONS)
-        support_editor = next(
-            (entry for entry in SUPPORT_EDITORS if entry.source == self.project.config.coil_mesh_file), None
-        )
-        node_icons["geometry"] = support_editor.icon_name if support_editor else "mesh"
-        if Path(self.project.config.coil_mesh_file).suffix.lower() in {".stl", ".npz"}:
-            node_icons["geometry"] = "support-import"
-        node_icons["winding"] = WINDING_ICONS[WINDING_INTENTS[winding_intent(self.project.config)]]
-        node_icons["target"] = _target_icon(self.project.config)
+        node_icons = model_node_icons(self.project.config)
         for node, item in self.tree_items.items():
             item.setIcon(0, icon(node_icons[node], badge="failed" if node in blocking_nodes else None))
         self._refresh_view_context()
@@ -7798,25 +8029,35 @@ class CoilGenWorkbench(QMainWindow):
             raise ValueError("Select a saved run before exporting conductor geometry.")
         if self._run_verification_error(self._selected_run):
             raise ValueError("Saved evidence failed verification; reopen and verify the run before exporting.")
-        if include_project and not self._apply_document_inputs():
-            raise ValueError("Correct pending settings before exporting the project and geometry.")
         record = self.runs[self._selected_run]
-        project = self._export_companion(record) if include_project else None
-        return export_geometry(record, directory, names, unit=unit, project=project)
+        from .export_panel import companion_with_result
 
-    def _owns_export_run(self, record):
-        owner = (
-            read_run_metadata(record).get("project_id", (read_run_metadata(record).get("job") or {}).get("project_id"))
-            or None
+        project = companion_with_result(record, self._export_source(record)) if include_project else None
+        # The export panel only submits DRAFT files after explicit acknowledgement.
+        return export_geometry(record, directory, names, unit=unit, project=project, allow_draft=True)
+
+    def _has_export_source(self, record, *, retained_only=False):
+        from ..application.bundles import SOURCE_PROJECT_FILE, project_key, revision_key
+        from ..application.session_evidence import revision_path
+
+        key = revision_key(read_run_metadata(record))
+        if None in key:
+            return False
+        return (
+            (record.directory / SOURCE_PROJECT_FILE).is_file()
+            or revision_path(self.jobs_directory.parent, key).is_file()
+            or (not retained_only and any(project_key(ch.project) == key for ch in self.assembly.channels))
         )
-        return owner is None or owner in {channel.project.id for channel in self.assembly.channels}
 
-    def _export_companion(self, record):
-        if not self._owns_export_run(record):
+    def _export_source(self, record):
+        from ..application.session_evidence import load_assembly, source_project
+
+        original = source_project(self.jobs_directory.parent, record, self.assembly.channels, load_assembly)
+        if original is None:
             raise ValueError(
-                "Open this run's owning project to include its inputs and completed results, or export its CAD files alone."
+                "The owning project's exact source revision is unavailable. Open that revision or export geometry alone."
             )
-        return self._portable_assembly()
+        return original
 
     def _geometry_export_dialog(self, names, unit, include_project):
         if self._geometry_export_task is not None:
@@ -7833,18 +8074,19 @@ class CoilGenWorkbench(QMainWindow):
         )
         names = tuple(names)
         feedback.names, feedback.unit, feedback.include_project = names, unit, include_project
-        name = re.sub(r"[^A-Za-z0-9_.-]+", "-", self.project.name).strip("-") or "coilgen"
+        metadata = read_run_metadata(record)
+        name = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(metadata.get("name") or "coilgen")).strip("-") or "coilgen"
+        if metadata.get("project_revision") is not None:
+            name += f"-r{metadata['project_revision']}"
         directory, _filter = QFileDialog.getSaveFileName(self, "Create a new CAD export folder", name + "-cad")
         if not directory:
             return
         try:
-            if include_project and not self._apply_document_inputs():
-                return
             if record is None:
                 raise ValueError("Select a saved run before exporting.")
             if self._run_verification_error(record):
                 raise ValueError("Saved evidence failed verification; reopen and verify the run before exporting.")
-            project = self._export_companion(record) if include_project else None
+            project = self._export_source(record) if include_project else None
             task = GeometryExportTask(record, directory, names, unit, project)
             task.feedback_state, task.source_id = feedback, source_id
             task.signals.finished.connect(self._geometry_export_finished)
@@ -7984,7 +8226,8 @@ class CoilGenWorkbench(QMainWindow):
                     self._refresh_history_panel()
             except (OSError, ValueError, TypeError, RuntimeError) as exc:
                 self.messages.appendPlainText(f"Run history link could not be saved: {exc}")
-        if select is None:
+        follow_latest = select is None
+        if follow_latest:
             followed = self.live_preview.state
             select = (
                 self.live_preview.following
@@ -8009,7 +8252,7 @@ class CoilGenWorkbench(QMainWindow):
                     self._run_verification_error(id_),
                 )
                 self._resume_capability_plan = selected_reuse
-            self.show_run(id_)
+            self.show_run(id_, follow_latest=follow_latest)
         self._refresh_stage_status(refresh_reuse=history_result is None)
         if select:
             self._save_session()
@@ -8074,11 +8317,11 @@ class CoilGenWorkbench(QMainWindow):
         if record is not None:
             self._inspect_saved_settings(record, node)
 
-    def show_run(self, id_):
+    def show_run(self, id_, *, follow_latest=False):
         with self._visible_work("Loading result geometry and review data"):
-            return self._show_run(id_)
+            return self._show_run(id_, follow_latest=follow_latest)
 
-    def _show_run(self, id_):
+    def _show_run(self, id_, *, follow_latest=False):
         if self.live_preview.job_id != id_ and self.live_preview.state.get("status") in {
             "queued",
             "running",
@@ -8095,7 +8338,7 @@ class CoilGenWorkbench(QMainWindow):
         run_arrays = record.select_arrays(copy=False) if hasattr(record, "select_arrays") else record.arrays
         # The viewport owns a detached mutable display snapshot; borrowed
         # MappingProxy metadata remains confined to read-only presentation.
-        self.viewport.display_run(run_arrays, metadata=record.metadata)
+        self.viewport.display_run(run_arrays, metadata=record.metadata, follow_latest=follow_latest)
         wire_fields = metadata.get("wire_fields", {})
         self.wire_fields_table.setRowCount(len(wire_fields))
         for row, (kind, evidence) in enumerate(wire_fields.items()):
@@ -8103,7 +8346,9 @@ class CoilGenWorkbench(QMainWindow):
             available = evidence.get("available") is True or (
                 evidence.get("available") is not False and capability.available
             )
-            source = "Original contours" if kind == "contour" else "Connected conductor" if kind == "routed" else kind
+            source = (
+                "Contours before routing" if kind == "contour" else "Connected conductor" if kind == "routed" else kind
+            )
             values = [
                 source if available else source + " · unavailable",
                 evidence.get("current_A"),
@@ -8214,10 +8459,10 @@ class CoilGenWorkbench(QMainWindow):
             status = "STALE for current model/study" if fingerprint else "Model identity unverified"
         self.result_state.setText(
             f"{status} · immutable run\n"
-            f"Sheet checks: {verdicts['sheet']} · Sweep geometry: {verdicts['sweeps']} · Fabrication review: {verdicts['fabrication']}"
+            f"Stream function checks: {verdicts['sheet']} · Sweep geometry: {verdicts['sweeps']} · Fabrication review: {verdicts['fabrication']}"
         )
         self.result_state.setToolTip(
-            "Sheet checks evaluate the optimized surface-current model. Sweep checks evaluate recorded pipeline solids. "
+            "Stream function checks evaluate the optimized surface-current model. Sweep checks evaluate recorded pipeline solids. "
             "Fabrication review checks its own conductor geometry and field; it does not establish construction release."
         )
         apply_tone(

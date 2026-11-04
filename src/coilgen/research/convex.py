@@ -1,4 +1,4 @@
-"""Parameterized physical convex research design, with explicit SI acceptance.
+"""Physical stream function optimization with independently checked SI bounds.
 
 The public specification is JSON-compatible via ``to_dict``/``from_dict``.
 Custom field matrices and scenario matrices act on *full nodal stream
@@ -75,6 +75,9 @@ class ResearchPhysicsSpec:
     computed once at reference_tolerance_scale times the supplied field
     budgets. Explicit scales use keys power [W], magnetic_energy [J],
     minimax [A/m]. Tolerance sweeps reuse those original reference scales.
+    Custom formulas use unweighted design-grid samples in SI. Auto uses a
+    conic solver for DCP expressions and local SLSQP for nonconvex expressions.
+    Its finite differences operate on the native reduced coefficients.
     """
 
     objective: str = "power"
@@ -108,11 +111,22 @@ class ResearchPhysicsSpec:
             "J": 1e-12,
         }
     )
+    custom_objective: str = ""
+    custom_constraints: tuple[str, ...] = ()
+    custom_solver: str = "auto"
 
     def __post_init__(self) -> None:
         objectives = {"power", "magnetic_energy", "minimax"}
-        if self.objective not in objectives | {"mixture"}:
-            raise ValueError("Research objective must be power, magnetic_energy, minimax, or mixture.")
+        if self.objective not in objectives | {"mixture", "custom"}:
+            raise ValueError("Research objective must be power, magnetic_energy, minimax, mixture, or custom.")
+        if self.custom_solver not in {"auto", "conic", "local"}:
+            raise ValueError("The custom solver must be auto, conic, or local.")
+        formulas = self.formula_program()
+        if self.objective == "custom" and not formulas.objective_text:
+            raise ValueError("A custom research objective requires a scalar custom_objective expression.")
+        if formulas.objective_text and self.objective != "custom":
+            raise ValueError("Set objective to custom when specifying custom_objective.")
+        object.__setattr__(self, "custom_constraints", tuple(formulas.constraint_lines))
         if set(self.objective_weights) - objectives or set(self.objective_scales) - objectives:
             raise ValueError("Research objective weight/scale keys must be power, magnetic_energy, or minimax.")
         if any(not np.isfinite(v) or v < 0 for v in self.objective_weights.values()):
@@ -153,8 +167,24 @@ class ResearchPhysicsSpec:
         values["energy"] = energy if isinstance(energy, EnergyQuadrature) else EnergyQuadrature(**energy)
         return cls(**values)
 
-    def to_dict(self) -> dict[str, Any]:
-        return _json_value(asdict(self))
+    def to_dict(self, *, include_formula_defaults=False) -> dict[str, Any]:
+        values = asdict(self)
+        if (
+            not include_formula_defaults
+            and not self.custom_objective
+            and not self.custom_constraints
+            and self.custom_solver == "auto"
+        ):
+            # Preserve existing serialized physics specs and their checkpoint
+            # identities when no formula controls have been configured.
+            for name in ("custom_objective", "custom_constraints", "custom_solver"):
+                del values[name]
+        return _json_value(values)
+
+    def formula_program(self):
+        from .formulas import parse_formulas
+
+        return parse_formulas(self.custom_objective, self.custom_constraints)
 
 
 def preflight_research_physics(spec: ResearchPhysicsSpec | Mapping[str, Any], face_count: int) -> dict[str, Any]:
@@ -165,6 +195,7 @@ def preflight_research_physics(spec: ResearchPhysicsSpec | Mapping[str, Any], fa
         or spec.magnetic_energy_limit_J is not None
         or spec.objective == "magnetic_energy"
         or (spec.objective == "mixture" and spec.objective_weights.get("magnetic_energy", 0) > 0)
+        or "energy_J" in spec.formula_program().symbols
     )
     return {"energy_requested": energy_required, **(spec.energy.preflight(face_count) if energy_required else {})}
 
@@ -194,7 +225,7 @@ class _Bound:
 
 
 class ParameterizedResearchProblem:
-    """Compile once and warm-start multiple physical tolerance solves.
+    """Reuse the reduced physical operators across tolerance solves.
 
     ``solve(tolerance_scale=...)`` scales default field residual budgets and
     custom/scenario error budgets. Exact equalities, one-sided bounds, force,
@@ -213,6 +244,7 @@ class ParameterizedResearchProblem:
         # Own a snapshot: caller edits must not alter the compiled objective or
         # the acceptance contract while reusing this model for a sweep.
         self.spec = ResearchPhysicsSpec.from_dict(ResearchPhysicsSpec.from_dict(spec).to_dict())
+        self.formulas = self.spec.formula_program()
         self.preflight = preflight_research_physics(self.spec, len(problem.combined_mesh.faces))
         if not conic_solver_order(config.constrained_optimization_solver):
             raise RuntimeError("Physical convex optimization requires an installed supported conic solver.")
@@ -229,6 +261,8 @@ class ParameterizedResearchProblem:
             dict(self.spec.objective_weights) if self.spec.objective == "mixture" else {self.spec.objective: 1.0}
         )
         self.weights = {key: value for key, value in self.weights.items() if value > 0}
+        if self.spec.objective == "custom":
+            self.weights = {}
         self.energy = (
             surface_magnetic_energy(
                 self.surface,
@@ -334,7 +368,7 @@ class ParameterizedResearchProblem:
         names = [bound.name for bound in self.bounds] + [name for name, *_ in self.quadratic_bounds]
         if len(names) != len(set(names)):
             raise ValueError("Research constraint/scenario names must be unique.")
-        if not self.bounds:
+        if not self.bounds and not (self.spec.custom_constraints or self.spec.objective == "custom"):
             raise ValueError("A research design needs at least one physical field or mechanical constraint.")
         for bound in self.bounds:
             if (
@@ -390,16 +424,52 @@ class ParameterizedResearchProblem:
             float(np.max(np.linalg.norm(self.surface.current_density_per_A_m @ reference, axis=1))), 1.0
         )
         self.peak = cp.Variable(nonneg=True)
+        # Native physical constraints already use dimensionless residuals.
+        # Keep these same expressions for both the conic seed and local solve.
+        self.native_constraints = tuple(constraints)
         if "minimax" in self.weights:
             current = self.surface.current_density_per_A_m.reshape(-1, self.expansion.shape[1]) / self.peak_scale
             grouped = cp.reshape(current @ self.x, (len(self.surface.areas_m2), 3), order="C")
             constraints.append(cp.norm(grouped, 2, axis=1) <= self.peak)
+        custom_objective = None
+        self.use_local = False
+        self.formula_scales = []
+        self.formula_objective_scale = 1.0
+        if self.formulas.objective_text or self.formulas.constraint_lines:
+            from .formulas import NonConvexFormulaError
+
+            self.use_local = self.spec.custom_solver == "local"
+            custom_bounds = []
+            if not self.use_local:
+                try:
+                    custom_objective, custom_bounds = self.formulas.compile(self._formula_bindings(self.x, cp))
+                except NonConvexFormulaError:
+                    if self.spec.custom_solver == "conic":
+                        raise
+                    self.use_local = True
+            # Positive row/objective scaling preserves the problem, while e.g.
+            # microtesla inequalities remain visible at conic feasibility precision.
+            self.formula_objective_scale, self.formula_scales = self._formula_scaling(reference)
+            if not self.use_local:
+                for bound, scale in zip(custom_bounds, self.formula_scales, strict=True):
+                    residual = bound.expr / (scale or 1.0)
+                    constraints.append(residual == 0 if isinstance(bound, cp.constraints.Equality) else residual <= 0)
         self.constraints = constraints
         self.objective_scales = dict(self.spec.objective_scales)
         self.reference_diagnostics: dict[str, Any] = {}
+        if self.use_local:
+            self.seed_problem = cp.Problem(
+                cp.Minimize(self._quadratic_expression(cp, self.power_matrix)), self.native_constraints
+            )
+            self.least_squares_seed = reference.copy() / self.current_scale
         if self.spec.objective == "mixture" and any(key not in self.objective_scales for key in self.weights):
-            reference_problem = cp.Problem(cp.Minimize(self._quadratic_expression(cp, self.power_matrix)), constraints)
-            self._run_backend(reference_problem)
+            if self.use_local:
+                self._solve_local(minimize_power=True)
+            else:
+                reference_problem = cp.Problem(
+                    cp.Minimize(self._quadratic_expression(cp, self.power_matrix)), constraints
+                )
+                self._run_backend(reference_problem)
             reference = np.asarray(self.x.value).reshape(-1)
             rows = self._check_bounds(reference, self.spec.reference_tolerance_scale)
             if not all(row["met"] for row in rows):
@@ -427,6 +497,8 @@ class ParameterizedResearchProblem:
                 "tolerance_scale": self.spec.reference_tolerance_scale,
                 **values,
             }
+            if self.use_local:
+                self.reference_diagnostics["source"] = "locally_minimized_power_feasible_at_reference_tolerance_scale"
         terms = []
         for key, weight in self.weights.items():
             if key == "minimax":
@@ -438,11 +510,13 @@ class ParameterizedResearchProblem:
                     key, max(float(np.linalg.norm(matrix, 2)) * self.current_scale**2, 1e-300)
                 )
                 terms.append(weight * cp.quad_form(self.variable, cp.psd_wrap(matrix * self.current_scale**2 / scale)))
-        self.cvxpy_problem = cp.Problem(cp.Minimize(sum(terms)), constraints)
-        if not self.cvxpy_problem.is_dcp(dpp=True):
+        objective = custom_objective / self.formula_objective_scale if custom_objective is not None else sum(terms)
+        self.cvxpy_problem = None if self.use_local else cp.Problem(cp.Minimize(objective), constraints)
+        if self.cvxpy_problem is not None and not self.cvxpy_problem.is_dcp(dpp=True):
             raise ValueError("Research formulation must be convex and parameterized without recanonicalization.")
         self.solve_count = 0
-        self.progress.report(60, f"compiled reusable convex graph: {len(self.bounds)} physical bounds")
+        method = "local nonlinear problem" if self.use_local else "reusable convex graph"
+        self.progress.report(60, f"compiled {method}: {len(self.bounds)} physical bounds")
 
     @staticmethod
     def _psd_matrix(matrix: np.ndarray, name: str) -> np.ndarray:
@@ -458,6 +532,84 @@ class ParameterizedResearchProblem:
     def _quadratic_expression(self, cp: Any, matrix: np.ndarray) -> Any:
         scale = max(float(np.linalg.norm(matrix, 2)) * self.current_scale**2, 1e-300)
         return cp.quad_form(self.variable, cp.psd_wrap(matrix * self.current_scale**2 / scale))
+
+    def _formula_bindings(self, x, cp=None):
+        """Same physical operands for the conic graph and independent NumPy evaluation."""
+        symbols = self.formulas.symbols
+        values = {}
+        if "psi_A" in symbols:
+            values["psi_A"] = self.expansion @ x
+        if symbols.intersection({"field_T", "residual_T", "target_T"}):
+            matrix, target = self.problem.unweighted_reduced_sensitivity, self.problem.unweighted_target_z
+            if matrix is None or target is None:
+                raise ValueError("Custom field expressions require unweighted design-grid sensitivity and target data.")
+            values["target_T"] = target
+            if symbols.intersection({"field_T", "residual_T"}):
+                values["field_T"] = matrix @ x
+                values["residual_T"] = values["field_T"] - target
+        for name, matrix in (
+            ("power_W", self.power_matrix),
+            ("energy_J", self.energy.matrix_J_per_A2 if self.energy is not None else None),
+        ):
+            if name in symbols:
+                values[name] = float(x @ matrix @ x) if cp is None else cp.quad_form(x, cp.psd_wrap(matrix))
+        if "peak_current_density_A_per_m" in symbols:
+            operator = self.surface.current_density_per_A_m
+            if cp is None:
+                peak = np.max(np.linalg.norm(operator @ x, axis=1))
+            else:
+                current = cp.reshape(operator.reshape(-1, operator.shape[-1]) @ x, operator.shape[:2], order="C")
+                peak = cp.max(cp.norm(current, 2, axis=1))
+            values["peak_current_density_A_per_m"] = peak
+        if "force_N" in symbols:
+            values["force_N"] = self.force_operator @ x
+        if "torque_Nm" in symbols:
+            values["torque_Nm"] = self.torque_operator @ x
+        return values
+
+    def _formula_scaling(self, reference):
+        objective_scale = 0.0
+        scales = np.zeros(len(self.spec.custom_constraints))
+        for x in (np.zeros_like(reference), reference):
+            try:
+                objective, comparisons = self.formulas.evaluate(self._formula_bindings(x))
+            except ValueError:
+                # A log, fractional power or reciprocal can have a restricted
+                # domain. A scaling probe is not a feasibility decision.
+                continue
+            if objective is not None:
+                objective_scale = max(objective_scale, abs(objective))
+            for i, (left, _, right) in enumerate(comparisons):
+                scales[i] = max(scales[i], float(np.max(np.abs(left))), float(np.max(np.abs(right))))
+        return objective_scale or 1.0, scales
+
+    def _formula_checks(self, x):
+        objective, comparisons = self.formulas.evaluate(self._formula_bindings(x))
+        rows = []
+        for i, (lhs, operator, rhs) in enumerate(comparisons):
+            left, right = np.broadcast_arrays(lhs, rhs)
+            residual = left - right if operator == "<=" else right - left
+            if operator == "==":
+                residual = np.abs(residual)
+            # Units are determined by the authored expression. The solver's
+            # dimensionless precision is converted using this row's SI scale.
+            allowance = self.config.constrained_optimization_tolerance * self.formula_scales[i]
+            effective = allowance + self.spec.acceptance_relative_tolerance * np.maximum(np.abs(left), np.abs(right))
+            worst = int(np.argmax(residual - effective))
+            rows.append(
+                {
+                    "name": f"custom:{i + 1} {self.spec.custom_constraints[i]}",
+                    "lhs": float(left.flat[worst]),
+                    "rhs": float(right.flat[worst]),
+                    "operator": operator,
+                    "value": float(residual.flat[worst]),
+                    "limit": 0.0,
+                    "effective_limit": float(effective.flat[worst]),
+                    "unit": "expression units",
+                    "met": bool(np.all(residual <= effective)),
+                }
+            )
+        return objective, rows
 
     def _add_field_constraint(self, item: LinearFieldConstraint) -> None:
         matrix, target = np.asarray(item.matrix, dtype=float), np.asarray(item.target, dtype=float).reshape(-1)
@@ -499,7 +651,7 @@ class ParameterizedResearchProblem:
             )
         )
 
-    def _run_backend(self, cvxpy_problem: Any) -> tuple[str, list[str]]:
+    def _run_backend(self, cvxpy_problem: Any, *, native_only=False) -> tuple[str, list[str]]:
         from ..optimization import _cvxpy_solver_options
         from ..optimization_solvers import conic_solver_order
 
@@ -513,11 +665,12 @@ class ParameterizedResearchProblem:
                 continue
             if cvxpy_problem.status in {"optimal", "optimal_inaccurate"} and self.x.value is not None:
                 candidate = np.asarray(self.x.value, dtype=float).reshape(-1)
-                failures = [
-                    row["name"]
-                    for row in self._check_bounds(candidate, float(self.tolerance_scale.value))
-                    if not row["met"]
-                ]
+                try:
+                    rows = self._check_bounds(candidate, float(self.tolerance_scale.value), native_only=native_only)
+                except (ValueError, FloatingPointError) as exc:
+                    errors.append(f"{solver}: numerical acceptance could not evaluate the candidate: {exc}")
+                    continue
+                failures = [row["name"] for row in rows if not row["met"]]
                 if not failures:
                     return solver, errors
                 errors.append(f"{solver}: physical acceptance failed for {', '.join(failures)}")
@@ -525,7 +678,7 @@ class ParameterizedResearchProblem:
             errors.append(f"{solver}: {cvxpy_problem.status}")
         raise RuntimeError("No research conic solve succeeded. " + "; ".join(errors))
 
-    def _check_bounds(self, x: np.ndarray, scale: float) -> list[dict[str, Any]]:
+    def _check_bounds(self, x: np.ndarray, scale: float, *, native_only=False) -> list[dict[str, Any]]:
         rows = []
         finite = bool(np.all(np.isfinite(x)))
         for bound in self.bounds:
@@ -573,7 +726,7 @@ class ParameterizedResearchProblem:
                     "met": bool(finite and value <= effective),
                 }
             )
-        if "minimax" in self.weights:
+        if "minimax" in self.weights and not self.use_local:
             value = float(np.max(np.linalg.norm(self.surface.current_density_per_A_m @ x, axis=1)))
             limit = float(self.peak.value) * self.peak_scale if self.peak.value is not None else float("nan")
             effective = limit * (
@@ -589,6 +742,8 @@ class ParameterizedResearchProblem:
                     "met": bool(finite and np.isfinite(limit) and value <= effective),
                 }
             )
+        if self.spec.custom_constraints and not native_only:
+            rows.extend(self._formula_checks(x)[1])
         return rows
 
     def _physical_values(self, x: np.ndarray) -> dict[str, Any]:
@@ -609,13 +764,120 @@ class ParameterizedResearchProblem:
             "reduced_coefficient_norm": float(np.linalg.norm(x)),
         }
 
+    def _solve_local(self, *, minimize_power=False):
+        """Run SLSQP in the same scaled reduced basis, starting from native feasibility."""
+        import cvxpy as cp
+        from scipy.optimize import minimize
+
+        seed_solver, attempts = self._run_backend(self.seed_problem, native_only=True)
+        start = np.array(self.variable.value, dtype=float, copy=True)
+        if minimize_power:
+            scale = max(float(np.linalg.norm(self.power_matrix, 2)) * self.current_scale**2, 1e-300)
+        # Compile the existing modeled objective for local comparisons too.
+        # Its minimax term uses the actual largest face current at each trial.
+        physical_terms = {
+            "power": lambda x: float(x @ self.power_matrix @ x),
+            "magnetic_energy": lambda x: self.energy.energy_J(x),
+            "minimax": lambda x: float(np.max(np.linalg.norm(self.surface.current_density_per_A_m @ x, axis=1))),
+        }
+        last_point, last_result = None, None
+
+        def quantities(point):
+            nonlocal last_point, last_result
+            if last_point is not None and np.array_equal(point, last_point):
+                return last_result
+            self.variable.value = point
+            x = self.current_scale * point
+            authored_objective, comparisons = self.formulas.evaluate(self._formula_bindings(x))
+            if minimize_power:
+                objective = float(x @ self.power_matrix @ x) / scale
+            elif authored_objective is not None:
+                objective = authored_objective / self.formula_objective_scale
+            else:
+                objective = sum(
+                    weight * physical_terms[key](x) / self.objective_scales[key] for key, weight in self.weights.items()
+                )
+            # SLSQP accepts inequalities as g(x) >= 0. Each equality is two
+            # inequalities to support redundant rows (e.g. zero net force).
+            margins = []
+            for constraint in self.native_constraints:
+                residual = np.asarray(constraint.expr.value, dtype=float).reshape(-1)
+                margins.append(-residual)
+                if isinstance(constraint, cp.constraints.Equality):
+                    margins.append(residual)
+            for (lhs, op, rhs), row_scale in zip(comparisons, self.formula_scales, strict=True):
+                residual = np.asarray((lhs - rhs) / (row_scale or 1.0)).reshape(-1)
+                margins.append(residual if op == ">=" else -residual)
+                if op == "==":
+                    margins.append(residual)
+            last_point = point.copy()
+            last_result = objective, np.concatenate(margins) if margins else np.empty(0)
+            return last_result
+
+        initial_guess = "minimum_power_subject_to_native_constraints"
+        try:
+            _, seed_margins = quantities(start)
+        except ValueError as exc:
+            # Some valid formula domains (e.g. log of a positive field)
+            # exclude the minimum-power solution. Try the physical drive
+            # estimate only when it independently passes the native limits.
+            start = self.least_squares_seed.copy()
+            native = self._check_bounds(self.current_scale * start, self.tolerance_scale.value, native_only=True)
+            if not all(row["met"] for row in native):
+                raise ValueError(f"Local formula has no finite, native-feasible initial point: {exc}") from exc
+            try:
+                _, seed_margins = quantities(start)
+            except ValueError as second:
+                raise ValueError(f"Local formula is undefined at both feasible starting points: {second}") from second
+            initial_guess = "native_feasible_weighted_least_squares"
+
+        def trial(point):
+            try:
+                return quantities(point)
+            except (ValueError, FloatingPointError):
+                # Allow the line search to reject trial points outside the
+                # real domain. The returned candidate is evaluated afresh.
+                return np.inf, np.full(seed_margins.shape, -np.inf)
+
+        constraints = [{"type": "ineq", "fun": lambda z: trial(z)[1]}] if len(seed_margins) else []
+        options = {
+            "maxiter": self.config.constrained_optimization_max_iterations,
+            "ftol": self.config.constrained_optimization_tolerance,
+        }
+        self.progress.report(None, f"Starting local SLSQP from {initial_guess}")
+        result = minimize(
+            lambda z: trial(z)[0],
+            start,
+            method="SLSQP",
+            constraints=constraints,
+            options=options,
+            callback=lambda _z: self.progress.report(None, "Checking local SLSQP iteration"),
+        )
+        if not result.success or not np.isfinite(result.fun) or not np.all(np.isfinite(result.x)):
+            raise RuntimeError(f"Local SLSQP did not converge (status {result.status}): {result.message}")
+        self.variable.value = result.x
+        self.local_diagnostics = {
+            "method": "SciPy SLSQP",
+            "global_optimality_claim": False,
+            "initial_guess": initial_guess,
+            "initial_solver": seed_solver,
+            "status_code": int(result.status),
+            "message": str(result.message),
+            "iterations": int(result.nit),
+            "objective_evaluations": int(result.nfev),
+            "objective_value_scaled": float(result.fun),
+            "derivatives": "forward finite differences in current-scaled reduced coefficients",
+            **options,
+        }
+        return "SLSQP", attempts
+
     def solve(self, *, tolerance_scale: float = 1.0) -> Any:
         from ..optimization import StreamFunctionSolution, _residual_constraint_diagnostics
 
         if not np.isfinite(tolerance_scale) or tolerance_scale < 0:
             raise ValueError("tolerance_scale must be finite and nonnegative.")
         self.tolerance_scale.value = tolerance_scale
-        solver, attempts = self._run_backend(self.cvxpy_problem)
+        solver, attempts = self._solve_local() if self.use_local else self._run_backend(self.cvxpy_problem)
         x = np.asarray(self.x.value, dtype=float).reshape(-1)
         rows = self._check_bounds(x, tolerance_scale)
         failed = [row for row in rows if not row["met"]]
@@ -643,7 +905,7 @@ class ParameterizedResearchProblem:
         )
         diagnostics.update(
             {
-                "stream_function_scheme": "research_convex",
+                "stream_function_scheme": "research_local" if self.use_local else "research_convex",
                 "research_physics_enabled": True,
                 "field_evaluation_current_source": "stream_function",
                 "field_evaluation_current_source_requested": self.config.field_evaluation_current_source,
@@ -654,12 +916,12 @@ class ParameterizedResearchProblem:
                 "research_preflight": dict(self.preflight),
                 "research_tolerance_scale": tolerance_scale,
                 "research_solve_count": self.solve_count,
-                "research_parameterized_dpp": True,
+                "research_parameterized_dpp": not self.use_local,
                 "research_constraint_diagnostics": rows,
                 "research_scenario_count": len(self.spec.scenarios),
-                "constrained_solver_backend": "cvxpy_research",
+                "constrained_solver_backend": "scipy_local" if self.use_local else "cvxpy_research",
                 "constrained_solver_name": solver,
-                "constrained_solver_status": self.cvxpy_problem.status,
+                "constrained_solver_status": "local_solution" if self.use_local else self.cvxpy_problem.status,
                 "constrained_solver_previous_attempts": attempts,
                 "constrained_solver_contract_met": True,
                 "constrained_solver_physical_constraints_met": True,
@@ -667,15 +929,32 @@ class ParameterizedResearchProblem:
                 "constrained_solver_diagnostic_result": False,
                 "constrained_solver_failed_constraints": [],
                 "constrained_solver_contract_constraint_diagnostics": rows,
-                "constrained_solver_objective_value": float(self.cvxpy_problem.value),
+                "constrained_solver_objective_value": self.local_diagnostics["objective_value_scaled"]
+                if self.use_local
+                else float(self.cvxpy_problem.value),
                 "regularization_factor": 0.0,
                 "regularization_lambda": 0.0,
                 "selected_factor": 0.0,
                 "selected_lambda": 0.0,
-                "selection_method": "research_convex",
+                "selection_method": "research_local" if self.use_local else "research_convex",
                 **self._physical_values(x),
             }
         )
+        if self.formulas.objective_text or self.formulas.constraint_lines:
+            diagnostics.update(
+                research_custom_objective=self.spec.custom_objective,
+                research_custom_objective_value=self._formula_checks(x)[0],
+                research_custom_constraints=list(self.spec.custom_constraints),
+                research_custom_solver=self.spec.custom_solver,
+                research_custom_solver_used="local" if self.use_local else "conic",
+                research_initial_guess=self.local_diagnostics["initial_guess"]
+                if self.use_local
+                else "conic_solver_default_with_warm_start_on_reuse",
+                research_custom_objective_scale=self.formula_objective_scale,
+                research_custom_constraint_scales=self.formula_scales.tolist(),
+            )
+            if self.use_local:
+                diagnostics["research_local_solver"] = dict(self.local_diagnostics)
         if self.energy is not None:
             diagnostics["research_energy_quadrature"] = {
                 "order": self.energy.quadrature_order,
@@ -688,7 +967,7 @@ class ParameterizedResearchProblem:
         return StreamFunctionSolution(x, diagnostics)
 
     def solve_many(self, tolerance_scales: Iterable[float]) -> tuple[Any, ...]:
-        """Solve a fixed-operator tolerance sweep with one compiled convex graph.
+        """Solve a fixed-operator tolerance sweep using the selected method.
 
         Reference scales remain those fixed during construction, independent
         of sweep order. Hardware bounds and equalities remain fixed. A failed

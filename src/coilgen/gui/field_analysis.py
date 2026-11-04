@@ -41,11 +41,13 @@ from PySide6.QtWidgets import (
 
 from ..application.field_analysis import FieldDataset, analyze_harmonics, metric_map, source_catalog
 from ..application.field_sampling import sample_slices
+from ..application.shielding import shielding_sources, shielding_surface_fields
 from ..attribution import AUTHOR_CREDIT, SOFTWARE_NAME, software_attribution
 from ..persistence import atomic_text_writer, json_value
 from ..progress import DesignCancelled
 from .coil_statistics import build_coil_statistics, mass_estimates
 from .run_metadata import read_run_metadata
+from .shielding_plot import SHIELDING_COMPONENTS, SHIELDING_SOURCES, draw_shielding_surface
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,7 +368,7 @@ class FieldAnalysisDialog(QDialog):
     progressDetails = Signal(object)
     closed = Signal()
 
-    _VIEW_TABS = {"field": 0, "metrics": 0, "slices": 1, "errors": 2, "harmonics": 3, "coil": 4}
+    _VIEW_TABS = {"field": 0, "metrics": 0, "slices": 1, "errors": 2, "harmonics": 3, "coil": 4, "shielding": 5}
 
     def __init__(
         self,
@@ -491,6 +493,7 @@ class FieldAnalysisDialog(QDialog):
         self._build_distribution_tab()
         self._build_harmonics_tab()
         self._build_coil_tab()
+        self._build_shielding_tab()
         self.status = QLabel("Analysis describes the saved field. Engineering acceptance remains in Review.")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
@@ -574,7 +577,9 @@ class FieldAnalysisDialog(QDialog):
     @classmethod
     def _validate_view(cls, view):
         if not isinstance(view, str) or view not in cls._VIEW_TABS:
-            raise ValueError("Field analysis view must be field, metrics, slices, errors, harmonics, or coil.")
+            raise ValueError(
+                "Field analysis view must be field, metrics, slices, errors, harmonics, coil, or shielding."
+            )
 
     @staticmethod
     def _source_alias(source):
@@ -597,6 +602,8 @@ class FieldAnalysisDialog(QDialog):
         self._validate_view(view)
         if self._closed or self._close_pending:
             return False
+        if view == "shielding" and not self.shield_source.count():
+            return False
         unavailable = None
         if source is not None:
             source = self._source_alias(source)
@@ -610,13 +617,13 @@ class FieldAnalysisDialog(QDialog):
                 unavailable = str(source)
         self._requested_view = view
         self.tabs.setCurrentIndex(self._VIEW_TABS[view])
-        if self.datasets and view not in {"harmonics", "coil"}:
+        if self.datasets and view not in {"harmonics", "coil", "shielding"}:
             dataset = self._dataset()
             metric = "field" if view == "field" or dataset.target_T is None else "signed_residual"
             if self._is_shim:
                 self.component.setCurrentIndex(self.component.findData("Bz"))
             self.metric_selector.setCurrentIndex(self.metric_selector.findData(metric))
-        elif view != "coil" and self._auto_start and not self._catalog_ready and self.worker is None:
+        elif view not in {"coil", "shielding"} and self._auto_start and not self._catalog_ready and self.worker is None:
             self.load_sources()
         if unavailable is not None:
             self.status.setText(
@@ -636,25 +643,38 @@ class FieldAnalysisDialog(QDialog):
 
     def _view_changed(self, *_):
         if self._VIEW_TABS[self._requested_view] != self.tabs.currentIndex():
-            self._requested_view = {0: "metrics", 1: "slices", 2: "errors", 3: "harmonics", 4: "coil"}[
+            self._requested_view = ("metrics", "slices", "errors", "harmonics", "coil", "shielding")[
                 self.tabs.currentIndex()
             ]
-        coil = self.tabs.currentIndex() == self._VIEW_TABS["coil"]
+        coil = self._requested_view == "coil"
+        shielding = self._requested_view == "shielding"
+        field = not (coil or shielding)
         for widget in [self.field_controls, self.display_controls, self.scope, self.refresh]:
-            widget.setVisible(not coil)
+            widget.setVisible(field)
+        self.status.setVisible(not shielding)
+        self.export_data.setVisible(not shielding)
+        if shielding:
+            self._draw_shielding()
+        elif self._shield_worker_source is not None and self.worker is not None:
+            self.worker.cancel.set()
         self.export_data.setText("Export stats…" if coil else "Export data…")
         self.export_data.setEnabled(coil or (self.worker is None and self._current()))
-        self.export_plot.setEnabled(not coil and self.worker is None and self._current())
-        if not coil and self._auto_start and not self._catalog_ready and self.worker is None:
+        self.export_plot.setEnabled(
+            self._shield_plot_key is not None if shielding else field and self.worker is None and self._current()
+        )
+        if field and self._auto_start and not self._catalog_ready and self.worker is None:
             QTimer.singleShot(0, self, self.load_sources)
-        if not coil and self.datasets and self.tabs.currentIndex() == self._VIEW_TABS["slices"]:
+        if self.datasets and self.tabs.currentIndex() == self._VIEW_TABS["slices"]:
             self._grid_requested = True
             if self.state is None or self.state.slices is None or not self._current():
                 self._pending = True
                 self.debounce.start()
+        elif field and self.datasets and not self._current():
+            self._pending = True
+            self.debounce.start()
 
     def _automatic_analysis(self):
-        if self.tabs.currentIndex() == self._VIEW_TABS["coil"]:
+        if self._requested_view in {"coil", "shielding"}:
             self._pending = False
             return
         self.refresh_analysis(sample_grid=self._grid_requested or self.tabs.currentIndex() == self._VIEW_TABS["slices"])
@@ -847,6 +867,107 @@ class FieldAnalysisDialog(QDialog):
         self._update_coil_stats()
         self.tabs.addTab(page, "Coil stats")
 
+    def _build_shielding_tab(self):
+        page = QWidget()
+        self.shield_layout = QVBoxLayout(page)
+        self.shield_source, self.shield_component, self.shield_scale = QComboBox(), QComboBox(), QComboBox()
+        for source in shielding_sources(self.record):
+            self.shield_source.addItem(SHIELDING_SOURCES[source], source)
+        routed = self.shield_source.findData("routed")
+        if routed >= 0:
+            self.shield_source.setCurrentIndex(routed)
+        for component, label in SHIELDING_COMPONENTS.items():
+            self.shield_component.addItem(label, component)
+        self.shield_scale.addItem("Compare fields on one scale", False)
+        self.shield_scale.addItem("Combined field detail", True)
+        controls = QHBoxLayout()
+        for label, control in (
+            ("Field source", self.shield_source),
+            ("Component", self.shield_component),
+            ("View", self.shield_scale),
+        ):
+            controls.addWidget(QLabel(label))
+            controls.addWidget(control)
+            control.currentIndexChanged.connect(self._draw_shielding)
+        controls.addStretch()
+        self.shield_compute = QPushButton("Compute interior samples")
+        self.shield_compute.clicked.connect(self._compute_shield_interior)
+        controls.addWidget(self.shield_compute)
+        self.shield_layout.addLayout(controls)
+        self.shield_note = QLabel()
+        self.shield_note.setWordWrap(True)
+        self.shield_layout.addWidget(self.shield_note)
+        self.shield_plot, self._shield_plot_key = None, None
+        self._shield_interiors = {}
+        self._shield_worker_source = None
+        index = self.tabs.addTab(page, "Shielding surface")
+        self.tabs.setTabVisible(index, bool(self.shield_source.count()))
+
+    def _draw_shielding(self):
+        source, component = self.shield_source.currentData(), self.shield_component.currentData()
+        net_detail = self.shield_scale.currentData()
+        key = source, component, net_detail
+        needs_compute = source is not None and source.endswith("_interior") and source not in self._shield_interiors
+        self.shield_compute.setVisible(needs_compute)
+        self.shield_compute.setEnabled(self.worker is None)
+        if self._shield_worker_source is not None and self.worker is not None and self._shield_worker_source != source:
+            self.worker.cancel.set()
+        if source is None or self._shield_plot_key == key:
+            return
+        self._shield_plot_key = None
+        self.export_plot.setEnabled(False)
+        if self.shield_plot is None:
+            self.shield_plot = self._plot(self.tabs.widget(self._VIEW_TABS["shielding"]))
+            self.shield_layout.addWidget(self.shield_plot, 1)
+        figure = self.shield_plot.figure
+        if figure is None:
+            return
+        if needs_compute:
+            figure.clear()
+            self.shield_plot.draw()
+            self.shield_note.setText(
+                "Computing the field at triangle-interior points…"
+                if source == self._shield_worker_source
+                else "Evaluate the saved current distribution at three interior points per suppression triangle."
+            )
+            return
+        try:
+            data = (
+                self._shield_interiors[source]
+                if source in self._shield_interiors
+                else shielding_surface_fields(self.record, source)
+            )
+            self.shield_component.model().item(self.shield_component.findData("normal")).setEnabled(
+                data.normals is not None
+            )
+            if component == "normal" and data.normals is None:
+                self.shield_component.setCurrentIndex(self.shield_component.findData("magnitude"))
+                return
+            title = f"{read_run_metadata(self.record).get('name', 'Saved run')} · {SHIELDING_SOURCES[source]}"
+            note = draw_shielding_surface(figure, data, component, title=title, net_detail=net_detail)
+            self.shield_note.setText(note)
+            self._shield_plot_key = key
+            self.export_plot.setEnabled(True)
+        except (ValueError, KeyError, TypeError) as exc:
+            figure.clear()
+            self.shield_note.setText(f"Shielding field map unavailable. {exc}")
+        self.shield_plot.draw()
+
+    def _compute_shield_interior(self):
+        source = self.shield_source.currentData()
+        if self.worker is not None or not source or not source.endswith("_interior"):
+            return
+        self._shield_worker_source = source
+        self.shield_compute.setEnabled(False)
+        self.shield_note.setText("Computing the field at triangle-interior points…")
+
+        def operation(task):
+            task.report(None, "Calculate triangle-interior fields")
+            fields = shielding_surface_fields(self.record, source, cancel_check=task.cancel.is_set)
+            return ("shielding", (source, fields))
+
+        self._start(operation)
+
     def _update_coil_stats(self, *_):
         self._coil_estimates = mass_estimates(self._coil_report, self.material_density.value())
         self.coil_note.setText(
@@ -933,9 +1054,16 @@ class FieldAnalysisDialog(QDialog):
         coil = self.tabs.currentIndex() == self._VIEW_TABS["coil"]
         self.export_data.setEnabled(coil or (enabled and self._current()))
         self.export_plot.setEnabled(not coil and enabled and self._current())
+        if self._requested_view == "shielding":
+            self.export_plot.setEnabled(self._shield_plot_key is not None)
 
     def load_sources(self):
-        if self.worker is None and not self._close_pending and not self._closed:
+        if (
+            self._requested_view not in {"coil", "shielding"}
+            and self.worker is None
+            and not self._close_pending
+            and not self._closed
+        ):
 
             def operation(task):
                 from ..application.evidence import load_saved_request
@@ -1274,14 +1402,22 @@ class FieldAnalysisDialog(QDialog):
             self._finish_close()
             return
         stale = worker.generation != self._generation
+        interior_source, self._shield_worker_source = self._shield_worker_source, None
         if error and not stale:
             self.status.setText(
                 "Field analysis cancelled." if error == "Cancelled" else "Field analysis failed: " + error
             )
+            if interior_source is not None and interior_source == self.shield_source.currentData():
+                self.shield_note.setText(self.status.text())
         elif result is not None and not stale:
             kind, value = result
             if kind == "catalog":
                 self._catalog_loaded(value)
+            elif kind == "shielding":
+                source, data = value
+                self._shield_interiors[source] = data
+                if self._requested_view == "shielding" and source == self.shield_source.currentData():
+                    self._draw_shielding()
             elif kind in {"analysis", "harmonics"}:
                 self.state = value
                 self._progress(None, "Build captured field plots and tables")
@@ -1295,12 +1431,15 @@ class FieldAnalysisDialog(QDialog):
         self.cancel.hide()
         self.busyChanged.emit(False)
         self._enable(bool(self.datasets))
+        self.shield_compute.setEnabled(True)
         if self.datasets:
             self.current_policy.setEnabled(self.source.currentData() + "_at_stream_current" in self.datasets)
             self.sampling.setEnabled(bool(self._dataset().weights is not None and np.any(self._dataset().weights > 0)))
             self.units.setEnabled(self.normalization.currentData() == "none")
         if self._pending:
             QTimer.singleShot(0, self, self._automatic_analysis)
+        if interior_source is not None and not self._catalog_ready and self._auto_start:
+            QTimer.singleShot(0, self, self.load_sources)
 
     def _catalog_loaded(self, datasets):
         self._catalog_ready = True
@@ -1498,7 +1637,7 @@ class FieldAnalysisDialog(QDialog):
             # the right edge of wide windows. Keep maps centered in each cell.
             figure.colorbar(image, ax=visible, label=f"{state.mapped.label} [{unit}]", shrink=0.82, panchor=False)
         descriptions = {
-            "direct_sheet": "saved sheet, directly evaluated",
+            "direct_sheet": "saved stream function, directly evaluated",
             "direct_wire": "saved winding, directly evaluated",
             "display_interpolation": "interpolated saved samples",
             "owned_analytic": "authored expression, original scale",
@@ -1772,16 +1911,22 @@ class FieldAnalysisDialog(QDialog):
             raise ValueError("Choose a .json or .csv coil-statistics export.")
 
     def _choose_plot(self):
-        if not self._current() or self.tabs.currentIndex() == self._VIEW_TABS["coil"]:
+        if self._requested_view == "shielding" and self._shield_plot_key is not None:
+            plot = self.shield_plot
+        elif not self._current() or self._requested_view in {"coil", "shielding"}:
             return
-        plot = [self.cloud, self.slice_plot, self.error_plot, self.harmonic_plot][self.tabs.currentIndex()]
+        else:
+            plot = [self.cloud, self.slice_plot, self.error_plot, self.harmonic_plot][self.tabs.currentIndex()]
         if not hasattr(plot, "save_png"):
             self.status.setText(
                 "The current graphics view is unavailable; export numerical analysis or a different plot."
             )
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export current field plot", "field_analysis.png", "PNG image (*.png)"
+            self,
+            "Export current field plot",
+            "shielding_surface.png" if self._requested_view == "shielding" else "field_analysis.png",
+            "PNG image (*.png)",
         )
         if path:
             try:

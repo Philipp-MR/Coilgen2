@@ -1,4 +1,4 @@
-"""Bounded integration checks for an unchanged piecewise-linear current sheet."""
+"""Bounded field integration checks for a fixed piecewise-linear stream function."""
 
 from dataclasses import replace
 
@@ -58,11 +58,11 @@ def _reject_on_sheet_samples(mesh, points):
         if not counts.sum():
             continue
         if counts.sum() > 1_000_000:
-            raise ValueError("Sheet proximity workspace exceeds its budget.")
+            raise ValueError("Surface proximity workspace exceeds its budget.")
         ids = np.concatenate([np.asarray(ids, int) for ids in candidates])
         repeated = np.repeat(samples, counts, axis=0)
         if np.any(_point_triangle_sq_numpy(repeated, triangles[ids]) <= tolerance**2):
-            raise ValueError("Integration samples must lie off the singular current-sheet surface.")
+            raise ValueError("Integration samples must lie off the coil surface, where the field kernel is singular.")
 
 
 def check_sheet_integration(
@@ -101,10 +101,10 @@ def check_sheet_integration(
     if points.ndim != 2 or points.shape[1:] != (3,) or not len(points) or not np.all(np.isfinite(points)):
         raise ValueError("points_m must contain finite nonempty (n,3) world coordinates in metres.")
     if not result.coil_parts:
-        raise ValueError("Integration comparison requires at least one current sheet.")
+        raise ValueError("Integration comparison requires at least one coil part with a stream function.")
     face_count = sum(part.mesh.n_faces for part in result.coil_parts)
     if any(not part.mesh.n_faces for part in result.coil_parts):
-        raise ValueError("Every current sheet requires a nonempty triangle mesh.")
+        raise ValueError("Every coil part requires a nonempty triangle mesh.")
     # Reject extreme levels before exponentiation, even for arbitrary-size
     # Python integers supplied by a caller.
     if subdivisions[-1] > int(max_integration_work).bit_length() // 2:
@@ -115,7 +115,7 @@ def check_sheet_integration(
     for part in result.coil_parts:
         stream = np.asarray(part.stream_function)
         if stream.shape != (part.mesh.n_vertices,) or not np.all(np.isfinite(stream)):
-            raise ValueError("Every current sheet requires a finite stream function matching its vertices.")
+            raise ValueError("Every coil part requires a finite stream function matching its vertices.")
     # All part operators coexist. Bound their combined allocation, including
     # conservative midpoint growth, before building any basis or field matrix.
     upper_vertices = sum(part.mesh.n_vertices for part in result.coil_parts) + face_count * (4 ** subdivisions[-1] - 1)
@@ -127,7 +127,7 @@ def check_sheet_integration(
     target = TargetField(
         points, np.zeros_like(points), np.ones(len(points)), np.zeros(len(points), bool), np.ones(len(points), int)
     )
-    reporter = ProgressReporter.from_config(config, label="Sheet integration comparison")
+    reporter = ProgressReporter.from_config(config, label="Stream function field integration")
     comparisons = []
     for level in subdivisions:
         parts = []
@@ -167,7 +167,7 @@ def check_sheet_integration(
         row["difference_peak_T"] = float(np.max(np.linalg.norm(difference, axis=1)))
         row["relative_difference"] = row["difference_rms_T"] / reference_rms if reference_rms else None
         row["passed"] = row["difference_rms_T"] <= limit
-    reporter.finish("Unchanged-sheet integration comparison complete")
+    reporter.finish("Stream function field integration comparison complete")
     return {
         "available": True,
         "passed": all(row["passed"] for row in comparisons[:-1]),
@@ -180,5 +180,5 @@ def check_sheet_integration(
         "current_refitted": False,
         "independent_quadrature_check": len(orders) > 1,
         "independent_mesh_solution_check": False,
-        "scope": "Same piecewise-linear sheet current, faceted support and world sample grid; integration agreement only. No optimization-mesh convergence or hardware qualification.",
+        "scope": "Integration agreement for a fixed piecewise-linear stream function, faceted support and world sample grid. No optimization-mesh convergence or hardware qualification.",
     }

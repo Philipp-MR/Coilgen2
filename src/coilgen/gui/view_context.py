@@ -23,6 +23,18 @@ from .dataset_capabilities import FIELD_KEYS as _FIELD_KEYS, PATH_PREFIXES, reso
 from .run_metadata import read_run_metadata
 
 
+PREVIEW_FEATURE_LABELS = {
+    "interconnections": "interconnections",
+    "realized_centerlines": "realized conductor centerlines",
+    "sweep": "conductor sweep",
+    "evaluated_winding": "evaluated wire field",
+    "independent_field": "independent stream function field",
+    "review_conductor": "fabrication review paths",
+    "fabricated_field": "fabrication review field",
+    "winding_validation": "independent winding field",
+}
+
+
 @dataclass(frozen=True, slots=True)
 class ViewContext:
     editing_text: str
@@ -49,8 +61,8 @@ _DATASETS = {
     "fabrication": "Pipeline conductor",
     "swept": "Pipeline swept conductor",
     "target": "Target field",
-    "sheet": "Continuous-sheet field",
-    "validation": "Independent sheet validation",
+    "sheet": "Stream function field",
+    "validation": "Independent stream function field validation",
     "contour_field": "Contour wire field",
     "contour_residual": "Contour residual",
     "routed_field": "Winding field",
@@ -153,8 +165,8 @@ def _dataset_scope(arrays, metadata, key, original, capability=None):
             if not metric or metric.get("available") is False:
                 detail += " Saved metric scope is unavailable/unverified."
         elif key in {"sheet", "validation"}:
-            current_text = "Solved sheet coefficients [A]"
-            detail = "Continuous sheet; unchanged saved solution, without current refitting."
+            current_text = "Solved stream function coefficients [A]"
+            detail = "Stream function model; unchanged saved solution, without current refitting."
         elif key == "fabricated":
             current_source = _text(_mapping(metadata.get("fabricated_physics")).get("current_source"))
             current_text = (
@@ -179,7 +191,7 @@ def _dataset_scope(arrays, metadata, key, original, capability=None):
             capability.available,
             "Saved mesh faces",
             None,
-            "Solved sheet coefficients",
+            "Solved stream function coefficients",
             "Recorded surface density [A/m]; copper volume current density and thermal acceptance require separate evidence.",
         )
     if key == "stream_function":
@@ -187,8 +199,8 @@ def _dataset_scope(arrays, metadata, key, original, capability=None):
             capability.available,
             "Mesh vertices",
             None,
-            "Solved sheet coefficients [A]",
-            "Saved continuous-sheet solution." + (" " + capability.explanation if not capability.available else ""),
+            "Solved stream function coefficients [A]",
+            "Saved stream function solution." + (" " + capability.explanation if not capability.available else ""),
         )
     if key in PATH_PREFIXES or key == "swept":
         return (
@@ -238,6 +250,9 @@ def build_view_context(
         arrays = _mapping(getattr(stage_preview, "arrays", None))
         identity, tone = _identity(project, metadata.get, pending)
         stage = _text(metadata.get("pipeline_stage"), "unrecorded")
+        if stage == "sheet":
+            stage = "stream function"
+        feature = PREVIEW_FEATURE_LABELS.get(metadata.get("preview_feature"))
         available, sampling, current, current_text, detail = _dataset_scope(
             arrays, metadata, dataset_key, wire_current == "original", dataset_capability
         )
@@ -252,10 +267,11 @@ def build_view_context(
         )
         return ViewContext(
             editing,
-            f"Viewing: {prefix} {stage} preview · submitted {submitted} · {dataset}"
+            f"Viewing: {prefix} {feature or stage} preview · submitted {submitted} · {dataset}"
             + (" · dataset unavailable" if not available else ""),
             editing_tooltip,
-            f"Completed stage boundary: {stage}; {submitted}.\n{identity}.\n"
+            (f"Latest computed feature: {feature}.\n" if feature else "")
+            + f"Completed stage boundary: {stage}; {submitted}.\n{identity}.\n"
             f"Project/channel ID: {metadata.get('project_id', 'unrecorded')}.\n"
             f"Exact request: {metadata.get('request_sha256', 'unrecorded')}.\n"
             f"{sampling}. {current_text}. {detail}\n"
@@ -382,6 +398,7 @@ class ViewContextHeader(QWidget):
 
     history_requested = Signal()
     model_requested = Signal()
+    design_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -407,8 +424,31 @@ class ViewContextHeader(QWidget):
         self.model_button.setEnabled(False)
         layout.addWidget(self.editing_label, 0, 0)
         layout.addWidget(self.model_button, 0, 1)
-        layout.addWidget(self.viewing_label, 1, 0, 1, 2)
+        self.design_button = QToolButton(self)
+        self.design_button.setObjectName("review_run_design")
+        self.design_button.setText("Run design choices")
+        self.design_button.setIcon(icon("settings"))
+        self.design_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.design_button.setAccessibleName("Review design choices for the selected run")
+        self.design_button.clicked.connect(self.design_requested)
+        self.design_button.hide()
+        layout.addWidget(self.viewing_label, 1, 0)
+        layout.addWidget(self.design_button, 1, 1)
         layout.setColumnStretch(0, 1)
+
+    def show_design_action(self, selected, available, integrity_error):
+        self.design_button.setVisible(selected)
+        self.design_button.setEnabled(available)
+        self.design_button.setText("Run design choices" if available or not selected else "No verified run inputs")
+        self.design_button.setToolTip(
+            integrity_error
+            or (
+                "Review the verified settings submitted for the selected run, including earlier revisions."
+                if available
+                else "This run has no uniquely identified, checksum-protected original request."
+            )
+        )
+        self.design_button.setAccessibleDescription(self.design_button.toolTip())
 
     def set_context(self, context: ViewContext):
         self.context = context

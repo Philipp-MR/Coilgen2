@@ -80,7 +80,7 @@ def main(argv=None):
         report = {
             "coilgen_import": coilgen.__file__,
             "numpy_version": np.__version__,
-            "comparison": "same 3% relative weighted Bz error budget; continuous-sheet FEM only",
+            "comparison": "same 3% relative weighted Bz error budget; stream function FEM only",
             "cases": [],
         }
         axis = np.linspace(-0.055, 0.055, 12)

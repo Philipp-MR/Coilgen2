@@ -211,6 +211,123 @@ def test_general_field_equality_and_one_sided_bound_survive_tolerance_sweep():
     assert problem.reduced_sensitivity @ result.reduced_stream_function == pytest.approx([1e-6], rel=1e-7)
 
 
+@pytest.mark.parametrize("objective", ["custom", "power"])
+def test_formula_bounds_use_unweighted_fields_and_remain_fixed_across_tolerance_sweeps(objective):
+    problem, config = planar_problem()
+    problem.reduced_sensitivity *= 3
+    problem.target_z *= 3
+    spec = ResearchPhysicsSpec(
+        objective=objective,
+        custom_objective="power_W" if objective == "custom" else "",
+        custom_constraints=("field_T >= 0.98 * target_T", "field_T <= 1.02 * target_T"),
+    )
+    model = ParameterizedResearchProblem(problem, spec, config)
+    for solution in model.solve_many([1.0, 3.0]):
+        actual = problem.unweighted_reduced_sensitivity @ solution.reduced_stream_function
+        assert actual == pytest.approx([0.98e-6], rel=2e-5)
+        rows = solution.diagnostics["research_constraint_diagnostics"]
+        assert any(row["name"] == "standard:dsv" for row in rows)
+        assert [row["met"] for row in rows if row["name"].startswith("custom:")] == [True, True]
+        if objective == "custom":
+            assert solution.diagnostics["research_custom_objective_value"] == pytest.approx(
+                solution.diagnostics["sheet_power_W"]
+            )
+
+
+def test_custom_field_equality_rejects_candidate_even_if_standard_field_budget_passes(monkeypatch):
+    problem, config = planar_problem()
+    model = ParameterizedResearchProblem(
+        problem, ResearchPhysicsSpec(custom_constraints=("field_T == target_T",)), config
+    )
+    x = np.linalg.lstsq(problem.unweighted_reduced_sensitivity, 0.95 * problem.unweighted_target_z, rcond=None)[0]
+
+    def fake_optimal(_problem):
+        model.variable.value = x / model.current_scale
+        return "mock_false_optimal", []
+
+    monkeypatch.setattr(model, "_run_backend", fake_optimal)
+    with pytest.raises(RuntimeError, match="physical acceptance failed: custom:1"):
+        model.solve()
+
+
+def test_formula_energy_preflights_only_when_referenced_and_uses_physical_joules():
+    problem, config = planar_problem()
+    spec = ResearchPhysicsSpec(objective="custom", custom_objective="energy_J")
+    model = ParameterizedResearchProblem(problem, spec, config)
+    solution = model.solve()
+    assert model.preflight["energy_requested"]
+    assert solution.diagnostics["research_custom_objective_value"] == pytest.approx(solution.diagnostics["energy_J"])
+    assert solution.diagnostics["energy_J"] > 0
+
+
+def test_unmodified_legacy_specs_do_not_acquire_new_fields_when_serialized():
+    custom = {"custom_objective", "custom_constraints", "custom_solver"}
+    original = ResearchPhysicsSpec(objective="minimax").to_dict(include_formula_defaults=True)
+    for key in custom:
+        original.pop(key)
+    assert ResearchPhysicsSpec.from_dict(original).to_dict() == original
+    changed = ResearchPhysicsSpec(
+        objective="custom", custom_objective="power_W", custom_constraints=("field_T >= target_T",)
+    )
+    assert ResearchPhysicsSpec.from_dict(changed.to_dict()).to_dict() == changed.to_dict()
+
+
+@pytest.mark.parametrize("policy", ["auto", "local"])
+def test_nonlinear_custom_formula_preserves_field_bounds_and_reports_local_status(policy):
+    problem, config = planar_problem()
+    spec = ResearchPhysicsSpec(
+        objective="custom",
+        custom_objective="cos(field_T[0] / 1e-6)",
+        custom_constraints=("square(field_T / 1e-6) <= 1.04",),
+        custom_solver=policy,
+    )
+    solution = ParameterizedResearchProblem(problem, spec, config).solve()
+    field = float((problem.unweighted_reduced_sensitivity @ solution.reduced_stream_function)[0])
+    assert field == pytest.approx(np.sqrt(1.04) * 1e-6, rel=1e-5)
+    diagnostics = solution.diagnostics
+    assert diagnostics["research_custom_objective_value"] == pytest.approx(np.cos(field / 1e-6))
+    assert diagnostics["research_custom_solver_used"] == "local"
+    assert diagnostics["constrained_solver_status"] == "local_solution"
+    assert diagnostics["research_local_solver"]["status_code"] == 0
+    assert diagnostics["research_local_solver"]["initial_guess"] == "minimum_power_subject_to_native_constraints"
+    assert diagnostics["research_parameterized_dpp"] is False
+    assert all(row["met"] for row in diagnostics["research_constraint_diagnostics"])
+
+
+def test_conic_only_rejects_valid_nonlinear_formula_instead_of_changing_optimizer():
+    problem, config = planar_problem()
+    spec = ResearchPhysicsSpec(objective="custom", custom_objective="sin(field_T[0])", custom_solver="conic")
+    with pytest.raises(ValueError, match="DCP"):
+        ParameterizedResearchProblem(problem, spec, config)
+
+
+def test_nonlinear_infeasible_constraint_rejects_result():
+    problem, config = planar_problem()
+    config.constrained_optimization_max_iterations = 30
+    spec = ResearchPhysicsSpec(custom_constraints=("square(field_T / 1e-6) >= 4",))
+    with pytest.raises(RuntimeError, match="Local SLSQP did not converge|physical acceptance failed"):
+        ParameterizedResearchProblem(problem, spec, config).solve()
+
+
+@pytest.mark.parametrize("policy", ["conic", "local"])
+def test_custom_domain_excludes_zero_and_unconstrained_local_can_start_from_design_field(policy):
+    problem, config = planar_problem()
+    spec = ResearchPhysicsSpec(
+        objective="custom",
+        custom_objective="field_T[0]/1e-6 - log(field_T[0]/1e-6)",
+        include_default_field_constraints=False,
+        custom_solver=policy,
+    )
+    model = ParameterizedResearchProblem(problem, spec, config)
+    solution = model.solve()
+    assert solution.diagnostics["research_custom_objective_value"] == pytest.approx(1.0, rel=1e-7)
+    assert problem.unweighted_reduced_sensitivity @ solution.reduced_stream_function == pytest.approx([1e-6], rel=5e-5)
+    if policy == "local":
+        assert (
+            solution.diagnostics["research_local_solver"]["initial_guess"] == "native_feasible_weighted_least_squares"
+        )
+
+
 def test_solver_false_optimal_is_rejected_by_physical_recomputation(monkeypatch):
     problem, config = planar_problem()
     compiled = ParameterizedResearchProblem(problem, ResearchPhysicsSpec(), config)
@@ -297,7 +414,11 @@ def test_serialized_spec_round_trip_and_validation():
         replace(spec, objective_scales={"power": 0})
 
 
-def test_research_objective_flows_through_real_coil_pipeline():
+@pytest.mark.parametrize(
+    "physics",
+    [{"objective": "power"}, {"objective": "custom", "custom_objective": "power_W", "custom_solver": "local"}],
+)
+def test_research_objective_flows_through_real_coil_pipeline(physics):
     result = run_coilgen(
         CoilGenConfig(
             coil_mesh_file="create cylinder mesh",
@@ -315,7 +436,7 @@ def test_research_objective_flows_through_real_coil_pipeline():
             skip_sweep=True,
             skip_inductance_calculation=True,
             progress_flag=False,
-            research_physics={"objective": "power"},
+            research_physics=physics,
         )
     )
     assert result.regularization_diagnostics["constrained_solver_contract_met"]
@@ -329,3 +450,5 @@ def test_research_objective_flows_through_real_coil_pipeline():
     assert result.needed_current_layout == pytest.approx(result.coil_parts[0].contour_step)
     assert result.field_by_layout == pytest.approx(result.field_layout_per1Amp * result.coil_parts[0].contour_step)
     assert result.regularization_diagnostics["contourability_target_current_source"] == "stream_function"
+    if physics["objective"] == "custom":
+        assert result.regularization_diagnostics["research_custom_solver_used"] == "local"

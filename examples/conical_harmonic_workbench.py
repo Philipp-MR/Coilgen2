@@ -8,11 +8,11 @@ solid Y20; it is not the pole amplitude.
 The support is a 300 mm long frustum, with bottom/top radii 180/140 mm.
 The spherical ROI has radius 50 mm. The study uses 1 x 1 mm copper with
 18 nOhm m resistivity, a 3 mm minimum bend radius and 0.1 mm insulation.
-It fits the sheet to 4% RMS and checks it against a 5% budget on a distinct,
-denser grid. The 12-level connected winding retains known fixed-current
-field and manufacturing failures even when the sheet passes. It is a
-routing investigation, not qualified hardware. Sheet, thin-wire, thermal
-and drive-feed evidence have different physical scopes.
+It fits the stream function to a 4% RMS field error budget and checks the
+field against a 5% budget on a distinct, denser grid. Although the stream
+function meets its field budget, the 12-level connected winding fails the
+fixed-current field and manufacturing checks. The example investigates routing.
+Thermal limits and drive feeds require separate evidence.
 """
 
 from __future__ import annotations

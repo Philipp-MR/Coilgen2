@@ -88,7 +88,7 @@ def main(argv=None, *, kind="biplanar_gradient_shim") -> int:
                 assembly.save(path)
                 summary = record.metadata.get("summary") or {}
                 _emit(
-                    f"{channel.name}: sheet={summary.get('sheet_accepted', summary.get('accepted'))}; "
+                    f"{channel.name}: stream function={summary.get('sheet_accepted', summary.get('accepted'))}; "
                     f"strict geometry={(record.metadata.get('fabrication') or {}).get('ready')}; "
                     f"construction release={summary.get('construction_released', False)}"
                 )

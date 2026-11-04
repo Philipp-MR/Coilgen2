@@ -31,7 +31,6 @@ def test_project_actions_and_templates_are_in_file_menu_without_toolbar_duplicat
         "Gradients",
         "Shim coils",
         "Coil systems",
-        "Demonstrations",
     }
     button = window.findChild(QToolButton, "load_template_button")
     assert button is None

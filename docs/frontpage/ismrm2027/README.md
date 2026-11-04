@@ -2,14 +2,16 @@
 
 These figures and results come from the CoilGen2 ISMRM 2027 abstract package.
 Numerical results use **v26**; the gradient summaries below are derived from its
-saved fields. They are not a benchmark of the current checkout. All PNGs are
-retained byte for byte; no field maps were redrawn.
+saved fields. They are not a benchmark of the current checkout. The original
+abstract PNGs and its evidence file are not included in this directory. For
+figures generated with the current GUI presets, see the
+[gallery review](../../../validation/gui_review_2026-11-03/GUI_REVIEW.md).
 
-| Local figure | Abstract source |
+| Original figure name | Abstract source |
 | --- | --- |
-| [workspace.png](workspace.png) | v26 Figure 1: graphical workspace and processing sequence |
-| [coil-examples.png](coil-examples.png) | Original v25 Figure 5 four-panel image, reused in v26; results are presented as a separate Markdown table |
-| [conductor-profiles.png](conductor-profiles.png) | v26 Figure 3: native cross-section editors, swept conductor segments and elliptical-winding field evaluation |
+| `workspace.png` | v26 Figure 1: graphical workspace and processing sequence |
+| `coil-examples.png` | Original v25 Figure 5 four-panel image, reused in v26; results are presented as a separate Markdown table |
+| `conductor-profiles.png` | v26 Figure 3: native cross-section editors, swept conductor segments and elliptical-winding field evaluation |
 
 ## Conductor cross-sections and sweeping
 
@@ -107,7 +109,7 @@ elliptical shim sweep failed configured bend, clearance, frame and support
 checks. Finite-cross-section current distributions and hardware performance
 were not evaluated. Saved routing and placement are not a controlled routing trial.
 
-[evidence.json](evidence.json) records exact saved metrics, derived gradients,
+`evidence.json` in the original abstract package records exact saved metrics, derived gradients,
 relative source paths, SHA-256 hashes and verification details. Paths are relative to the
 supplied abstract package. Its large numerical archives, frozen software and
 runtime are not duplicated here; this directory is a compact provenance record,

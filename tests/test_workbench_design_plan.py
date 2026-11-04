@@ -156,6 +156,8 @@ def _channels(window):
 
 def test_plan_is_a_right_dock_with_persisted_user_visibility(windows):
     window = windows(_assembly())
+    window.resize(1280, 760)
+    window.show()
     dock = window.design_plan_dock
     assert dock.objectName() == "design_plan_dock"
     assert window.dockWidgetArea(dock) == Qt.DockWidgetArea.RightDockWidgetArea

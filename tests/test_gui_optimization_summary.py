@@ -17,6 +17,58 @@ def text(summary):
     return "\n".join((summary.title, summary.equation, *summary.terms, *summary.notes, summary.solver_text))
 
 
+def test_visible_physical_setup_includes_the_field_operator_and_its_effective_bound():
+    config = {
+        "research_physics": {"objective": "power", "force_equality_N": [0, 1, 0]},
+        "target_field_component": "Bz",
+        "field_shape_function": "x*x-y*y",
+        "target_error_tolerance_percent": 4,
+        "target_error_tolerance_absolute_T": 2e-8,
+    }
+    summary = build_optimization_summary(config)
+    bounds = "\n".join(summary.constraint_lines)
+    assert "‖√W(Ax − b)‖₂ ≤ 4% × ‖√W(b)‖₂ + 2e-08 T" in bounds
+    assert "x*x-y*y" in bounds and "F(x) = [0, 1, 0] N" in bounds
+    changed = build_optimization_summary(
+        config, {"target_error_constraint_metric": "rms", "target_error_rms_limit_T": 1e-6}
+    )
+    assert "RMS_W(Ax − b) ≤ 1e-06 T" in "\n".join(changed.constraint_lines)
+    assert "4%" not in "\n".join(changed.constraint_lines)
+
+
+def test_regional_pose_constraints_replace_the_default_dsv_budget_only():
+    requirements = {
+        "regions": [{"name": "ROI", "component": "vector", "rms_limit_T": 3e-6, "peak_limit_T": 5e-6}],
+        "scenarios": [
+            {"name": "displaced", "membership": "design"},
+            {"name": "validation only", "membership": "validation"},
+        ],
+    }
+    physics = {"sheet_power_limit_W": 2, "custom_constraints": ["norm_inf(psi_A) <= 3"]}
+    summary = build_optimization_summary({"research_physics": physics}, requirements=requirements)
+    bounds = "\n".join(summary.constraint_lines)
+    assert "nominal, displaced" in bounds and "validation only" not in bounds and "DSV" not in bounds
+    assert "RMS(A_pose ψ − b_pose) ≤ 3e-06 T" in bounds and "peak(A_pose ψ − b_pose) ≤ 5e-06 T" in bounds
+    assert "xᵀRx ≤ 2 W" in bounds and "norm_inf(psi_A) <= 3" in bounds
+
+
+def test_matrix_equalities_scenario_and_hardware_bounds_are_visible():
+    physics = {
+        "include_default_field_constraints": False,
+        "objective": "custom",
+        "custom_objective": "power_W / 2",
+        "field_constraints": [{"name": "null", "norm": "equality", "unit": "T"}],
+        "scenarios": [{"name": "offset", "peak_limit_T": 3e-6}],
+    }
+    summary = build_optimization_summary(
+        {"research_physics": physics, "max_wire_current_A": 2, "min_wire_distance_m": 0.01}
+    )
+    bounds = "\n".join(summary.constraint_lines)
+    assert "power_W / 2" in summary.equation
+    assert "null · Aᵢψ = bᵢ" in bounds and "offset · peak(Aᵢψ − bᵢ) ≤ 3e-06 T" in bounds
+    assert "max_f ‖K_f x‖₂ ≤ 200 A/m" in bounds and "Δψ ≤ 2 A" in bounds
+
+
 def test_default_describes_weighted_soft_cost_and_numerical_units():
     summary = build_optimization_summary(CoilGenConfig())
     assert summary.formulation == "tikhonov"

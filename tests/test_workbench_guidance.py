@@ -62,7 +62,8 @@ def test_ready_next_action_is_visible_without_changing_model_or_study(windows):
     window.overview_window.open_panel()
     assert window.overview_window.isVisible()
     assert not window.design_overview.details.isHidden()
-    assert window.design_status_label.text() == window.design_overview._state.title
+    assert window.design_status_label.text().startswith(window.design_overview._state.title)
+    assert f"Click {window.compute_button.text()}" in window.design_status_label.text()
     assert window.project is project
     assert window.undo_stack.count() == 0
     assert not window.service.submissions

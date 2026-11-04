@@ -15,10 +15,12 @@ def body_arrays(index=0, shift=0.0):
     return {f"swept_0_{index}_vertices_m": vertices, f"swept_0_{index}_faces": faces}
 
 
+@pytest.mark.parametrize("edges", [False, True])
 def test_swept_dataset_renders_exact_saved_vertices_and_faces_without_centerline_recreation(
-    scientific_viewport, monkeypatch
+    scientific_viewport, monkeypatch, edges
 ):
     viewport = scientific_viewport
+    viewport.edges.setChecked(edges)
     arrays = {**body_arrays(), **body_arrays(1, 0.01)}
     arrays["fabrication_0_points_m"] = np.array([[999, 999, 999], [1000, 1000, 1000]])
     original = {key: value.copy() for key, value in arrays.items()}
@@ -32,7 +34,7 @@ def test_swept_dataset_renders_exact_saved_vertices_and_faces_without_centerline
         np.testing.assert_array_equal(mesh.points, arrays[f"swept_0_{index}_vertices_m"])
         np.testing.assert_array_equal(mesh.faces.reshape(-1, 4)[:, 1:], arrays[f"swept_0_{index}_faces"])
         assert mesh.n_cells == 4
-        assert options["show_edges"]
+        assert options["show_edges"] == edges
         assert viewport._actors[viewport._actor_key(actor)] == "winding"
     assert "2 bodies" in viewport.caption.text()
     assert "inspection only" in viewport.caption.text()

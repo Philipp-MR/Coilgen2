@@ -14,7 +14,7 @@ _STEP_LABELS = {
     "support": "Define support",
     "target": "Define target and ROI",
     "prepared": "Prepare",
-    "sheet": "Optimize sheet",
+    "sheet": "Optimize stream function",
     "contours": "Generate contours",
     "routed": "Connect / sweep",
     "evaluated": "Evaluate",

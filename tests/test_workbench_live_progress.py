@@ -9,7 +9,6 @@ import pytest
 import test_workbench_usability as usability
 
 from PySide6.QtCore import QCoreApplication, QEvent, QThreadPool, Signal
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QComboBox
 
 from coilgen.application import ProjectDocument
@@ -29,19 +28,38 @@ class StageViewport(usability.Preview):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.dataset = QComboBox(self)
-        for key in ("support", "preview_target", "target", "stream_function", "contours", "swept"):
+        for key in (
+            "support",
+            "preview_target",
+            "target",
+            "stream_function",
+            "contours",
+            "routes",
+            "fabrication",
+            "swept",
+        ):
             self.dataset.addItem(key, key)
         self.dataset.currentIndexChanged.connect(self.context_changed)
         self.stage_preview_metadata = None
         self.stage_arrays = None
 
-    def display_stage_preview(self, arrays, metadata):
+    def display_stage_preview(self, arrays, metadata, *, follow=True):
         self.stage_preview_metadata, self.stage_arrays = dict(metadata), arrays
+        if follow:
+            self.follow_latest_stage_preview()
+        self.context_changed.emit()
+
+    def follow_latest_stage_preview(self):
+        metadata = self.stage_preview_metadata
+        if metadata is None:
+            return
         preferred = {"prepared": "target", "sheet": "stream_function", "contours": "contours"}.get(
             metadata["pipeline_stage"], "swept"
         )
+        preferred = {"interconnections": "routes", "realized_centerlines": "fabrication", "sweep": "swept"}.get(
+            metadata.get("preview_feature"), preferred
+        )
         self.dataset.setCurrentIndex(self.dataset.findData(preferred))
-        self.context_changed.emit()
 
     def clear_stage_preview(self):
         self.stage_preview_metadata = None
@@ -49,9 +67,10 @@ class StageViewport(usability.Preview):
         self.dataset.setCurrentIndex(self.dataset.findData("preview_target"))
         self.context_changed.emit()
 
-    def display_run(self, arrays, metadata=None):
+    def display_run(self, arrays, metadata=None, *, follow_latest=False):
         self.stage_preview_metadata = None
-        super().display_run(arrays, metadata)
+        self.followed_on_completion = follow_latest
+        super().display_run(arrays, metadata, follow_latest=follow_latest)
 
     def view_state(self):
         return {"dataset": self.dataset.currentData(), "source": "live" if self.stage_preview_metadata else "model"}
@@ -92,7 +111,7 @@ def _wait(predicate):
     assert predicate()
 
 
-def _snapshot(window, state, stage):
+def _snapshot(window, state, stage, feature=None):
     points = np.array([[0.0, 0.0, 0.0], [0.01, 0.01, 0.01]])
     arrays = {"target_points_m": points, "target_field_T": np.ones((2, 3)) * 1e-4}
     if stage != "prepared":
@@ -106,15 +125,22 @@ def _snapshot(window, state, stage):
         "scope": "completed_boundary_preview",
         "acceptance_claim": False,
     }
+    if feature:
+        metadata.update(scope="completed_feature_preview", preview_feature=feature)
+        arrays["route_0_points_m"] = points
+        if feature in {"realized_centerlines", "sweep"}:
+            arrays["fabrication_0_points_m"] = points
+        if feature == "sweep":
+            arrays.update(swept_0_0_vertices_m=points, swept_0_0_faces=np.zeros((1, 3), dtype=int))
     return StagePreview(window.jobs_directory / state["id"], metadata, arrays)
 
 
-def _publish(window, state, stage):
-    preview = _snapshot(window, state, stage)
+def _publish(window, state, stage, feature=None):
+    preview = _snapshot(window, state, stage, feature)
     window.live_preview._loader = lambda *_args, **_kwargs: preview
     directory = preview.directory
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / "stage_preview.json").write_text(stage, encoding="utf-8")
+    (directory / "stage_preview.json").write_text(feature or stage, encoding="utf-8")
     window.jobs.states[0].update(
         status="running", stage=f"Computing after {stage}", completed_stages=preview.metadata["completed_stages"]
     )
@@ -154,7 +180,8 @@ def test_actual_stage_previews_update_graphics_without_creating_results(window):
         )
         np.testing.assert_array_equal(window.viewport.stage_arrays["target_field_T"], preview.arrays["target_field_T"])
         assert window.view_context.context.source == "live"
-        assert f"Live {stage}" in window.view_context.context.viewing_text
+        label = "stream function" if stage == "sheet" else stage
+        assert f"Live {label}" in window.view_context.context.viewing_text
         assert window.runs == {}
         assert window._selected_run is None
         assert (
@@ -165,19 +192,41 @@ def test_actual_stage_previews_update_graphics_without_creating_results(window):
         assert window._workbench_view_state()["dataset"] == "preview_target"
 
 
-def test_manual_selection_pauses_until_follow_is_resumed(window):
+def test_choosing_a_plot_still_advances_when_new_geometry_arrives(window):
+    state = window.compute()
+    _publish(window, state, "contours")
+    _wait(lambda: window.viewport.dataset.currentData() == "contours")
+    window.viewport.dataset.setCurrentIndex(window.viewport.dataset.findData("target"))
+    window.viewport.dataset.activated.emit(window.viewport.dataset.currentIndex())
+    assert window.live_preview.following
+    for feature, plot, label in (
+        ("interconnections", "routes", "interconnections"),
+        ("realized_centerlines", "fabrication", "realized conductor centerlines"),
+        ("sweep", "swept", "conductor sweep"),
+    ):
+        _publish(window, state, "contours", feature)
+        _wait(lambda: window.viewport.dataset.currentData() == plot)
+        assert f"Live {label} preview" in window.view_context.context.viewing_text
+        assert "Completed stage boundary: contours" in window.view_context.context.viewing_tooltip
+        assert window.stage_items["routed"].text(1) != "Computed"
+        assert not window.runs
+
+
+def test_pinned_plot_keeps_receiving_geometry_and_resumes_without_new_data(window):
     state = window.compute()
     _publish(window, state, "sheet")
     _wait(lambda: window.viewport.stage_preview_metadata is not None)
     window.viewport.dataset.setCurrentIndex(window.viewport.dataset.findData("target"))
     window.viewport.dataset.activated.emit(window.viewport.dataset.currentIndex())
+    window._set_live_follow(False)
     assert not window.live_preview.following
     _publish(window, state, "contours")
-    QTest.qWait(30)
-    assert window.viewport.dataset.currentData() == "target"
-    assert window.viewport.stage_preview_metadata["pipeline_stage"] == "sheet"
-    window._set_live_follow(True)
     _wait(lambda: window.viewport.stage_preview_metadata["pipeline_stage"] == "contours")
+    assert window.viewport.dataset.currentData() == "target"
+    window.live_preview._loader = Mock(side_effect=AssertionError("Already loaded"))
+    window._set_live_follow(True)
+    assert window.viewport.dataset.currentData() == "contours"
+    window.live_preview._loader.assert_not_called()
 
 
 def test_final_verification_does_not_override_paused_plot(window):
@@ -207,6 +256,7 @@ def test_verified_final_result_exits_live_scope(window):
     assert window.live_preview.job_id is None
     assert window.viewport.stage_preview_metadata is None
     assert window._selected_run == state["id"]
+    assert window.viewport.followed_on_completion
     assert window.runs[state["id"]].metadata["summary"]["accepted"] is False
 
 
@@ -217,6 +267,7 @@ def test_viewing_saved_run_pauses_active_follow_and_can_return_to_live_plot(wind
     window.runs["historical"] = _record(window, {**state, "id": "historical", "name": "Older study"})
     window.show_run("historical")
     assert window._selected_run == "historical"
+    assert not window.viewport.followed_on_completion
     assert window.live_preview.job_id == state["id"]
     assert not window.live_preview.following
     assert window.viewport.stage_preview_metadata is None

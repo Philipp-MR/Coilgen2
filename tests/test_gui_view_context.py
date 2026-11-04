@@ -273,7 +273,7 @@ def test_independent_grid_counts_and_sample_slab_stay_separate(tmp_path):
     assert context.available is True
     assert context.sampling == "Independent samples · 7 samples"
     assert context.current_A is None
-    assert "Solved sheet coefficients [A]" in context.viewing_text
+    assert "Solved stream function coefficients [A]" in context.viewing_text
     assert "Displayed sample selection: z ≈ 0 m · 3 samples; no interpolation" in context.viewing_tooltip
 
 

@@ -18,12 +18,24 @@ Use it for early magnetostatic design and screening. Treat thermal, voltage,
 PNS, acoustic, eddy-current, mechanical, and regulatory checks as downstream
 engineering work unless a project script explicitly adds those checks.
 
-## Recommended Spyder Workflow
+## First run in a GUI
 
-The optional [native workbench](NATIVE_WORKBENCH.md) uses the same engine with
-an editable project tree, geometry inspection, isolated stage jobs and saved
-validation evidence. Start it with `python -m coilgen.gui` after installing the
-`gui` extra. The script workflow below remains supported.
+On Windows, run `Setup CoilGen2.cmd` once. Choose one interface:
+
+- Open `Start CoilGen2 GUI.cmd` for the desktop. Choose **Browse examples… → Gradients → Cylindrical Y gradient (Gy)**, then click **Compute full design**. When the job finishes, select it in **Jobs**, click
+  **View results**, then **Run design choices**. [Desktop walkthrough](NATIVE_WORKBENCH.md)
+- Open `Start CoilGen2 Browser.cmd` for the browser. Choose **Browse examples…**,
+  select **Gradients · Cylindrical Y gradient (Gy)** and click **Load template**.
+  Click **Compute full design** and follow the job in **Design plan**. When it
+  finishes, open **Run design choices** above the result plot. [First-run screen](../validation/gui_winding_quality_2026-11-03/browser-workbench-start.jpg) · [Browser walkthrough](BROWSER_WORKBENCH.md)
+
+Both interfaces use the same engine. The cylindrical Gy example designs a
+connected winding for a 20 mT/m gradient along the world y axis. Gradient and shim
+templates request smoothing, but a completed computation can still fail field, routing
+or fabrication checks. The result reader shows the inputs actually submitted,
+even if you have since changed the editor.
+
+## Run a design from Spyder
 
 1. Open `projects/general_examples/scripts/conventional_cylindrical_mri_gradient.py`.
 2. Edit only the `PARAMETERS["design"]` values.

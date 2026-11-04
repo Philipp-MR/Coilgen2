@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 import time
 
@@ -52,6 +53,7 @@ from .routing import (
 from .inductance import calculate_inductance_by_coil_layout
 from .manufacturing import create_swept_coil_meshes, realize_coil_paths
 from .joint_group_adoption import improve_group_routes, refresh_retained_route_diagnostics
+from .crossing_repair import crossing_repair_enabled, repair_swept_crossings
 from .routing_assembly import assemble_routing_parts
 from .routing_jumps import fabricated_jump_metrics
 from .pcb import generate_cylindrical_pcb_print
@@ -65,6 +67,7 @@ from .preoptimization import apply_preoptimized_stream_function, has_preoptimize
 from .progress import ProgressReporter, progress_scope
 from .pipeline_stages import PipelineCheckpoint, PipelineStage, PipelineState, stage_fingerprints
 from .pipeline_failure import retain_pipeline_failure
+from .scientific_arrays import shielding_contribution_arrays, shielding_geometry_arrays
 from .symmetry import mirror_symmetric_mesh_from_half
 from .surface_topology import mesh_quality_report
 from .target import define_target_field
@@ -73,8 +76,9 @@ from .target import define_target_field
 class _ExecutionContext:
     """Per-execution reporting; checkpoint times never masquerade as rerun work."""
 
-    def __init__(self, config: CoilGenConfig):
+    def __init__(self, config: CoilGenConfig, feature_callback=None):
         self.progress = ProgressReporter.from_config(config)
+        self.feature_callback = feature_callback
         self.realize_for_routing = (
             config.joint_group_routing and not config.skip_postprocessing and not config.make_cylndrical_pcb
         )
@@ -127,7 +131,7 @@ class CoilGenPipeline:
 
     Configuration is owned by this instance; changes to a caller's config never
     change an in-progress run. Stage execution copies its checkpoint before any
-    mutable numerical operations, so one solved sheet can feed multiple studies.
+    mutable numerical operations, so one optimized stream function can feed multiple studies.
     """
 
     def __init__(self, config: CoilGenConfig, project_root: Path | None = None, *, requirements=None):
@@ -152,12 +156,21 @@ class CoilGenPipeline:
         return state.result
 
     def run_stage(
-        self, stage: PipelineStage | str, checkpoint: PipelineCheckpoint | None = None, *, checkpoint_callback=None
+        self,
+        stage: PipelineStage | str,
+        checkpoint: PipelineCheckpoint | None = None,
+        *,
+        checkpoint_callback=None,
+        feature_callback=None,
+        resume_callback=None,
     ) -> PipelineCheckpoint:
         """Execute through a selected boundary, optionally reusing completed work.
 
         A checkpoint cannot be rewound or reused after upstream settings, asset
         contents or numerical source change. Recompute those stages explicitly.
+        The resume callback receives the verified input checkpoint before work
+        continues. The feature callback observes intermediate geometry synchronously;
+        its state is borrowed for display and cannot be used as a recovery boundary.
         """
         selected = PipelineStage(stage)
         fingerprints = self.stage_fingerprints()
@@ -168,17 +181,31 @@ class CoilGenPipeline:
                     PipelineCheckpoint(boundary, state, self.config, self.project_root, fingerprints=fingerprints)
                 )
 
-        state, _ = self._execute(selected, checkpoint, completed if checkpoint_callback is not None else None)
+        state, _ = self._execute(
+            selected,
+            checkpoint,
+            completed if checkpoint_callback is not None else None,
+            feature_callback=feature_callback,
+            resume_callback=resume_callback,
+        )
         return PipelineCheckpoint(selected, state, self.config, self.project_root, fingerprints=fingerprints)
 
-    def _execute(self, selected: PipelineStage, checkpoint: PipelineCheckpoint | None = None, completed=None):
+    def _execute(
+        self,
+        selected: PipelineStage,
+        checkpoint: PipelineCheckpoint | None = None,
+        completed=None,
+        *,
+        feature_callback=None,
+        resume_callback=None,
+    ):
         validation_config = self.config
         if self.requirements is not None:
             from .application.research_requirements import requirements_validation_config
 
             validation_config = requirements_validation_config(self.config)
         validate_config(validation_config, project_root=self.project_root).raise_for_errors()
-        context = _ExecutionContext(self.config)
+        context = _ExecutionContext(self.config, feature_callback)
         state = PipelineState()
         first_stage = 0
         if checkpoint is not None:
@@ -187,6 +214,8 @@ class CoilGenPipeline:
             if selected.index < checkpoint.stage.index:
                 raise ValueError("A checkpoint cannot be rewound; provide an earlier stage artifact.")
             checkpoint.assert_compatible(self.config, self.project_root, fingerprints=self.stage_fingerprints())
+            if resume_callback is not None:
+                resume_callback(checkpoint)
             state = deepcopy(checkpoint._state)
             first_stage = checkpoint.stage.index + 1
             context.progress.report(0.0, f"reusing {checkpoint.stage.value} checkpoint", force=True)
@@ -279,6 +308,11 @@ class CoilGenPipeline:
 
             preflight_research_physics(self.config.research_physics, sum(mesh.n_faces for mesh in prepared_meshes))
         state.parts = [CoilPart(mesh=mesh) for mesh in prepared_meshes]
+        roles = coil_mesh.metadata.get("part_roles")
+        if isinstance(roles, (list, tuple)) and len(roles) == len(prepared_meshes):
+            for mesh, role in zip(prepared_meshes, roles):
+                if role in ("primary", "active_shield"):
+                    mesh.metadata["role"] = role
         mesh_quality_diagnostics = _validate_prepared_mesh_quality(prepared_meshes, self.config)
         symmetry_mesh_diagnostics.update(mesh_quality_diagnostics)
         parts = state.parts
@@ -303,6 +337,7 @@ class CoilGenPipeline:
             ),
         )
         state.target_field = target_field
+        state.shielding_arrays.update(shielding_geometry_arrays(target_field, secondary_target_mesh))
         stage("defined target field")
 
         parts = context.compute("Build mesh neighborhoods", calculate_one_ring_by_mesh, parts)
@@ -384,6 +419,7 @@ class CoilGenPipeline:
         state.target_field = target_field
         state.combined_mesh = combined_mesh
         state.sf_b_field = sf_b_field
+        state.shielding_arrays.update(shielding_contribution_arrays(parts, target_field, "sheet"))
         state.regularization_diagnostics = regularization_diagnostics
         state.primary_surface_index = primary_surface_ind
 
@@ -518,6 +554,7 @@ class CoilGenPipeline:
                 ("Clean wire paths", 5),
                 ("Realize conductors", 5 if context.realize_for_routing else 0),
                 ("Select joint routes", 25 if routing else 0),
+                ("Check mounted crossing clearance", 10 if routing else 0),
                 ("Sweep conductors", 15 if not self.config.skip_sweep else 0),
                 ("Validate circuit assembly", 4 if routing else 0),
                 ("Generate PCB", 1 if self.config.make_cylndrical_pcb else 0),
@@ -571,27 +608,46 @@ class CoilGenPipeline:
                 progress=ProgressReporter.from_config(self.config, label="Inter-group routing"),
             )
             stage("interconnected among loop groups")
+            if context.feature_callback is not None and any(
+                part.wire_path is not None and len(part.wire_path.v) >= 2 for part in parts
+            ):
+                context.feature_callback("interconnections", replace(state, parts=parts))
             parts = context.compute("Shift return paths", shift_return_paths, parts, self.config)
             stage("shifted return paths")
+        defer_route_gate = self.config.fail_on_route_quality_issues and crossing_repair_enabled(self.config)
+        cleanup_config = replace(self.config, fail_on_route_quality_issues=False) if defer_route_gate else self.config
         parts = context.compute(
             "Clean wire paths",
             cleanup_wire_paths,
             parts,
-            config=self.config,
+            config=cleanup_config,
             progress=ProgressReporter.from_config(self.config, label="Route cleanup"),
         )
         stage("cleaned wire paths")
         if realize_for_routing:
             parts = context.compute("Realize conductors", realize_coil_paths, parts, self.config)
             stage("realized fabrication centerlines")
+            if context.feature_callback is not None and any(part.fabrication_path is not None for part in parts):
+                context.feature_callback("realized_centerlines", replace(state, parts=parts))
         parts = context.compute("Select joint routes", improve_group_routes, parts, self.config, target_field)
         stage("selected joint group routes")
+        parts = context.compute("Check mounted crossing clearance", repair_swept_crossings, parts, self.config)
+        if defer_route_gate:
+            from .layout import _raise_on_bad_route_quality
+
+            state.parts = parts
+            for part in parts:
+                _raise_on_bad_route_quality(part, self.config)
         # Parts arrive without a mesh. A body returned by route
         # selection belongs to an independently validated candidate; retain its
         # exact geometry, including any routing-specific clearance contract.
         unswept_parts = [part for part in parts if part.swept_body is None]
         if unswept_parts:
             context.compute("Sweep conductors", create_swept_coil_meshes, unswept_parts, self.config)
+        if context.feature_callback is not None and any(
+            part.swept_bodies or part.swept_body is not None for part in parts
+        ):
+            context.feature_callback("sweep", replace(state, parts=parts))
         refresh_retained_route_diagnostics(parts)
         stage("finalized swept conductor meshes")
         # Retain the actual final candidate before a strict assembly gate can

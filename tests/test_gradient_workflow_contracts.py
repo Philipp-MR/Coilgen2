@@ -239,6 +239,7 @@ def pipeline_fixture(monkeypatch):
             return SimpleNamespace(
                 stage=PipelineStage.EVALUATED,
                 result=self.result,
+                shielding_arrays={},
                 save=lambda destination: Path(destination).write_bytes(b"fake evaluated checkpoint"),
             )
 
@@ -427,7 +428,7 @@ def test_gradient_review_retains_sheet_wire_and_open_circuit_scope_without_accep
         },
     }
     rows = {row.key: row for row in gradient_review(metadata)}
-    assert rows["sheet_K"].unit == "A/m" and "sheet" in rows["sheet_K"].scope.lower()
+    assert rows["sheet_K"].unit == "A/m" and "stream function" in rows["sheet_K"].scope.lower()
     assert rows["open:wire_J"].value == 2e6 and rows["open:wire_J"].unit == "A/m²"
     assert rows["open:efficiency"].value is None
     assert "partial" in rows["open:inductance_H"].scope

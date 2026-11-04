@@ -127,7 +127,7 @@ def test_unknown_or_invalid_legacy_percentage_remains_indeterminate_for_active_j
 
 @pytest.mark.parametrize("value", [None, 0, 0.45, 1, float("nan"), "0.45"])
 def test_runtime_unavailable_does_not_present_last_known_progress_as_current(value):
-    state = {"status": "running", "progress": value, "stage": "Optimizing sheet", "project_revision": 4}
+    state = {"status": "running", "progress": value, "stage": "Optimizing stream function", "project_revision": 4}
     before = dict(state)
     snapshot = build_design_progress(
         "evaluated",
@@ -145,7 +145,7 @@ def test_runtime_unavailable_does_not_present_last_known_progress_as_current(val
     assert snapshot.stages[0].viewed and not any(stage.inferred for stage in snapshot.stages)
     assert "does not establish engineering acceptance" in snapshot.stages[0].tooltip
     assert "Job status file is temporarily unreadable" in snapshot.tooltip
-    assert "Last known operation: Optimizing sheet" in snapshot.tooltip
+    assert "Last known operation: Optimizing stream function" in snapshot.tooltip
     assert "Last known worker progress" in snapshot.tooltip and "current progress is unavailable" in snapshot.tooltip
     assert state == before
 

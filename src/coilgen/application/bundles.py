@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from hashlib import sha256
 import json
+import time
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 
@@ -18,6 +19,18 @@ from .service import DesignService, RunRecord
 
 
 _EXECUTION_FILE = "execution_times.json"
+SOURCE_PROJECT_FILE = "source_project.coilgen.json"
+
+
+def revision_key(metadata):
+    return tuple(
+        metadata.get(key)
+        for key in ("project_id", "project_revision", "project_fingerprint", "project_model_fingerprint")
+    )
+
+
+def project_key(project):
+    return project.id, project.revision, project.fingerprint, project.model_fingerprint
 
 
 def _execution_times(payload, request_sha256):
@@ -197,13 +210,19 @@ class RunArchive:
         return _execution_times(payload, self.metadata["request_sha256"]) if payload is not None else {}
 
     @classmethod
-    def capture(cls, record: RunRecord, alias: str | None = None):
+    def capture(cls, record: RunRecord, alias: str | None = None, *, source_project=None):
         verified = verify_record(record)
         directory = verified.directory
         result = {key: value for key, value in verified.metadata.items() if key != "job"}
         names = {"result.json", "manifest.json", "request.json"}
         names.update(_relative_name(item["name"]) for item in result["artifacts"])
         files = {}
+        if source_project is not None:
+            if project_key(source_project) != revision_key(result):
+                raise ValueError("Cannot archive a source project from a different run revision.")
+            files[SOURCE_PROJECT_FILE] = json.dumps(
+                source_project.inputs_only().to_dict(), allow_nan=False, separators=(",", ":")
+            ).encode("utf-8")
         for name in names:
             path = (directory / _relative_name(name)).resolve()
             if not path.is_relative_to(directory):
@@ -327,8 +346,17 @@ class RunArchive:
                 with path.open("xb") as stream:
                     stream.write(payload)
             self._verify_materialized(directory)
-            try:
-                directory.rename(destination)
-            except FileExistsError:
-                return self._verify_materialized(destination)
+            # Scanners and sync clients briefly hold handles in a newly written directory on Windows.
+            delays = iter((0.02, 0.05, 0.1, 0.2, 0.4, 0.8))
+            while True:
+                try:
+                    directory.rename(destination)
+                    break
+                except FileExistsError:
+                    return self._verify_materialized(destination)
+                except PermissionError as exc:
+                    delay = next(delays, None)
+                    if getattr(exc, "winerror", None) not in {5, 32, 33} or delay is None:
+                        raise
+                    time.sleep(delay)
         return self._verify_materialized(destination)

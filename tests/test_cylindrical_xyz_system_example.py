@@ -51,7 +51,7 @@ def test_three_ready_studies_have_separate_coaxial_supports_and_real_conductor_s
         assert config.b_0_strength_T == 3 and tuple(config.b_0_direction) == (0, 0, 1)
         assert not config.set_roi_into_mesh_center
         mesh = load_mesh_from_config(config, tmp_path)
-        assert mesh.n_vertices == 544 and len(mesh.boundaries) == 2
+        assert mesh.n_vertices == 48 * 25 and len(mesh.boundaries) == 2
         np.testing.assert_allclose(np.linalg.norm(mesh.vertices[:, :2], axis=1), radius, atol=1e-14)
         np.testing.assert_allclose(np.ptp(mesh.vertices[:, 2]), CYLINDRICAL_LENGTH_M, atol=1e-14)
         np.testing.assert_allclose(mesh.vertices.mean(axis=0), 0, atol=1e-14)

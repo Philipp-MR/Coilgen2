@@ -8,7 +8,7 @@ import test_native_workbench as native
 
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtGui import QFont, QFontDatabase
-from PySide6.QtWidgets import QPushButton
+from PySide6.QtWidgets import QDockWidget, QPushButton
 
 from coilgen.application import ProjectDocument
 from coilgen.application.presets import EXAMPLE_TITLES, preset_config, preset_study
@@ -79,6 +79,7 @@ def test_real_workspace_keeps_complete_compute_label_visible(window, application
             window.select_node(step)
             window._adapt_toolbars()
             _assert_visible_controls(window, application)
+            assert window.width() == width
             assert window.compute_button.text() == expected
 
 
@@ -91,3 +92,18 @@ def test_visible_workspace_adapts_after_font_change(window, application):
     window.setFont(larger_font)
     _assert_visible_controls(window, application)
     assert window.service.submissions == []
+
+
+def test_narrow_sidebar_shares_plot_space_and_preserves_a_closed_plan(window, application):
+    window.resize(800, 760)
+    window.show()
+    application.processEvents()
+    model = window.findChild(QDockWidget, "model_dock")
+    assert window.design_plan_dock in window.tabifiedDockWidgets(model)
+    window.design_plan_dock.hide()
+    window.resize(1280, 760)
+    application.processEvents()
+    assert window.design_plan_dock.isHidden() and window.design_plan_dock not in window.tabifiedDockWidgets(model)
+    window.resize(800, 760)
+    application.processEvents()
+    assert window.design_plan_dock.isHidden() and window.width() == 800

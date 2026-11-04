@@ -6,7 +6,7 @@ import math
 
 import numpy as np
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, QSignalBlocker, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -28,6 +28,8 @@ from PySide6.QtWidgets import (
 from ..application.conductor_profiles import (
     canonical_profile_points,
     is_rectangular_profile,
+    omega_holder_profile,
+    round_wire_profile,
     validate_conductor_profile,
 )
 from .icons import icon
@@ -36,9 +38,8 @@ from .icons import icon
 class ConductorProfileEditor(QWidget):
     """One draft control storing physical SI points, with millimetre UI values.
 
-    Coordinates are not recentered or reordered. Closing the owning window
-    keeps both valid and incomplete table edits. The parent commits ``profile``
-    through its normal Apply/undo/save boundary.
+    Coordinates retain their original origin and order. The parent commits
+    ``profile`` when the user applies the draft.
     """
 
     changed = Signal()
@@ -88,7 +89,7 @@ class ConductorProfileEditor(QWidget):
         point_actions = QHBoxLayout()
         self.add_button = QPushButton("Split segment", table_panel)
         self.add_button.setIcon(icon("edit"))
-        self.add_button.setToolTip("Insert a midpoint after the selected point, then move it to form a convex corner.")
+        self.add_button.setToolTip("Insert a midpoint after the selected point, then move it to form a new corner.")
         self.remove_button = QPushButton("Remove", table_panel)
         self.remove_button.setIcon(icon("remove"))
         self.remove_button.setToolTip("Remove the selected point; a polygon needs at least three points.")
@@ -110,7 +111,18 @@ class ConductorProfileEditor(QWidget):
         )
         self.fit_button = QPushButton("Fit view", self)
         self.fit_button.setIcon(icon("fit-view"))
+        self.round_button = QPushButton("Round wire", self)
+        self.round_button.setObjectName("conductor_profile_round")
+        self.round_button.setToolTip("Round (litz) wire polygon centred on the origin; diameter = conductor width.")
+        self.omega_button = QPushButton("Omega holder", self)
+        self.omega_button.setObjectName("conductor_profile_omega")
+        self.omega_button.setToolTip(
+            "Printable omega holder around a round wire at the origin (wire diameter = conductor width). "
+            "Sweep about the profile origin so the exported path follows the wire centre."
+        )
         bottom.addWidget(self.rectangle_button)
+        bottom.addWidget(self.round_button)
+        bottom.addWidget(self.omega_button)
         bottom.addStretch(1)
         bottom.addWidget(self.fit_button)
         layout.addLayout(bottom)
@@ -131,6 +143,8 @@ class ConductorProfileEditor(QWidget):
         self.add_button.clicked.connect(self.insert_point)
         self.remove_button.clicked.connect(self.remove_point)
         self.rectangle_button.clicked.connect(self.start_rectangle)
+        self.round_button.clicked.connect(lambda: self.start_preset("round"))
+        self.omega_button.clicked.connect(lambda: self.start_preset("omega"))
         self.fit_button.clicked.connect(self.preview.fit_view)
         self.preview.point_selected.connect(self.select_point)
         self.preview.point_moved.connect(self._move_point)
@@ -183,6 +197,33 @@ class ConductorProfileEditor(QWidget):
             tuple(self.table.item(row, col).text() for col in range(2)) for row in range(self.table.rowCount())
         )
         return (mode, rows if mode == "polygon" else ())
+
+    def capture_draft(self):
+        # The data role holds the exact SI coordinate behind the mm display.
+        cells = tuple(
+            tuple(
+                (item.text(), item.data(Qt.ItemDataRole.UserRole))
+                for item in (self.table.item(r, 0), self.table.item(r, 1))
+            )
+            for r in range(self.table.rowCount())
+        )
+        return self.mode_combo.currentIndex(), cells, self._polygon_initialized, self._loaded_error
+
+    def restore_draft(self, state):
+        mode, cells, self._polygon_initialized, self._loaded_error = state
+        self._close_cell_editor()
+        with QSignalBlocker(self.table), QSignalBlocker(self.mode_combo):
+            self.mode_combo.setCurrentIndex(mode)
+            self.table.setRowCount(len(cells))
+            for row, pair in enumerate(cells):
+                for column, (text, source) in enumerate(pair):
+                    item = QTableWidgetItem(text)
+                    item.setData(Qt.ItemDataRole.UserRole, source)
+                    self.table.setItem(row, column, item)
+            self.table.setVerticalHeaderLabels(tuple(str(index + 1) for index in range(len(cells))))
+        self._update_state()
+        self.preview.fit_view()
+        self._emit_changed()
 
     def value(self):
         return self.profile()
@@ -292,6 +333,29 @@ class ConductorProfileEditor(QWidget):
         loading = self._loading
         self._loading = True
         self._set_points(self._rectangle_points())
+        self._polygon_initialized = True
+        self._loaded_error = ""
+        self.mode_combo.setCurrentIndex(1)
+        self._loading = loading
+        self._update_state()
+        self.preview.fit_view()
+        self._emit_changed()
+
+    def start_preset(self, kind):
+        """Replace the polygon with a round wire or an omega holder around it.
+
+        The wire diameter is the current conductor width; both shapes are
+        centred on the origin (the modeled path reference).
+        """
+        diameter = self._width_mm * 1e-3
+        try:
+            points = round_wire_profile(diameter) if kind == "round" else omega_holder_profile(diameter)
+        except ValueError as exc:
+            self.status_label.setText(str(exc))
+            return
+        loading = self._loading
+        self._loading = True
+        self._set_points(points)
         self._polygon_initialized = True
         self._loaded_error = ""
         self.mode_combo.setCurrentIndex(1)
@@ -412,7 +476,7 @@ class ConductorProfileEditor(QWidget):
             self.status_label.setText(
                 (f"{len(summary.points_m)} points" if polygon else "Rectangle")
                 + f" · area {summary.area_m2 * 1e6:g} mm² · "
-                f"extent {summary.width_m * 1e3:g} × {summary.height_m * 1e3:g} mm · convex"
+                f"extent {summary.width_m * 1e3:g} × {summary.height_m * 1e3:g} mm"
             )
             self.status_label.setStyleSheet("")
 

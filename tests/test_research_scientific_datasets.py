@@ -1,14 +1,17 @@
 """Saved field coordinates and reviewed paths must describe their own geometry."""
 
+import json
 from types import SimpleNamespace
 
 import numpy as np
 
 from coilgen import CoilGenConfig
+from coilgen.application.stage_preview import MANIFEST_NAME
 from coilgen.models import CoilPart, Mesh, SweptBody
 from coilgen.physics import biot_savart_wire_path
 from coilgen.research.application import _scientific_arrays, run_design
 from coilgen.research.requests import ResearchRequest
+from coilgen.research.validation import validate_on_independent_grid
 
 
 def _mesh(offset=0):
@@ -59,7 +62,17 @@ def test_legacy_sweep_aggregate_is_exported_only_when_no_individual_bodies_exist
 def test_review_field_retains_design_grid_and_review_geometry_separate_from_sheet_grid(tmp_path, monkeypatch):
     captured = {}
 
+    def latest_feature():
+        manifest = json.loads((tmp_path / MANIFEST_NAME).read_text(encoding="utf-8"))
+        assert manifest["acceptance_claim"] is False and manifest["pipeline_stage"] == "evaluated"
+        return manifest.get("preview_feature")
+
+    def independent_grid(result, **kwargs):
+        assert latest_feature() == "evaluated_winding"
+        return validate_on_independent_grid(result, **kwargs)
+
     def compile_review(result, **kwargs):
+        assert latest_feature() == "independent_field"
         # Simulate a different mounting policy. Its return participates in B
         # while the mounted-conductor trace remains a distinct dataset.
         contour = result.coil_parts[0].contour_lines[0].v
@@ -77,14 +90,38 @@ def test_review_field_retains_design_grid_and_review_geometry_separate_from_shee
         )
 
     def validate_review(result, fabrication, **kwargs):
+        assert latest_feature() == "review_conductor"
         field = result.coil_parts[0].contour_step * biot_savart_wire_path(
             captured["electrical"], result.target_field.coords, worker_count=1
         )
         captured["field"] = field
-        return {"checks": [], "unknown_reasons": ["synthetic review remains unverified"], "field_T": field}
+        return {
+            "checks": [],
+            "unknown_reasons": ["synthetic review remains unverified"],
+            "field_T": field,
+            "current_source": "original_contour_current_no_refit",
+        }
 
+    def validate_winding(result, fabrication, **kwargs):
+        assert latest_feature() == "fabricated_field"
+        points = np.asarray([[0.0, 0.001, 0.002], [0.003, 0.0, 0.001]])
+        field = result.coil_parts[0].contour_step * biot_savart_wire_path(
+            captured["electrical"], points, worker_count=1
+        )
+        return {
+            "available": True,
+            "points_m": points,
+            "target_T": np.zeros_like(field),
+            "field_T": field,
+            "checks": [],
+            "unknown_reasons": [],
+            "current_source": "original_contour_current_no_refit",
+        }
+
+    monkeypatch.setattr("coilgen.research.application.validate_on_independent_grid", independent_grid)
     monkeypatch.setattr("coilgen.research.fabrication.compile_fabrication", compile_review)
     monkeypatch.setattr("coilgen.research.application.validate_fabricated_constraints", validate_review)
+    monkeypatch.setattr("coilgen.research.application.validate_winding_on_independent_grid", validate_winding)
     config = CoilGenConfig(
         coil_mesh_file="create cylinder mesh",
         cylinder_mesh_parameter_list=(0.3, 0.12, 12, 6, 1, 0, 0, 0),
@@ -106,7 +143,10 @@ def test_review_field_retains_design_grid_and_review_geometry_separate_from_shee
         progress_flag=False,
         plot_flag=False,
     )
-    result = run_design(ResearchRequest.from_config(config, fabricate=True, validation_resolution=5), tmp_path)
+    result = run_design(
+        ResearchRequest.from_config(config, fabricate=True, validation_resolution=5, engineering={}), tmp_path
+    )
+    assert latest_feature() == "winding_validation"
     assert result["summary"]["scope"] == "fabrication_review" and result["summary"]["accepted"] is False
     assert "sheet_accepted" in result["summary"]
     assert result["summary"]["fabrication_review_performed"] is True
@@ -114,6 +154,18 @@ def test_review_field_retains_design_grid_and_review_geometry_separate_from_shee
     assert result["wire_fields"]["contour"]["current_refitted"] is False
     assert result["wire_fields"]["routed"]["available"] is False
     with np.load(tmp_path / "scientific_result.npz", allow_pickle=False) as saved:
+        final_preview = json.loads((tmp_path / MANIFEST_NAME).read_text(encoding="utf-8"))
+        with np.load(tmp_path / final_preview["array_file"], allow_pickle=False) as preview:
+            for name in (
+                "contour_field_T",
+                "validation_field_T",
+                "review_conductor_0_points_m",
+                "review_electrical_0_points_m",
+                "fabricated_field_T",
+                "winding_validation_field_T",
+                "winding_validation_points_m",
+            ):
+                np.testing.assert_array_equal(preview[name], saved[name])
         np.testing.assert_array_equal(saved["contour_field_T"], captured["result"].field_by_unconnected_loops)
         assert "routed_field_T" not in saved.files
         np.testing.assert_array_equal(saved["fabricated_points_m"], captured["result"].target_field.coords)

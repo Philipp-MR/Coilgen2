@@ -208,7 +208,7 @@ def _build_brief(project, pending):
         "Optimization preference",
         objective,
         "Preference",
-        "Continuous current sheet; winding results are evaluated separately",
+        "Optimize the stream function before evaluating the winding.",
         "solve",
         icon_name={"power": "power-loss", "minimax": "current-density", "magnetic_energy": "inductance"}.get(
             physics.get("objective", "power") if physics is not None else None, "stream-function"
@@ -219,7 +219,7 @@ def _build_brief(project, pending):
     independent = _number(config.target_error_tolerance_percent / study["design_margin"])
     field = (
         f"Design relative budget {relative}%; metric {config.target_error_constraint_metric}. "
-        f"Independent-sheet relative budget {independent}% (design / {_number(study['design_margin'])})."
+        f"Independent stream function field budget {independent}% (design / {_number(study['design_margin'])})."
         if default_field
         else f"Default target-field constraints are disabled in the physical specification; configured {relative}% budget is inactive in that default check."
     )
@@ -246,7 +246,7 @@ def _build_brief(project, pending):
     add(
         "acceptance",
         "Numerical acceptance policy",
-        f"Solver field allowance {_number(field_acceptance_slack_T(config) * 1e9)} nT; independent-sheet allowance {_number(independent_field_acceptance_slack_T(config) * 1e9)} nT.",
+        f"Solver field allowance {_number(field_acceptance_slack_T(config) * 1e9)} nT; independent stream function field allowance {_number(independent_field_acceptance_slack_T(config) * 1e9)} nT.",
         "Assumption",
         "Existing solver tolerances; these allowances do not replace field budgets",
         "solve",
@@ -259,14 +259,14 @@ def _build_brief(project, pending):
         bounds.append(f"configured spacing ≥ {_number(hardware['min_wire_distance_m'] * 1e3)} mm")
     if hardware["engineering_surface_current_density_limit_A_per_m"] > 0:
         bounds.append(
-            f"effective sheet K ≤ {_number(hardware['engineering_surface_current_density_limit_A_per_m'])} A/m ({hardware['engineering_surface_current_density_limit_source']})"
+            f"effective surface current density K ≤ {_number(hardware['engineering_surface_current_density_limit_A_per_m'])} A/m ({hardware['engineering_surface_current_density_limit_source']})"
         )
     add(
         "hardware",
         "Current / spacing limits",
         "; ".join(bounds) + "." if bounds else "No current, spacing or surface-current limit is configured.",
         "Requirement" if bounds else "Scope",
-        f"Contour mode: {hardware['contour_discretization_method']}; hardware infeasibility policy: {config.gradient_hardware_infeasible_policy}. A sheet K bound is not a conductor current-density or amplifier qualification.",
+        f"Contour mode: {hardware['contour_discretization_method']}; hardware infeasibility policy: {config.gradient_hardware_infeasible_policy}. A surface current density bound is not a conductor current-density or amplifier qualification.",
         "solve",
         "neutral" if bounds else "warning",
     )
@@ -297,7 +297,7 @@ def _build_brief(project, pending):
             if physical
             else "No additional sheet power, energy, net force, torque or field-scenario bound is configured.",
             "Requirement" if physical else "Scope",
-            "Continuous sheet in the configured background field; finite scenarios certify their sampled cases",
+            "Stream function model in the configured background field; finite scenarios certify their sampled cases",
             "solve",
         )
     fabrication = (
@@ -335,7 +335,7 @@ def _build_brief(project, pending):
         "Remaining engineering evidence",
         "Complete drive/feed geometry and external returns, amplifier voltage, cooling, temperature and duty cycle require separate qualification.",
         "Scope",
-        "Geometric CAD export and sheet constraints do not establish construction release",
+        "Geometric CAD export and stream function constraints do not establish construction release",
         "check",
         "warning",
     )

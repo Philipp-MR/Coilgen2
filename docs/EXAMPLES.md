@@ -1,5 +1,16 @@
 # Examples
 
+For an interactive example, open **Browse examples…** in either workbench. On the desktop, choose **Gradients → Cylindrical Y gradient (Gy)**. In the browser, select **Gradients · Cylindrical Y gradient (Gy)** and click **Load template**. In both, click **Compute full design**. [Desktop guide](NATIVE_WORKBENCH.md) · [Browser guide](BROWSER_WORKBENCH.md)
+The gallery includes single channels and two coil systems. The
+[winding gallery](../validation/gui_winding_quality_2026-11-03/README.md)
+compares actual saved windings and their field and fabrication checks.
+For the X²−Y² example, choose **File → Load template → Shim coils →
+Second-order shim — X²−Y²** in the desktop, or use **Browse examples…**
+in the browser to select and load that shim. Compute a full design to review
+the wire after routing. Loading a fresh template uses the updated support
+resolution and fit policy; opening an existing project restores its saved
+inputs and result. The scripts below have their own settings.
+
 The [current inventory](../validation/examples/current_inventory.json) records every
 guarded runnable script and its source hash. Regenerate it after example changes
 with `python validation/examples/inventory.py`. Inventory does not imply validation;

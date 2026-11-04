@@ -47,7 +47,7 @@ def test_target_placement_window_reopens_without_changing_exact_region(windows, 
     assert window.undo_stack.count() == 0
 
 
-def test_target_placement_incomplete_text_survives_closing_and_fails_apply(windows, application):
+def test_target_placement_dismiss_discards_incomplete_text(windows, application):
     window = _target_window(windows)
     original = window.project
     section = window._target_region_editor.placement_section
@@ -59,10 +59,11 @@ def test_target_placement_incomplete_text_survives_closing_and_fails_apply(windo
     section.dialog.close()
     section.open()
     application.processEvents()
-    assert control.lineEdit().text().startswith("1e")
-    assert not window.apply_settings()
+    assert control.hasAcceptableInput()
+    assert not window._draft_dirty
+    assert window.apply_settings()
     assert window.project is original and window.undo_stack.count() == 0
-    assert not window._field_errors["roi_center_m_x"].isHidden()
+    assert window._field_errors["roi_center_m_x"].isHidden()
 
 
 def test_region_sample_count_reports_actual_preview_without_sampling_again(windows):

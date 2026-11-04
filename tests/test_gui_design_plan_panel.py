@@ -125,7 +125,7 @@ def test_multichannel_reports_real_worker_without_averaging_and_excludes_disable
         active_channel_id=gz.id,
         states=(
             _state(gx, status="queued", progress=0),
-            _state(gy, status="running", progress=0.67, active_stage="sheet", stage="Solving current sheet"),
+            _state(gy, status="running", progress=0.67, active_stage="sheet", stage="Solving for the stream function"),
         ),
     )
     panel.set_plan(plan)

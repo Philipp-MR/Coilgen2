@@ -265,6 +265,14 @@ class ProjectDocument:
         ).encode()
         return sha256(encoded).hexdigest()
 
+    @staticmethod
+    def _stored_config(values):
+        """Supply only opt-in fields introduced after the original project schema."""
+        config = dict(values)
+        config.setdefault("target_region_geometry", None)
+        config.setdefault("contour_smoothing_local_fallback", False)
+        return config
+
     @property
     def _identity_values(self) -> dict:
         values = self.values
@@ -272,6 +280,8 @@ class ProjectDocument:
         # identities of pre-region project JSON and its saved result evidence.
         if values.get("target_region_geometry") is None:
             values.pop("target_region_geometry", None)
+        if values.get("contour_smoothing_local_fallback") is False:
+            values.pop("contour_smoothing_local_fallback", None)
         return values
 
     @property
@@ -329,7 +339,7 @@ class ProjectDocument:
 
     def inputs_only(self) -> ProjectDocument:
         """Keep owned inputs and design decisions without result/view payloads."""
-        session = {key: value for key, value in self._session.items() if key == "design_study"}
+        session = {key: value for key, value in self._session.items() if key in {"design_study", "full_fabrication"}}
         return self.with_results((), session=session)
 
     def update_study(self, changes: Mapping[str, Any]) -> ProjectDocument:
@@ -366,6 +376,8 @@ class ProjectDocument:
 
     @property
     def config(self) -> CoilGenConfig:
+        if not self._assets:
+            return self._resolved_config(self.project_root)
         with self._cache_lock:
             if self._cache is None:
                 object.__setattr__(self, "_cache", TemporaryDirectory(prefix="coilgen-project-"))
@@ -438,11 +450,16 @@ class ProjectDocument:
         )
         if not config_changed:
             return updated
+        updated.validate_config(allow_incomplete=allow_incomplete)
+        return updated
+
+    def validate_config(self, *, allow_incomplete: bool = False) -> None:
+        """Validate the resolved inputs, allowing an unset support during editing."""
         from ..config_validation import ConfigValidationReport, validate_config
 
         try:
-            config = updated.config
-            if updated.study.get("requirements") is not None:
+            config = self.config
+            if self.study.get("requirements") is not None:
                 from .research_requirements import requirements_validation_config
 
                 config = requirements_validation_config(config)
@@ -462,7 +479,6 @@ class ProjectDocument:
             report.raise_for_errors()
         except (TypeError, OverflowError) as exc:
             raise ValueError(f"Invalid CoilGen configuration: {exc}") from exc
-        return updated
 
     def replace_config(self, config: CoilGenConfig) -> ProjectDocument:
         return self.update_config(asdict(config))
@@ -556,10 +572,7 @@ class ProjectDocument:
         if not isinstance(value["config"], dict) or not isinstance(value["assets"], dict):
             raise ValueError("Project config and assets must be JSON objects.")
         json.dumps(value, allow_nan=False)
-        # Narrow migration: older files predate this optional, inactive field.
-        # Missing unrelated settings still fail the resolved-config contract.
-        config_values = dict(value["config"])
-        config_values.setdefault("target_region_geometry", None)
+        config_values = cls._stored_config(value["config"])
         assets = {}
         for id_, descriptor in value["assets"].items():
             if value["schema"] == PROJECT_SCHEMA:

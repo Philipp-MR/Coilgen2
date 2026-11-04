@@ -329,7 +329,7 @@ def test_stopped_jobs_preserve_only_recorded_earlier_stages(assembly, status, st
 
 def test_runtime_failure_retains_evidence_without_current_percentage_or_animation(assembly):
     gx = assembly.channel("gx").project
-    job = state(gx, progress=0.45, completed_stages=["prepared"], stage="Optimizing sheet")
+    job = state(gx, progress=0.45, completed_stages=["prepared"], stage="Optimizing stream function")
     before = deepcopy(job)
     plan = build_design_plan(assembly, states=[job], runtime_unavailable="Status file unreadable")
     channel = plan.channels[0]

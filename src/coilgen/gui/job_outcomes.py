@@ -18,7 +18,7 @@ _TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
 _PRIORITY = {"error": 0, "warning": 1, "info": 2, "success": 3, "neutral": 4}
 _STAGES = {
     "prepared": "Prepare",
-    "sheet": "Sheet",
+    "sheet": "Stream function",
     "contours": "Contours",
     "routed": "Winding",
     "evaluated": "Evaluate",
@@ -104,7 +104,7 @@ def build_job_outcome(state, record=None, verification_error=""):
             "fabrication_review",
         }
         detail = (
-            f"Saved sheet checks: {verdicts['sheet']}; pipeline conductor geometry: {verdicts['sweeps']}; "
+            f"Saved stream function checks: {verdicts['sheet']}; pipeline conductor geometry: {verdicts['sweeps']}; "
             f"fabrication review: {verdicts['fabrication']}."
         )
         if constraints:

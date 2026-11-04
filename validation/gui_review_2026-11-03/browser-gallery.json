@@ -1,0 +1,154 @@
+[
+  {
+    "template": "Gradients · Cylindrical X gradient (Gx)",
+    "editor": "Cylindrical X gradient (Gx) · revision 2",
+    "batch": false,
+    "spline": true,
+    "cap": true,
+    "guard": true
+  },
+  {
+    "template": "Gradients · Cylindrical Y gradient (Gy)",
+    "editor": "Cylindrical Y gradient (Gy) · revision 2",
+    "batch": false,
+    "spline": true,
+    "cap": true,
+    "guard": true
+  },
+  {
+    "template": "Gradients · Cylindrical Z gradient (Gz)",
+    "editor": "Cylindrical Z gradient (Gz) · revision 2",
+    "batch": false,
+    "spline": true,
+    "cap": true,
+    "guard": true
+  },
+  {
+    "template": "Gradients · Halbach transverse-field X gradient (Gx)",
+    "editor": "Halbach transverse-field X gradient (Gx) · revision 2",
+    "batch": false,
+    "spline": true,
+    "cap": true,
+    "guard": true
+  },
+  {
+    "template": "Gradients · Halbach transverse-field Y gradient (Gy)",
+    "editor": "Halbach transverse-field Y gradient (Gy) · revision 2",
+    "batch": false,
+    "spline": true,
+    "cap": true,
+    "guard": true
+  },
+  {
+    "template": "Gradients · Halbach transverse-field Z gradient (Gz)",
+    "editor": "Halbach transverse-field Z gradient (Gz) · revision 2",
+    "batch": false,
+    "spline": true,
+    "cap": true,
+    "guard": true
+  },
+  {
+    "template": "Gradients · Actively shielded Y gradient (Gy)",
+    "editor": "Actively shielded Y gradient (Gy) · revision 4",
+    "batch": false,
+    "spline": true,
+    "cap": true,
+    "guard": true
+  },
+  {
+    "template": "Gradients · Biplanar X gradient (Gx)",
+    "editor": "Biplanar X gradient (Gx) · revision 2",
+    "batch": false,
+    "spline": true,
+    "cap": true,
+    "guard": true
+  },
+  {
+    "template": "Gradients · Biplanar Y gradient (Gy)",
+    "editor": "Biplanar Y gradient (Gy) · revision 2",
+    "batch": false,
+    "spline": true,
+    "cap": true,
+    "guard": true
+  },
+  {
+    "template": "Gradients · Biplanar Z gradient (Gz)",
+    "editor": "Biplanar Z gradient (Gz) · revision 2",
+    "batch": false,
+    "spline": true,
+    "cap": true,
+    "guard": true
+  },
+  {
+    "template": "Shim coils · Uniform B0 shim (Z0)",
+    "editor": "Uniform B0 shim (Z0) · revision 2",
+    "batch": false,
+    "spline": true,
+    "cap": true,
+    "guard": true
+  },
+  {
+    "template": "Shim coils · Second-order shim — Z2",
+    "editor": "Second-order shim — Z2 · revision 2",
+    "batch": false,
+    "spline": true,
+    "cap": true,
+    "guard": true
+  },
+  {
+    "template": "Shim coils · Second-order shim — XZ",
+    "editor": "Second-order shim — XZ · revision 2",
+    "batch": false,
+    "spline": true,
+    "cap": true,
+    "guard": true
+  },
+  {
+    "template": "Shim coils · Second-order shim — YZ",
+    "editor": "Second-order shim — YZ · revision 2",
+    "batch": false,
+    "spline": true,
+    "cap": true,
+    "guard": true
+  },
+  {
+    "template": "Shim coils · Second-order shim — X²−Y²",
+    "editor": "Second-order shim — X²−Y² · revision 2",
+    "batch": false,
+    "spline": true,
+    "cap": true,
+    "guard": true
+  },
+  {
+    "template": "Shim coils · Second-order shim — XY",
+    "editor": "Second-order shim — XY · revision 2",
+    "batch": false,
+    "spline": true,
+    "cap": true,
+    "guard": true
+  },
+  {
+    "template": "Shim coils · Conical Z2",
+    "editor": "Conical Z2 · revision 2",
+    "batch": false,
+    "spline": true,
+    "cap": true,
+    "guard": true
+  },
+  {
+    "template": "Coil systems · Cylindrical XYZ gradient system (Gx, Gy, Gz)",
+    "editor": "Cylindrical Gx · revision 2",
+    "batch": true,
+    "spline": true,
+    "cap": true,
+    "guard": true
+  },
+  {
+    "template": "Coil systems · Biplanar gradients + second-order shims",
+    "editor": "Biplanar Gx · revision 2",
+    "batch": true,
+    "spline": true,
+    "cap": true,
+    "guard": true
+  }
+]

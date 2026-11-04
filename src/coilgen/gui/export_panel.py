@@ -3,7 +3,6 @@
 from copy import deepcopy
 from dataclasses import dataclass, field
 from inspect import Parameter, signature
-import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import shutil
 from tempfile import TemporaryDirectory
@@ -22,9 +21,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..application.cad import (
+    default_export_selection,
+    draft_export_notice,
+    geometry_option_label,
+    is_draft_artifact,
+)
+from ..persistence import publish_exclusive
 from .colors import apply_tone, item_foreground
 from .icons import icon
-from .run_context import run_compatibility
 
 
 @dataclass
@@ -123,9 +128,19 @@ def geometry_export_description(package):
     """Describe the committed manifest's actual units, rather than requested units."""
     manifest = getattr(package, "manifest", {})
     geometry = manifest.get("geometry", ())
-    formats = tuple(dict.fromkeys(f"{item['format'].upper()} [{item['actual_unit']}]" for item in geometry))
-    count = len(package.paths)
+    labels = {"path_csv": "3D path CSV", "path_step": "3D path STEP"}
+    formats = tuple(
+        dict.fromkeys(
+            f"{labels.get(item['format'], item['format'].upper())} [{item['actual_unit']}]" for item in geometry
+        )
+    )
+    paths = sum(str(item.get("format", "")).startswith("path_") for item in geometry)
+    count = len(package.paths) - paths
     text = f"Exported {count} solid {'file' if count == 1 else 'files'}"
+    if paths:
+        text += f" and {paths} 3D path {'file' if paths == 1 else 'files'}"
+    if any(item.get("draft") for item in geometry):
+        text += " (DRAFT: not construction-released)"
     text += " · " + ", ".join(formats) if formats else ""
     if manifest.get("project_companion"):
         text += " · project JSON and results included"
@@ -218,14 +233,14 @@ class GeometryExportPanel(QWidget):
         self.bounds.setObjectName("geometry_export_bounds")
         self.bounds.setWordWrap(True)
         self.bounds.setTextFormat(Qt.TextFormat.PlainText)
-        self.include_project = QCheckBox("Include project JSON and results")
+        self.include_project = QCheckBox("Include matching run project")
         self.include_project.setIcon(icon("project-json"))
         self.include_project.setIconSize(QSize(18, 18))
         self.include_project.setAccessibleName(self.include_project.text())
         self.include_project.setChecked(self.state.include_project)
         self.include_project.setObjectName("geometry_export_include_project")
         self.include_project.setToolTip(
-            "Save one self-contained project JSON containing model inputs and completed results with the CAD export."
+            "Include the exact source revision and this result as a self-contained project JSON."
         )
         self.companion_context = QLabel()
         self.companion_context.setObjectName("geometry_export_companion_context")
@@ -302,6 +317,18 @@ class GeometryExportPanel(QWidget):
         layout.addWidget(self.units)
         layout.addWidget(self.include_project)
         layout.addWidget(self.companion_context)
+        self.draft_notice = QLabel(draft_export_notice(review.get("failure_reasons") or ()))
+        self.draft_notice.setObjectName("geometry_export_draft_notice")
+        self.draft_notice.setTextFormat(Qt.TextFormat.PlainText)
+        self.draft_notice.setWordWrap(True)
+        apply_tone(self.draft_notice, "error")
+        self.draft_ack = QCheckBox("Export DRAFT geometry although recorded checks failed")
+        self.draft_ack.setObjectName("geometry_export_draft_ack")
+        self.draft_ack.toggled.connect(self._selection_changed)
+        self.draft_notice.setVisible(False)
+        self.draft_ack.setVisible(False)
+        layout.addWidget(self.draft_notice)
+        layout.addWidget(self.draft_ack)
         layout.addWidget(self.export_button)
         self.receipt = ExportReceiptPanel(self.state.receipt)
         layout.addWidget(self.receipt)
@@ -317,12 +344,15 @@ class GeometryExportPanel(QWidget):
         layout.addWidget(release)
         with QSignalBlocker(self.table):
             self.table.setRowCount(len(self.options))
+            default_names = default_export_selection(self.options)
             for row, option in enumerate(self.options):
-                name = QTableWidgetItem(f"{option.body_id} · {option.format.upper()}")
+                name = QTableWidgetItem(geometry_option_label(option))
                 name.setIcon(icon("conductor-sweep"))
                 name.setData(Qt.ItemDataRole.UserRole, option.name)
                 name.setFlags(name.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                selected = option.name in self.state.names if self.state.names is not None else option.format == "stl"
+                selected = (
+                    option.name in self.state.names if self.state.names is not None else option.name in default_names
+                )
                 name.setCheckState(Qt.CheckState.Checked if selected else Qt.CheckState.Unchecked)
                 name.setToolTip(option.name)
                 self.table.setItem(row, 0, name)
@@ -379,26 +409,13 @@ class GeometryExportPanel(QWidget):
             self.companion_context.clear()
             self.companion_context.hide()
             return
-        current = (
-            next((channel.project for channel in assembly.channels if channel.project.id == owner), None)
-            if assembly is not None
-            else project
-        )
-        current = current or project
         revision = metadata.get("project_revision", (metadata.get("job") or {}).get("project_revision", "unrecorded"))
-        context, label = run_compatibility(metadata, current)
-        current_revision = current.revision if current is not None else "unverified"
-        companion = (
-            f"Current assembly ({len(assembly.channels)} channels)" if assembly is not None else "Current project"
-        )
-        text = f"CAD source: saved revision {revision}. {companion} companion: applied revision {current_revision} · {label.lower()}."
+        text = f"CAD source: saved revision {revision}. The project file includes that revision and this result."
         if pending:
-            text += " Pending edits will be applied before saving the companion."
-        if context == "earlier":
-            text += " The project contains the current settings and saved earlier result; CAD remains the selected run's geometry."
+            text += " Pending editor changes stay in the workbench."
         self.companion_context.setText(text)
         self.companion_context.setToolTip(text)
-        apply_tone(self.companion_context, "warning" if context != "current" or pending else "info")
+        apply_tone(self.companion_context, "info")
         self.companion_context.setVisible(self.include_project.isChecked())
 
     def selected_names(self):
@@ -412,13 +429,22 @@ class GeometryExportPanel(QWidget):
         with QSignalBlocker(self.table):
             for row, option in enumerate(self.options):
                 self.table.item(row, 1).setText(
-                    f"STL · {self.units.currentData()}" if option.format == "stl" else f"STEP · {option.source_unit}"
+                    f"{'STL' if option.format == 'stl' else 'CSV'} · {self.units.currentData()}"
+                    if option.format in {"stl", "path_csv"}
+                    else f"STEP · {option.source_unit}"
                 )
         names = self.selected_names()
         self.state.names = names
         self.state.unit = self.units.currentData()
         self.state.include_project = self.include_project.isChecked()
-        self.export_button.setEnabled(self._has_record and bool(names) and not self._exporting and not self._diagnostic)
+        drafts = any(is_draft_artifact(name) for name in names)
+        if hasattr(self, "draft_ack"):
+            self.draft_notice.setVisible(drafts)
+            self.draft_ack.setVisible(drafts)
+        draft_blocked = drafts and not (hasattr(self, "draft_ack") and self.draft_ack.isChecked())
+        self.export_button.setEnabled(
+            self._has_record and bool(names) and not self._exporting and not self._diagnostic and not draft_blocked
+        )
         self.export_button.setToolTip(
             self._diagnostic or "Export the selected saved solids and their recorded provenance."
         )
@@ -479,6 +505,14 @@ class _ExportSignals(QObject):
     finished = Signal(object, str)
 
 
+def companion_with_result(record, source):
+    """Attach only the selected verified result to its matching input revision."""
+    from ..application.bundles import RunArchive
+
+    archive = RunArchive.capture(record, source_project=source)
+    return source.with_results((archive,), session={**source.session, "selected_run_id": archive.id})
+
+
 class GeometryExportTask(QRunnable):
     """Write an already detached snapshot without calling any Qt-owned model."""
 
@@ -501,7 +535,10 @@ class GeometryExportTask(QRunnable):
         relay = ProgressSignalRelay(lambda event: deliver_task_signal(self.signals, "progress", event))
         try:
             with progress_context(relay.report):
-                package = export_geometry(self.record, self.directory, self.names, unit=self.unit, project=self.project)
+                project = companion_with_result(self.record, self.project) if self.project is not None else None
+                package = export_geometry(
+                    self.record, self.directory, self.names, unit=self.unit, project=project, allow_draft=True
+                )
         except Exception as exc:
             if isinstance(exc, EvidenceIntegrityError):
                 self.verification_error = str(exc)
@@ -582,7 +619,9 @@ def export_verified_artifacts(record, directory, *, loader):
     if directory.is_relative_to(source_directory):
         raise ValueError("Export artifacts outside the immutable saved run directory.")
     directory.parent.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(prefix=".coilgen-artifacts-", dir=directory.parent) as temporary:
+    with TemporaryDirectory(
+        prefix=".coilgen-artifacts-", dir=directory.parent, ignore_cleanup_errors=True
+    ) as temporary:
         stage = Path(temporary)
         staged = []
         with progress_scope(15, 55, "Staging and checking saved artifact files", label="Artifact export"):
@@ -611,7 +650,7 @@ def export_verified_artifacts(record, directory, *, loader):
                     for parent in reversed(missing):
                         parent.mkdir(exist_ok=False)
                         created_directories.append(parent)
-                    os.link(path, destination)
+                    publish_exclusive(path, destination)
                     created_files.append(destination)
                     task.advance()
                 task.done()

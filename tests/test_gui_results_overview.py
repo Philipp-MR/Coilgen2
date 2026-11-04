@@ -207,7 +207,7 @@ def test_sheet_evidence_uses_explicit_error_scalars_and_does_not_borrow_solver_o
     summary = summarize_field_result(_record(metadata, ("target_points_m", "target_field_T", "sheet_field_T")))
     assert summary.source_key == "sheet" and summary.component == "Bx"
     assert summary.rms_uT is summary.peak_uT is summary.relative_percent is summary.current_A is None
-    assert summary.badge == "Sheet passed" and summary.current_display == "Not applicable"
+    assert summary.badge == "Stream function checks passed" and summary.current_display == "Not applicable"
     metadata["validation"] = {
         "available": True,
         "rms_error_T": 1e-6,
@@ -283,7 +283,7 @@ def test_verification_failure_and_stale_snapshot_remain_visible_but_integrity_ga
     assert panel.buttons["field"].isEnabled()
     panel.set_analysis_available(False)
     assert not panel.buttons["field"].isEnabled() and panel.buttons["checks"].isEnabled()
-    assert panel.buttons["coil"].isEnabled()
+    assert not panel.has_coil_statistics and not panel.buttons["coil"].isEnabled()
 
 
 def test_identity_cache_avoids_repeated_metadata_work_and_invalidates_on_health_or_revision_state(widgets):
@@ -305,7 +305,7 @@ def test_identity_cache_avoids_repeated_metadata_work_and_invalidates_on_health_
 
 
 @pytest.mark.parametrize("width", (660, 800))
-def test_native_font_render_and_six_actions_fit_narrow_result_board(widgets, app, tmp_path, width):
+def test_native_font_render_and_primary_actions_fit_narrow_result_board(widgets, app, tmp_path, width):
     root, panel = widgets
     panel.set_record(_record(_coil_metadata()))
     _show(root, app, width)
@@ -384,7 +384,7 @@ def test_coil_only_saved_record_has_properties_and_checks_without_a_computed_fie
     assert panel.isVisible() and panel.has_coil_statistics
     assert panel.field_cards.isHidden() and "Field not calculated" in panel.context.text()
     assert panel.buttons["coil"].isEnabled() and panel.buttons["checks"].isEnabled()
-    assert all(not panel.buttons[key].isEnabled() for key in ("field", "slices", "errors", "harmonics"))
+    assert not panel.buttons["field"].isEnabled()
     assert panel.source_key == "" and panel.heading.full_text.startswith("Results ·")
     panel.set_record(record, source_error="Saved geometry hash mismatch")
     assert panel.isVisible() and panel.badge.text() == "Verification failed"

@@ -51,8 +51,10 @@ def test_custom_expression_is_retained_when_returning_from_linear_goal(windows):
     window = windows(project)
     window.select_node("target")
     window.findChild(QComboBox, "target_mode").setCurrentText("Linear gradient")
+    assert window.apply_settings()
     assert window.project.config.field_shape_function == "y"
     window.findChild(QComboBox, "target_mode").setCurrentText("Analytic expression")
+    assert window.apply_settings()
     assert window.project.config.field_shape_function == project.config.field_shape_function
     assert window.project.config.target_gradient_normalization == "off"
 

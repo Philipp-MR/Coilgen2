@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import multiprocessing
 import os
 from pathlib import Path
@@ -57,7 +56,7 @@ def launch(project=None, *, jobs_directory=None, background=False, project_path=
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="CoilGen2 native scientific workbench")
-    parser.add_argument("project", nargs="?", type=Path, help="Saved CoilGen project JSON")
+    parser.add_argument("project", nargs="?", type=Path, help="Saved CoilGen project (.coilgen or JSON)")
     parser.add_argument("--jobs-directory", type=Path, help="Directory for durable local jobs")
     parser.add_argument("--background", action="store_true", help="Open without taking keyboard focus")
     arguments = parser.parse_args(argv)
@@ -65,24 +64,16 @@ def main(argv=None) -> int:
         project = None
         if arguments.project:
             _startup_message(f"Loading project: {arguments.project.name}")
-            from ..application import ASSEMBLY_SCHEMA, ProjectAssembly, ProjectDocument
-            from ..application.assembly import LEGACY_ASSEMBLY_SCHEMAS
+            from .project_loading import load_document
 
-            value = json.loads(arguments.project.read_text(encoding="utf-8"))
-            if not isinstance(value, dict):
-                raise ValueError("Project file must contain a JSON object.")
-            project = (
-                ProjectAssembly.load(arguments.project)
-                if value.get("schema") in {ASSEMBLY_SCHEMA, *LEGACY_ASSEMBLY_SCHEMAS}
-                else ProjectDocument.load(arguments.project)
-            )
+            project = load_document(arguments.project)
         return launch(
             project,
             jobs_directory=arguments.jobs_directory,
             background=arguments.background,
             project_path=arguments.project,
         )
-    except (ValueError, TypeError, OSError, RuntimeError, KeyError) as exc:
+    except (ValueError, TypeError, OSError, RuntimeError, KeyError, ImportError) as exc:
         print(str(exc), file=sys.stderr, flush=True)
         return 2
 

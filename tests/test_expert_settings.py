@@ -251,6 +251,8 @@ def test_unedited_scientific_values_and_unrepresented_json_settings_survive(dial
 
 def test_unsupported_loaded_enum_is_retained_until_explicit_reset(application):
     config = preset_config()
+    # Keep the fixture valid for the default miter mode after the single-field reset.
+    config.sweep_corner_cluster_max_source_deviation_m = 0
     config.sweep_bend_mode = "future_custom_mode"
     calls = []
     dialog = ExpertSettingsDialog(config, lambda changes, label: calls.append(changes) or True)

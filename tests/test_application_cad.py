@@ -10,7 +10,16 @@ import numpy as np
 import pytest
 
 from coilgen.application import DesignService, ProjectDocument
-from coilgen.application.cad import export_geometry, geometry_catalog
+from coilgen.application.cad import (
+    default_export_selection,
+    draft_export_notice,
+    export_catalog,
+    export_geometry,
+    geometry_catalog,
+    geometry_option_label,
+    is_draft_artifact,
+    path_catalog,
+)
 from coilgen.attribution import software_attribution
 from coilgen.config import CoilGenConfig
 from coilgen.geometry import read_stl
@@ -160,12 +169,12 @@ def test_export_rechecks_corrupted_source_and_stale_metadata_before_writing(tmp_
     assert not destination.exists()
 
 
-def test_selection_rejects_centerlines_unknowns_and_duplicate_names(tmp_path):
+def test_selection_rejects_unknowns_support_and_duplicate_names(tmp_path):
     record = _run(tmp_path)
     destination = tmp_path / "rejected"
     for names in (
         [],
-        [f"fabrication/{BODY}_fabrication_centroid.step"],
+        ["support.stl"],
         ["../outside.stl"],
         [geometry_catalog(record)[0].name] * 2,
     ):
@@ -174,6 +183,49 @@ def test_selection_rejects_centerlines_unknowns_and_duplicate_names(tmp_path):
     with pytest.raises(ValueError, match="unit"):
         export_geometry(record, destination, unit="inches")
     assert not destination.exists()
+
+
+def test_conductor_path_is_listed_and_exported_explicitly(tmp_path):
+    record = _run(tmp_path)
+    paths = path_catalog(record)
+    assert [option.format for option in paths] == ["path_step"]
+    assert paths[0].body_id == BODY
+    np.testing.assert_allclose(
+        paths[0].bounds_m, [_solid().vertices[:2].min(axis=0), _solid().vertices[:2].max(axis=0)]
+    )
+    assert {option.name for option in export_catalog(record)} == {
+        option.name for option in (*geometry_catalog(record), *paths)
+    }
+    default = export_geometry(record, tmp_path / "default")
+    assert {row["format"] for row in default.manifest["geometry"]} == {"stl", "step"}
+    package = export_geometry(record, tmp_path / "path", [paths[0].name])
+    row = package.manifest["geometry"][0]
+    assert row["format"] == "path_step"
+    assert row["step_unit_policy"] == "preserved_declared_unit"
+    assert row["export_sha256"] == row["source_sha256"]
+
+
+def test_draft_solid_export_requires_explicit_acknowledgement(tmp_path):
+    record = _run(tmp_path, ready=False)
+    draft = record.directory / "fabrication" / f"{BODY}_DRAFT_fabrication.stl"
+    save_mesh_as_stl(_solid(), draft, solid_name=f"DRAFT_{BODY}")
+
+    def add(metadata):
+        metadata["artifacts"].append({"name": f"fabrication/{draft.name}", "kind": "stl", "sha256": file_digest(draft)})
+
+    record = _replace_artifacts(record, add)
+    option = next(option for option in export_catalog(record) if is_draft_artifact(option.name))
+    assert option.inspection_only
+    assert geometry_option_label(option).startswith("DRAFT · ")
+    assert option.name not in default_export_selection(export_catalog(record))
+    with pytest.raises(ValueError, match="NOT construction-released"):
+        export_geometry(record, tmp_path / "refused", [option.name])
+    assert not (tmp_path / "refused").exists()
+    package = export_geometry(record, tmp_path / "draft", [option.name], allow_draft=True)
+    row = package.manifest["geometry"][0]
+    assert row["draft"] is True and row["inspection_only"] is True
+    assert package.manifest["construction_released"] is False
+    assert "missing_return" in draft_export_notice(["missing_return"])
 
 
 def test_existing_destination_is_never_overwritten(tmp_path):
@@ -216,7 +268,7 @@ def test_companion_failure_and_publication_failure_leave_no_committed_package(tm
     assert not destination.exists()
     import coilgen.application.cad as cad
 
-    original = cad.os.link
+    original = cad._publish_exclusive
     calls = 0
 
     def fail_second(source, target):
@@ -226,7 +278,7 @@ def test_companion_failure_and_publication_failure_leave_no_committed_package(tm
             raise OSError("publication failed")
         return original(source, target)
 
-    monkeypatch.setattr(cad.os, "link", fail_second)
+    monkeypatch.setattr(cad, "_publish_exclusive", fail_second)
     destination = tmp_path / "failed_publication"
     with pytest.raises(OSError, match="publication"):
         export_geometry(record, destination)
@@ -292,11 +344,23 @@ def test_duplicate_output_filenames_fail_before_publication(tmp_path):
     assert not destination.exists()
 
 
+def test_exclusive_publication_preserves_a_competing_file(tmp_path):
+    from coilgen.application.cad import _publish_exclusive
+
+    source, target = tmp_path / "staged", tmp_path / "already-there"
+    source.write_bytes(b"new")
+    target.write_bytes(b"existing")
+    with pytest.raises(FileExistsError):
+        _publish_exclusive(source, target)
+    assert target.read_bytes() == b"existing"
+    assert source.read_bytes() == b"new"
+
+
 def test_package_manifest_is_the_last_atomic_commit_marker(tmp_path, monkeypatch):
     record = _run(tmp_path)
     import coilgen.application.cad as cad
 
-    original = cad.os.link
+    original = cad._publish_exclusive
     published = []
 
     def observe(source, target):
@@ -307,6 +371,6 @@ def test_package_manifest_is_the_last_atomic_commit_marker(tmp_path, monkeypatch
         original(source, target)
         published.append(Path(target))
 
-    monkeypatch.setattr(cad.os, "link", observe)
+    monkeypatch.setattr(cad, "_publish_exclusive", observe)
     package = export_geometry(record, tmp_path / "atomic")
     assert published[-1] == package.manifest_path

@@ -72,9 +72,11 @@ class TargetRegionEditor:
         self.gallery.setCurrentIndex(
             self.gallery.findData("imported_map" if imported_map else "legacy_mesh" if legacy_mesh else self.shape)
         )
-        form.addRow(self.gallery)
+        if imported_map:
+            form.addRow(self.gallery)
+        else:
+            window._register(form, "target_region_shape", "Region shape", self.gallery)
         self.gallery.setEnabled(not imported_map)
-        self.gallery.currentIndexChanged.connect(lambda: window._switch_target_region(self.gallery.currentData()))
         self.sampling = RegionSamplingSelector()
         self.sampling.setObjectName("target_region_sampling")
         self.sampling.setCurrentIndex(
@@ -87,10 +89,10 @@ class TargetRegionEditor:
             )
         )
         self.sampling.setEnabled(not imported_map and not legacy_mesh and not self.region_error)
-        form.addRow(self.sampling)
-        self.sampling.currentIndexChanged.connect(
-            lambda: window._switch_target_region_sampling(self.sampling.currentData())
-        )
+        if imported_map:
+            form.addRow(self.sampling)
+        else:
+            window._register(form, "target_region_sampling", "Region sampling", self.sampling)
         form.addRow(radius_row.labelItem.widget(), radius_row.fieldItem.widget())
         radius = window._draft_controls["target_region_radius"]
         radius.setEnabled(not imported_map and not legacy_mesh and self.shape in {"sphere", "cylinder"})
@@ -221,7 +223,7 @@ class TargetRegionEditor:
         else:
             note("Surface sampling checks the boundary only.")
         if not imported_map:
-            button = QPushButton("Import region surface…")
+            button = QPushButton("Import and apply region surface…")
             button.setObjectName("import_region")
             button.setIcon(icon("roi-enclosing-mesh"))
             button.clicked.connect(window._import_region_dialog)

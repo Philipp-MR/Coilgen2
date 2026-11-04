@@ -50,6 +50,18 @@ gui = [
     "cvxpy>=1.4",
     "threadpoolctl>=3.2",
 ]
+web = [
+    "aiohttp>=3.9",
+    "matplotlib>=3.7",
+    "psutil>=5.9",
+    "pyvista>=0.44,<0.50",
+    "scipy>=1.10",
+    "cvxpy>=1.4",
+    "threadpoolctl>=3.2",
+    "trame>=3.6",
+    "trame-vtk>=2.8",
+    "trame-vuetify>=2.7",
+]
 solver = [
     "cvxpy>=1.4",
 ]
@@ -90,6 +102,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "coilgen.gui" = ["assets/coilgen-logo.png", "assets/martinos-logo.png", "assets/ACKNOWLEDGMENTS.md"]
+"coilgen.web" = ["assets/project_upload.js", "assets/workbench.css", "assets/center_panel.css"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

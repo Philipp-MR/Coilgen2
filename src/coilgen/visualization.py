@@ -1751,6 +1751,7 @@ def _save_within_group_cut_choice_view(
         _inter_group_cut_alignment_state,
         _within_group_cut_width,
         generate_group_cutshapes,
+        interconnection_axis,
     )
 
     style = style or SvgStyle()
@@ -1776,7 +1777,7 @@ def _save_within_group_cut_choice_view(
                 group_center_v,
                 part.mesh,
                 _within_group_cut_width(config),
-                config.b_0_direction,
+                interconnection_axis(config, part.mesh),
                 cut_plane_definition="nearest",
                 cut_height_ratio=0.5,
                 align_axial_rings=align_axial_rings,

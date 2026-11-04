@@ -36,6 +36,30 @@ circulation modes are not implemented.
 | `magnetic_energy` | Surface-current self and mutual magnetic energy, J |
 | `minimax` | Maximum facewise vector current density magnitude, A/m |
 | `mixture` | Weighted sum of the above divided by fixed physical reference scales |
+| `custom` | Scalar expression in the supplied physical quantities |
+
+```python
+config.research_physics = ResearchPhysicsSpec(
+    objective="custom",
+    custom_objective="power_W / 2 + sum_squares(residual_T / 1e-6)",
+    custom_constraints=("norm_inf(residual_T) <= 2e-6",),
+    custom_solver="auto",
+).to_dict()
+```
+
+`psi_A` contains the full nodal stream function after basis expansion.
+`field_T`, `target_T` and `residual_T` use the same unweighted design samples,
+including suppression rows. Vector targets interleave Bx, By and Bz. Additional
+operands include `power_W`, `energy_J`, `peak_current_density_A_per_m`,
+`force_N` and `torque_Nm`. Expressions support arithmetic, indexed components,
+norms and scalar reductions. A constraint may use `<=`, `>=` or `==`.
+
+`auto` selects the conic path for disciplined convex formulas and local SciPy
+SLSQP for other supported formulas. Use `conic` or `local` to select a solver
+explicitly. The local solver uses the configured conic backend to find a
+minimum-power starting point satisfying the native constraints. Inspect
+`research_custom_solver_used`, `research_custom_objective_value` and
+`research_constraint_diagnostics` for the result and post-solve checks.
 
 `objective_weights` and `objective_scales` use keys `power`, `magnetic_energy`
 and `minimax`. Scales must be positive, in W, J and A/m respectively. Missing

@@ -52,6 +52,30 @@ def test_prior_failed_job_does_not_override_successful_cached_boundary(windows, 
     assert window.stage_items["sheet"].text(1) == "Cached"
 
 
+def test_verified_result_without_checkpoints_shows_recorded_stages_for_its_own_revision(windows, tmp_path):
+    window = windows()
+    project = window.project
+    current = {
+        "project_id": project.id,
+        "project_revision": project.revision,
+        "project_fingerprint": project.fingerprint,
+    }
+    window._reuse_plan = ReusePlan((), (), ())
+    window.runs["partial"] = RunRecord(tmp_path / "partial", {**current, "pipeline_stage": "contours"}, {})
+    previous = {**current, "project_revision": project.revision - 1, "pipeline_stage": "evaluated"}
+    window.runs["previous"] = RunRecord(tmp_path / "earlier", previous, {})
+    window._refresh_stage_status(refresh_reuse=False)
+    for key in ("prepared", "sheet", "contours"):
+        assert window.stage_items[key].text(1) == "Computed"
+        assert "No reusable checkpoint" in window.stage_items[key].toolTip(1)
+    assert window.stage_items["evaluated"].text(1) == "Not computed"
+    assert not window.resume_action.isEnabled()
+    complete = {**current, "pipeline_stage": "evaluated", "summary": {"accepted": False}}
+    window.runs["complete"] = RunRecord(tmp_path / "complete", complete, {})
+    window._refresh_stage_status(refresh_reuse=False)
+    assert window.stage_items["evaluated"].text(1) == "Checks failed"
+
+
 def test_downstream_edit_shows_verified_reusable_stages_without_rechecking_archives(windows, stopped, monkeypatch):
     project, state, root, _directory = stopped
     window = windows(project, directory=root)
@@ -115,7 +139,7 @@ def test_stopped_job_can_resume_verified_boundary_without_creating_result(window
     assert not window.runs
     assert window._selected_run is None
     assert window.resume_action.isEnabled()
-    assert window.resume_action.text() == "Resume from sheet"
+    assert window.resume_action.text() == "Resume from stream function"
     submitted = window.resume_selected_run()
     assert submitted is not None
     assert window.service.submissions[-1][1]["resume_checkpoint"] == str(directory / "checkpoints/sheet.cgstage")

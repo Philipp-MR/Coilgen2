@@ -24,20 +24,11 @@ from PySide6.QtWidgets import (
 )
 
 from .colors import apply_tone, tone_color
+from .design_plan import STAGE_STATUS_LABELS
 from .design_progress import build_design_progress
 from .icons import icon
 
 
-_STAGE_LABELS = {
-    "complete": "Completed",
-    "reusable": "Cached",
-    "current": "Computing",
-    "waiting": "Pending",
-    "skipped": "Outside plan",
-    "failed": "Failed",
-    "stopped": "Stopped",
-    "stale": "Inputs changed",
-}
 _ACTIVE = {"running", "cancelling", "queued"}
 _CHANNEL_LABELS = {
     "idle": "Pending",
@@ -302,7 +293,7 @@ class DesignPlanPanel(QWidget):
                 1,
                 "Stopping"
                 if channel.status == "cancelling" and stage.status == "current"
-                else _STAGE_LABELS.get(stage.status, stage.status.capitalize()),
+                else STAGE_STATUS_LABELS.get(stage.status, stage.status.capitalize()),
             )
             stage_icon = icon(stage.icon_name)
             if stage.status in {"waiting", "skipped", "stale", "reusable"}:
@@ -431,7 +422,7 @@ class DesignPlanPanel(QWidget):
             "Runtime status is unavailable; the selected plot is retained."
             if unavailable
             else "Follow completed previews for the indicated worker. Following another channel first selects that channel. "
-            "Turn off to keep the selected plot."
+            "Turn off to keep the selected plot while new datasets appear in the Plot menu."
         )
         with QSignalBlocker(self.follow_button):
             self.follow_button.setChecked(

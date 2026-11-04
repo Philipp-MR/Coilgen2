@@ -10,7 +10,16 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QCoreApplication, QEvent, QSignalBlocker, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QFormLayout, QLabel, QScrollArea, QSpinBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialogButtonBox,
+    QFormLayout,
+    QLabel,
+    QScrollArea,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
+)
 from shiboken6 import isValid
 
 from coilgen.gui.controls import ScientificSpinBox
@@ -63,25 +72,29 @@ def test_focus_window_moves_whole_row_without_copying_widgets_or_values(section)
     assert not editor.dialog.isModal()
 
 
-def test_reopening_same_window_keeps_incomplete_pending_input_and_error(section, application):
-    _page, _form, control, error, editor, _window = section
-    value = control.value()
+@pytest.mark.parametrize("dismiss", ("cancel", "close", "escape"))
+def test_dismissing_incomplete_edit_restores_exact_value_and_text(section, application, dismiss):
+    _page, _form, control, _error, editor, _window = section
+    value, text = control.value(), control.text()
     editor.open()
     application.processEvents()
     control.lineEdit().selectAll()
     QTest.keyClicks(control.lineEdit(), "1e")
-    error.show()
     dialog = editor.dialog
-    dialog.close()
+    if dismiss == "cancel":
+        editor.footer.button(QDialogButtonBox.StandardButton.Cancel).click()
+    elif dismiss == "escape":
+        QTest.keyClick(control, Qt.Key.Key_Escape)
+    else:
+        dialog.close()
     assert not dialog.isVisible()
     editor.open()
     application.processEvents()
     assert editor.dialog is dialog
-    assert control.lineEdit().text().startswith("1e")
-    assert not control.hasAcceptableInput()
+    assert control.lineEdit().text() == text
+    assert control.hasAcceptableInput() and not control.lineEdit().isModified()
     assert control.value() == value
-    assert error.isVisible()
-    assert editor.summary_label.text().startswith("1e")
+    assert editor.summary_label.text() == text
 
 
 def test_failed_control_opens_its_section_and_visible_error(section, application):

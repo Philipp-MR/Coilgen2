@@ -6,7 +6,7 @@ from threading import Event, get_ident
 import numpy as np
 import pytest
 from PySide6.QtCore import QCoreApplication, Signal, Qt
-from PySide6.QtWidgets import QDialog
+from PySide6.QtWidgets import QDialog, QPushButton
 
 from coilgen.application import DesignService, RunRecord
 from test_workbench_usability import application as application, windows as windows
@@ -65,10 +65,16 @@ def select_record(window, record):
 def test_results_appear_after_selection_with_direct_toolbar_and_tree_access(windows, tmp_path):
     window = windows()
     assert window.results_overview.isHidden()
+    assert window.field_results_button.isHidden() and not window.tree_items["results"].isExpanded()
     assert not window.field_results_button.isEnabled()
     record = computed_record(window, tmp_path / "saved")
     select_record(window, record)
     assert not window.results_overview.isHidden()
+    assert not window.field_results_button.isHidden() and window.tree_items["results"].isExpanded()
+    assert not window.view_context.design_button.isHidden()
+    assert not window.view_context.design_button.isEnabled()  # Legacy record without an original request.
+    assert window.view_context.design_button.text() == "No verified run inputs"
+    assert "original request" in window.view_context.design_button.toolTip()
     assert window.workspace.isAncestorOf(window.results_overview)
     assert window.field_results_button.isEnabled()
     assert window.results_overview.source_key == "routed_at_stream_current"
@@ -153,6 +159,8 @@ def test_target_only_result_does_not_enable_field_analysis(windows, tmp_path):
     select_record(window, record)
     assert not window.field_results_button.isEnabled()
     assert window.result_tree_items["metrics"].isDisabled()
+    assert window.result_tree_items["metrics"].text(1) == "Not recorded"
+    assert window.result_tree_items["coil"].isDisabled()
 
 
 def test_coil_properties_remain_accessible_without_field_samples(windows, tmp_path, monkeypatch):
@@ -173,6 +181,21 @@ def test_coil_properties_remain_accessible_without_field_samples(windows, tmp_pa
     assert not window.results_overview.isHidden()
     window.field_results_button.click()
     assert requested == [{"view": "coil"}]
+
+
+def test_historical_winding_keeps_review_but_disables_authoring_new_feeds(windows, tmp_path):
+    window = windows()
+    record = computed_record(window, tmp_path / "winding")
+    metadata = record.metadata
+    metadata["winding_steps"] = [{"body_id": "turn"}]
+    select_record(window, RunRecord(record.directory, metadata, record.arrays))
+    window.select_node("winding")
+    assert window.gradient_actions["_gradient_circuit_dialog"].isEnabled()
+    assert window.settings.widget().findChild(QPushButton, "gradient_engineering_winding").isEnabled()
+    window.apply_config({"levels": window.project.config.levels + 1})
+    assert not window.gradient_actions["_gradient_circuit_dialog"].isEnabled()
+    assert not window.settings.widget().findChild(QPushButton, "gradient_engineering_winding").isEnabled()
+    assert window.result_tree_items["checks"].text(1) == "Available"
 
 
 def test_projection_field_uses_analysis_without_invalid_viewport_selection(windows, tmp_path, monkeypatch):

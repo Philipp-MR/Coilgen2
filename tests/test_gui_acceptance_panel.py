@@ -207,7 +207,7 @@ def test_unavailable_routed_evidence_cannot_hide_available_contour_current(panel
         "contour": {"available": True, "current_A": 12, "current_refitted": False},
     }
     panel.set_record(record)
-    assert "Original contours: original wire current 12 A" in panel.metrics.text()
+    assert "Contours before routing: original wire current 12 A" in panel.metrics.text()
     assert "25 A" not in panel.metrics.text()
     panel.stage_buttons["routed"].click()
     row = next(index for index, check in enumerate(panel.report.checks) if check.key == "routed:rms")

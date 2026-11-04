@@ -1,7 +1,7 @@
 """Adaptive single-layer support discovery for cohort shim channels.
 
-The continuous localization stage uses the physically meaningful sheet-current
-density ``K = n x grad_s(psi)`` on every triangle.  It is deliberately only a
+The continuous localization stage uses the surface current density
+``K = n x grad_s(psi)`` on every triangle.  It is deliberately only a
 support-discovery stage: a final graph partition and exact zero-current
 constraints are required before the result is described as sectorized.
 """
@@ -525,9 +525,9 @@ def adaptively_sectorize_cohort_channels(
         )
 
     if progress_callback is not None:
-        progress_callback("Adaptive hardening: enforcing zero sheet current outside every sector...")
+        progress_callback("Adaptive hardening enforces zero surface current density outside every sector...")
     with progress_scope(75, 95):
-        reporter.report(None, "Enforcing zero sheet current outside the final sectors")
+        reporter.report(None, "Enforcing zero surface current density outside the final sectors")
         hardened, solver, status, constraint_count, local_dof_counts = _solve_sector_local_basis_update(
             cp,
             scenarios,
@@ -1359,7 +1359,7 @@ def _project_full_basis_to_reduced(problem: Any, full_basis: np.ndarray) -> np.n
     if maximum_density_error / reference_density > 1.0e-8:
         raise RuntimeError(
             "Sector-local stream function could not be mapped back to the original reduced "
-            "coordinates without changing sheet current."
+            "coordinates without changing surface current density."
         )
     return np.asarray(reduced, dtype=float)
 

@@ -226,9 +226,9 @@ def test_standard_gy_geometry_failures_override_a_passing_sheet():
     state = assess_guidance(project, record, readiness=READY)
     assert state.action_key == "inspect_problems"
     assert _stage(state, "check").status == "failed"
-    assert "passed sheet cannot override" in state.detail.lower()
+    assert "passing stream function check cannot override" in state.detail.lower()
     assert state.action_label == "Review failed checks"
-    assert "Saved sheet checks: Passed" in state.detail
+    assert "Saved stream function checks: Passed" in state.detail
     assert "pipeline conductor geometry: Failed" in state.detail
     assert "fabrication review: Failed" in state.detail
 
@@ -263,7 +263,7 @@ def test_failure_action_counts_only_recorded_errors_and_reports_warnings_separat
 
 
 def test_a_warning_about_undesigned_feeds_does_not_hide_available_closed_turn_geometry():
-    project = _project("independent_turns")
+    project = _project().update_config({"skip_postprocessing": True, "contour_only_sweep_mode": True})
     issue = ProblemIssue("feeds", "Feeds are not designed", "Closed turns have no drive terminals.", severity="warning")
     state = assess_guidance(project, _record(project), issues=(issue,), readiness=READY)
     assert state.action_key == "export_geometry"
@@ -355,8 +355,9 @@ def test_summary_reports_actual_cylinder_span_and_distinct_wire_and_sheet():
 
 def test_summary_preserves_absolute_field_and_hz_units_without_gradient_normalization():
     config = replace(
-        preset_config("independent_turns"),
+        preset_config(),
         field_shape_function=str(PROTON_GYROMAGNETIC_RATIO_HZ_PER_T * 1e-4),
+        target_gradient_normalization="none",
         target_field_units="Hz",
     )
     summary = resolved_model_summary(ProjectDocument.from_config(config))

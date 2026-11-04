@@ -4,18 +4,20 @@
 
 Define a support surface and target field, optimize the surface current, and
 turn its contours into a winding. CoilGen2 brings these steps into a Python
-library and a desktop workbench, with field evaluation throughout the process.
+library, a desktop workbench and a browser workbench with the same numerical engine.
 
 [Installation](#installation) ·
-[Workbench guide](../docs/NATIVE_WORKBENCH.md) ·
+[Desktop guide](../docs/NATIVE_WORKBENCH.md) · [Browser guide](../docs/BROWSER_WORKBENCH.md) ·
 [Examples](../docs/EXAMPLES.md) ·
 [Documentation](../docs/README.md)
 
-![Four CoilGen2 designs with calculated Bz maps: shielded y-gradient, biplanar x-gradient, cylindrical X²−Y² shim, and conical Z2 shim.](../docs/frontpage/ismrm2027/coil-examples.png)
+![Previous and updated X²−Y² shim at the same scale, showing the recorded mounted winding and a developed view of one lobe.](../validation/gui_winding_quality_2026-11-03/x2y2-reviewed-windings.png)
 
-*Coil designs from the ISMRM 2027 abstract: **A** shielded y-gradient,
-**B** biplanar x-gradient, **C** cylindrical X²−Y² shim, **D** conical Z2 shim.
-Fields use the mounted conductor centerlines; field scales differ.*
+[GUI gallery: winding layouts, field comparisons and fabrication checks](../validation/gui_winding_quality_2026-11-03/README.md).
+
+The table below reports **earlier ISMRM 2027 abstract designs**, with fields
+evaluated on their mounted conductor centerlines. Their configurations and
+numbers are separate from the current GUI presets.
 
 | Example | ROI radius (mm) | Mode efficiency | Relative RMS Bz error (%) |
 | --- | ---: | ---: | ---: |
@@ -31,6 +33,13 @@ in meters; their efficiencies therefore use **mT/(m²·A)**.
 [Figure sources and numerical results](../docs/frontpage/ismrm2027/README.md).
 
 ## Installation
+
+On Windows, run `Setup CoilGen2.cmd` from the checkout, then open
+`Start CoilGen2 GUI.cmd`. Choose **Browse examples… → Gradients → Cylindrical Y gradient (Gy)**, then **Compute full design**.
+When the job finishes, use **Jobs → View results → Run design choices** to
+inspect the model that was submitted. **Engineering checks** shows the separate
+stream function, sweep and fabrication verdicts. For the browser, use
+`Start CoilGen2 Browser.cmd` and follow the [first-run guide](../docs/BROWSER_WORKBENCH.md).
 
 Requires **Python 3.10+** and Git. In a terminal:
 
@@ -56,6 +65,11 @@ python -m coilgen.gui
 ```
 
 Choose **File → Load template** to start with a gradient or shim design.
+New gallery designs fit contours on the support with a 0.5 mm displacement
+cap and a turn-spacing guard. If a whole-loop fit fails, eligible corners can
+still be rounded within those limits. Compare **Contours before routing** with
+**Review conductor centerlines** after a run; **Fit** shows the whole coil.
+The connectors and mounted conductor have their own field, clearance and bend checks.
 On Windows, subsequent launches can also use **`Start CoilGen2 GUI.cmd`**.
 For scripts without the GUI, install `python -m pip install -e ".[research,plot]"`.
 [Full installation guide](../docs/INSTALL.md).
@@ -66,10 +80,10 @@ For scripts without the GUI, install `python -m pip install -e ".[research,plot]
   target fields, suppression regions, regularization and constrained objectives.
 - **Build the winding:** extract and smooth contours, connect loops, route
   returns, and set conductor cross-section and placement.
-- **Evaluate:** compare sheet, contour and conductor-centerline fields;
-  inspect spacing, bend and clearance diagnostics, resistance and inductance estimates.
+- **Evaluate** the fields from the stream function, contours and conductor centerlines.
+  Inspect spacing, bend and clearance diagnostics, resistance and inductance estimates.
 
-![CoilGen2 workbench with the model tree, cylindrical support controls, winding view, and processing sequence from surface current to field analysis.](../docs/frontpage/ismrm2027/workspace.png)
+![Browser workbench showing the X²−Y² shim. Model Builder is on the left, the reviewed winding and field metrics are in the center, and the five completed design steps are on the right. Engineering checks failed.](../validation/gui_winding_quality_2026-11-03/browser-workbench-results.jpg)
 
 The workbench and Python scripts share the numerical engine. Saved projects
 retain editable geometry, targets and processing settings.
@@ -78,13 +92,9 @@ retain editable geometry, targets and processing settings.
 
 Edit the cross-section in millimeters, sweep it along the winding, and choose
 centered, inner or outer mounting on the support. Profiles can be rectangular
-or custom convex polygons, including the elliptical and trapezoidal examples below.
+or custom convex polygons, including elliptical and trapezoidal profiles.
 
-![Elliptical, rectangular and trapezoidal conductor profiles in the editor, their swept segments, and the elliptical winding's field error through realization and mounting.](../docs/frontpage/ismrm2027/conductor-profiles.png)
-
-*A–C: cross-sections. D–F: swept conductor segments. G: elliptical winding only—
-relative RMS Bz error for the source route (1), realized path (2) and mounted
-centerline (3), at unchanged current.*
+[Illustrative circular-profile sweep meshes and bend details](../docs/frontpage/swept_bodies.svg) ·
 [Profile editor](../docs/NATIVE_WORKBENCH.md) ·
 [Sweep and mounting controls](../docs/PARAMETERS.md#volumetric-sweep-controls).
 
@@ -100,7 +110,7 @@ and mounting. These comparisons use 2,048 independent volume samples per design,
 without gain or offset fitting. [Methods, stage comparisons and provenance](../docs/frontpage/ismrm2027/README.md).
 
 These are numerical examples. Discrete winding fields use thin-filament
-Biot–Savart evaluation; the illustrated profile sweeps fail
+Biot–Savart evaluation; the abstract's profile sweeps failed
 configured geometric checks and are not ready for fabrication.
 [Physical assumptions](../docs/PHYSICAL_ASSUMPTIONS.md) ·
 [Interpreting results](../docs/RESULT_INTERPRETATION.md).

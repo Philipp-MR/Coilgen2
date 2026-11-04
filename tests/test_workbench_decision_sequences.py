@@ -83,6 +83,9 @@ def test_switching_decision_windows_retains_incomplete_draft_and_widget_identity
     assert radius.lineEdit().text().startswith("1e")
     assert not radius.hasAcceptableInput()
     assert window.project is original and window.undo_stack.count() == 0
+    dimensions.dialog.reject()
+    assert radius.hasAcceptableInput() and not window._draft_dirty
+    assert window.apply_settings() and window.project is original
 
 
 def test_apply_and_next_resolves_fresh_sections_after_one_atomic_revision(windows, application):
@@ -103,6 +106,27 @@ def test_apply_and_next_resolves_fresh_sections_after_one_atomic_revision(window
     assert sum(section.dialog.isVisible() for section in _sections(window)) == 1
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     assert not isValid(old_dialog)
+
+
+def test_cancel_restores_only_this_decision_before_a_later_apply(windows, application):
+    window = windows()
+    project = window.project
+    radius = window._draft_controls["radius_mm"]
+    mesh = window._draft_controls["angular_divisions"]
+    original_mesh = mesh.value()
+    _owned_section(window, "radius_mm").open()
+    radius.setValue(172)
+    section = _owned_section(window, "angular_divisions")
+    section.open()
+    mesh.setValue(original_mesh + 1)
+    section.dialog.reject()
+    application.processEvents()
+    assert mesh.value() == original_mesh and radius.value() == 172
+    assert window._changed_controls == {"radius_mm"} and window.project is project
+    assert window.apply_settings()
+    parameters = window.project.config.cylinder_mesh_parameter_list
+    assert parameters[1] == pytest.approx(0.172) and parameters[2] == original_mesh
+    assert window.undo_stack.count() == 1
 
 
 def test_compute_and_save_reopen_invalid_hidden_decision_without_submitting(windows, application, tmp_path):
@@ -294,6 +318,10 @@ def test_choose_field_opens_original_tiles_directly_and_family_selection_rebuild
     target = combo.findText("Spherical harmonic")
     QTest.keyClick(buttons[target], Qt.Key.Key_Return)
     application.processEvents()
+    assert window.project is original and window.undo_stack.count() == 0
+    assert window._draft_dirty
+    assert window.apply_settings()
+    application.processEvents()
     assert window.project.revision == original.revision + 1
     assert window.undo_stack.count() == 1
     assert recognize_solid_harmonic_target(window.project.config.field_shape_function) is not None
@@ -360,6 +388,10 @@ def test_graphical_study_output_changes_only_owned_study_and_is_undoable(windows
     selected = combo.findData("contours")
     QTest.keyClick(combo.buttons[selected], Qt.Key.Key_Return)
     application.processEvents()
+    assert window.project is original and window.undo_stack.count() == 0
+    assert window._draft_dirty
+    assert window.apply_settings()
+    application.processEvents()
     assert window.project.study == {**study, "pipeline_stage": "contours"}
     assert window.project.values == inputs and window.project.model_fingerprint == model_fingerprint
     assert window.project.revision == original.revision + 1
@@ -393,6 +425,10 @@ def test_field_region_choice_reuses_original_tiles_and_model_without_a_second_pi
     assert window.project is original and window.service.submissions == []
     selected = gallery.findData("box")
     QTest.keyClick(buttons[selected], Qt.Key.Key_Space)
+    application.processEvents()
+    assert window.project is original and window.undo_stack.count() == 0
+    assert window._draft_dirty
+    assert window.apply_settings()
     application.processEvents()
     assert window.project.revision == original.revision + 1
     assert window.undo_stack.count() == 1 and window.service.submissions == []

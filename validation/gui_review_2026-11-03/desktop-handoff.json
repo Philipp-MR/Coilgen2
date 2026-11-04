@@ -1,0 +1,12 @@
+{
+  "native_viewport": "UnavailableViewport",
+  "editor_revision": 3,
+  "editor_treatment": "off",
+  "source_revision": 2,
+  "source_treatment": "parameterized_bspline",
+  "source_request_sha256": "2e76daf0aa7d101d605ebb569e0f3ebed12c2206cbf8f7ff49e57e444f8d1d8c",
+  "matched_exact_project_and_result": true,
+  "verified_STL_files_in_mm": 4,
+  "resaved_project_bytes": 23713137,
+  "resaved_project_sha256": "64299df054f448c7511adbf338b2b11bc8cabbdb6544a586974ae8d5d98b2e49"
+}

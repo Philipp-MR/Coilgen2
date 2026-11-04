@@ -157,9 +157,9 @@ def compare_runs(left: RunRecord | str | Path, right: RunRecord | str | Path) ->
             reason = ""
         metrics.append(ComparisonMetric(name, unit, first, second, *scopes, comparable, reason))
 
-    design_scope = tuple(f"continuous sheet; design grid; component={value}" for value in component)
+    design_scope = tuple(f"stream function field · design grid · component={value}" for value in component)
     metric(
-        "Sheet design relative error",
+        "Design-grid stream function field relative error",
         "%",
         *(value.get("relative_field_error") for value in summaries),
         design_scope,
@@ -168,14 +168,14 @@ def compare_runs(left: RunRecord | str | Path, right: RunRecord | str | Path) ->
         factor=100,
     )
     independent_scope = tuple(
-        f"continuous sheet; independent grid; component={component[index]}; n={value.get('point_count', 'unknown')}; "
+        f"stream function field · independent grid · component={component[index]} · n={value.get('point_count', 'unknown')} · "
         f"current unchanged; quadrature check={value.get('independent_quadrature_check', False)}"
         for index, value in enumerate(validations)
     )
     for name, key, unit, factor in (
-        ("Sheet independent RMS error", "rms_error_T", "µT", 1e6),
-        ("Sheet independent relative error", "relative_field_error", "%", 100),
-        ("Sheet independent peak error", "peak_error_T", "µT", 1e6),
+        ("Independent stream function field RMS error", "rms_error_T", "µT", 1e6),
+        ("Independent stream function field relative error", "relative_field_error", "%", 100),
+        ("Independent stream function field peak error", "peak_error_T", "µT", 1e6),
     ):
         metric(
             name,
@@ -266,7 +266,7 @@ def compare_runs(left: RunRecord | str | Path, right: RunRecord | str | Path) ->
         "Sheet power",
         "W",
         *(summary.get("power_w") for summary in summaries),
-        ("continuous sheet before contouring/routing",) * 2,
+        ("stream function model before contouring and routing",) * 2,
         True,
     )
     winding = tuple(value.get("winding_validation") or {} for value in metadata)

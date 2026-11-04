@@ -1,0 +1,107 @@
+{
+  "body": "biplanar_gz__0/part002_body0001",
+  "selection": "opposing cut legs",
+  "index_base": 0,
+  "scope": "minimum between the two selected STL station intervals",
+  "required_gap_m": 0.00025,
+  "distance_m": 0.0007323174374208415,
+  "stl": {
+    "path": "fabrication/part002_body0001_DRAFT_fabrication.stl",
+    "sha256": "575f2c97e5dd89a7e0680088924cc6f0514d91821aadf0f68fd86a97574a041a",
+    "job": "dde2b98556d04f1c8f590225429f118b",
+    "request_sha256": "48066a7d9821ce721fde90567a8967e8bb2fda00a373ba5f86b31b93339bbe6e",
+    "project_model_fingerprint": "bcf5912a76981065615f4380af5bf45e212338edbb62a85e9e1a7a25af36a9ea"
+  },
+  "first": {
+    "body": "biplanar_gz__0/part002_body0001",
+    "face": 1492,
+    "station": 186,
+    "owner": "inter_group_connector",
+    "world_xyz_m": [
+      -0.04521268187961484,
+      -0.0007821429565999624,
+      0.047701503096993246
+    ],
+    "owner_detail": {
+      "kind": "inter_group_connector",
+      "group_index": -1,
+      "loop_index": -1,
+      "connector_index": 1,
+      "connector_role": "primary"
+    },
+    "triangle_vertices_m": [
+      [
+        -0.045406059471733214,
+        0.0011963361134614812,
+        0.04792110654914122
+      ],
+      [
+        -0.04538464332181936,
+        0.0007845537724809858,
+        0.051315307963184405
+      ],
+      [
+        -0.04521268187961484,
+        -0.0007821429565999624,
+        0.047701503096993246
+      ]
+    ]
+  },
+  "second": {
+    "body": "biplanar_gz__0/part002_body0001",
+    "face": 24784,
+    "station": 3098,
+    "owner": "inter_group_connector",
+    "world_xyz_m": [
+      -0.04448058518205014,
+      -0.0007641994809317108,
+      0.0477003689689412
+    ],
+    "owner_detail": {
+      "kind": "inter_group_connector",
+      "group_index": -1,
+      "loop_index": -1,
+      "connector_index": 1,
+      "connector_role": "closing"
+    },
+    "triangle_vertices_m": [
+      [
+        -0.04452832818449687,
+        0.0013878114134884686,
+        0.05092933477412685
+      ],
+      [
+        -0.04452452644269954,
+        0.001016024464083451,
+        0.047501232049239374
+      ],
+      [
+        -0.044475473557300485,
+        -0.0009717118885004719,
+        0.04771686601467708
+      ]
+    ]
+  },
+  "section_plane": {
+    "origin_m": [
+      -0.044846633530832486,
+      -0.0007731712187658366,
+      0.047700936032967226
+    ],
+    "normal": [
+      0.0016305068549563955,
+      -0.0033197798518643513,
+      0.9999931602311743
+    ],
+    "transverse_axis": [
+      0.06218134258959186,
+      -0.9980590263800407,
+      -0.003414746708168614
+    ],
+    "height_axis": [
+      0.998063536094347,
+      0.06218648505149889,
+      -0.0014209137158729599
+    ]
+  }
+}

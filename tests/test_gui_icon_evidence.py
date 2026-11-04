@@ -97,15 +97,28 @@ def test_empty_evidence_has_absence_badges_and_disabled_stage_actions(widgets):
 
 
 @pytest.mark.parametrize(
-    "kind,support_icon,target_icon,circuit_icon",
+    "kind,changes,support_icon,target_icon,circuit_icon",
     (
-        ("cylinder", "support-cylinder", "target-gradient", "connected-winding"),
-        ("biplanar", "support-biplanar", "target-gradient", "separate-circuits"),
-        ("independent_turns", "support-cylinder", "target-uniform", "independent-turns"),
+        ("cylinder", {}, "support-cylinder", "target-gradient", "connected-winding"),
+        ("biplanar", {}, "support-biplanar", "target-gradient", "separate-circuits"),
+        (
+            "cylinder",
+            {
+                "field_shape_function": "1e-4",
+                "target_gradient_normalization": "none",
+                "skip_postprocessing": True,
+                "contour_only_sweep_mode": True,
+            },
+            "support-cylinder",
+            "target-uniform",
+            "independent-turns",
+        ),
     ),
 )
-def test_brief_pictograms_follow_physical_configuration(widgets, kind, support_icon, target_icon, circuit_icon):
-    project = ProjectDocument.from_config(preset_config(kind))
+def test_brief_pictograms_follow_physical_configuration(
+    widgets, kind, changes, support_icon, target_icon, circuit_icon
+):
+    project = ProjectDocument.from_config(replace(preset_config(kind), **changes))
     before = project.to_dict()
     brief = design_brief(project)
     rows = {item.key: item for item in brief.items}

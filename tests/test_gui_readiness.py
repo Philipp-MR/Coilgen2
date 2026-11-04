@@ -359,7 +359,6 @@ def test_imported_support_roundtrip_and_point_only_target_mesh_are_valid(tmp_pat
         (((0, 0), (1e-3, 0), (1e-3, 0), (0, 1e-3)), "zero-length"),
         (((0, 0), (1e-3, 1e-3), (0, 1e-3), (1e-3, 0)), "intersect"),
         (((0, 0), (1e-3, 0), (2e-3, 0)), "area"),
-        (((0, 0), (2e-3, 0), (1e-3, 1e-3), (2e-3, 2e-3), (0, 2e-3)), "convex"),
         (((0, 0), (1e-3, 0), (2e-3, 0), (2e-3, 2e-3), (0, 2e-3)), "collinear"),
     ],
 )
@@ -405,14 +404,14 @@ def test_nonfinite_profile_import_cannot_become_project_but_has_actionable_readi
         ("evaluated", {"skip_sweep": True, "skip_postprocessing": True}, False),
         ("routed", {"skip_sweep": True, "contour_only_sweep_mode": True}, False),
         ("evaluated", {"skip_sweep": True, "contour_only_sweep_mode": True}, False),
-        # Independent-turn sweeps still require a valid convex profile.
+        # Independent-turn sweeps still require a valid simple profile.
         ("routed", {"contour_only_sweep_mode": True}, True),
         ("evaluated", {"contour_only_sweep_mode": True}, True),
         ("routed", {"skip_postprocessing": True}, True),
     ],
 )
 def test_profile_readiness_follows_geometry_consumer_scope(stage, changes, requires_profile):
-    points = ((0, 0), (2e-3, 0), (1e-3, 1e-3), (2e-3, 2e-3), (0, 2e-3))
+    points = ((0, 0), (2e-3, 2e-3), (0, 2e-3), (2e-3, 0))  # self-intersecting: invalid for any swept or clearance use
     project = ProjectDocument.from_config(replace(numeric_config(), cross_sectional_points=points, **changes))
     report = check_readiness(project, pipeline_stage=stage)
     profile_issues = tuple(issue for issue in report.blocking if issue.key == "cross_sectional_points")

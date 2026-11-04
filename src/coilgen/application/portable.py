@@ -253,7 +253,7 @@ def load_bundle(path, *, progress=None, max_bytes=DEFAULT_MAX_BYTES):
             item["id"],
             item["name"],
             item["revision"],
-            item["config"],
+            ProjectDocument._stored_config(item["config"]),
             assets,
             path.parent,
             _study=item["study"],

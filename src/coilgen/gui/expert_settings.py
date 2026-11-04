@@ -99,6 +99,13 @@ FIELDS = (
         "bool",
     ),
     ExpertField(
+        "contour_smoothing_local_fallback",
+        "Try local fits when a whole-loop fit fails",
+        "Contour smoothing",
+        "Try a bounded local fit before keeping an extracted loop. Requires local mesh smoothing, a positive displacement limit and spacing protection.",
+        "bool",
+    ),
+    ExpertField(
         "contour_smoothing_work_samples_per_mesh_length",
         "Fit samples per mesh length",
         "Contour smoothing",
@@ -359,9 +366,9 @@ FIELDS = (
     ),
     ExpertField(
         "surface_current_density_limit_A_per_m",
-        "Maximum sheet current density",
+        "Maximum surface current density",
         "Physical constraints",
-        "Continuous-sheet current K [A/m], distinct from contour wire current [A]. Zero disables this configured bound.",
+        "Surface current density K [A/m], distinct from contour wire current [A]. Zero disables this configured bound.",
         unit="A/m",
     ),
     ExpertField(
@@ -370,7 +377,7 @@ FIELDS = (
         "Physical constraints",
         "An active research_physics specification invokes the physical convex solver. Mixture weights/scales remain available in JSON and are preserved here.",
         "enum",
-        choices=("power", "magnetic_energy", "minimax", "mixture"),
+        choices=("power", "magnetic_energy", "minimax", "mixture", "custom"),
     ),
     ExpertField(
         "research_physics.sheet_power_limit_W",
@@ -446,7 +453,8 @@ _CHOICES = {
     "stream_function_basis": ("vertex", "cotangent_spectral_lowpass"),
     "stream_function_spectral_cutoff_policy": ("hard", "minimum_modes"),
     "field_evaluation_current_source": ("target_fit", "stream_function"),
-    "research_physics.objective": ("power", "magnetic_energy", "minimax", "mixture"),
+    "research_physics.objective": ("power", "magnetic_energy", "minimax", "mixture", "custom"),
+    "research_physics.custom_solver": ("auto", "conic", "local"),
 }
 _HELP = {
     "sf_opt_method": "Tikhonov balances weighted field residual and regularization. Fixed-error efficiency searches regularization; constrained_quadratic imposes direct convex constraints. Active research_physics takes precedence.",
@@ -460,7 +468,7 @@ _HELP = {
     "constrained_optimization_tolerance": "Numerical conic solver tolerance. Independently measured physical residual acceptance remains separate.",
     "constrained_optimization_threads": "Native solver thread request; zero keeps the existing automatic/default policy.",
     "constrained_optimization_max_iterations": "Conic solver iteration limit. Reaching this limit does not establish convergence or feasibility.",
-    "constrained_quadratic_objective_mode": "Select the existing direct constrained objective: resistance/penalties, smoothness or minimax sheet current. Feasible field and physical bounds remain separate requirements.",
+    "constrained_quadratic_objective_mode": "Select the existing direct constrained objective: resistance/penalties, smoothness or minimax surface current density. Feasible field and physical bounds remain separate requirements.",
     "constrained_quadratic_fallback_policy": "Strict rejects an unmet constrained contract; diagnostic retains an explicitly failed diagnostic result; target_error_scan permits the existing regularization-search fallback.",
     "target_error_constraint_metric": "Norm is the residual L2 contract; RMS normalizes by sample count and STD removes the mean. These metrics are not interchangeable acceptance budgets.",
     "target_error_constraint_mode": "Separate keeps target and suppression budgets distinct; combined uses the existing weighted joint residual contract.",
@@ -468,7 +476,10 @@ _HELP = {
     "stream_function_spectral_cutoff_length_m": "Physical spectral cutoff length in native metres; zero retains the existing disabled cutoff. Inspect retained modes and field feasibility.",
     "stream_function_smoothness_factor": "Additional native stream-function smoothness penalty; changing it changes the optimized winding tradeoff.",
     "research_physics": "Complete optional physical convex specification in native JSON. Null keeps it inactive; explicit configuration changes solver precedence. Individual research fields preserve every other nested key.",
-    "research_physics.objective": "Power [W], magnetic energy [J], minimax sheet current [A/m], or dimensionless weighted mixture. An active physical specification takes precedence over the native method.",
+    "research_physics.objective": "Power [W], magnetic energy [J], minimax surface current density [A/m], a weighted mixture, or a custom scalar expression. An active physical specification takes precedence over the native method.",
+    "research_physics.custom_objective": "Scalar expression to minimize for the custom objective. The Custom formula editor lists the available symbols, functions and examples.",
+    "research_physics.custom_constraints": "JSON list of formula constraints, also editable one per line in the Custom formula editor. These apply in addition to configured physical bounds.",
+    "research_physics.custom_solver": "Auto selects a conic solver for disciplined convex formulas and local SLSQP otherwise. Local optimization reports a local result.",
     "research_physics.objective_weights": "Nonnegative weights keyed by power, magnetic_energy and minimax. Mixture requires at least one positive weight; objectives are divided by their reference scales.",
     "research_physics.objective_scales": "Positive reference scales in SI: power [W], magnetic_energy [J], minimax [A/m]. Missing scales use the existing feasible reference solution policy.",
     "research_physics.field_constraints": "Native JSON list of LinearFieldConstraint objects: name, matrix, target, tolerance, norm, unit and optional group_size. Matrix columns are full nodal stream functions [A].",
@@ -775,7 +786,7 @@ class ExpertSettingsDialog(QDialog):
         self._initial = _canonical(config)
         self._draft = deepcopy(self._initial)
         self._defaults = _canonical(CoilGenConfig())
-        self._defaults["research_physics"] = ResearchPhysicsSpec().to_dict()
+        self._defaults["research_physics"] = ResearchPhysicsSpec().to_dict(include_formula_defaults=True)
         self._typed_errors = {}
         self._json_dirty = False
         self._active_tab = 0
@@ -926,7 +937,7 @@ class ExpertSettingsDialog(QDialog):
                 editor.set_value(_read(self._draft, key, self._defaults))
             editor.setEnabled(active or not key.startswith("research_physics."))
         self.physics_note.setText(
-            "Physical convex solver active. Objectives, bounds, equalities, energy, scenarios and acceptance policy are editable below. Each field preserves the other nested values. The complete optional JSON control can explicitly replace or disable the specification."
+            "Physical solver active. Objectives, formula constraints, bounds, equalities, energy, scenarios and acceptance policy are editable below. Each field preserves the other nested values. The complete optional JSON control can explicitly replace or disable the specification."
             if active
             else "The imported physical specification is not a JSON object and is retained. Use native JSON, Default, or explicit Configure to replace it."
             if self._draft.get("research_physics") is not None

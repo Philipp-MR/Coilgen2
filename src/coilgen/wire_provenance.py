@@ -10,6 +10,118 @@ from .progress import ProgressReporter
 _SegmentValue = TypeVar("_SegmentValue")
 
 
+def ordered_source_stations(source_points: np.ndarray, target_points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Map the midpoints of a resampled winding to distinct ordered source visits.
+
+    Both polylines describe the same complete conductor. Repeated endpoints
+    indicate closure, and the closed target may start on either side of its seam.
+    The result indexes the supplied source even if the target traverses it backwards.
+    """
+    from scipy.ndimage import median_filter
+    from scipy.spatial import cKDTree
+
+    source = np.asarray(source_points, dtype=float)
+    target = np.asarray(target_points, dtype=float)
+    nearest = nearest_source_segment_indices(source, target)
+    if not len(nearest):
+        return nearest, np.empty(0)
+    sv = np.diff(source, axis=0)
+    sl = np.linalg.norm(sv, axis=1)
+    sa = np.r_[0.0, sl.cumsum()]
+    length = sa[-1]
+    tv = np.diff(target, axis=0)
+    tl = np.linalg.norm(tv, axis=1)
+    ta = np.r_[0.0, tl.cumsum()]
+    mid = (target[:-1] + target[1:]) / 2
+    if min(length, ta[-1]) <= 1e-12:
+        return nearest, np.zeros(len(nearest))
+
+    def projection(idx):
+        relative = mid[:, None, :] - source[idx]
+        return np.clip(np.einsum("ijk,ijk->ij", relative, sv[idx]) / np.maximum(sl[idx] ** 2, 1e-30), 0.0, 1.0)
+
+    t = projection(nearest[:, None])[:, 0]
+    station = sa[nearest] + t * sl[nearest]
+    u = (ta[:-1] + tl / 2) * length / ta[-1]
+    closed = np.linalg.norm(source[0] - source[-1]) <= 1e-9 and np.linalg.norm(target[0] - target[-1]) <= 1e-9
+    if closed:
+        # Select direction and phase from the whole winding; an arbitrary
+        # coincident point at the seam is not a reliable alignment anchor.
+        def alignment(sign):
+            delta = station - sign * u
+            phase = np.angle(np.exp(2j * np.pi * delta / length).mean()) * length / (2 * np.pi)
+            delta = (delta - phase + length / 2) % length - length / 2
+            return np.median(abs(delta)), sign, phase, delta
+
+        _, sign, phase, residual = min((alignment(1), alignment(-1)), key=lambda row: row[0])
+    else:
+        forward = np.linalg.norm(source[0] - target[0]) + np.linalg.norm(source[-1] - target[-1])
+        backward = np.linalg.norm(source[0] - target[-1]) + np.linalg.norm(source[-1] - target[0])
+        sign = 1 if forward <= backward else -1
+        phase = 0.0 if sign == 1 else length
+        residual = station - phase - sign * u
+    if sign < 0:
+        source = source[::-1]
+        sv = np.diff(source, axis=0)
+        sl = sl[::-1]
+        sa = np.r_[0.0, sl.cumsum()]
+        nearest = len(sl) - 1 - nearest
+        t = 1 - t
+        station = length - station
+        phase = length - phase
+        residual = -residual
+    # Fast path retains the original geometric answer on an unambiguous,
+    # correctly ordered trace, including exact retraces with identical sampling.
+    directed = station + length * np.rint((u + phase - station) / length) if closed else station
+    if np.all(np.diff(directed) >= -1e-12):
+        return (nearest if sign > 0 else len(sl) - 1 - nearest), (t if sign > 0 else 1 - t)
+    center = np.median(residual)
+    delta = residual - center
+    anchor = abs(delta) <= max(0.008 * length, 5 * np.median(abs(delta)), 1e-9)
+    delta = np.interp(u, u[anchor], delta[anchor])
+    window = min(101, 2 * (len(u) // 90) + 3)
+    expected = np.maximum.accumulate(u + phase + center + median_filter(delta, size=window, mode="nearest"))
+    if not closed:
+        expected = np.clip(expected, 0.0, length)
+    smid = sa[:-1] + sl / 2
+    xyz = (source[:-1] + source[1:]) / 2
+    periods = np.arange(-1, 2) * length if closed else np.array([0.0])
+    valid = np.flatnonzero(sl > 1e-12)
+    ids = np.tile(valid, len(periods))
+    cloud = np.column_stack((xyz[ids], 0.13 * np.concatenate([smid[valid] + k for k in periods])))
+    e = expected % length if closed else expected
+    near = cKDTree(cloud).query(np.column_stack((mid, 0.13 * e)), k=np.arange(1, min(12, len(ids)) + 1))[1]
+    at = np.clip(np.searchsorted(sa, e, side="right") - 1, 0, len(sl) - 1)
+    candidates = np.column_stack((ids[near], nearest, at, at))
+    fracs = projection(candidates)
+    # One state at the predicted arclength ensures a feasible monotonic
+    # sequence even across a removed source spike or coincident samples.
+    fracs[:, -1] = np.clip((e - sa[at]) / np.maximum(sl[at], 1e-30), 0.0, 1.0)
+    pos = sa[candidates] + fracs * sl[candidates]
+    if closed:
+        pos += length * np.rint((expected[:, None] - pos) / length)
+    xyz = source[candidates] + fracs[:, :, None] * sv[candidates]
+    error = np.sum((xyz - mid[:, None, :]) ** 2, axis=2) + 1e-5 * (pos - expected[:, None]) ** 2
+    parents = np.zeros(candidates.shape, dtype=np.int16)
+    cost = error[0].copy()
+    cols = np.arange(len(cost))
+    for i in range(1, len(u)):
+        travel = pos[i][None, :] - pos[i - 1][:, None]
+        penalty = (0.03 * (travel - (u[i] - u[i - 1]))) ** 2
+        penalty[travel < -1e-12] = np.inf
+        scores = cost[:, None] + penalty
+        parents[i] = np.argmin(scores, axis=0)
+        cost = error[i] + scores[parents[i], cols]
+    chosen = np.empty(len(u), dtype=int)
+    chosen[-1] = np.argmin(cost)
+    for i in range(len(u) - 1, 0, -1):
+        chosen[i - 1] = parents[i, chosen[i]]
+    rows = np.arange(len(u))
+    ix = candidates[rows, chosen]
+    f = fracs[rows, chosen]
+    return (ix if sign > 0 else len(sl) - 1 - ix), (f if sign > 0 else 1 - f)
+
+
 def _segment_match_scores(
     midpoints: np.ndarray,
     directions: np.ndarray,

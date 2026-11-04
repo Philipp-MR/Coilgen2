@@ -118,7 +118,7 @@ def test_contour_manufacturing_and_resampling_modes_invalidate_contours():
         {"joint_group_routing_seam_search_extent_rel": 0.05},
     ],
 )
-def test_routing_selection_policy_invalidates_geometry_without_resolving_current_sheet(changes):
+def test_routing_selection_policy_invalidates_geometry_without_recomputing_stream_function(changes):
     before = config()
     assert invalidated_stage(before, replace(before, **changes)) is PipelineStage.ROUTED
     manufacturing = replace(
@@ -166,8 +166,11 @@ def test_checkpoint_manifest_and_arrays_are_integrity_checked(tmp_path):
         PipelineCheckpoint.load(path)
 
 
-@pytest.mark.parametrize("unknown_field,missing_unrelated", [(False, False), (True, False), (False, True)])
-@pytest.mark.parametrize("schema_version", [2, 3])
+@pytest.mark.parametrize(
+    "unknown_field,missing_unrelated",
+    [(None, False), ("unknown_routing_magic", False), ("contour_smoothing_local_fallback", False), (None, True)],
+)
+@pytest.mark.parametrize("schema_version", [2, 3, 4])
 def test_authenticated_checkpoint_config_migration_is_narrow_and_preserves_old_policy(
     tmp_path,
     unknown_field,
@@ -188,14 +191,16 @@ def test_authenticated_checkpoint_config_migration_is_narrow_and_preserves_old_p
         elif isinstance(value, dict):
             if value.get("$class") == "CoilGenConfig":
                 attrs = value["fields"]
+                attrs.pop("contour_smoothing_local_fallback")
                 if schema_version == 2:
                     attrs.pop("joint_group_routing_selection_policy")
                     attrs.pop("joint_group_routing_regular_field_tolerance_rel")
-                attrs.pop("joint_group_routing_port_search_count")
-                attrs.pop("joint_group_routing_cut_span_max_factor")
-                attrs.pop("joint_group_routing_seam_search_extent_rel")
+                if schema_version <= 3:
+                    attrs.pop("joint_group_routing_port_search_count")
+                    attrs.pop("joint_group_routing_cut_span_max_factor")
+                    attrs.pop("joint_group_routing_seam_search_extent_rel")
                 if unknown_field:
-                    attrs["unknown_routing_magic"] = True
+                    attrs[unknown_field] = True
                 if missing_unrelated:
                     attrs.pop("levels")
             for item in value.values():
@@ -220,9 +225,15 @@ def test_authenticated_checkpoint_config_migration_is_narrow_and_preserves_old_p
     loaded = PipelineCheckpoint.load(path)
     assert loaded.config.joint_group_routing_selection_policy == ("physical" if schema_version == 2 else "regular")
     assert loaded.config.joint_group_routing_regular_field_tolerance_rel == 0.001
-    assert loaded.config.joint_group_routing_port_search_count == 0
-    assert loaded.config.joint_group_routing_cut_span_max_factor == 1.0
-    assert loaded.config.joint_group_routing_seam_search_extent_rel == 0.0
+    assert loaded.config.contour_smoothing_local_fallback is False
+    if schema_version <= 3:
+        assert loaded.config.joint_group_routing_port_search_count == 0
+        assert loaded.config.joint_group_routing_cut_span_max_factor == 1.0
+        assert loaded.config.joint_group_routing_seam_search_extent_rel == 0.0
+    else:
+        assert (
+            loaded.config.joint_group_routing_port_search_count == original.config.joint_group_routing_port_search_count
+        )
     np.testing.assert_array_equal(loaded.parts[0].mesh.vertices, original.parts[0].mesh.vertices)
     with pytest.raises(ValueError, match="Cannot reuse prepared"):
         CoilGenPipeline(loaded.config).run_stage("sheet", loaded)

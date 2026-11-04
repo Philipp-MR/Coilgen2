@@ -9,7 +9,7 @@ import pytest
 import test_workbench_usability as usability
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QPlainTextEdit, QTableWidgetItem
+from PySide6.QtWidgets import QDialogButtonBox, QPlainTextEdit, QTableWidget, QTableWidgetItem, QTabWidget, QTreeWidget
 
 from coilgen.application import ProjectDocument
 from coilgen.application.design_studies import design_study_state
@@ -143,23 +143,29 @@ def test_python_export_includes_pending_history_notes_without_changing_physics(w
     assert restored.revision == original.revision
 
 
-def test_geometry_companion_includes_pending_history_notes(windows, tmp_path, monkeypatch):
+def test_geometry_companion_retains_exact_submitted_inputs_and_result_after_edits(
+    windows, prepared_run, tmp_path, monkeypatch
+):
     from coilgen.application import cad
+    from coilgen.application.bundles import project_key
+    from coilgen.application.session_evidence import retain_revision
 
-    window = windows()
-    record = SimpleNamespace(directory=tmp_path / "run", metadata={"project_id": window.project.id}, arrays={})
+    original, record = prepared_run
+    window = windows(original.update_config({"levels": original.config.levels + 2}))
+    retain_revision(window.jobs_directory.parent, original)
     window.runs["source"] = record
     window._selected_run = "source"
-    window.history_panel.hypothesis.setPlainText("Preserve the fabrication decision with the geometry")
-    monkeypatch.setattr(window, "_portable_assembly", lambda: window.assembly)
+    window.history_panel.hypothesis.setPlainText("Decision for the next revision")
     export = Mock(return_value="package")
     monkeypatch.setattr(cad, "export_geometry", export)
     window.export_selected_geometry(tmp_path / "cad")
     companion = export.call_args.kwargs["project"]
-    assert (
-        design_study_state(companion.channels[0].project).hypothesis
-        == "Preserve the fabrication decision with the geometry"
-    )
+    assert project_key(companion) == project_key(original)
+    assert project_key(companion) != project_key(window.project)
+    assert companion.saved_runs[0].metadata["request_sha256"] == record.metadata["request_sha256"]
+    assert design_study_state(companion).hypothesis != "Decision for the next revision"
+    assert window.history_panel.hypothesis.toPlainText() == "Decision for the next revision"
+    window.history_panel.hypothesis.clear()
 
 
 def test_known_integrity_failure_blocks_geometry_export(windows, tmp_path, monkeypatch):
@@ -195,6 +201,44 @@ def test_saved_settings_inspection_verifies_original_request_and_keeps_model_unc
     assert dialogs and all(editor.isReadOnly() for editor in dialogs[-1].findChildren(QPlainTextEdit))
     assert window.project is original and window.undo_stack.count() == undo_count
     dialogs[-1].close()
+
+
+def test_design_choices_for_a_partial_earlier_run_keep_the_snapshot_and_pending_editor_separate(
+    windows, prepared_run, application
+):
+    project, record = prepared_run
+    window = windows(project)
+    window.load_run(record.directory)
+    old_levels = project.config.levels
+    assert window.apply_config({"levels": old_levels + 1})
+    window.select_node("geometry")
+    window._draft_controls["radius_mm"].setValue(171.5)
+    original, undo_count = window.project, window.undo_stack.count()
+    review = window.view_context.design_button
+    assert not review.isHidden() and review.isEnabled()
+    review.click()
+    deadline = time.monotonic() + 10
+    while window._saved_settings_task is not None and time.monotonic() < deadline:
+        application.processEvents()
+        time.sleep(0.01)
+    dialog = window.findChildren(SavedSettingsDialog)[-1]
+    tabs = dialog.findChild(QTabWidget)
+    tree = dialog.findChild(QTreeWidget, "submitted_design_choices")
+    assert tabs.currentWidget() is tree
+    row = tree.findItems("Contour levels", Qt.MatchFlag.MatchExactly | Qt.MatchFlag.MatchRecursive, 0)[0]
+    assert row.text(1) == str(old_levels)
+    tabs.setCurrentIndex(next(i for i in range(tabs.count()) if tabs.tabText(i) == "Complete request"))
+    submitted = json.loads(tabs.currentWidget().toPlainText())
+    assert submitted["config"]["levels"] == old_levels and submitted["pipeline_stage"] == "prepared"
+    tabs.setCurrentIndex(next(i for i in range(tabs.count()) if tabs.tabText(i) == "Compare with editor"))
+    table = dialog.findChild(QTableWidget, "saved_settings_differences")
+    idx = next(i for i in range(table.rowCount()) if table.item(i, 0).text() == "config.levels")
+    assert [table.item(idx, col).text() for col in (1, 2)] == [str(old_levels), str(old_levels + 1)]
+    assert window.project is original and window.undo_stack.count() == undo_count and window._draft_dirty
+    close = dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Close)
+    assert close.isVisibleTo(dialog)
+    close.click()
+    assert dialog.isHidden()
 
 
 def test_saved_settings_refuses_request_changed_after_selection(prepared_run):

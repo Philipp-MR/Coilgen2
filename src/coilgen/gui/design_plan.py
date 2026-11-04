@@ -21,7 +21,7 @@ from .run_metadata import read_run_metadata
 
 _STAGES = (
     ("prepared", "Prepare model", "Prepare support meshes and target samples", "mesh"),
-    ("sheet", "Current sheet", "Optimize the continuous current sheet", "stream-function"),
+    ("sheet", "Stream function", "Optimize the stream function", "stream-function"),
     ("contours", "Contour paths", "Generate contour winding paths", "contours"),
     ("routed", "Route / sweep", "Connect winding paths and construct conductors", "conductor-sweep"),
     ("evaluated", "Evaluate field", "Evaluate fields and requested engineering checks", "independent-validation"),
@@ -29,6 +29,16 @@ _STAGES = (
 _KEYS = tuple(stage[0] for stage in _STAGES)
 _ACTIVE = frozenset({"queued", "running", "cancelling"})
 _STOPPED = frozenset({"failed", "cancelled", "interrupted"})
+STAGE_STATUS_LABELS = {
+    "complete": "Completed",
+    "reusable": "Cached",
+    "current": "Computing",
+    "waiting": "Pending",
+    "skipped": "Outside plan",
+    "failed": "Failed",
+    "stopped": "Stopped",
+    "stale": "Inputs changed",
+}
 _STAGE_TEXT = {
     "complete": "Recorded stage computation completed; engineering acceptance is separate",
     "reusable": "Verified compatible checkpoint available; the worker rechecks it before reuse",
@@ -140,7 +150,8 @@ def _boundaries(value, target):
     return {key for key in value if isinstance(key, str) and key in _KEYS[: _KEYS.index(target) + 1]}
 
 
-def _record_boundaries(metadata):
+def recorded_stage_keys(metadata):
+    """Completed stages in a verified result, independently of reusable checkpoint files."""
     target = metadata.get("pipeline_stage")
     return set(_KEYS[: _KEYS.index(target) + 1]) if target in _KEYS else set()
 
@@ -215,7 +226,7 @@ def _channel_plan(
             valid_records.append(metadata)
         elif metadata.get("project_fingerprint"):
             historical.add(metadata.get("request_sha256") or id_ or id(metadata))
-            stale.update(_record_boundaries(metadata))
+            stale.update(recorded_stage_keys(metadata))
     for item in states:
         if item.get("project_id") == project.id and item.get("project_fingerprint") != project.fingerprint:
             boundaries = _boundaries(item.get("completed_stages", ()), target)
@@ -237,7 +248,7 @@ def _channel_plan(
     )
     verification = "failed" if source_error else "verified" if own_records else None
     if own_records:
-        recorded.update(set().union(*(_record_boundaries(record) for record in own_records)) & allowed)
+        recorded.update(set().union(*(recorded_stage_keys(record) for record in own_records)) & allowed)
     elif status == "completed" and not source_error:
         verification = "pending"
     cached = {
@@ -254,7 +265,9 @@ def _channel_plan(
     for key, label, description, icon_name in _STAGES:
         if key == "evaluated":
             controls = {**project.study, **state}
-            description += f"; independent sheet field validation resolution {controls['validation_resolution']}"
+            description += (
+                f"; independent stream function field validation resolution {controls['validation_resolution']}"
+            )
             if controls.get("fabricate"):
                 description += "; strict conductor geometry review"
             if any(

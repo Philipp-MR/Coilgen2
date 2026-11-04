@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QAbstractSpinBox, QCheckBox, QComboBox, QFormLayout, QLabel, QLineEdit
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QAbstractSpinBox, QCheckBox, QComboBox, QFormLayout, QLabel, QLineEdit, QPushButton
 
 from ..engineering_limits import engineering_contouring_enabled, max_wire_current_A, min_wire_distance_m
 from .focused_editors import FocusedFormSection, control_form
@@ -32,8 +33,13 @@ GRAPHICAL_SETTINGS = {
         ),
     },
     "objective": {
+        "custom": (
+            "stream-function",
+            "Custom formula",
+            "Minimize a scalar expression in the stream function and its physical fields.",
+        ),
         "power": ("power-loss", "Joule power", "Minimize sheet Joule loss in watts."),
-        "minimax": ("current-density", "Peak sheet current", "Minimize peak surface current density in A/m."),
+        "minimax": ("current-density", "Peak surface current density", "Minimize peak surface current density in A/m."),
         "magnetic_energy": ("inductance", "Magnetic energy", "Minimize stored magnetic energy in joules."),
         "mixture": (
             "stream-function",
@@ -54,6 +60,30 @@ GRAPHICAL_SETTINGS = {
         ),
         "surface_outer": ("surface-normal", "Outside support", "Mount outside the support along its normal."),
         "surface_inner": ("surface-normal", "Inside support", "Mount on the opposite side of the support normal."),
+    },
+    "conductor_path_reference": {
+        "centroid": (
+            "conductor-profile",
+            "Profile centroid",
+            "The exported 3D path, fabricated field source and bend checks follow the profile's area centroid.",
+        ),
+        "profile_origin": (
+            "placement",
+            "Profile origin (0, 0)",
+            "Sweep about the profile origin, e.g. a round litz-wire centre inside an omega-shaped printed holder.",
+        ),
+    },
+    "interconnection_axis": {
+        "b0": (
+            "routing",
+            "Along B₀",
+            "Cuts, returns and interconnections run parallel to the main field (conventional bores).",
+        ),
+        "support_axis": (
+            "cut-location",
+            "Along the support bore axis",
+            "Use when the bore is perpendicular to B₀ (transverse-field / Halbach magnets); compare both for each gradient.",
+        ),
     },
     "contour_discretization_method": {
         "level_count": (
@@ -127,7 +157,7 @@ class _Sequence:
         ]
         return " · ".join(values)
 
-    def add(self, title, keys, symbol, *, summary=None, extras=(), existing=None, size=None):
+    def add(self, title, keys, symbol, *, summary=None, extras=(), existing=None, size=None, related=()):
         controls = tuple(control for key in keys if (control := self.control(key)) is not None)
         if not controls and existing is None:
             return None
@@ -147,6 +177,8 @@ class _Sequence:
         if existing is None:
             self.form.addRow(section)
             self.window._focused_sections.append(section)
+        section.related_controls = tuple(self.window._draft_controls[key] for key in related)
+        section.discarded.connect(self._discarded)
         for widget in extras:
             if widget is not None:
                 self.layout.removeWidget(widget)
@@ -157,6 +189,12 @@ class _Sequence:
             section.dialog.resize(min(size[0], bounds.width() - 24), min(size[1], bounds.height() - 64))
         self.sections.append(section)
         return section
+
+    def _discarded(self, restored):
+        for control in restored:
+            key = control.objectName()
+            if self.window._draft_controls.get(key) is control:
+                self.window._mark_draft_dirty(key)
 
     def finish(self, next_page=None):
         window = self.window
@@ -231,7 +269,7 @@ def build_settings_sequence(window, page, form, layout):
             )
         placement = tuple(key for key in controls if key.startswith(("rotation_", "center_", "plane_normal_")))
         mesh = tuple(key for key in controls if "divisions" in key or key == "mesh_edge_mm")
-        dimensions = tuple(key for key in controls if key not in (*placement, *mesh))
+        dimensions = tuple(key for key in controls if key not in ("support_type", *placement, *mesh))
         sequence.add(
             "Surface dimensions", dimensions, "conductor-profile", summary=lambda: sequence.labelled(dimensions)
         )
@@ -288,6 +326,7 @@ def build_settings_sequence(window, page, form, layout):
                 field_keys,
                 "field-component",
                 extras=_extras(layout, "linear_gradient_summary"),
+                related=("field_shape_function", "target_gradient_axis") if linear else (),
                 size=(600, 350) if linear else None,
             )
             scaling = (
@@ -310,6 +349,7 @@ def build_settings_sequence(window, page, form, layout):
                     f"{sequence.text('target_field_units')} · {sequence.text('target_gradient_normalization')} · {sequence.text('target_field_component')}"
                 ),
                 size=(600, 480),
+                related=("target_gradient_strength",) if linear else (),
             )
             legacy_reveal = form.parentWidget().findChild(QCheckBox, "advanced_target_controls")
             if legacy_reveal is not None:
@@ -370,12 +410,14 @@ def build_settings_sequence(window, page, form, layout):
         )
         sequence.add(
             "Physical placement",
-            ("conductor_mounting_mode", "return_path_lift", "normal_shift_mm"),
+            ("conductor_mounting_mode", "conductor_path_reference", "return_path_lift", "normal_shift_mm"),
             "surface-normal",
             summary=lambda: (
-                f"{sequence.text('conductor_mounting_mode')} · "
+                f"{sequence.text('conductor_mounting_mode')} · {sequence.text('conductor_path_reference')} · "
                 + (
-                    f"return-path lift {sequence.text('normal_shift_mm')}"
+                    "no connected return paths"
+                    if config.skip_postprocessing or config.contour_only_sweep_mode
+                    else f"return-path lift {sequence.text('normal_shift_mm')}"
                     if controls["return_path_lift"].isChecked()
                     else "return-path lift off"
                 )
@@ -388,6 +430,7 @@ def build_settings_sequence(window, page, form, layout):
             ("winding_intent",),
             "connected-winding",
             extras=_extras(layout, "winding_scope"),
+            related=("sweep",),
             size=(620, 480),
         )
 
@@ -430,6 +473,7 @@ def build_settings_sequence(window, page, form, layout):
                 "contour_displacement_mm",
                 "contour_segment_mm",
                 "contour_smoothing_preserve_min_turn_distance",
+                "contour_smoothing_local_fallback",
             ),
             "contours",
             summary=lambda: (
@@ -445,19 +489,78 @@ def build_settings_sequence(window, page, form, layout):
         )
         sequence.add("Clearance and bend limits", ("min_turn_distance", "min_bend"), "wire-spacing")
         sequence.add(
+            "Interconnection direction",
+            ("interconnection_axis",),
+            "routing",
+            summary=lambda: sequence.text("interconnection_axis"),
+        )
+        sequence.add(
             "Conductor solids",
             ("sweep",),
             "conductor-sweep",
             summary=lambda: "Generate solids" if controls["sweep"].isChecked() else "Centerlines only",
         )
     elif page == "optimization":
-        sequence.add(
+
+        def strategy_summary():
+            method = sequence.text("sf_opt_method")
+            if normalize_optimization_method(window._value("sf_opt_method")) != "constrained_quadratic":
+                return method
+            family = window._value("objective")
+            parts = [method, sequence.text("objective")]
+            if family == "Native objective (see below)":
+                parts.append(sequence.text("constrained_quadratic_objective_mode"))
+            elif family == "custom" or window._value("custom_constraints").strip():
+                mode = window._value("custom_solver")
+                parts.append(
+                    {"auto": "Auto (conic or local)", "conic": "Conic", "local": "Local (SLSQP)"}.get(mode, mode)
+                )
+            return " · ".join(parts)
+
+        strategy_section = sequence.add(
             "Solve strategy",
-            ("sf_opt_method", "objective", "stream_function_cost_function", "constrained_quadratic_objective_mode"),
+            (
+                "sf_opt_method",
+                "objective",
+                "custom_objective",
+                "custom_constraints",
+                "custom_solver",
+                "include_default_field_constraints",
+                "stream_function_cost_function",
+                "constrained_quadratic_objective_mode",
+            ),
             "stream-function",
+            summary=strategy_summary,
             extras=_extras(layout, "optimization_mode_info"),
-            size=(660, 500),
+            size=(720, 620),
         )
+        from ..research.formulas import (
+            FORMULA_EXAMPLE_CONSTRAINTS,
+            FORMULA_EXAMPLE_OBJECTIVE,
+            FORMULA_FUNCTIONS,
+            FORMULA_SYMBOLS,
+        )
+
+        reference = QLabel(
+            "Use SI quantities and scale each term before combining different physical units. "
+            "Choose a built-in physical objective to add only constraints. Enter one comparison per line using <=, >=, or ==. "
+            "Vector comparisons apply component by component. Index vectors from zero.\n\n"
+            + "\n".join(f"{name}   {meaning}" for name, meaning in FORMULA_SYMBOLS.items())
+            + "\n\nFunctions   "
+            + ", ".join(FORMULA_FUNCTIONS)
+            + f"\n\nExample objective\n{FORMULA_EXAMPLE_OBJECTIVE}\n\nExample constraints\n"
+            + FORMULA_EXAMPLE_CONSTRAINTS
+        )
+        reference.setObjectName("formula_reference")
+        reference.setWordWrap(True)
+        reference.setTextFormat(Qt.TextFormat.PlainText)
+        reference.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        reference_button = QPushButton("Formula reference and examples")
+        reference_button.setCheckable(True)
+        reference_button.toggled.connect(reference.setVisible)
+        strategy_section.form.addRow(reference_button)
+        strategy_section.form.addRow(reference)
+        reference.hide()
         sequence.add(
             "Field and current limits",
             (
@@ -470,27 +573,38 @@ def build_settings_sequence(window, page, form, layout):
             ),
             "constraint",
             summary=lambda: (
-                optimization_field_budget_text(
-                    config,
-                    {
-                        **{
-                            key: window._value(key)
-                            for key in (
-                                "sf_opt_method",
-                                "target_error_constraint_metric",
-                                "target_error_tolerance_percent",
-                                "target_error_tolerance_absolute_T",
-                                "target_error_rms_limit_T",
-                                "target_error_std_limit_T",
-                            )
+                (
+                    "Named region and pose field constraints"
+                    if window.project.study.get("requirements") is not None
+                    else optimization_field_budget_text(
+                        config,
+                        {
+                            **{
+                                key: window._value(key)
+                                for key in (
+                                    "sf_opt_method",
+                                    "target_error_constraint_metric",
+                                    "target_error_tolerance_percent",
+                                    "target_error_tolerance_absolute_T",
+                                    "target_error_rms_limit_T",
+                                    "target_error_std_limit_T",
+                                )
+                            },
+                            "research_physics": (
+                                {
+                                    **(config.research_physics or {}),
+                                    "objective": window._value("objective"),
+                                    "include_default_field_constraints": window._value(
+                                        "include_default_field_constraints"
+                                    ),
+                                }
+                                if normalize_optimization_method(window._value("sf_opt_method"))
+                                == "constrained_quadratic"
+                                and window._value("objective") != "Native objective (see below)"
+                                else None
+                            ),
                         },
-                        "research_physics": (
-                            {**(config.research_physics or {}), "objective": window._value("objective")}
-                            if normalize_optimization_method(window._value("sf_opt_method")) == "constrained_quadratic"
-                            and window._value("objective") != "Native objective (see below)"
-                            else None
-                        ),
-                    },
+                    )
                 )
                 + " · "
                 + (
@@ -610,6 +724,10 @@ def _configure_visibility(sequence, page):
             for name in (
                 "stream_function_cost_function",
                 "constrained_quadratic_objective_mode",
+                "custom_objective",
+                "custom_constraints",
+                "custom_solver",
+                "include_default_field_constraints",
                 "regularization_selection_method",
                 "stream_function_smoothness_factor",
                 "optimization_solver",
@@ -629,6 +747,8 @@ def _configure_visibility(sequence, page):
 
         controls["sf_opt_method"].currentTextChanged.connect(strategy)
         controls["objective"].currentTextChanged.connect(strategy)
+        controls["custom_constraints"].textChanged.connect(strategy)
+        controls["include_default_field_constraints"].toggled.connect(strategy)
         controls["target_error_constraint_metric"].currentTextChanged.connect(strategy)
         strategy()
     elif page == "winding":
@@ -671,15 +791,28 @@ def _configure_visibility(sequence, page):
             visible("contour_smoothing_factor", smoothing and not mesh)
             visible("contour_displacement_mm", smoothing)
             visible("contour_smoothing_preserve_min_turn_distance", smoothing)
+            visible("contour_smoothing_local_fallback", smoothing and mesh)
+            controls["contour_smoothing_local_fallback"].setEnabled(
+                smoothing
+                and mesh
+                and window._raw_value("contour_displacement_mm") > 0
+                and window._raw_value("contour_smoothing_preserve_min_turn_distance")
+            )
             visible("contour_segment_mm", mode != "off")
 
         controls["contour_path_regularization_mode"].currentTextChanged.connect(contour_smoothing)
         controls["contour_smoothing_scale_mode"].currentTextChanged.connect(contour_smoothing)
+        controls["contour_displacement_mm"].valueChanged.connect(contour_smoothing)
+        controls["contour_smoothing_preserve_min_turn_distance"].toggled.connect(contour_smoothing)
         contour_smoothing()
     elif page == "material":
 
         def lift(*_args):
-            visible("normal_shift_mm", controls["return_path_lift"].isChecked())
+            connected = (
+                not window.project.config.skip_postprocessing and not window.project.config.contour_only_sweep_mode
+            )
+            visible("return_path_lift", connected)
+            visible("normal_shift_mm", connected and controls["return_path_lift"].isChecked())
 
         controls["return_path_lift"].toggled.connect(lift)
         lift()

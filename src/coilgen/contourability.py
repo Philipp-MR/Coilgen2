@@ -36,13 +36,11 @@ def validate_and_repair_contourability(
     sf_b_field: np.ndarray,
     config: CoilGenConfig,
 ) -> tuple[list[CoilPart], dict[str, Any]]:
-    """Validate that finite contours still represent the optimized sheet current.
+    """Check whether the contours reproduce the field of the optimized stream function.
 
-    The stream-function optimizer solves for a continuous surface-current sheet.
-    The later contouring step is a discretization of that sheet into equal-current
-    loops.  This check catches cases where closed loops exist but are too sparse,
-    collapsed, badly oriented, or electromagnetically far from the continuous
-    stream-function field.
+    The contouring step extracts equal-current loops from stream function levels.
+    This check catches sparse, collapsed, or misoriented loops, as well as loops
+    whose magnetic field deviates too far from that of the continuous solution.
     """
 
     mode = normalise_symmetry_mode(getattr(config, "contourability_validation", "auto"))

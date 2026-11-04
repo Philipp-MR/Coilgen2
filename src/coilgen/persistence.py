@@ -83,6 +83,15 @@ def atomic_json(path: Path, value: Any) -> None:
     atomic_text(path, text)
 
 
+def publish_exclusive(source: Path, target: Path) -> None:
+    """Publish a staged file on the same volume, never replacing an existing target."""
+    if os.name == "nt":
+        # Windows rename is exclusive and works on volumes without hard links.
+        os.rename(source, target)
+    else:
+        os.link(source, target)
+
+
 def file_digest(path: Path) -> str:
     digest = sha256()
     with Path(path).open("rb") as source:
@@ -126,6 +135,7 @@ def numerical_source_digest(package_root: Path) -> str:
         package_root,
         exclude=(
             "gui",
+            "web",
             "application",
             "cli.py",
             "__main__.py",

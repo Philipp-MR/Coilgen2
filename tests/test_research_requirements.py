@@ -131,7 +131,7 @@ def test_support_and_sample_joint_rotation_preserves_full_vector_operator():
 def test_sheet_surface_samples_are_rejected_instead_of_kernel_zero():
     parts, config = parts_config()
     spec = ResearchRequirements((RegionalRequirement("On support", dataset(((0.01, 0.01, 0),)), peak_limit_T=1e-7),))
-    with pytest.raises(FieldSamplingError, match="singular sheet"):
+    with pytest.raises(FieldSamplingError, match="coil surface"):
         prepare_requirement_constraints(parts, config, spec)
 
 

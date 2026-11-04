@@ -267,7 +267,7 @@ def test_independent_validation_header_uses_distinct_saved_grid_and_no_drive_cur
     assert context.sampling == "Independent samples · 2 samples"
     assert context.current_A is None
     np.testing.assert_array_equal(window.viewport._dataset_mesh.points, record.arrays["validation_points_m"])
-    assert "Solved sheet coefficients [A]" in context.viewing_text
+    assert "Solved stream function coefficients [A]" in context.viewing_text
 
 
 def test_missing_original_array_does_not_relabel_or_render_refitted_map(window, tmp_path):

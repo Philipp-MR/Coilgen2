@@ -111,7 +111,7 @@ def test_partial_design_finishes_only_after_checkpoint_artifacts_and_metadata_ar
     with progress_context(events.append):
         result = run_design(request, tmp_path / "run")
     assert result["pipeline_stage"] == "prepared"
-    assert writes[0][0] is None and writes[-1][0] == result["metadata_sha256"]
+    assert [checksum for checksum, _ in writes] == [result["metadata_sha256"]]
     assert all(value < 100 for _, value in writes)
     progress = [event["overall_percent"] for event in events if "overall_percent" in event]
     assert progress == sorted(progress) and progress[-1] == 100

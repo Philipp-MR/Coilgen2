@@ -119,8 +119,8 @@ def test_primary_probe_reports_actual_dataset_distance_units_and_stored_sample(s
     viewport.plotter.picked_point = [0, 0.009, 0]
     viewport._picked_actor(actor)
     text = viewport.probe.text()
-    assert "Selected Continuous-sheet field" in text
-    assert "Nearest displayed sample in Continuous-sheet field" in text
+    assert "Selected Stream function field" in text
+    assert "Nearest displayed sample in Stream function field" in text
     assert "(0, 0.01, 0) m" in text and "distance 0.001 m" in text
     assert "Bz [µT]: 2.1" in text and "no interpolation" in text
     for name, values in before.items():
@@ -138,7 +138,7 @@ def test_context_layer_pick_does_not_borrow_primary_field_value(scientific_viewp
     viewport._picked_actor(actor)
     text = viewport.probe.text()
     assert f"Selected {'Support layer' if layer == 'support' else 'Target points layer'}" in text
-    assert "viewing Continuous-sheet field" in text
+    assert "viewing Stream function field" in text
     assert "no field value sampled at this position" in text
     assert "Bz [µT]" not in text and "Nearest displayed sample" not in text
 

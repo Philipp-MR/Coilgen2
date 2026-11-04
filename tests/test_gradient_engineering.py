@@ -157,7 +157,8 @@ def test_explicit_feed_participates_in_fields_resistance_and_export_without_qual
     assert report.field_metrics["drive_feed_designed"]
     assert not report.ready and any("physical_feed_break_not_swept" in reason for reason in report.failure_reasons)
     assert any("drive_lead_conductor_clearance_not_certified" in reason for reason in report.failure_reasons)
-    assert not list(tmp_path.glob("*.stl"))
+    # Failed strict review writes only labelled DRAFT solids, never released ones.
+    assert not [path for path in tmp_path.glob("*.stl") if "_DRAFT_" not in path.name]
     np.testing.assert_array_equal(
         np.loadtxt(tmp_path / f"{BODY}_electrical_path_explicit_drive.csv", delimiter=",", skiprows=1), electrical
     )

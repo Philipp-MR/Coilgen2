@@ -1,7 +1,7 @@
 """Portable starting designs shared by the GUI, notebooks and batch clients.
 
-Templates specify physical inputs and a complete study; they contain no saved
-acceptance claims. The original preset API and numerical defaults are retained.
+Templates specify physical inputs, bounded pre-routing contour smoothing and
+a complete study. Acceptance is measured when the user computes the design.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ class TemplateSpec:
 
 _GRADIENT_WORKFLOW = (
     "Bz gradient of 20 mT/m in a 40 mm spherical DSV, with B0 = 3 T along world z. "
-    "Fit the current sheet, extract contours, connect the winding, sweep 2 × 2 mm copper "
+    "Fit the stream function, extract contours, connect the winding, sweep 2 × 2 mm copper "
     "and independently review fields and manufacturing geometry. Feeds and cooling require design."
 )
 _SHIM_DESCRIPTION = (
@@ -41,6 +41,28 @@ _SHIM_DESCRIPTION = (
     "The absolute Bz target uses world coordinates and a fixed 20 mm reference radius. "
     "The full study retains discrete-wire and manufacturing failures for review; feeds and cooling require design."
 )
+
+
+_HALBACH_DESCRIPTION = (
+    "This gallery example generates a 200 mm long cylindrical support of 80 mm radius, rotated 90° about "
+    "world x so the bore runs along y while B0 = 50 mT points along world z (vertical). "
+    "Bz = 0.02*{axis} T in a 40 mm spherical DSV. Interconnection direction: {routing}. "
+    "The separate Halbach research project uses octagonal STL surfaces. "
+    "The winding uses 2 × 2 mm copper and requires feed and cooling design."
+)
+HALBACH_BORE_AXIS = (0.0, 1.0, 0.0)
+# Measured on these templates (2-3 Nov 2026): no routing axis is better in
+# general. The "centerline intersection" first reported for Gz along B0 was a
+# false positive of the contact check (near-duplicate route vertices); the true
+# minimum distance is 1.33 mm. For Gx, routing along the bore collides two
+# connectors (0.03 mm). Keep the conventional B0 routing; interconnection_axis
+# remains available per design. These reference measurements predate the
+# mounted-copper clearance check; each new layout is independently swept.
+HALBACH_INTERCONNECTION_AXIS = {"x": "b0", "y": "b0", "z": "b0"}
+_HALBACH_ROUTING_TEXT = {
+    "b0": "along B0 (the interconnection direction can be switched to the bore axis per design)",
+    "support_axis": "along the bore axis",
+}
 
 
 def _gradient_description(support: str, axis: str) -> str:
@@ -59,6 +81,16 @@ TEMPLATE_SPECS = (
     TemplateSpec("cylinder", EXAMPLE_TITLES["cylinder"], "Gradients", preset_description("cylinder"), "gradient-y"),
     TemplateSpec(
         "cylinder_gz", "Cylindrical Z gradient (Gz)", "Gradients", _gradient_description("cylinder", "z"), "gradient-z"
+    ),
+    *(
+        TemplateSpec(
+            f"halbach_g{axis}",
+            f"Halbach transverse-field {axis.upper()} gradient (G{axis})",
+            "Gradients",
+            _HALBACH_DESCRIPTION.format(axis=axis, routing=_HALBACH_ROUTING_TEXT[HALBACH_INTERCONNECTION_AXIS[axis]]),
+            f"gradient-{axis}",
+        )
+        for axis in "xyz"
     ),
     TemplateSpec(
         "shielded_gy",
@@ -133,18 +165,18 @@ TEMPLATE_SPECS = (
         "support-cylinder",
     ),
     TemplateSpec(
+        "shielded_xyz_gradient",
+        SYSTEM_EXAMPLE_TITLES["shielded_xyz_gradient"],
+        "Coil systems",
+        system_description("shielded_xyz_gradient"),
+        "shielded-gradient",
+    ),
+    TemplateSpec(
         "biplanar_gradient_shim",
         SYSTEM_EXAMPLE_TITLES["biplanar_gradient_shim"],
         "Coil systems",
         system_description(),
         "biplanar-system",
-    ),
-    TemplateSpec(
-        "independent_turns",
-        EXAMPLE_TITLES["independent_turns"],
-        "Demonstrations",
-        preset_description("independent_turns"),
-        "independent-turns",
     ),
 )
 
@@ -211,16 +243,27 @@ def _shielded_project(spec: TemplateSpec, root: Path) -> ProjectDocument:
 
 
 def _shim_config(id_: str):
+    # Refining the axisymmetric Z2 support introduced a nearly reversing
+    # connector in its reviewed wire. Preserve its original ring mesh.
+    angular, axial = (32, 16) if id_ == "shim_z2" else (64, 32)
     config = replace(
         preset_config("cylinder"),
+        # Resolve the high-curvature shim lobes before extracting level sets.
+        # Keep the physical cylinder span at 200 mm with the legacy mesh builder.
+        cylinder_mesh_parameter_list=(0.2 * (axial + 1) / axial, 0.08, angular, axial, 1, 0, 0, 0),
         design_context="mr_shim",
         conductor_cross_section_width=0.001,
         conductor_cross_section_height=0.001,
         sweep_min_bend_radius=0.003,
+        # The other four cylindrical shims clear without moving a contour
+        # tangentially to make room for a cut.
+        sweep_corner_cluster_max_source_deviation_m=0.003 if id_ in {"shim_yz", "shim_z2"} else 0.0,
         levels=12,
         target_error_tolerance_percent=4.0,
         target_gradient_normalization="none",
-        normal_shift_length=0.001,
+        # Two nearby axial returns of Z2 cross the same turn: reserve a
+        # third height without changing its stream function or winding levels.
+        normal_shift_length=0.0038 if id_ == "shim_z2" else 0.002,
         symmetry_reduction="off",
     )
     if id_ == "shim_z0":
@@ -235,9 +278,9 @@ def _shim_config(id_: str):
 def template_assembly(id_: str, *, project_root=None) -> ProjectAssembly:
     """Instantiate independent owned inputs, ready for the complete workflow.
 
-    All lengths and fields use SI and the world origin. Active shielding is a
-    joint current-sheet solve with an explicit separate zero-field target; its
-    support and closed suppression surface are embedded in the project JSON.
+    All lengths and fields use SI and the world origin. The active shielding
+    design fits the stream functions jointly with a separate zero-field target.
+    Its support and closed suppression surface are embedded in the project JSON.
     """
     spec = template_spec(id_)
     root = Path.cwd() if project_root is None else Path(project_root).expanduser().resolve()
@@ -252,10 +295,27 @@ def template_assembly(id_: str, *, project_root=None) -> ProjectAssembly:
         elif id_.startswith("shim_"):
             config = _shim_config(id_)
             study = preset_study("biplanar")
+        elif id_.startswith("halbach_g"):
+            axis = id_.removeprefix("halbach_g")
+            base = preset_config("cylinder")
+            length, radius, angular, axial = base.cylinder_mesh_parameter_list[:4]
+            config = replace(
+                base,
+                cylinder_mesh_parameter_list=(length, radius, angular, axial, 1, 0, 0, math.pi / 2),
+                field_shape_function=axis,
+                target_gradient_axis=axis,
+                b_0_strength_T=0.05,
+                research_physics={**base.research_physics, "b0_T": (0.0, 0.0, 0.05)},
+                interconnection_axis=HALBACH_INTERCONNECTION_AXIS[axis],
+            )
+            study = preset_study("cylinder")
         else:
             support, axis = id_.split("_g")
             kind = "cylinder" if support == "cylinder" else "biplanar"
             config = replace(preset_config(kind), field_shape_function=axis, target_gradient_axis=axis)
+            if id_ == "biplanar_gz":
+                # The long crossing cuts pass above another 2 mm winding.
+                config = replace(config, normal_shift_length=0.0055, sweep_corner_cluster_max_source_deviation_m=0.003)
             study = preset_study(kind)
         project = ProjectDocument.from_config(config, name=spec.title, project_root=root).update_study(study)
     return ProjectAssembly.new(spec.title, (project,))

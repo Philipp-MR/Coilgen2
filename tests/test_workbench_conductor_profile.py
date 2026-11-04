@@ -88,12 +88,11 @@ def test_polygon_coordinate_apply_undo_redo_and_json_preserve_si(windows, applic
     np.testing.assert_array_equal(restored.config.cross_sectional_points, expected)
 
 
-def test_pending_incomplete_cell_survives_close_blocks_compute_save_and_export(windows, application, tmp_path):
+def test_incomplete_cell_blocks_compute_save_and_export_until_discarded(windows, application, tmp_path):
     window = _window(windows, PROFILE)
     original = window.project
     editor, _entry = _edit_cell(window, application, "1e")
     assert window._draft_dirty and editor.table.item(1, 0).text() == "1e"
-    window._conductor_profile_section.dialog.close()
     window.compute()
     application.processEvents()
     assert window.project is original and not window.service.submissions
@@ -106,10 +105,13 @@ def test_pending_incomplete_cell_survives_close_blocks_compute_save_and_export(w
     with pytest.raises(ValueError, match="Correct the pending settings"):
         window.export_python(tmp_path / "invalid.py")
     assert not (tmp_path / "invalid.json").exists() and not (tmp_path / "invalid.py").exists()
-    window.revert_draft()
+    window._conductor_profile_section.dialog.close()
     assert _editor(window).profile() == PROFILE and not window._draft_dirty
-    assert window._conductor_profile_section.dialog.isVisible()
-    assert window.undo_stack.count() == 0
+    assert not window._conductor_profile_section.dialog.isVisible()
+    assert window.undo_stack.count() == 0 and window.project is original
+    window.compute()
+    assert len(window.service.submissions) == 1
+    np.testing.assert_array_equal(window.service.submissions[0][0].config.cross_sectional_points, PROFILE)
 
 
 def test_live_valid_cell_compute_submits_new_profile_without_enter(windows, application):
@@ -173,7 +175,7 @@ def test_rectangle_to_polygon_is_one_undoable_profile_change(windows):
 @pytest.mark.parametrize(
     "points",
     (
-        ((0, 0), (0.002, 0), (0.001, 0.001), (0.002, 0.002), (0, 0.002)),
+        ((0, 0), (0.002, 0.002), (0, 0.002), (0.002, 0)),
         ((0, 0), (0.001, 0)),
         ((0, 0, 0), (0.001, 0, 0), (0, 0.001, 0)),
     ),

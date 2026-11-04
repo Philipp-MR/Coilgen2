@@ -6,7 +6,7 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from .config import CoilGenConfig
+from .config import INTERCONNECTION_AXIS_MODES, CoilGenConfig
 from .design_context import CoilApplication, normalize_design_context
 from .engineering_limits import LEVEL_COUNT_METHODS, ENGINEERING_METHODS, contour_discretization_method
 from .field_components import normalize_field_component
@@ -187,6 +187,21 @@ def _validate_mesh_settings(config: CoilGenConfig, error, warning, *, project_ro
             error("b_0_direction", "B0 direction contains non-finite values.")
         elif np.linalg.norm(b0_direction) < 1e-15:
             error("b_0_direction", "B0 direction must be nonzero.")
+    axis_setting = config.interconnection_axis
+    if isinstance(axis_setting, str):
+        if axis_setting not in INTERCONNECTION_AXIS_MODES:
+            error(
+                "interconnection_axis",
+                f"Interconnection axis must be one of {', '.join(INTERCONNECTION_AXIS_MODES)} or a vector.",
+            )
+    else:
+        try:
+            axis_vector = np.asarray(axis_setting, dtype=float)
+        except (TypeError, ValueError):
+            error("interconnection_axis", "Interconnection axis vector must be numeric.")
+        else:
+            if axis_vector.shape != (3,) or not np.all(np.isfinite(axis_vector)) or np.linalg.norm(axis_vector) < 1e-15:
+                error("interconnection_axis", "Interconnection axis vector must be three finite, nonzero values.")
     _positive(error, "main B0 field strength", "b_0_strength_T", config.b_0_strength_T)
 
 
@@ -774,7 +789,7 @@ def _validate_secondary_suppression_surfaces(config: CoilGenConfig, error) -> No
 
 
 def _validate_optimization_settings(config: CoilGenConfig, error, warning) -> None:
-    _positive(error, "effective current-sheet thickness [m]", "conductor_thickness", config.conductor_thickness)
+    _positive(error, "effective conductor thickness [m]", "conductor_thickness", config.conductor_thickness)
     # The inherited field name denotes resistivity, not conductivity. Positive
     # finite rho and thickness keep the sheet resistance model physical.
     _positive(
@@ -1518,6 +1533,8 @@ def _validate_optimization_settings(config: CoilGenConfig, error, warning) -> No
     if int(getattr(config, "contour_smoothing_patch_rings", 4)) < 1:
         error("contour_smoothing_patch_rings", "Contour smoothing patch rings must be at least one.")
     smoothing_displacement_limit = _finite_float(config.contour_smoothing_max_displacement)
+    if not isinstance(config.contour_smoothing_local_fallback, (bool, np.bool_)):
+        error("contour_smoothing_local_fallback", "Local contour fitting must be a boolean.")
     if not np.isfinite(smoothing_displacement_limit) or smoothing_displacement_limit < 0.0:
         error(
             "contour_smoothing_max_displacement",
@@ -2189,6 +2206,7 @@ def _validate_manufacturing_settings(config: CoilGenConfig, error, warning) -> N
     _enum(
         error, "conductor_mounting_mode", config.conductor_mounting_mode, {"centered", "surface_outer", "surface_inner"}
     )
+    _enum(error, "conductor_path_reference", config.conductor_path_reference, {"centroid", "profile_origin"})
     _enum(error, "sweep_path_simplification", config.sweep_path_simplification, {"off", "exact", "toleranced"})
     _enum(error, "sweep_surface_realization", config.sweep_surface_realization, {"analytic", "mesh"})
     _enum(error, "sweep_bend_mode", config.sweep_bend_mode, {"miter", "fillet"})

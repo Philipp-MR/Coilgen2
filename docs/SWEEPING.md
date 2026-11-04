@@ -19,10 +19,36 @@ at a fixed attachment does not flatten the entire neighboring connector segment.
 Distinct local distance minima retain separate anchors, and contact clustering
 does not merge different route priorities. Exact nonadjacent centerline contacts
 are retained even inside the short-bend exclusion used for proximity warnings.
-Contour points and shared connector endpoints remain fixed. The lift never
+In the initial connector-only proposal, contour points and shared connector
+endpoints remain fixed. The lift never
 exceeds `normal_shift_length`. Arclength ramps use sorted nearest-anchor
 queries with linear temporary storage instead of a path-by-anchor distance
 matrix. An insufficient lift or incompatible ownership remains explicit.
+
+The connected-winding pipeline also tests the actual mounted copper. If the
+initial winding has insufficient clearance, it tries other crossing heights,
+longer approaches to short cuts, and lateral offsets of owned joins. A shoulder
+can start on the neighboring winding. Source conditioning or local fillets of
+ordinary turns require an explicit manufacturing deviation allowance
+(`sweep_corner_cluster_max_source_deviation_m`); the unconnected contour
+solution and the prescribed current are retained. The signed normal lift is
+bounded by the configured value. A newly clear route replaces the incumbent
+only after a fresh sweep, including the fabrication mesh realization if it
+differs from the design realization.
+
+For each pair of distinct winding stretches the required **copper-to-copper**
+gap is twice `sweep_insulation_thickness` plus `sweep_manufacturing_tolerance`
+and `sweep_bend_clearance_margin`, all in metres. For example, 0.100 mm
+insulation per face and 0.050 mm tolerance require 0.250 mm between the bare
+surfaces. The facet test checks for contact anywhere, including overlaps
+beyond an incident pair's shared edge or vertex. Positive-gap checks include
+stretches separated by more than four bare-profile diameters of intervening
+wire and shorter non-neighboring stretches that turn back by at least 90°.
+This avoids imposing insulation between successive rings of the same
+continuous conductor. A passing reported gap is a lower bound at the requested
+clearance; an exhausted search is unverified. The capsule measurements remain
+available as geometric screens. Bend, support, mesh-quality, and assembly
+checks retain their own verdicts.
 
 A local connector spike may be corrected only when both adjacent intervals have
 the same explicit connector owner and are offset/free geometry. Movement is

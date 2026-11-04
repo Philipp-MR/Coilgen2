@@ -69,7 +69,7 @@ A separate CPython 3.10.22 environment containing NumPy 2.2.6 and pytest,
 with no SciPy, CVXPY, Numba, Qt, VTK or Matplotlib available, completed a real
 small public `CylinderCoilDesign` through contours using the reference kernel
 and unconstrained Tikhonov optimization. Its 84-vertex/144-triangle support,
-19 ROI samples and eight contours had finite stream functions, sheet fields
+19 ROI samples and eight contours had finite stream functions, stream function fields
 and contour coordinates; the requested 300 mm physical length was realized.
 Repeating with the declared NumPy floor, **1.24.4**, also passed that contour
 solve, 53 focused finite-wire/ROI/affine-fit/cylinder tests, and the independent
@@ -181,10 +181,10 @@ resistive power, scalar/vectorized sensitivity, and analytical field checks.
 | Check | Observed result |
 | --- | --- |
 | Circular-loop segment refinement, three axial locations | Approximately 16-fold error reduction for each 4-fold segment increase; final worst error below 0.000056%. |
-| Uniform rectangular current sheet vs analytical solid angle | Relative field error below 7.4 × 10⁻¹³ across the tested scales and transforms. |
+| Field from a linear stream function on a rectangle (uniform surface current) vs analytical solid angle | Relative field error below 7.4 × 10⁻¹³ across the tested scales and transforms. |
 | Maxwell-pair fabrication reference | Strict geometry checks and fixed-current gradient validation passed on 913 independent ROI points. |
 | Solenoid analytical circular-loop stack | Center-field error 0.0732%; inductance error 1.91%. |
-| Welcome-page cylinder / biplanar examples | Independent sheet Bz relative RMS errors 3.404% / 3.014%; original-current unconnected contours 3.381% / 2.959%. |
+| Welcome-page cylinder / biplanar examples | Independent Bz relative RMS errors for the stream functions 3.404% / 3.014%; original-current unconnected contours 3.381% / 2.959%. |
 
 The Maxwell example uses two independently closed turns, with no designed
 drive feeds. The solenoid uses the example's deterministic ordered winding.
@@ -204,11 +204,11 @@ for this check.
 The exact exported Python script and JSON sidecar also executed headlessly
 in 7.28 seconds with Qt/VTK imports blocked. The replay retained the saved
 contours stage and matching project/model fingerprints. All 47 scientific
-arrays were finite; its stream function, sheet field and independent validation
+arrays were finite; its stream function, predicted field and independent validation
 field matched the native run exactly (zero relative L2 difference). The
 sidecar's input hash was unchanged.
 
-The full run's continuous sheet passed its independent field check
+The full run's stream function passed its independent field check
 (3.109% relative Bz error). **The final winding was rejected for fabrication.**
 Recorded failures include route/sweep clearance, self-intersection, minimum
 bend radius, curvature envelope, unresolved frame sampling, and support

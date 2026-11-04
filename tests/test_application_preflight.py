@@ -36,6 +36,17 @@ assert SUPPORT_EDITORS
     assert result.returncode == 0, result.stderr
 
 
+def test_legacy_halbach_mismatch_surfaces_both_physical_fields_without_rewriting_them(tmp_path):
+    from coilgen.application.templates import template_assembly
+
+    project = template_assembly("halbach_gx", project_root=tmp_path).channels[0].project
+    assert not any(issue.title == "Separate mechanical background" for issue in check_preflight(project).issues)
+    legacy = project.update_config({"research_physics": {**project.config.research_physics, "b0_T": (0, 0, 3)}})
+    issue = next(issue for issue in check_preflight(legacy).issues if issue.title == "Separate mechanical background")
+    assert not issue.blocking and "(0, 0, 3) T" in issue.message and "(0, 0, 0.05) T" in issue.message
+    np.testing.assert_allclose(legacy.config.research_physics["b0_T"], (0, 0, 3))
+
+
 def test_valid_preflight_preserves_configuration_and_never_assembles_operators(monkeypatch):
     monkeypatch.setattr("coilgen.physics.calculate_sensitivity_matrix", lambda *_a, **_k: pytest.fail("Operator built"))
     monkeypatch.setattr(preflight, "find_spec", lambda _name: pytest.fail("Unused solver checked"))
@@ -80,10 +91,8 @@ def test_missing_conic_solver_retains_stage_and_fallback_policy(monkeypatch):
 
 
 def test_stage_specific_profile_requirement_is_preserved():
-    # A concave polygon may remain a sheet-study draft, but not a swept solid.
-    config = replace(
-        numeric_config(), cross_sectional_points=((0, 0), (0.002, 0), (0.001, 0.001), (0.002, 0.002), (0, 0.002))
-    )
+    # A self-intersecting polygon may remain a sheet-study draft, but not a swept solid.
+    config = replace(numeric_config(), cross_sectional_points=((0, 0), (0.002, 0.002), (0, 0.002), (0.002, 0)))
     project = ProjectDocument.from_config(config)
     assert check_preflight(project, pipeline_stage="sheet").ready
     issue = next(
@@ -91,7 +100,15 @@ def test_stage_specific_profile_requirement_is_preserved():
         for issue in check_preflight(project, pipeline_stage="routed").blocking
         if issue.key == "cross_sectional_points"
     )
-    assert issue.node == "material" and "convex" in issue.message
+    assert issue.node == "material" and "intersect" in issue.message
+    concave = project.update_config(
+        {"cross_sectional_points": ((0, 0), (0.002, 0), (0.001, 0.001), (0.002, 0.002), (0, 0.002))}
+    )
+    assert not [
+        issue
+        for issue in check_preflight(concave, pipeline_stage="routed").blocking
+        if issue.key == "cross_sectional_points"
+    ]
 
 
 def test_owned_input_survives_original_deletion_and_reports_cache_corruption(tmp_path):

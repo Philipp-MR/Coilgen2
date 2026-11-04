@@ -10,6 +10,7 @@ from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -26,9 +27,10 @@ from .acceptance import acceptance_report
 from .colors import apply_tone, item_foreground, tone_color
 from .icons import icon
 from .run_context import run_timestamp
+from .run_metadata import has_saved_request, read_run_metadata
 
 
-_STAGE_TITLES = {"sheet": "Sheet", "contours": "Contours", "routed": "Connected", "physical": "Conductor"}
+_STAGE_TITLES = {"sheet": "Stream function", "contours": "Contours", "routed": "Connected", "physical": "Conductor"}
 _STAGE_ICONS = {
     "sheet": "stream-function",
     "contours": "contours",
@@ -98,10 +100,10 @@ class AcceptancePanel(QWidget):
         layout.setSpacing(4)
         self.identity = _label(self, "acceptance_identity")
         layout.addWidget(self.identity)
-        stage_layout = QHBoxLayout()
-        stage_layout.setSpacing(5)
+        self.stage_layout = QGridLayout()
+        self.stage_layout.setSpacing(5)
         self.stage_buttons = {}
-        for key, title in _STAGE_TITLES.items():
+        for index, (key, title) in enumerate(_STAGE_TITLES.items()):
             button = QToolButton(self)
             button.setObjectName(f"acceptance_stage_{key}")
             button.setText(title)
@@ -109,9 +111,10 @@ class AcceptancePanel(QWidget):
             button.setIconSize(QSize(20, 20))
             button.setCheckable(True)
             button.clicked.connect(lambda _checked=False, stage=key: self._select_stage(stage))
-            stage_layout.addWidget(button, 1)
+            self.stage_layout.addWidget(button, index // 2, index % 2)
             self.stage_buttons[key] = button
-        layout.addLayout(stage_layout)
+        self._stage_columns = 2
+        layout.addLayout(self.stage_layout)
         self.summary = _label(self, "acceptance_summary")
         layout.addWidget(self.summary)
         self.metrics = _label(self, "acceptance_metrics")
@@ -188,6 +191,15 @@ class AcceptancePanel(QWidget):
         self.edit_settings.clicked.connect(self._edit_settings)
         self.problems.clicked.connect(lambda: self.action_requested.emit("problems"))
         self.set_record(None)
+
+    def _fit_stage_buttons(self):
+        buttons = self.stage_buttons.values()
+        required = sum(button.sizeHint().width() for button in buttons) + self.stage_layout.spacing() * 3
+        columns = 4 if required <= self.contentsRect().width() - 40 else 2
+        if columns != self._stage_columns:
+            self._stage_columns = columns
+            for index, button in enumerate(buttons):
+                self.stage_layout.addWidget(button, index // columns, index % columns)
 
     def set_record(self, record, *, project=None, issues=(), pending=False, diagnostic=""):
         """Refresh the evidence without rereading files or recomputing physics."""
@@ -268,6 +280,7 @@ class AcceptancePanel(QWidget):
             button.setAccessibleDescription(stage.detail)
             button.setToolTip(stage.detail)
             button.setEnabled(any(check.stage == stage.key for check in self.report.checks))
+        self._fit_stage_buttons()
         self.table.blockSignals(False)
         self._apply_filter(preserve_selection=False)
         keys = [check.key for check in self.report.checks]
@@ -339,15 +352,8 @@ class AcceptancePanel(QWidget):
             if issue is not None
             else "A recorded spatial witness is required; no location is inferred."
         )
-        metadata = self._record.metadata if self._record is not None else {}
-        request_saved = any(
-            artifact.get("name") == "request.json"
-            and isinstance(artifact.get("sha256"), str)
-            and len(artifact["sha256"]) == 64
-            and all(character in "0123456789abcdef" for character in artifact["sha256"].lower())
-            for artifact in metadata.get("artifacts") or ()
-            if isinstance(artifact, dict)
-        )
+        metadata = read_run_metadata(self._record)
+        request_saved = has_saved_request(metadata)
         self.settings.setEnabled(check is not None and request_saved and not self._diagnostic)
         self.settings.setToolTip(
             self._diagnostic
@@ -450,7 +456,7 @@ class AcceptancePanel(QWidget):
             ((kind, wires[kind]) for kind in ("routed", "contour") if (wires.get(kind) or {}).get("available") is True),
             (None, {}),
         )
-        scope = "Connected conductor" if kind == "routed" else "Original contours"
+        scope = "Connected conductor" if kind == "routed" else "Contours before routing"
         original = evidence.get("at_stream_current") or {}
         if original.get("available") is not True:
             original = evidence if evidence.get("current_refitted") is False else {}
@@ -503,6 +509,7 @@ class AcceptancePanel(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if hasattr(self, "table"):
+            self._fit_stage_buttons()
             self._responsive_columns()
             QTimer.singleShot(0, self, self._reveal_selection)
 

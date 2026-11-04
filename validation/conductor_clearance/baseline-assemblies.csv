@@ -1,0 +1,4 @@
+system,body_pairs,failing_pairs,minimum_surface_gap_mm
+biplanar_gradient_shim,144,0,1.76395509484857
+cylindrical_xyz_gradient,3,0,1.7589730110404165
+shielded_xyz_gradient,12,0,3.413465147854129

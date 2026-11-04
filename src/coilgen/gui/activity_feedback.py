@@ -69,15 +69,24 @@ class ComputationFeedback(QObject):
 
     def _attach(self, dialog):
         key = getCppPointer(dialog)[0]
-        indicator = self.indicators.get(key)
-        if indicator is not None and isValid(indicator):
-            return
         layout = dialog.layout()
         vertical = isinstance(layout, QBoxLayout) and layout.direction() in (
             QBoxLayout.Direction.TopToBottom,
             QBoxLayout.Direction.BottomToTop,
         )
         if not vertical and not isinstance(layout, (QFormLayout, QGridLayout)):
+            return
+        # Scientific editors and plots have large preferred sizes. Keep their
+        # controls on the selected display when reopening on a smaller screen.
+        if dialog.screen() is not None and not dialog.isMaximized() and not dialog.isFullScreen():
+            bounds = dialog.screen().availableGeometry()
+            if dialog.width() > bounds.width() - 20 or dialog.height() > bounds.height() - 50:
+                dialog.resize(
+                    min(dialog.width(), max(1, bounds.width() - 20)),
+                    min(dialog.height(), max(1, bounds.height() - 50)),
+                )
+        indicator = self.indicators.get(key)
+        if indicator is not None and isValid(indicator):
             return
         indicator = ComputationIndicator(dialog)
         indicator.setObjectName("window_computation_indicator")

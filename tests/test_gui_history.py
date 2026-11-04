@@ -105,7 +105,9 @@ def test_pinned_baseline_actions_notes_and_comparison_are_owned_and_persistent(a
     assert comparison.right.directory == second.directory
     assert "B − A" in panel.comparison_notes.text()
     row = next(
-        index for index, metric in enumerate(comparison.metrics) if metric.name == "Sheet independent relative error"
+        index
+        for index, metric in enumerate(comparison.metrics)
+        if metric.name == "Independent stream function field relative error"
     )
     assert panel.metrics_table.item(row, 5).text() == "0"
     delta_row = next(

@@ -295,7 +295,7 @@ def _triangle_pair_batches(minima, maxima, tolerance, limits, diagnostics, progr
         yield np.concatenate(buffered)
 
 
-def _exact_collision_audit(mesh, limits, progress_callback=None):
+def _exact_collision_audit(mesh, limits, progress_callback=None, *, fabrication_path=None, required_gap_m=0.0):
     """All triangle pairs, excluding only their legitimate shared simplex."""
     if len(mesh.faces) > limits.maximum_sweep_faces:
         return {"exact_collision_completed": False}, "sweep_face_budget_exceeded"
@@ -311,6 +311,25 @@ def _exact_collision_audit(mesh, limits, progress_callback=None):
     if np.any(np.linalg.norm(normals, axis=1) == 0):
         return {"exact_collision_completed": False}, "degenerate_sweep_triangle"
     tolerance = max(float(np.max(np.ptp(mesh.vertices, axis=0))), 1.0) * 1e-12
+    if required_gap_m < 0 or not np.isfinite(required_gap_m) or (required_gap_m and fabrication_path is None):
+        raise ValueError("A finite nonnegative copper gap and its associated fabrication path are required.")
+    intervals = None
+    if fabrication_path is not None:
+        from .swept_clearance import SweepIntervals, loft_pair_batches
+
+        intervals = SweepIntervals(fabrication_path, mesh.faces)
+    gap_count = 0
+    minimum = np.inf
+    witness = None
+    station_witnesses = {}
+
+    def record_pairs(first, second, distances):
+        if intervals is None:
+            return
+        for i, j, d in zip(intervals.station[first], intervals.station[second], distances):
+            key = (int(min(i, j)), int(max(i, j)))
+            station_witnesses[key] = min(station_witnesses.get(key, np.inf), float(d))
+
     minima, maxima = triangles.min(axis=1), triangles.max(axis=1)
     diagnostics = {
         "exact_collision_completed": False,
@@ -344,17 +363,22 @@ def _exact_collision_audit(mesh, limits, progress_callback=None):
 
     report(message=f"building triangle search tree; faces={len(mesh.faces)}")
     try:
-        for batch in _triangle_pair_batches(minima, maxima, tolerance, limits, diagnostics, report):
+        batches = (
+            loft_pair_batches(minima, maxima, required_gap_m + tolerance, limits, diagnostics)
+            if intervals is not None
+            else _triangle_pair_batches(minima, maxima, tolerance, limits, diagnostics, report)
+        )
+        for batch in batches:
             first, second = batch.T
             shared = mesh.faces[first, :, None] == mesh.faces[second, None, :]
             incident = np.any(shared, axis=(1, 2))
             if np.any(incident):
                 incident_tested += int(incident.sum())
-                incident_count += int(
-                    _incident_triangle_overlaps(
-                        triangles[first[incident]], triangles[second[incident]], shared[incident], tolerance
-                    ).sum()
+                overlaps = _incident_triangle_overlaps(
+                    triangles[first[incident]], triangles[second[incident]], shared[incident], tolerance
                 )
+                incident_count += int(overlaps.sum())
+                record_pairs(first[incident][overlaps], second[incident][overlaps], np.zeros(overlaps.sum()))
             first, second = first[~incident], second[~incident]
             if not len(first):
                 report()
@@ -366,6 +390,17 @@ def _exact_collision_audit(mesh, limits, progress_callback=None):
                 report("stopped", "nonfinite triangle distance")
                 return diagnostics, "nonfinite_triangle_distance"
             count += int(np.count_nonzero(distances <= tolerance))
+            if intervals is not None:
+                remote = intervals.separate_visits(first, second)
+                deficient = remote & (distances < required_gap_m - tolerance)
+                gap_count += int(np.count_nonzero(deficient))
+                invalid = deficient | (distances <= tolerance)
+                record_pairs(first[invalid], second[invalid], distances[invalid])
+                if np.any(remote):
+                    nearest = np.flatnonzero(remote)[np.argmin(distances[remote])]
+                    if distances[nearest] < minimum:
+                        minimum = float(distances[nearest])
+                        witness = [int(first[nearest]), int(second[nearest])]
             tested += len(first)
             report()
     except _TriangleAuditBudgetExceeded as error:
@@ -382,7 +417,18 @@ def _exact_collision_audit(mesh, limits, progress_callback=None):
         }
     )
     report("finished")
-    return diagnostics, ("swept_mesh_self_intersection" if count + incident_count else "")
+    if intervals is not None:
+        diagnostics.update(
+            required_copper_gap_m=float(required_gap_m),
+            copper_gap_violating_facet_pairs=gap_count,
+            copper_gap_minimum_lower_bound_m=min(minimum, float(required_gap_m)),
+            copper_gap_witness_faces=witness if minimum <= required_gap_m else None,
+            copper_clearance_witness_intervals=[[i, j, d] for (i, j), d in sorted(station_witnesses.items())],
+        )
+    reason = (
+        "swept_mesh_self_intersection" if count + incident_count else "insufficient_copper_gap" if gap_count else ""
+    )
+    return diagnostics, reason
 
 
 def _sweep_preview(part, config, limits, progress_callback=None):

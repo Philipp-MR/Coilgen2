@@ -33,7 +33,7 @@ class Preview(QWidget):
     def render_project(self, project):
         self.project = project
 
-    def display_run(self, arrays, metadata=None):
+    def display_run(self, arrays, metadata=None, *, follow_latest=False):
         self.displayed = metadata
 
     def clear_run(self):

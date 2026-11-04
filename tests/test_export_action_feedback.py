@@ -85,7 +85,7 @@ def test_geometry_receipt_preserves_choices_and_reports_actual_committed_units(
     assert panel.selected_names() == names and not panel.include_project.isChecked()
     assert "STL [mm]" in panel.receipt.status.text()
     assert "STEP [m]" in panel.receipt.status.text()
-    assert "2 solid files" in panel.receipt.status.text()
+    assert "2 solid files and 1 3D path file" in panel.receipt.status.text()
     assert str(directory) in panel.receipt.status.text()
     assert panel.receipt.open_button.isVisibleTo(panel)
     opened = []
@@ -93,7 +93,7 @@ def test_geometry_receipt_preserves_choices_and_reports_actual_committed_units(
     panel.receipt.open_button.click()
     assert Path(opened[0]) == directory
     window.statusBar().clearMessage()
-    assert "2 solid files" in panel.receipt.status.text()
+    assert "2 solid files and 1 3D path file" in panel.receipt.status.text()
     window.select_node("geometry")
     window.navigate_workflow("export")
     assert window.geometry_export_panel.selected_names() == names
@@ -259,16 +259,16 @@ def test_artifact_publication_failure_rolls_back_own_files_only(tmp_path, monkey
     directory.mkdir()
     unrelated = directory / "existing-note.txt"
     unrelated.write_text("keep")
-    link = exports.os.link
+    publish = exports.publish_exclusive
     calls = []
 
     def failing(source, target):
         calls.append(target)
         if len(calls) == 2:
             raise OSError("Publication failed")
-        return link(source, target)
+        return publish(source, target)
 
-    monkeypatch.setattr(exports.os, "link", failing)
+    monkeypatch.setattr(exports, "publish_exclusive", failing)
     with pytest.raises(OSError, match="Publication failed"):
         export_verified_artifacts(record, directory, loader=DesignService.load_run)
     assert unrelated.read_text() == "keep"

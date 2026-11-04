@@ -94,8 +94,8 @@ def _parameter(field, value):
         "config.min_wire_distance_m": ("Minimum wire clearance", 1e3, "mm"),
         "config.interconnection_cut_width": ("Interconnection cut width", 1e3, "mm"),
         "config.target_error_tolerance_percent": ("Design field error budget", 1, "%"),
-        "config.stream_function_cost_function": ("Sheet objective", 1, ""),
-        "config.sf_opt_method": ("Sheet solver", 1, ""),
+        "config.stream_function_cost_function": ("Stream function objective", 1, ""),
+        "config.sf_opt_method": ("Stream function solver", 1, ""),
         "config.coil_mesh_file": ("Support source", 1, ""),
         "config.field_shape_function": ("Target expression", 1, ""),
         "config.target_field_component": ("Target field component", 1, ""),
@@ -402,7 +402,7 @@ class HistoryPanel(QWidget):
                         verdicts = run_verdicts(metadata)
                         item.setToolTip(
                             f"Saved validation scope: {summary.get('scope', 'unrecorded')}. This verdict applies only to that scope.\n"
-                            f"Sheet checks: {verdicts['sheet']}\n"
+                            f"Stream function checks: {verdicts['sheet']}\n"
                             f"Sweep geometry: {verdicts['sweeps']}\n"
                             f"Fabrication review: {verdicts['fabrication']}\n"
                             "A passed validation scope does not release the coil for construction."

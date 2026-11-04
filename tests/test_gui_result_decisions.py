@@ -231,7 +231,7 @@ def test_channel_overview_prefers_matching_owned_evidence_and_separates_executio
             "project_fingerprint": "earlier",
             "status": "running",
             "project_revision": 2,
-            "stage": "Current sheet",
+            "stage": "Stream function",
             "created_at": "2026-10-05T17:00:00+00:00",
         }
     ]
@@ -255,7 +255,7 @@ def test_channel_overview_prefers_matching_owned_evidence_and_separates_executio
     window.close()
 
 
-def test_export_context_distinguishes_older_cad_and_current_owned_assembly(panels):
+def test_export_context_identifies_only_selected_revision_even_when_other_channel_has_edits(panels):
     assembly = system_assembly()
     owner = assembly.channels[0].project
     current_other_channel = assembly.channels[1].project
@@ -266,10 +266,8 @@ def test_export_context_distinguishes_older_cad_and_current_owned_assembly(panel
     )
     text = panel.companion_context.text()
     assert "CAD source: saved revision 4" in text
-    assert f"Current assembly (9 channels) companion: applied revision {owner.revision}" in text
-    assert "earlier model/study" in text
-    assert "Pending edits will be applied" in text
-    assert "CAD remains the selected run's geometry" in text
+    assert "project file includes that revision and this result" in text
+    assert "Pending editor changes stay in the workbench" in text
     panel.include_project.setChecked(False)
     assert panel.companion_context.isHidden()
     assert panel.selected_names() == (_options()[0].name,)

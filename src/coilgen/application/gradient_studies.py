@@ -214,6 +214,15 @@ class ConvergenceCriterion:
     def __post_init__(self):
         if not isinstance(self.metric, str) or not self.metric:
             raise ValueError("A convergence criterion requires a metric name.")
+        # Earlier studies identify these metrics by their former display names.
+        aliases = {
+            "Sheet design relative error": "Design-grid stream function field relative error",
+            "Sheet independent RMS error": "Independent stream function field RMS error",
+            "Sheet independent relative error": "Independent stream function field relative error",
+            "Sheet independent peak error": "Independent stream function field peak error",
+        }
+        if self.metric in aliases:
+            object.__setattr__(self, "metric", aliases[self.metric])
         for name in ("relative_tolerance", "absolute_tolerance"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or value < 0:
@@ -222,7 +231,7 @@ class ConvergenceCriterion:
 
 DEFAULT_CONVERGENCE_CRITERIA = (
     ConvergenceCriterion("Sheet power", 0.01),
-    ConvergenceCriterion("Sheet design relative error", 0, 0.1),  # percentage points
+    ConvergenceCriterion("Design-grid stream function field relative error", 0, 0.1),  # percentage points
 )
 
 
@@ -575,7 +584,8 @@ def saved_winding_currents(record, *, current_policy="original"):
 def _saved_winding(record, current_policy):
     if current_policy not in {"original", "recorded"}:
         raise ValueError("Current policy must be original or recorded; no fitted current is computed.")
-    metadata, arrays = record.metadata, record.select_arrays(copy=False)
+    metadata = record.metadata_view if hasattr(record, "metadata_view") else record.metadata
+    arrays = record.select_arrays(copy=False)
     plans = metadata.get("winding_steps") or []
     bodies = ((metadata.get("fabrication") or {}).get("electrical_metrics") or {}).get("bodies") or []
     if plans and all(plan.get("circuit_complete") is True for plan in plans):

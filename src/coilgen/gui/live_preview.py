@@ -52,7 +52,7 @@ class LivePreviewController(QObject):
         self._root = Path(jobs_directory).resolve()
         self._loader = loader or load_stage_preview
         self._state = {}
-        self._following = False
+        self._mode = "paused"
         self._preview = None
         self._error = None
         self._epoch = 0
@@ -71,7 +71,11 @@ class LivePreviewController(QObject):
 
     @property
     def following(self):
-        return self._following
+        return self._mode == "follow"
+
+    @property
+    def watching(self):
+        return self._mode != "paused"
 
     @property
     def preview(self):
@@ -100,31 +104,39 @@ class LivePreviewController(QObject):
             return
         self._epoch += 1
         self._state = deepcopy(state)
-        self._following = True
+        self._mode = "follow"
         self._preview, self._error, self._seen, self._pending = None, None, None, None
         self.changed.emit()
         self.refresh(state)
 
+    def pin_plot(self):
+        """Keep refreshing the live dataset menu while holding the selected plot."""
+        if self.following:
+            self._mode = "pinned"
+            self.changed.emit()
+
     def pause(self):
-        if self._following:
+        """Detach from live data when the user visits a separate model or saved run."""
+        if self.watching:
             self._epoch += 1
-            self._following = False
+            self._mode = "paused"
             self._pending = None
             self.changed.emit()
 
     def resume(self):
-        if self._closed or not self._state or self._following:
+        if self._closed or not self._state or self.following:
             return
-        self._epoch += 1
-        self._following = True
-        self._seen, self._pending = None, None
+        if not self.watching:
+            self._epoch += 1
+            self._seen, self._pending = None, None
+        self._mode = "follow"
         self.changed.emit()
         self.refresh(self._state)
 
     def stop(self):
         self._epoch += 1
         self._state, self._pending, self._seen = {}, None, None
-        self._following = False
+        self._mode = "paused"
         self._preview, self._error = None, None
         self.changed.emit()
 
@@ -175,7 +187,7 @@ class LivePreviewController(QObject):
             return
         self._state = deepcopy(state)
         self.changed.emit()
-        if not self._following:
+        if not self.watching:
             return
         try:
             request = self._request(state)
@@ -204,12 +216,12 @@ class LivePreviewController(QObject):
         # load exists. A new generation waits/coalesces rather than racing it.
         self._worker = None
         pending, self._pending = self._pending, None
-        if not self._closed and epoch == self._epoch and self._following:
+        if not self._closed and epoch == self._epoch and self.watching:
             self._error = error
             if preview is not None and error is None:
                 self._preview = preview
                 self.preview_ready.emit(self.job_id, preview)
-        if not self._closed and self._following and pending is not None:
+        if not self._closed and self.watching and pending is not None:
             if epoch != self._epoch or pending != request:
                 if self._worker is None:
                     # A ready handler may change projects/start a new load.

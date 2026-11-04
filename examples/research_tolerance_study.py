@@ -3,7 +3,7 @@
     python examples/research_tolerance_study.py [--no-resume]
 
 Power and magnetic-energy normalization stays fixed at the feasible reference
-for tolerance_scale=1. Output records sampled sheet constraints; independently
+for tolerance_scale=1. Output records sampled stream function constraints; independently
 validate and fabricate selected candidates before making winding decisions.
 """
 

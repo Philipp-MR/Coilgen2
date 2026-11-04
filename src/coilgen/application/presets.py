@@ -15,7 +15,6 @@ from ..config import CoilGenConfig
 EXAMPLE_TITLES = {
     "cylinder": "Cylindrical Y gradient (Gy)",
     "biplanar": "Biplanar Y gradient (Gy)",
-    "independent_turns": "Independent-turn sweep demo",
     "conical_harmonic": "Conical Z2",
 }
 PRESET_NAMES = tuple(EXAMPLE_TITLES)
@@ -25,10 +24,10 @@ _DESCRIPTIONS = {
         "Y-gradient insert: a 200 mm long cylinder of 80 mm support radius surrounds a 40 mm diameter "
         "spherical imaging volume (DSV). Gy = dBz/dy = 20 mT/m, with the 3 T main field along world z. "
         "The designed Bz perturbation is −0.4, 0 and +0.4 mT at y = −20, 0 and +20 mm. "
-        "The study fits a continuous current sheet, extracts 16 contour levels, connects the winding, "
+        "The study fits a continuous stream function, extracts 16 contour levels, connects the winding, "
         "sweeps 2 × 2 mm copper (4 mm² area, 6 mm minimum bend radius), and checks its field at the original current. "
         "The 1 mm homogenized sheet thickness is a separate optimization assumption, not the physical wire size. "
-        "A 3% sheet design RMS budget reserves headroom for discretization, routing and a 5% independent sheet check. "
+        "The stream function has a 3% RMS field error budget on the design grid and 5% on an independent grid. "
         "Connected-wire and manufacturing failures remain visible; feeds, cooling and duty cycle need design."
     ),
     "biplanar": (
@@ -39,25 +38,17 @@ _DESCRIPTIONS = {
         "(4 mm² area, 6 mm minimum bend radius) at the modeled current; "
         "direct 3D inter-group connectors "
         "may leave the planes. The 1 mm homogenized sheet thickness is a separate optimization assumption, "
-        "not the physical wire size. A 4% sheet design RMS budget reserves sampling margin for a 5% "
-        "independent sheet check. Routing and swept-body checks must be inspected. "
+        "not the physical wire size. The stream function has a 4% RMS field error budget on the design grid "
+        "and 5% on an independent grid. Routing and swept-body checks must be inspected. "
         "Inter-plane feeds, mutual inductance, cooling and duty cycle are not qualified."
     ),
-    "independent_turns": (
-        "B0 shim demonstration: four separate closed turns on a 200 mm long cylinder of 80 mm radius, "
-        "targeting uniform Bz = 100 µT in a spherical ROI of 20 mm radius. "
-        "The study uses 1 × 1 mm copper, 0.1 mm insulation and a 3 mm minimum bend radius. "
-        "A 4% sheet design RMS budget reserves sampling margin for a 5% independent sheet check. "
-        "All four solids and all body-pair clearances are reviewed. "
-        "The turns have no feed breaks or terminals; a driven assembly and its mutual inductance remain undesigned."
-    ),
     "conical_harmonic": (
-        "Z2 shim on a 300 mm long conical support, with bottom/top radii 180/140 mm; "
+        "Z2 shim on a 300 mm long conical support with 64 azimuthal and 24 axial divisions, bottom/top radii 180/140 mm; "
         "50 mm spherical ROI radius. The absolute world-coordinate target is "
         "Bz = 0.002(2z² − x² − y²) T, giving +10 µT at the ROI poles and −5 µT at its equator. "
         "The study uses 12 contour levels and 1 × 1 mm copper in a 3 T main field. "
-        "A 4% sheet design RMS budget reserves sampling margin for a 5% independent sheet check. "
-        "The continuous sheet passes in the reference run; discrete-wire field and routing need improvement. "
+        "The stream function has a 4% RMS field error budget on the design grid and 5% on an independent grid. "
+        "Its field passes in the reference run. The discrete-wire field and routing need improvement. "
         "Inspect those failed checks before fabrication. Drive feeds and thermal operation remain undesigned."
     ),
 }
@@ -75,13 +66,13 @@ def preset_description(kind: str = "cylinder") -> str:
 
 
 def preset_study(kind: str = "cylinder") -> dict:
-    """A full design study with a distinct, denser sheet validation grid.
+    """A full design study with a distinct, denser grid for stream function field validation.
 
     The native spherical design grid uses 17 samples across four ROI radii,
     retaining 257 interior samples. Validation uses 18 cell-centered samples
     across two ROI radii, retaining 3112 distinct samples. The cylinder uses a
     3% solve budget and design_margin=0.6; the other examples use 4% and 0.8.
-    Both reserve headroom while keeping the independent sheet budget at 5%.
+    Both reserve headroom while keeping the independent field error budget at 5%.
     """
     _check_kind(kind)
     return {
@@ -93,20 +84,21 @@ def preset_study(kind: str = "cylinder") -> dict:
 
 
 def preset_config(kind: str = "cylinder") -> CoilGenConfig:
-    """Return an explicit compact gradient or independent-turn shim model.
+    """Return an explicit compact gradient or conical shim model.
 
     Resistivity is 18 nΩ m, approximately room-temperature copper. The 1 mm
     sheet thickness belongs to the continuous-sheet power model; swept-wire
     resistance and Joule loss use the separate conductor area: 2 × 2 mm for
-    Gy gradient inserts and 1 × 1 mm for the two shim demonstrations.
+    Gy gradient inserts and 1 × 1 mm for the conical shim.
     No thermal, voltage or duty-cycle qualification is inferred from either.
     """
     _check_kind(kind)
+    angular, axial = 48, 24
     config = CoilGenConfig(
         coil_mesh_file="create cylinder mesh",
         # The legacy builder realizes height * nz/(nz+1). Compensate here
         # for a physical 200 mm span without changing old script geometry.
-        cylinder_mesh_parameter_list=(0.2 * 17 / 16, 0.08, 32, 16, 1, 0, 0, 0),
+        cylinder_mesh_parameter_list=(0.2 * (axial + 1) / axial, 0.08, angular, axial, 1, 0, 0, 0),
         field_shape_function="y",
         target_gradient_strength=0.02,
         target_gradient_normalization="linear_fit",
@@ -127,15 +119,29 @@ def preset_config(kind: str = "cylinder") -> CoilGenConfig:
         specific_conductivity_conductor=18e-9,
         levels=16,
         min_point_loop_number=4,
+        # Smooth mesh-scale contour kinks before routing. Limit measured
+        # displacement on the support to half the smallest example wire width.
+        # Unsafe fits retain the original closed contour.
+        contour_path_regularization_mode="parameterized_bspline",
+        contour_smoothing_scale_mode="mesh_coupled",
+        contour_smoothing_mesh_gain=0.1,
+        contour_smoothing_max_displacement=0.0005,
+        contour_smoothing_preserve_min_turn_distance=True,
+        contour_smoothing_local_fallback=True,
         gauss_order=2,
         field_evaluation_current_source="stream_function",
         inter_group_connection_path_method="mesh_geodesic",
         joint_group_routing_max_candidates=3,
         conductor_mounting_mode="surface_outer",
-        normal_shift_length=0.002,
+        # Reserve room for both mounted copper profiles and their insulation.
+        normal_shift_length=0.004 if kind in ("cylinder", "biplanar") else 0.002,
+        # Evaluate the same support realization used for fabrication export.
+        sweep_surface_realization="mesh",
         interconnection_cut_width=0.006,
         sweep_bend_mode="fillet",
         sweep_min_bend_radius=0.006 if kind in ("cylinder", "biplanar") else 0.003,
+        # A manufactured bend can round a sharp cut inside this local corridor.
+        sweep_corner_cluster_max_source_deviation_m=0.006 if kind in ("cylinder", "biplanar") else 0.003,
         sweep_insulation_thickness=0.0001,
         sweep_manufacturing_tolerance=0.00005,
         sweep_max_segment_length=0.004,
@@ -152,22 +158,10 @@ def preset_config(kind: str = "cylinder") -> CoilGenConfig:
         return replace(
             config,
             coil_mesh_file="create bi-planary mesh",
-            biplanar_mesh_parameter_list=(0.2, 0.2, 16, 16, 1, 0, 0, 0, 0, 0, 0.1),
+            biplanar_mesh_parameter_list=(0.2, 0.2, 24, 24, 1, 0, 0, 0, 0, 0, 0.1),
             surface_is_cylinder_flag=False,
             inter_group_connection_path_method="direct_3d",
             routing_circuit_scope="per_part",
-        )
-    if kind == "independent_turns":
-        return replace(
-            config,
-            field_shape_function="1e-4",
-            target_gradient_strength=1e-4,
-            target_gradient_normalization="none",
-            design_context="mr_shim",
-            pot_offset_factor=0.25,
-            levels=4,
-            skip_postprocessing=True,
-            contour_only_sweep_mode=True,
         )
     if kind == "conical_harmonic":
         from ..problem import PipelineGeometrySpec
@@ -177,8 +171,8 @@ def preset_config(kind: str = "cylinder") -> CoilGenConfig:
             length_m=0.30,
             radius_bottom_m=0.18,
             radius_top_m=0.14,
-            angular_divisions=32,
-            length_divisions=12,
+            angular_divisions=64,
+            length_divisions=24,
         )
         target = SolidHarmonicTarget(2, 0, 10e-6 / math.sqrt(5 / (4 * math.pi)), 0.05)
         config = replace(config, **geometry.to_config_overrides(), **target.to_config_overrides())
@@ -191,5 +185,9 @@ def preset_config(kind: str = "cylinder") -> CoilGenConfig:
             symmetry_reduction="off",
             sweep_surface_realization="mesh",
             interconnection_cut_width=0.008,
+            # Four crossing heights are needed where the return runs through
+            # inter-group connections on the tapered winding.
+            normal_shift_length=0.0058,
+            sweep_corner_cluster_max_source_deviation_m=0.003,
         )
     return config

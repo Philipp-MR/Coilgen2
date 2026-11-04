@@ -64,6 +64,7 @@ def test_nine_owned_full_studies_have_realistic_nominal_layer_geometry(assembly)
         assert config.target_error_tolerance_percent / channel.project.study["design_margin"] == pytest.approx(5)
         assert not config.skip_postprocessing and not config.skip_sweep and not config.contour_only_sweep_mode
         assert config.routing_circuit_scope == "per_part"
+        assert tuple(config.force_cut_selection) == (("auto", "auto", "high", "auto") if channel.id == "gy" else ())
         assert config.field_evaluation_current_source == "stream_function"
         assert config.specific_conductivity_conductor == pytest.approx(18e-9)
         assert config.sweep_insulation_thickness == pytest.approx(0.0001)
@@ -76,7 +77,9 @@ def test_nine_owned_full_studies_have_realistic_nominal_layer_geometry(assembly)
         np.testing.assert_allclose(np.abs(mesh.vertices[:, 0]), half_gap, atol=1e-15)
         np.testing.assert_allclose(mesh.vertices.mean(axis=0), (0, 0, 0), atol=1e-15)
         np.testing.assert_allclose(np.ptp(mesh.vertices[:, 1:], axis=0), (0.30, 0.30), atol=1e-15)
-        assert mesh.n_vertices == 450
+        # Z2 and X²−Y² use lower resolutions validated on the connected wire.
+        expected_vertices = 450 if channel.id in {"z2", "x2-y2"} else 1250
+        assert mesh.n_vertices == expected_vertices
         assert np.all(np.isfinite(mesh.vertices))
         triangles = mesh.vertices[mesh.faces]
         assert np.all(
@@ -202,7 +205,7 @@ def test_script_retains_project_and_records_failed_channels_without_invented_res
 
 
 def test_unknown_system_kind_has_actionable_error():
-    assert SYSTEM_PRESET_NAMES == ("biplanar_gradient_shim", "cylindrical_xyz_gradient")
+    assert SYSTEM_PRESET_NAMES == ("biplanar_gradient_shim", "cylindrical_xyz_gradient", "shielded_xyz_gradient")
     with pytest.raises(ValueError, match="choose biplanar_gradient_shim"):
         system_assembly("unknown")
 

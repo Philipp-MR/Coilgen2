@@ -90,7 +90,7 @@ def _saved_sources(record):
         ),
         (
             "sheet",
-            "Continuous sheet · design samples",
+            "Stream function field · design samples",
             "target_points_m",
             "sheet_field_T",
             "target_field_T",
@@ -100,7 +100,7 @@ def _saved_sources(record):
         ),
         (
             "validation",
-            "Continuous sheet · independent samples",
+            "Stream function field · independent samples",
             "validation_points_m",
             "validation_field_T",
             "validation_target_T",
@@ -159,8 +159,9 @@ def _saved_sources(record):
         prefix = row.get("array_prefix")
         if row.get("available") is not True or not prefix:
             continue
-        label = f"{row['region']} · {row['scenario']} · {row['sampling']} · {row['scope']}"
         representation = "sheet" if row["scope"] == "continuous_sheet" else "wire"
+        source = "stream function field" if representation == "sheet" else row["scope"]
+        label = f"{row['region']} · {row['scenario']} · {row['sampling']} · {source}"
         definitions.append(
             (
                 prefix,

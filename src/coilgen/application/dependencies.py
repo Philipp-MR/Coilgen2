@@ -27,7 +27,7 @@ def dependency_plan(old: CoilGenConfig, new: CoilGenConfig) -> DependencyPlan:
 
     Unknown inputs conservatively invalidate preparation. Wire dimensions,
     material and current/spacing limits remain upstream because they may alter
-    the sheet objective, constraint construction or contour conditioning.
+    the stream function objective, constraint construction or contour conditioning.
     """
     from ..pipeline_stages import changed_config_fields, config_field_stage, invalidated_stage, PipelineStage
 

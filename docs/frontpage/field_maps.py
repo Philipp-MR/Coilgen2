@@ -130,7 +130,7 @@ def compute(cases: list[dict], metrics: list[dict]) -> tuple[dict, dict]:
         print(f"{case['name']}: reproducing all saved 912-point vector fields", flush=True)
         proof = {
             "sheet": _verify_saved(
-                _sheet_field(parts, arrays["validation_points_m"], config), arrays["sheet_field_T"], "Sheet"
+                _sheet_field(parts, arrays["validation_points_m"], config), arrays["sheet_field_T"], "Stream function"
             ),
             "contours": _verify_saved(
                 _contour_field(arrays, case, arrays["validation_points_m"]), arrays["contour_field_T"], "Contours"
@@ -167,7 +167,7 @@ def compute(cases: list[dict], metrics: list[dict]) -> tuple[dict, dict]:
             }
         )
     metadata = {
-        "description": "Direct dense-plane fields of the smoothed, filtered front-page contours and original current sheets; no current fit.",
+        "description": "Dense-plane fields from the smoothed, filtered front-page contours and original stream functions at their original excitation.",
         "grid": {
             "axis_count": len(axis),
             "axis_spacing_m": float(axis[1] - axis[0]),
@@ -209,7 +209,7 @@ def render(dense: dict, metadata: dict) -> None:
         0.055, 0.912, "10 mT/m gradients  ·  90 mm target sphere  ·  original solved currents", fontsize=15, color=MUTED
     )
     positions = ((0.55, 0.255), (0.16, 0.255))
-    headings = ("Requested Bz", "Contour Bz", "Sheet − target", "Contours − target")
+    headings = ("Requested Bz", "Contour Bz", "Stream function Bz − target", "Contours − target")
     field_scale = max(
         float(np.max(np.abs(dense[f"case_{i}_{key}"][:, 2]))) * 1e3
         for i in range(2)
@@ -239,7 +239,7 @@ def render(dense: dict, metadata: dict) -> None:
         fig.text(
             0.945,
             row_heading_y + 0.002,
-            f"Volume RMS error  ·  sheet {case['volume_sheet_relative_rms_Bz_error_percent']:.2f}%  /  contours {case['volume_contour_relative_rms_Bz_error_percent']:.2f}%",
+            f"Volume RMS error  ·  stream function {case['volume_sheet_relative_rms_Bz_error_percent']:.2f}%  /  contours {case['volume_contour_relative_rms_Bz_error_percent']:.2f}%",
             ha="right",
             fontsize=13,
             color=MUTED,

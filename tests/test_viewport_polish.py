@@ -66,6 +66,33 @@ def test_exact_solid_is_preferred_and_strict_review_remains_distinct(scientific_
     assert "fabrication-review conductor" in viewport.caption.text()
 
 
+def test_review_draws_only_physical_centerlines_and_reports_prerouting_fits(scientific_viewport):
+    from coilgen.application.evidence import resolve_dataset
+    from coilgen.application.scene_spec import scene_layers
+
+    viewport = scientific_viewport
+    physical = np.array([[0.08, 0, 0], [0.081, 0, 0], [0.08, 0.01, 0], [0.08, 0, 0]])
+    frame_only = {"review_conductor_0_frame_points_m": physical[:-1]}
+    assert not resolve_dataset(frame_only, "review_conductor").available
+    arrays = {**saved_geometry(), **frame_only, "review_conductor_0_points_m": physical}
+    viewport.roi_layer.setChecked(True)
+    viewport.display_run(
+        arrays, {"contour_smoothing": [{"smoothed_count": 24, "fit_rejected_count": 8, "spacing_rejected_count": 16}]}
+    )
+    assert viewport.dataset.currentData() == "review_conductor"
+    assert not viewport.roi_layer.isChecked() and not viewport.edges.isChecked()
+    assert set(viewport._actors.values()) == {"geometry", "winding"}
+    assert len(viewport.plotter.meshes) == 2
+    np.testing.assert_array_equal(viewport.plotter.meshes[-1][0].points, physical)
+    assert "24 of 48 contours smoothed" in viewport.caption.text()
+    assert "after path realization and mounting" in viewport.caption.text()
+    layers, reason = scene_layers(arrays, "review_conductor")
+    assert not reason and len(layers[-1].lines) == 1
+    np.testing.assert_array_equal(layers[-1].lines[0], physical)
+    viewport.display_run(arrays, {})
+    assert "outcome unrecorded" in viewport.caption.text()
+
+
 def test_grouped_selector_retains_all_session_keys_and_skips_headers(scientific_viewport):
     viewport = scientific_viewport
     expected = {
@@ -272,10 +299,32 @@ def test_orthographic_fit_uses_projected_scene_extent_and_retains_label_margin(s
     viewport._fit_view()
     assert camera.parallel_scale == pytest.approx(0.25)
     # A tall narrow viewport must fit the horizontal extent as well.
-    camera.parallel_scale = 2
+    camera.parallel_scale = 0.03
     viewport.plotter.window_size = (100, 400)
     viewport._fit_view()
     assert camera.parallel_scale == pytest.approx(0.5)
+
+
+def test_line_only_saved_run_fits_actual_vertices_in_wide_view(scientific_viewport, monkeypatch):
+    viewport = scientific_viewport
+    camera = viewport.plotter.camera = viewport.pv.Camera()
+    camera.position, camera.focal_point, camera.up = (1, 1, 1), (0, 0, 0), (0, 0, 1)
+    camera.parallel_scale = 0.0587
+    viewport.plotter.bounds = (-0.08, 0.08, -0.08, 0.08, -0.1, 0.1)
+    viewport.plotter.window_size = (1252, 378)
+    fits = []
+    monkeypatch.setattr(viewport.plotter, "reset_camera", lambda: fits.append(True))
+    path = np.array([[0.08, 0.02, -0.1], [-0.08, -0.02, 0.1], [0.08, 0.02, -0.1]])
+    viewport.display_run({"review_conductor_0_points_m": path})
+    direction = np.asarray(camera.direction)
+    right = np.cross(direction, camera.up)
+    right /= np.linalg.norm(right)
+    up = np.cross(right, direction)
+    extent = max(abs(path @ up).max(), abs(path @ right).max() * 378 / 1252)
+    assert fits == [True]
+    box = np.asarray([[x, y, z] for x in (-0.08, 0.08) for y in (-0.08, 0.08) for z in (-0.1, 0.1)])
+    axis_extent = max(abs(box @ up).max(), abs(box @ right).max() * 378 / 1252)
+    assert camera.parallel_scale == pytest.approx(max(1.25 * extent, 1.20 * axis_extent))
 
 
 def test_fit_leaves_perspective_projection_and_saved_scale_untouched(scientific_viewport, monkeypatch):

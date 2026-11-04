@@ -10,7 +10,7 @@ import pytest
 pytest.importorskip("PySide6")
 from PySide6.QtCore import QCoreApplication, QEvent, QThreadPool, QTimer
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QComboBox
+from PySide6.QtWidgets import QCheckBox, QComboBox
 
 import test_workbench_usability as usability
 from coilgen.application import ProjectAssembly, ProjectDocument
@@ -256,13 +256,15 @@ def test_completed_record_preserves_production_viewport_detached_metadata_contra
     dataset.addItem("Saved target", "target")
     adapter = SimpleNamespace(
         dataset=dataset,
+        roi_layer=QCheckBox(),
+        _live_stage_preview=False,
         _clear_inspection_task=lambda: None,
         _rebuild_capabilities=lambda: None,
-        _preferred_run_dataset=lambda: "target",
+        _preferred_run_dataset=lambda *_args: "target",
         _render=lambda: None,
     )
-    window.viewport.display_run = lambda arrays, metadata=None: ScientificViewport.display_run(
-        adapter, arrays, metadata
+    window.viewport.display_run = lambda arrays, metadata=None, **options: ScientificViewport.display_run(
+        adapter, arrays, metadata, **options
     )
     window.service.load_run = lambda _directory: captured
     window.poll_jobs()

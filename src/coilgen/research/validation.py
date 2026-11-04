@@ -177,7 +177,7 @@ def sample_independent_target(result: Any, *, resolution: int = 12) -> TargetFie
 
 
 def validate_on_independent_grid(result: Any, *, resolution: int = 12, design_margin: float = 1.0) -> dict[str, Any]:
-    """Evaluate unchanged sheet current on a distinct grid without refitting.
+    """Evaluate the field of the fitted stream function on a distinct grid.
 
     Rebuild basis data on copied parts, so low-memory results remain usable.
     This changes sample locations, not the field-kernel quadrature accuracy.
@@ -185,7 +185,7 @@ def validate_on_independent_grid(result: Any, *, resolution: int = 12, design_ma
     config = result.input_data
     from ..progress import ProgressReporter, progress_scope
 
-    reporter = ProgressReporter.from_config(config, label="Independent sheet validation")
+    reporter = ProgressReporter.from_config(config, label="Independent stream function field validation")
     reason = _unsupported_contract(result)
     imported_map = str(config.target_field_definition_file).strip().lower() not in {"", "none"}
     legacy_mesh = config.target_region_geometry is None and str(config.target_mesh_file).strip().lower() not in {
@@ -221,11 +221,11 @@ def validate_on_independent_grid(result: Any, *, resolution: int = 12, design_ma
     with progress_scope(20, 30):
         calculate_basis_functions(parts)
     with progress_scope(30, 95):
-        reporter.report(0, "Evaluating independent current-sheet samples")
+        reporter.report(0, "Evaluating the stream function field operator on the independent grid")
         calculate_sensitivity_matrix(parts, validation, config)
     field = sum(np.einsum("ctv,v->tc", part.sensitivity_matrix, part.stream_function) for part in parts)
     check = field_budget_check(result, field, target, design_margin=design_margin)
-    reporter.finish("Independent sheet validation complete")
+    reporter.finish("Independent stream function field validation complete")
     return {
         "available": True,
         "point_count": len(points),
@@ -564,7 +564,7 @@ def validate_fabricated_constraints(
         unknown.append("The sheet-energy bound needs complete-circuit self and mutual energy validation after routing.")
     if spec.field_constraints or spec.scenarios:
         unknown.append(
-            "Custom field/scenario matrices act on the original sheet; post-route validation operators and target coordinates are required."
+            "Custom field/scenario matrices act on the original stream function. Post-route validation requires new operators and target coordinates."
         )
     if (
         (check_default_field and np.any(result.target_field.suppressed))
@@ -676,6 +676,9 @@ def validate_fabricated_constraints(
     checks.extend({"name": reason, "value": None, "limit": None, "unit": "", "passed": None} for reason in unknown)
     uniform_paths_available = paths_valid and spec.background_B_per_face_T is None
     uniform_available = uniform_paths_available and complete_circuits
+    from .suppression_validation import sampled_suppression
+
+    suppression = sampled_suppression(result, field if paths_valid and complete_circuits else None)
     reporter.finish("Fabricated physical limits reviewed")
     return {
         "checks": checks,
@@ -692,6 +695,7 @@ def validate_fabricated_constraints(
         "partial_path_force_N": force.tolist() if uniform_paths_available and not complete_circuits else None,
         "partial_path_torque_Nm": torque.tolist() if uniform_paths_available and not complete_circuits else None,
         "field_T": field if paths_valid else None,
+        **({"sampled_suppression": suppression} if suppression is not None else {}),
         "current_source": "original_contour_current_no_refit",
         "currents_A": {body_id: float(body["current_A"]) for body_id, body in bodies.items()} if paths_valid else {},
     }

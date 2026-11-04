@@ -36,14 +36,14 @@ def test_artifact_progress_counts_staging_and_publication_before_completion(tmp_
 
     record = _run(tmp_path)
     events, publications = [], []
-    original_link = exports.os.link
+    original_publish = exports.publish_exclusive
 
-    def checked_link(source, destination):
+    def checked_publish(source, destination):
         assert max(_percentages(events)) < 100
         publications.append(destination)
-        return original_link(source, destination)
+        return original_publish(source, destination)
 
-    monkeypatch.setattr(exports.os, "link", checked_link)
+    monkeypatch.setattr(exports, "publish_exclusive", checked_publish)
     with progress_context(events.append):
         paths = export_verified_artifacts(record, tmp_path / "artifacts", loader=DesignService.load_run)
     percentages = _percentages(events)

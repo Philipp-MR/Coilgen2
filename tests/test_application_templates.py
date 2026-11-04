@@ -28,6 +28,12 @@ def test_templates_validate_and_request_complete_studies(spec, tmp_path):
         assert project.study["fabricate"] is True
         assert project.config.constrained_quadratic_fallback_policy == "strict"
         assert project.config.field_evaluation_current_source == "stream_function"
+        assert project.config.contour_path_regularization_mode == "parameterized_bspline"
+        assert project.config.contour_smoothing_scale_mode == "mesh_coupled"
+        assert project.config.contour_smoothing_mesh_gain == pytest.approx(0.1)
+        assert project.config.contour_smoothing_max_displacement == pytest.approx(0.5e-3)
+        assert project.config.contour_smoothing_preserve_min_turn_distance
+        assert project.config.contour_smoothing_local_fallback
         assert project.config.target_error_tolerance_percent / project.study["design_margin"] == pytest.approx(5.0)
 
 
@@ -59,6 +65,16 @@ def test_original_examples_keep_their_resolved_numerical_inputs(id_):
 
     assert json_value(asdict(project.config)) == json_value(asdict(preset_config(id_)))
     assert {key: project.study[key] for key in preset_study(id_)} == preset_study(id_)
+
+
+def test_generated_gallery_inputs_can_be_inspected_without_a_writable_temp_directory(monkeypatch):
+    def no_temp(*args, **kwargs):
+        raise PermissionError("Temporary directory is unavailable")
+
+    monkeypatch.setattr("coilgen.application.project.TemporaryDirectory", no_temp)
+    project = template_assembly("cylinder").channels[0].project
+    assert project.config.coil_mesh_file == "create cylinder mesh"
+    assert project.config.contour_path_regularization_mode == "parameterized_bspline"
 
 
 @pytest.mark.parametrize("support", ("cylinder", "biplanar"))
@@ -102,6 +118,14 @@ def test_shim_targets_match_named_cartesian_modes_and_physical_peak(id_):
     assert config.conductor_cross_section_width == config.conductor_cross_section_height == 0.001
 
 
+def test_lobed_shim_preserves_physical_span_on_its_refined_support(tmp_path):
+    project = template_assembly("shim_x2_y2", project_root=tmp_path).channels[0].project
+    mesh = load_mesh_from_config(project.config, tmp_path)
+    assert mesh.n_vertices == 64 * 33
+    np.testing.assert_allclose(np.linalg.norm(mesh.vertices[:, :2], axis=1), 0.08, atol=1e-14, rtol=0)
+    np.testing.assert_allclose([mesh.vertices[:, 2].min(), mesh.vertices[:, 2].max()], [-0.1, 0.1], atol=1e-14)
+
+
 def test_shielded_template_prepares_joint_supports_and_closed_external_zero_vector_target(tmp_path):
     project = template_assembly("shielded_gy", project_root=tmp_path).channels[0].project
     config = project.config
@@ -132,6 +156,8 @@ def test_shielded_template_prepares_joint_supports_and_closed_external_zero_vect
 
 
 def test_active_shield_sheet_reduces_external_vector_field_at_the_joint_solution_current(tmp_path):
+    from coilgen.application.shielding import shielding_surface_fields
+
     project = template_assembly("shielded_gy", project_root=tmp_path).channels[0].project
     result = DesignService.run(
         project, tmp_path / "sheet", threads=1, pipeline_stage="sheet", fabricate=False, validation_resolution=12
@@ -154,6 +180,24 @@ def test_active_shield_sheet_reduces_external_vector_field_at_the_joint_solution
     assert combined < external_rms(fields[0]) / 5
     np.testing.assert_allclose(combined, checkpoint.diagnostics["suppression_field_rms_T"], rtol=1e-11)
     np.testing.assert_allclose(fields[0] + fields[1], checkpoint.sf_b_field, atol=1e-15)
+    record = DesignService.load_run(tmp_path / "sheet")
+    saved = shielding_surface_fields(record)
+    np.testing.assert_array_equal(saved.points_m, state.target_field.coords[mask])
+    np.testing.assert_allclose(saved.primary_T, fields[0][mask], atol=1e-15)
+    np.testing.assert_allclose(saved.shield_T, fields[1][mask], atol=1e-15)
+    np.testing.assert_allclose(saved.total_T, checkpoint.sf_b_field[mask], atol=1e-15)
+    np.testing.assert_array_equal(saved.area_weights_m2, weights)
+    np.testing.assert_allclose(np.linalg.norm(saved.normals, axis=1), 1)
+    assert len(saved.faces) == 624 and saved.current_source == "solved_stream_function"
+    interior = shielding_surface_fields(record, "sheet_interior")
+    assert len(interior.points_m) == 3 * len(saved.faces)
+    np.testing.assert_allclose(np.sum(interior.area_weights_m2), np.sum(weights))
+    assert interior.sampling == "triangle_interior"
+    assert np.all(interior.target_T == 0)
+    # The sparsely sampled end caps of this original benchmark underresolve
+    # transverse-gradient leakage. Independent quadrature measures the difference.
+    interior_rms = np.sqrt(np.average(np.sum(interior.total_T**2, axis=1), weights=interior.area_weights_m2))
+    np.testing.assert_allclose(interior_rms, 23.3634e-6, rtol=2e-3)
 
 
 def test_unknown_template_is_rejected_without_side_effects():

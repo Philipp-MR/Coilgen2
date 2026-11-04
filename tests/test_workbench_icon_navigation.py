@@ -20,6 +20,9 @@ def test_surface_tile_changes_only_source_and_preserves_exact_undo(windows):
     before = window.project.values
     gallery = window.findChild(SurfaceGallery, "support_type")
     gallery.buttons[gallery.findData("create conical frustum mesh")].click()
+    assert window.project.values == before and window.undo_stack.count() == 0
+    assert window._draft_dirty
+    assert window.apply_settings()
     expected = dict(before, coil_mesh_file="create conical frustum mesh", surface_is_cylinder_flag=False)
     assert window.project.values == expected
     assert window.undo_stack.count() == 1

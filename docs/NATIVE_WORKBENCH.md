@@ -12,7 +12,30 @@ Philipp Amrein's personal gratitude, with the official logo and website link.
 
 The desktop workbench is an optional PySide6/Qt interface to the same Python
 numerical engine used by existing CoilGen scripts. Qt owns the model editor and
-graphics; isolated numerical workers own computation. No browser server is used.
+graphics, and isolated numerical workers own computation. The browser has the
+same **Model Builder**, central plot and **Design plan** arrangement on wide
+screens. Both use the same Python design engine and project format. Save a
+self-contained `.coilgen` file to open the design and its saved results in
+either workbench. The browser guide covers team workspaces, downloads and how
+to locate the same run.
+[Browser workbench](BROWSER_WORKBENCH.md)
+
+## First desktop run
+
+1. Start **Start CoilGen2 GUI.cmd** and choose **Browse examples… → Gradients →
+   Cylindrical Y gradient (Gy)**. This example requests a 20 mT/m Y gradient
+   on a cylindrical support. Its winding and full evaluation are already set.
+2. Click **Compute full design** at the top of the main window. The Design plan
+   shows progress. To try a different design, use **File → Load template**.
+   For a coil system, the top button runs the editing channel. **Compute enabled
+   channels** in the Design plan submits each included channel's requested study.
+3. In **Jobs**, select the completed job and click **View results**. If you
+   closed Jobs, reopen it through **View → Open evidence window → Jobs**.
+   Click **Run design choices** beside the plot to see the submitted inputs.
+   Open **Engineering checks** to see what passed, failed or lacks evidence.
+4. Choose **File → Save project** to keep the model and its available runs
+   together. **Export conductor geometry** in the Model Builder creates a
+   separate CAD package for the selected run.
 
 Coil systems show a labeled **Editing channel** selector above the plot. Its
 **Include in system compute** checkbox controls numerical participation.
@@ -40,6 +63,10 @@ space; **View → Design plan** restores it, and starting a computation opens it
 Its visibility is saved with the project view. The lower-left computing indicator
 continues to cover other background operations as well.
 
+On narrower windows, **Model Builder** and **Design plan** share a tabbed
+sidebar so the plot and Compute button fit. Click the tab for the panel you
+want. Starting a run brings the Design plan to the front.
+
 The persistent activity strip also shows worker names, current operations and
 individual percentages when the plan is closed or the plot shows an earlier run.
 **Tasks…** opens a live list of every active or queued worker and local operation,
@@ -59,14 +86,15 @@ python -m pip install -e ".[gui,plot]"
 python -m coilgen.gui
 ```
 
-On Windows, double-click `Start CoilGen2 GUI.cmd`. It uses this checkout's
-`.venv` when present, resolves its local source independently of the starting
+On Windows, double-click `Start CoilGen2 GUI.cmd`. It checks the configured or
+shared CoilGen2 environment, then the checkout's `.venv`, then Python on PATH.
+It resolves its local source independently of the starting
 directory, and keeps startup errors visible in the console. Progress messages
 identify interpreter selection, library loading, Qt/3D initialization and when
 the workspace is ready. To open a saved project:
 
 ```powershell
-python -m coilgen.gui path/to/design.coilgen.json
+python -m coilgen.gui path/to/design.coilgen
 ```
 
 **File → Open** reads the project, verifies embedded results and local history,
@@ -106,7 +134,8 @@ self-inductances nor swept mesh volumes are combined into an inferred aggregate.
 Field-budget cards use the actual positive-weight sample count and recorded
 component. Skipped electrical calculations are unavailable, rather than zero.
 
-Use the prominent **Coil results** toolbar button, the overview's direct actions,
+Use the **Coil results** toolbar button, the overview's **Field map**,
+**Coil stats** and **Engineering checks** actions,
 or the entries under **Results and provenance** in the Model Builder to open
 metrics, slices, errors, harmonics, coil properties or engineering checks. The
 existing **View → Detailed field analysis…** and viewport **Inspect** actions are
@@ -118,7 +147,7 @@ are not applied by opening it. Verification runs in the background, and opening
 **Coil stats** does not start field calculations. Metrics and errors use native
 samples first; physical slice evaluation starts when slices are requested.
 
-Choose continuous-sheet, routed/contour, realized-conductor, independent-validation
+Choose stream function, routed/contour, realized-conductor, independent-validation
 or named region/pose samples where those fields were calculated. Recorded winding
 current and original stream-function current are distinct choices when both exist.
 Immutable stored field maps disable the wire-current selector and explain their
@@ -203,7 +232,7 @@ specified faceted exclusions. Available swept facets are checked as well,
 including miter extensions and containment of disconnected solids. NPZ
 `vertices_m` already uses metres. Scene
 constraints gate acceptance of recorded geometry; they do not silently reroute
-the sheet solution or certify an unswept feed. Finite pose/scale scenarios do not
+the stream function solution or certify an unswept feed. Finite pose/scale scenarios do not
 prove continuous uncertainty coverage or material/cross-section tolerances.
 Scene clearance applies to the recorded world geometry; posed field validation
 does not qualify obstacle clearance in those additional poses.
@@ -215,23 +244,28 @@ magnetostatic fields, net force/torque and lumped temperature do not establish
 those additional qualifications. Research review actions are disabled when
 their selected run has no verified evidence.
 
-Startup opens an empty welcome screen with **New project**, **Open project** and
-**Load template**. **File → New project…** (Ctrl+N) creates a named design with no
-support or target selected; it can be saved immediately as a self-contained JSON.
+Startup offers **Browse examples…**, **Open project…**
+and **New blank project…**. **File → New project…** (Ctrl+N) creates a named design with no
+support or target selected. It can be saved immediately.
+**File → Import model inputs** contains mesh and field-map import. **File →
+Export Python and run files** contains replay scripts and recorded worker
+files. **File → Export conductor geometry…** opens CAD export.
 Templates are explicit starting choices under **File → Load template**. Passing
 a project path at startup opens that saved design. **File → Close project**
 returns to the welcome screen after checking pending changes.
-Save includes pending design notes from every channel. Discard clears the
-closed or replaced project's drafts; closing an individual popup or switching
-channels retains them.
+Save includes pending design notes from every channel. Discarding a project
+clears its drafts.
 
 An open design shows the Model Builder and plot. The left Model Builder is the
 main workflow navigation; there is no second workflow button bar. Click a model or study
 item to open its settings; keyboard users can select it and press Enter.
 Settings open in a floating inspector. Placement, mesh, harmonic basis/origin,
 sheet material and numerical details open in smaller modeless windows from that
-inspector. **Apply & preview** and **Revert** stay outside its scrolling area.
-Closing an editor keeps its draft; applying refreshes the same logical editor.
+inspector. **Apply & preview** and **Revert draft** stay outside its scrolling area.
+**Cancel** or the window’s **×** closes the editor and discards its unapplied
+changes. In a focused decision this restores the values present when it opened.
+Other decisions keep their pending edits. **Apply & preview** commits the
+settings and refreshes the editor.
 Native drafts mark the document as modified immediately. Applying, undoing and
 redoing acknowledge the applied revision; reverting or restoring the original
 value clears the pending-edit message. Rejected edits retain their values and
@@ -243,10 +277,14 @@ locking navigation or claiming that a design passed a check. **Back** retains
 pending edits and **Apply & next** validates and applies them before opening the
 next decision. The final decision offers the next section, opening its first
 choice directly; reaching Study never starts a computation automatically.
-Each window also provides **Revert draft** and **Close**. An invalid
+**Revert draft** resets the form in place. **Cancel** resets it and closes the window. An invalid
 entry reopens its owning window, even if changing a mode hid or disabled that row.
 Opening and closing decisions preserves exact saved SI values and makes no
 model revision.
+
+Choose a structural option and click **Apply & preview** to open the settings
+for that support, target family, region shape or sampling mode. **Import and
+apply** commits the selected file after the file and units have been confirmed.
 
 **Choose support** shows the complete primitive gallery. **Choose field** opens
 linear gradients, analytic expressions, spherical harmonics and an existing
@@ -259,17 +297,16 @@ Custom profile editing, explicit mounting/return-path displacement, engineering
 current/spacing contouring and the full native Advanced editor remain available.
 
 Under **Study**, **Choose output** opens graphical choices for preparation,
-current-sheet optimization, contours, routing/sweeping or full evaluation.
-**Requested operations** gives the detailed scope of the actual winding and
-contouring policies. Changing an output selects the study boundary and is
-undoable; computation still requires the explicit **Compute** action.
+stream function optimization, contours, routing/sweeping or full evaluation.
+The selected stage's inspector shows the requested operations and names the
+button to start them. Applying an output changes the study boundary in one undoable revision; computation still requires the explicit **Compute** action.
 
 **View → Open evidence window** opens **Jobs**, **Results** and **History** in
 separate reusable windows without shrinking the plot. **Detailed evidence** opens
 checks, wire fields, comparisons and diagnostics. **Design status** and **Brief**
 open pipeline evidence and physical assumptions on demand. Closing windows
 preserves saved evidence and running jobs. Open evidence windows and inspector
-visibility are saved in the single project JSON, including per-channel views.
+visibility are saved in the project, including per-channel views.
 One primary **Compute** button remains visible in the study toolbar. Select its
 boundary in the Model Builder or **Study → Choose output**. Channel selection
 appears for multiple channels, or to re-enable a disabled single channel.
@@ -285,18 +322,24 @@ the current support and colored target samples together. Component and units
 identify the displayed field; this is the requested target rather than a solved
 coil field. Unrelated edits preserve the chosen plot and camera.
 
-The right-hand plan tracks **Prepare → Sheet → Contours → Winding → Evaluate**
+The right-hand plan tracks **Prepare → Stream function → Contours → Winding → Evaluate**
 for each channel. Black text means a recorded computation boundary; **Cached**
 identifies verified reusable evidence for the applied model. Blue marks current
-work, with the operation and its reported percentage shown separately. Completed
-stages appear in the plot automatically,
-including the current sheet, contours and connected/swept conductors when
-requested. **Viewing** labels these as live previews of the submitted revision.
-They do not establish final result integrity or engineering acceptance.
+work, with the operation and its reported percentage shown separately. The **Plot**
+menu enables each dataset as it becomes available. With **Follow run** on (the
+default for a new computation), the plot advances from the stream function to
+contours, then to interconnections, realized conductor centerlines and the swept
+conductor as each requested feature finishes. You can inspect connected paths
+while conductor realization or sweeping is still running. As evaluation continues,
+the menu also enables calculated wire fields, independent field samples and
+fabrication review datasets as they become available. **Viewing** identifies
+the submitted revision. Stage completion and final verification are tracked separately.
 Automatic completion display follows only the exact current submitted revision.
 Finishing an older revision leaves the selected view intact and makes its result
 available through Jobs and Results. Stopped live snapshots retain their stopped status.
-Selecting another plot pauses **Follow run**; enable it to resume. Jobs stays an
+Choose any available plot to inspect it until the next feature arrives. Turn off
+**Follow run** to hold that selection while the menu keeps updating. Turn it
+back on to display the latest available feature immediately. Jobs stays an
 on-demand window, so submitting a computation keeps the graphics visible.
 The lower-left status bar displays the current operation's measured percentage,
 or **Computing…** with a busy bar when that operation has no known work total.
@@ -344,15 +387,16 @@ previously completed jobs do not produce new startup notices.
 Live snapshots remain separate from completed results and are not embedded as
 results in project JSON or offered for CAD export.
 
-Compute is named for the selected boundary; **Study → Requested operations**
-lists its outputs.
+Compute is named for the selected boundary. Click that stage in the Model Builder
+to see its outputs.
 Readiness checks use that boundary. Advanced settings also opens modelessly;
 Compute stops if it has an unapplied draft. Valid expert drafts are included by
 Save and script export; incomplete or conflicting drafts remain available for
 correction. An expert draft cannot overwrite inputs changed in another editor.
-Closing Advanced settings retains its draft and keeps it visible in Editing,
-the modified-project indicator and the next action. Save, Python export and CAD
-project companions include validated drafts and pending History notes for every channel.
+**Cancel** or **×** in Advanced settings discards its unapplied changes.
+Save and Python export include validated open drafts and pending History notes. A CAD project companion
+contains the selected run and its matching saved input revision. CAD export
+does not apply pending edits.
 Nonblocking preflight warnings remain accessible through **Modeling notes** beside
 the compact design status. Its next-action button opens the relevant settings,
 job or engineering evidence directly. Notes do not prevent computation.
@@ -365,8 +409,10 @@ scope remain visible where applicable. These controls change the view only.
 Drag in the 3D view to rotate the camera. A left click selects an object and
 opens its settings only after release; camera drags and modified navigation
 gestures do not open settings windows.
-After camera navigation, its orientation reads **Custom**; choosing a preset,
-including the same preset again, restores that world-coordinate view. A probe
+After rotating or panning, the orientation reads **Custom**. Wheel zoom can
+crop the winding while the orientation still reads **Isometric**. Click
+**Fit** to frame the whole coil at the current orientation, or choose an
+orientation preset to restore that world-coordinate view. A probe
 identifies the selected layer and dataset. Field probes report the nearest stored
 sample, distance and units without interpolation; contextual support, ROI and
 witness layers do not borrow field values from another dataset. When the support
@@ -377,8 +423,8 @@ current policy and does not silently switch to a different stored field. Compari
 offers common available datasets; each source retains its own evidence when none match.
 
 **File → Load template** groups
-editable starting designs into **Gradients**, **Shim coils**, **Coil systems**
-and **Demonstrations**. Choose cylindrical or biplanar Gx/Gy/Gz, an actively
+editable starting designs into **Gradients**, **Shim coils** and **Coil systems**.
+Choose cylindrical or biplanar Gx/Gy/Gz, an actively
 shielded Gy, uniform Z0, the five second-order modes, or conical Z2. Loading a
 template protects unsaved edits and sets up a full study without starting a job.
 All template settings are already applied. Loading selects full design evaluation
@@ -387,15 +433,52 @@ Open a section in the Model Builder only when you want to inspect or change it.
 The shielded template jointly optimizes primary and outer current supports
 against the ROI target and a zero-vector-field constraint on a separate closed
 external cylinder. Both support meshes and the suppression surface are owned
-inputs embedded in the project JSON. Its sampled external-field budget and
+inputs embedded in the saved project. Its sampled external-field budget and
 independent ROI checks are separate evidence; inspect discrete-wire results
 before exporting a shielded design.
+
+### Inspect active shielding
+
+Choose **Browse examples… → Coil systems → Actively shielded XYZ foil gradient system (Gx, Gy, Gz)**.
+Run **Channels → Compute enabled channels independently**, then open **View results** for the
+channel you want to inspect. The example targets 20 mT/m on each axis over the same
+40 mm DSV. Each channel has a primary and an outer active winding. All three use the
+same closed external observation cylinder (150 mm radius, 400 mm length).
+
+Open **View → Plot shielding surface…** or **Coil results → Shielding surface**.
+Select the stream function, unconnected contours or routed winding according to
+the fields saved for that run. The comparison shows the primary and shield
+contributions at the same excitation, plus their vector sum. The common µT scale
+shows cancellation directly. Switch to the net-field detail scale to locate the
+remaining leakage. For a zero-field target this net field is the residual.
+For a nonzero target the comparison includes the combined field minus the requested
+field. Older results can show the saved net field even when they lack the two
+individual contributions.
+
+**Complete electrical paths** shows a saved net field when the fabrication review
+records closed paths, their drive currents and matching coordinates.
+
+Select **B · n** to examine the signed field normal to the sampled surface, or
+**|B|** to examine total leakage. Peak and RMS refer to the displayed component
+at the saved design samples. The plot identifies area-weighted or equal-sample RMS.
+To check what happens between design vertices, select a **triangle-interior check**
+under **Field source** and click **Compute interior samples**. This reevaluates the
+field from the saved stream function or routed wire at three points inside each observation triangle,
+with one third of the facet area assigned to each point. These points use facet
+normals. On the design vertices the normal component uses the saved vertex normals.
+Both peaks are sampled peaks. The source options depend on the saved geometry,
+excitation and calculation size.
+Compare the routed field with the stream function field at their recorded excitations. In
+particular, check the end regions after contouring and connection.
+The external observation surface represents a chosen magnet or cryostat boundary.
+Predicting its induced currents, heat load or mechanical response requires its
+conducting geometry, material properties and drive waveform.
 
 **File → Load template → Coil systems → Cylindrical XYZ gradient system (Gx, Gy, Gz)**
 creates the three independent gradient channels on coaxial 200 mm long supports
 of 80, 86 and 92 mm radius. All use the same world-origin 40 mm spherical DSV,
-B₀ along world z, and 20 mT/m Bz gradients. The complete sheet-to-conductor
-studies are already configured. The supports have nominal 6 mm radial spacing;
+B₀ along world z, and 20 mT/m Bz gradients. Each study covers stream function optimization
+through conductor evaluation. The supports have nominal 6 mm radial spacing;
 routes, feeds, coupling, stray field and combined drive qualification require
 system review. See the [cylindrical XYZ example](../examples/cylindrical_xyz_gradient_README.md)
 for conductor settings, field definitions and script usage.
@@ -406,7 +489,7 @@ Use **Channels → Channel overview** (or the channel icon beside Enabled) to
 compare execution, parameter compatibility and scoped field/geometry evidence.
 Use **Configuration…** for physical inputs, open a selected channel, or compute
 the enabled channels independently. Each
-channel retains its own inputs, study and completed results in the same JSON.
+channel retains its own inputs, study and completed results in the same project file.
 The example uses a shared 40 mm DSV, 20 mT/m gradients, 100 µT Z0 and quadratic
 modes peaking at 10 µT on the reference sphere. Full evaluation requests
 contours, routing, sweeping and strict review. See the
@@ -424,7 +507,7 @@ CoilGen keeps its surface-coil optimization and realization operations explicit:
    material and winding options. Physical values display their units; native
    configuration retains its declared units (including degree-valued options
    and T/Hz target fields). Inspect the geometry/target preview before solving.
-2. Under **Study**, select the sheet objective, field budget and physical bounds,
+2. Under **Study**, select the stream function objective, field budget and physical bounds,
    then configure independent evaluation and fabrication review. Choose a study
    boundary from preparation through full design evaluation. A saved project
    retains its own boundary and validation settings. Full evaluation executes
@@ -439,7 +522,7 @@ CoilGen keeps its surface-coil optimization and realization operations explicit:
    affected controls. The current revision and undo history remain intact.
    Undo/redo restores full immutable revisions. Advanced settings opens searchable,
    typed expert controls and a synchronized native JSON editor.
-4. Choose a computation boundary: prepare, sheet, contours, route/realize, or
+4. Choose a computation boundary: prepare, optimize the stream function, generate contours, route/realize, or
    evaluate. Use the blue Compute button at the upper right, or Ctrl+Enter.
    Compute submits a detached input snapshot to a bounded worker.
    The Jobs panel's execution strip and table report activity, execution state,
@@ -465,7 +548,7 @@ CoilGen keeps its surface-coil optimization and realization operations explicit:
    marks incompatible evidence stale; previous runs remain inspectable.
    Full results initially show the exact saved pipeline sweep triangles when
    available. Strict reviewed results initially show their own recorded conductor
-   path. The grouped dataset selector provides sheet, winding and field views.
+   path. The grouped dataset selector provides stream function, winding and field views.
    A labeled Plot header spans the viewport; field components, units and stored
    wire-current choices appear on their own row when relevant to the selected plot.
    Pipeline sweep geometry is separate from conductor centerlines and
@@ -473,27 +556,39 @@ CoilGen keeps its surface-coil optimization and realization operations explicit:
    manufacturing checks.
 6. Inspect the computation-stage tree. Compute automatically reuses the latest
    compatible saved boundary at or before the requested stage. Changing contour
-   levels can reuse the optimized sheet, while upstream material changes rebuild
+   levels can reuse the optimized stream function, while upstream material changes rebuild
    it. Resume selected run restricts reuse to that run's compatible boundaries.
    Resume is enabled only when a verified compatible checkpoint exists.
    Completing a requested partial study offers **Continue** to the next boundary,
    without claiming that downstream field or manufacturing checks passed.
 7. Review independent field and physical constraints before exporting. Engineering
    acceptance is separate from job completion and construction release.
-   The banner and comparison table separate sheet checks, pipeline sweep checks
-   and strict fabrication review. A sheet pass cannot hide a failed sweep; missing
+   The banner and comparison table separate stream function checks, pipeline sweep checks
+   and strict fabrication review. A passing stream function field cannot hide a failed sweep; missing
    check evidence remains unverified. Wire field rows state their sampling scope
    and original/refitted current policy.
-   **Inspect saved settings** opens the original verified request read-only beside
-   the applied model snapshot. Editing current channel settings and running review
+   **Run design choices** beside the plot opens the original verified request
+   read-only for any saved stage. The first tab groups the physical choices and
+   shows recorded smoothing outcomes where available. **Complete request** gives
+   every submitted value at its stored precision. **Compare with editor** shows
+   differences from the applied model captured when you opened the review.
+   This also works after editing the model or selecting an older run. A legacy
+   run without a verified original request identifies the missing evidence.
+   **Inspect saved settings** from an engineering check opens the same review.
+   **Close** or Escape returns to the workbench. To change physics inputs, open
+   a model editor or **Edit → Advanced settings…**. Feed authoring requires
+   verified winding evidence for the currently applied numerical model.
+   Editing current channel settings and running review
    explicitly target the active revision. Integrity failures remain visible across
    aliases of the same run and block inspection, export and reuse until reverified.
 8. Open **Export** under Results. Select the actual saved conductor solid bodies
    and formats, choose explicit STL coordinate units (default mm), and create a
    new CAD export folder. STEP retains its declared source units. World bounds
    and physical extents display in mm. The package includes hashes, run revision,
-   units and separate check scopes in `geometry_manifest.json`; the default
-   companion `project.coilgen.json` contains model inputs and completed results.
+   units and separate check scopes in `geometry_manifest.json`. A project
+   companion is available when the selected run's exact input revision can be
+   recovered. It contains that source and that result. Otherwise export the
+   geometry alone.
    Export verifies the saved files and never regenerates a sweep or fits a new
    current. Failed checks label available geometry as inspection output; runs
    without saved solids explain the missing evidence and offer review or problems.
@@ -611,17 +706,40 @@ Open **Winding and routing → Contour smoothing** to optionally smooth closed
 contours on their current-carrying surface before cutting and interconnection.
 **Smooth on surface** exposes mesh-coupled strength, a displacement cap in mm,
 sampling interval and centerline-spacing preservation. Smaller mesh gain means
-stronger attenuation of mesh-scale oscillations. The option is off by default;
-opening the editor does not change the model. Applying a change invalidates
-contours and downstream geometry, while compatible current-sheet work remains
+stronger attenuation of mesh-scale oscillations. The built-in examples request
+surface smoothing. Existing project files retain the policy they saved, and
+new blank designs start with the native default (off). Opening the editor does
+not change the model. Applying a change invalidates
+contours and downstream geometry, while a compatible stream function solution remains
 reusable. The field is evaluated again at the retained contour current.
+**Contours before routing** reports the contour geometry used at that stage,
+including any accepted smoothing. **Original contour current** describes the
+saved current before any evaluation-current fit.
+With mesh-coupled smoothing, a positive displacement cap and spacing protection,
+**Try local fits when a whole-loop fit fails** lets an eligible loop round
+individual corners within those guards. Inspect the accepted and retained counts
+in **Run design choices**. The local-fit count is a subset of the accepted fits.
+
+The default **Review conductor centerlines** result shows the saved winding after
+routing, path realization and mounting. Its caption gives the recorded
+pre-routing fit counts when available. To inspect the actual closed contours,
+choose **Contours before routing** in **Plot**. **Fit** frames the geometry at
+the current orientation. **Layers → Target points** and **Display → Edges**
+let you add sampling points and mesh triangles when you need them.
+
+For the X²−Y² cylindrical shim, loading a fresh template selects a 64 × 32
+mesh at the same 200 mm length and 80 mm radius. The [matched before/after
+views and physical measurements](../validation/gui_winding_quality_2026-11-03/README.md)
+show why this changes the wire itself. Opening an earlier project instead will
+correctly display the mesh, fits and routed wire from that earlier run.
+
 **Resample only** adds points without rounding corners; connected routing
 defers that operation. Advanced settings contain fit/output sampling density
 and local surface-patch controls.
 
-**Results → Design acceptance** presents sheet, contours, connected winding and
-physical conductor evidence together. Saved requested/effective limits determine
-the displayed margins. A descriptive wire-field value does not inherit the sheet
+**Results → Design acceptance** presents evidence for the stream function, contours, connected winding and
+physical conductor together. Saved requested/effective limits determine
+the displayed margins. A descriptive wire-field value does not inherit the stream function field
 budget. Each row retains its current, sampling and geometry scope. Select a failed
 check to open the relevant settings or locate an actual recorded spatial witness.
 Missing evidence and undesigned feeds remain explicit.
@@ -633,7 +751,7 @@ separate from independent assembly channels. Compare the candidate to its baseli
 physical parameter differences retain exact native values in tooltips, and numerical
 deltas appear only for compatible evidence. Comparisons and note drafts survive
 history refreshes. Baseline evidence, design notes and decision rationale are embedded
-in the single project JSON, with stable identities that survive relocation.
+in the saved project file, with stable identities that survive relocation.
 Verification-heavy GUI actions run in a background task and reject a returned
 document if the model or editor draft changed during verification.
 
@@ -649,9 +767,8 @@ File → Load template provides small MRI insert models with explicit SI inputs:
 | --- | --- | --- | --- |
 | Cylindrical Gx / Gy / Gz | 200 mm long, 80 mm radius | `ΔBz = (20 mT/m)x`, `y` or `z`; 40 mm ROI diameter | 16 contour levels, connected 2 × 2 mm winding and conductor solids |
 | Biplanar Gx / Gy / Gz | Two 200 × 200 mm planes normal to world x, 100 mm apart | `ΔBz = (20 mT/m)x`, `y` or `z`; 40 mm ROI diameter | 16 contour levels, 2 × 2 mm circuits on each support and conductor solids |
-| Actively shielded Gy | Two 300 mm long cylindrical supports, radii 80 / 110 mm | Gy = 20 mT/m, 40 mm DSV; external zero vector field, 20 µT area-weighted RMS budget on a closed 150 mm radius / 400 mm long cylinder | Joint sheet optimization, separate 2 × 2 mm support circuits and conductor solids |
+| Actively shielded Gy | Two 300 mm long cylindrical supports, radii 80 / 110 mm | Gy = 20 mT/m, 40 mm DSV; external zero vector field, 20 µT area-weighted RMS budget on a closed 150 mm radius / 400 mm long cylinder | Joint stream function optimization, separate 2 × 2 mm support circuits and conductor solids |
 | Cylindrical Z0 / Z2 / XZ / YZ / X²−Y² / XY | 200 mm long cylinder, 80 mm radius | Z0 = 100 µT; each quadratic mode peaks at 10 µT on the 20 mm reference sphere | 12 contour levels, connected 1 × 1 mm winding and conductor solids |
-| Independent-turn sweep demo | 200 mm long cylinder, 80 mm radius | Uniform `Bz = 100 µT`; 20 mm ROI radius | Four separate closed turns and reviewed solids |
 | Conical Z2 | 300 mm long frustum, 180/140 mm bottom/top radii | +10 µT poles / −5 µT equator; 50 mm ROI radius | 12 contour levels and a connected winding; challenging routing study |
 
 These models use 18 nΩ m copper resistivity, a 1 mm homogenized sheet thickness,
@@ -672,7 +789,7 @@ For a first Gy study:
    20 mm, so its diameter (DSV) is 40 mm.
 2. Click **Compute full design**. The template already includes its target,
    conductor, optimization, winding and validation settings. Use **Plot** to
-   compare the target, continuous-sheet solution, contours, connected winding
+   compare the target, stream function solution, contours, connected winding
    and wire field. For wire maps, choose **Original contour current**, then
    inspect **Checks** and **Problems**.
 
@@ -698,9 +815,9 @@ and uses the same physical scale on both axes.
 
 The current sweep requires a strictly convex, nonintersecting polygon with
 finite coordinates and positive area. Invalid drafts remain editable and block
-Apply, Compute and Save; closing the window keeps pending edits. **Apply &
-preview** creates one undoable model change; **Revert draft** restores the
-applied profile. The project JSON stores the points in metres, including their
+Apply, Compute and Save while the editor is open. **Cancel** or **×** discards
+the unapplied profile. **Apply & preview** creates one undoable model change.
+**Revert draft** restores the applied profile in the editor. The project JSON stores the points in metres, including their
 original order and offset. `u` is transverse to the wire in the support surface;
 `n` follows its normal. Editing never recenters the profile. Mounting settings
 can subsequently offset its path reference. Copper area comes from the polygon;
@@ -711,12 +828,12 @@ legacy report roles. Nominal width also controls PCB tracks and some routing
 thresholds; choose it consistently with the polygon extent. The editor never
 silently substitutes the bounding box into these settings.
 
-The unshielded cylindrical gradients fit a 3% sheet RMS budget with a budget
+The unshielded cylindrical gradients fit a 3% RMS field-error budget for the stream function with a budget
 ratio of 0.6; the other studies use 4% and 0.8. The spherical ROI uses 257 design
-samples and a denser, different 3112-point independent sheet grid against a 5%
+samples and a denser, different 3112-point independent field-validation grid against a 5%
 budget. The shielded template adds its separate external suppression samples
 and area-weighted vector-field constraint. Strict fabrication review is
-requested. In the cylindrical reference run, the independent sheet RMS error is
+requested. In the cylindrical reference run, the independent RMS field error for the stream function is
 3.11%, and the 2 × 2 mm connected-wire Bz RMS error is 4.60% on the design grid
 at the original 18.63 A current. The resulting path is 12.44 m long, with
 0.05599 Ω resistance, 19.44 W instantaneous Joule loss and 4.66 A/mm² conducting
@@ -776,8 +893,8 @@ Selecting a problem does not infer a new collision or modify the numerical resul
 
 Project history retains named runs, selected evidence and viewport controls across
 reopening. Saving embeds the verified completed evidence, aliases and viewing
-state in the single project JSON. An auxiliary local history cache supports the
-active session and can be rebuilt from that JSON; it is not required to relocate
+state in the saved project file. An auxiliary local history cache supports the
+active session and can be rebuilt from that file; it is not required to relocate
 the project. Scientific outputs remain immutable. Missing or corrupt evidence
 remains visible with an explanation. Histories remain separate for independent
 channels, including after converting a standalone project to a collection.
@@ -788,12 +905,30 @@ limits. Each field map retains its own saved sampling grid and current policy;
 the viewer does not interpolate mismatched grids or fit currents to make results
 comparable. Metric rows identify incompatible physical scopes.
 
-The **Optimize current sheet** settings show the effective cost equation and
-solver configuration above the decision cards. The display follows native
+The **Optimize stream function** settings show the objective, its field and
+hardware constraints, and the solver configuration above the decision cards.
+For example, a 4% weighted norm budget with zero absolute allowance displays
+‖√W(Ax − b)‖₂ ≤ 0.04 ‖√W b‖₂, where Ax is the calculated field and b is the
+target on the same samples. The display follows native
 Tikhonov, field-budget regularization searches, native constrained objectives
 and physical power, magnetic-energy, minimax or mixture objectives. It identifies
 imported-pattern bypasses and parameters that the selected formulation ignores.
 Pending edits update this display without changing the applied model.
+
+Choose **Custom formula…** to enter a scalar objective and one constraint per
+line using `<=`, `>=` or `==`. For example, `power_W / 2 + sum_squares(residual_T / 1e-6)`
+trades power against design-grid field error using 2 W and 1 µT reference
+scales. Adding `norm_inf(residual_T) <= 2e-6` places a separate 2 µT peak limit
+on the unweighted residual samples. Configured field and hardware bounds remain
+visible alongside the custom constraints. The editor lists the available SI
+quantities and functions. Apply saves the formulas with the project revision.
+
+**Auto** uses the conic solver for formulas that satisfy disciplined convex
+programming rules and local SLSQP for other supported formulas. A nonlinear
+objective such as `(power_W / 2 - 1)**2` penalizes deviation from 2 W. The run
+records the solver and checks constraint residuals on the returned coefficients.
+A local solve establishes feasibility only to the reported tolerances and can
+converge to different stationary points from different starting conditions.
 
 The **Field and current limits** card exposes the relative field budget, absolute
 budget [T] and metric-specific RMS/STD limits [T]. A positive RMS/STD limit replaces
@@ -829,7 +964,7 @@ this ratio. A ratio of 1 uses the same field budget; 0.8 permits 1.25 times that
 budget on the independent grid. This ratio does not tighten the optimization
 tolerance. Set a tighter design field budget explicitly when reserving margin
 for discretization or realization. Saved validation metadata records the actual
-limit and acceptance allowance. Independent sheet sampling and design-grid wire
+limit and acceptance allowance. Independently sampled stream function fields and design-grid wire
 fields retain their separate physical scopes.
 
 The independent-channel container retains separate channel targets, settings,
@@ -898,14 +1033,15 @@ includes owned inputs and is the portable route for rerunning a design elsewhere
 controls. Editing creates a new revision. Public configuration, arrays and run
 metadata are detached copies. Display names do not substitute for persistent IDs.
 
-Save project writes one self-contained JSON, including imported meshes/target
-maps, configuration, study controls, completed run evidence, checkpoints and
+Save project defaults to a self-contained **Compact CoilGen bundle (`.coilgen`)**,
+including imported meshes, target maps, configuration, study controls, completed run evidence, checkpoints and
 viewing state. Independent-channel collections embed each channel in that same
-file. Copy only the JSON to relocate the project. Saved run aliases, the selected
+file. Copy that file to relocate the project. Saved run aliases, the selected
 channel/run, workflow page and camera remain available after relocation.
 
-Input assets and numerical result artifacts are stored as hash-verified base64
-bytes. Original NPZ data types, floating-point precision, result/manifest bytes
+**Save As** also offers a self-contained JSON. In that format, input assets and
+numerical result artifacts are stored as hash-verified base64 bytes.
+Original NPZ data types, floating-point precision, result/manifest bytes
 and physical acceptance scopes are preserved. Saving atomically replaces the
 JSON only after serialization succeeds. Reopening materializes verified worker
 files into an application cache; that cache is rebuildable from the JSON. A large
@@ -913,7 +1049,7 @@ study can produce a correspondingly large JSON because checkpoints and results
 are included. Old v1 projects and collections still load; saving migrates them
 to the self-contained v2 format.
 
-Save As also offers **Compact CoilGen bundle (`.coilgen`)**. The single ZIP file
+The compact bundle's single ZIP file
 contains a readable JSON manifest and compressed, content-addressed input and
 evidence bytes, deduplicated across channels. Original NPZ bytes, array types,
 run owners, scientific fingerprints and artifact hashes stay unchanged. Opening
@@ -990,7 +1126,7 @@ validation are not silently inferred from closed paths.
 The fabrication-review compiler defaults to realization on the finite-element
 mesh; the ordinary pipeline can use analytic support realization. Their saved
 centerlines are separate viewport datasets, and fabricated fields retain the
-review's target coordinates. Independent sheet sampling verifies that sheet
+review's target coordinates. Independent sampling verifies the stream function
 model's field budget; it does not establish mesh convergence or independently
 certify the finished winding. Legacy target-current fitting remains available;
 fixed-current diagnostics and fabrication checks report their own scope.
@@ -1019,17 +1155,17 @@ Each creation requires a fresh output directory. The example uses a 300 mm cone
 with radii 180/140 mm, a 100 mm diameter spherical ROI, and
 `Bz = 0.002*(2*z*z-x*x-y*y)` T. Its normalized Y20 coefficient is approximately
 15.8533 µT at R=50 mm: +10 µT at the axial poles and −5 µT at the equator.
-It requests a 4% sheet design budget, a 5% independent sheet budget, 12 contour
+It requests 4% design and 5% independent field-error budgets for the stream function, 12 contour
 levels, mesh-geodesic connectors, 1×1 mm copper conductor and strict fabrication
 review. It uses 257 fitting samples and a separate 3112-point evaluation grid;
 the ROI and harmonic reference radius are both 50 mm, with independently saved
 definitions.
 
 This is a demanding shim-design study for inspecting the full connected-coil
-workflow. The stored trial achieved the sheet budget but failed the fabricated
+workflow. The stored trial met the stream function field budget but failed the fabricated
 field budget and reported routing, clearance, support-penetration and sweep
 failures. Inspect the current run's Problems and Wire fields tables at the
-original current before considering export. A passing sheet alone does not
+original current before considering export. A passing stream function field check alone does not
 establish winding accuracy or construction release.
 
 Use separate saved runs to investigate support-mesh convergence, contour
@@ -1113,12 +1249,12 @@ passed checks, failures, missing evidence, queued work and stale results.
 
 In Geometry, click a Cylinder, Biplanar or Conical frustum tile; imported supports
 retain their own source. The selection changes the same native geometry settings
-as the former dropdown and remains undoable. In Winding, choose a circuit diagram
+as the former dropdown when you click **Apply & preview**. In Winding, choose a circuit diagram
 and apply the draft. The diagrams map to the existing connected, per-support,
 independent-turn and contour-only modes without changing their mathematical
 behavior. Additional backend surfaces remain available through Advanced settings.
 
-Above the viewport, Target, Field, Wire and Connections buttons select available
+Above the viewport, the **Inspect…** menu's Target, Field, Wire and Connections entries select available
 scientific data. The scope note identifies fallbacks and missing evidence. The
 selected task remains visible while changing units, components, current policy,
 sample slabs or display layers; an explicit dataset or run change clears it.

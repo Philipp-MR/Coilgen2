@@ -14,22 +14,34 @@ application = usability.application
 windows = usability.windows
 
 
-def test_smoothing_is_opt_in_and_opening_winding_does_not_modify_inputs(windows):
+def test_gallery_smoothing_is_visible_and_opening_winding_does_not_modify_inputs(windows):
     window = windows()
     original = window.project
     window.select_node("winding")
     controls = window._draft_controls
     section = window._settings_decisions["Contour smoothing"]
-    assert controls["contour_path_regularization_mode"].currentText() == "off"
-    assert section.summary_label.text() == "Keep original contours"
-    for name in ("contour_smoothing_mesh_gain", "contour_smoothing_factor", "contour_segment_mm"):
-        assert not section.form.isRowVisible(controls[name].parentWidget())
+    assert controls["contour_path_regularization_mode"].currentText() == "parameterized_bspline"
+    assert controls["contour_smoothing_scale_mode"].currentText() == "mesh_coupled"
+    assert "Smooth on surface" in section.summary_label.text()
+    assert section.form.isRowVisible(controls["contour_smoothing_mesh_gain"].parentWidget())
+    assert not section.form.isRowVisible(controls["contour_smoothing_factor"].parentWidget())
+    assert controls["contour_smoothing_local_fallback"].isEnabled()
+    assert controls["contour_displacement_mm"].value() == pytest.approx(0.5)
     assert window.apply_settings()
     assert window.project is original and window.undo_stack.count() == 0
 
 
 def test_enabling_surface_smoothing_commits_only_requested_fields_and_can_undo(windows):
-    window = windows()
+    window = windows(
+        ProjectDocument.from_config(
+            replace(
+                preset_config(),
+                contour_path_regularization_mode="off",
+                contour_smoothing_scale_mode="legacy",
+                contour_smoothing_local_fallback=False,
+            )
+        )
+    )
     window.select_node("winding")
     original = window.project
     controls = window._draft_controls
@@ -39,7 +51,11 @@ def test_enabling_surface_smoothing_commits_only_requested_fields_and_can_undo(w
     assert section.form.isRowVisible(controls["contour_smoothing_mesh_gain"].parentWidget())
     assert not section.form.isRowVisible(controls["contour_smoothing_factor"].parentWidget())
     controls["contour_smoothing_mesh_gain"].setValue(0.2)
+    controls["contour_displacement_mm"].setValue(0)
+    assert not controls["contour_smoothing_local_fallback"].isEnabled()
     controls["contour_displacement_mm"].setValue(0.35)
+    assert controls["contour_smoothing_local_fallback"].isEnabled()
+    controls["contour_smoothing_local_fallback"].setChecked(True)
     controls["contour_segment_mm"].setValue(0.2)
     assert window.project is original and not window.service.submissions
     assert window.apply_settings()
@@ -49,6 +65,7 @@ def test_enabling_surface_smoothing_commits_only_requested_fields_and_can_undo(w
         contour_smoothing_scale_mode="mesh_coupled",
         contour_smoothing_mesh_gain=0.2,
         contour_smoothing_max_displacement=0.35e-3,
+        contour_smoothing_local_fallback=True,
         contour_resample_target_segment_length=0.2e-3,
     )
     assert window.undo_stack.count() == 1
@@ -56,6 +73,7 @@ def test_enabling_surface_smoothing_commits_only_requested_fields_and_can_undo(w
     submitted = window.service.submissions[-1][0].config
     assert submitted.contour_smoothing_max_displacement == pytest.approx(0.35e-3)
     assert submitted.contour_smoothing_mesh_gain == 0.2
+    assert submitted.contour_smoothing_local_fallback
     window.undo_stack.undo()
     assert window.project.values == original.values
 

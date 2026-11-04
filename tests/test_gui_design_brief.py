@@ -46,15 +46,15 @@ def test_brief_is_detached_intent_and_does_not_materialize_assets(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "kind,word",
+    "kind,config_changes,word",
     [
-        ("cylinder", "One connected series"),
-        ("biplanar", "Separate connected circuit per support"),
-        ("independent_turns", "Independent closed turns"),
+        ("cylinder", {}, "One connected series"),
+        ("biplanar", {}, "Separate connected circuit per support"),
+        ("cylinder", {"skip_postprocessing": True, "contour_only_sweep_mode": True}, "Independent closed turns"),
     ],
 )
-def test_circuit_intention_describes_real_backend_modes(kind, word):
-    brief = design_brief(project(kind))
+def test_circuit_intention_describes_real_backend_modes(kind, config_changes, word):
+    brief = design_brief(project(kind, **config_changes))
     assert word in item(brief, "circuit").value
     assert "external" in item(brief, "circuit").value or "feed" in item(brief, "circuit").value
     assert "complete driven assembly" in item(brief, "terminals").scope
@@ -81,7 +81,7 @@ def test_sheet_physical_objective_and_bounds_keep_si_scope_and_zero_limits():
     assert "magnetic energy ≤ 0.1 J" in bounds.value
     assert "force ≤ 0 N" in bounds.value
     assert "torque equality (0, 0, 0) N·m" in bounds.value
-    assert "Continuous sheet" in bounds.scope
+    assert "Stream function model" in bounds.scope
     assert "direction (1, 0, 0)" in item(brief, "frame").value
     assert "background (0, 2, 0) T" in item(brief, "frame").value
 
@@ -91,14 +91,14 @@ def test_native_objective_is_not_silently_reported_as_physical_power():
     assert "Native tikhonov formulation" in item(brief, "objective").value
     assert "Minimize continuous-sheet" not in item(brief, "objective").value
     assert "Solver field allowance 100 nT" in item(brief, "acceptance").value
-    assert "independent-sheet allowance 0.1 nT" in item(brief, "acceptance").value
+    assert "independent stream function field allowance 0.1 nT" in item(brief, "acceptance").value
 
 
 def test_field_budget_preserves_design_margin_without_claiming_winding_validation():
     brief = design_brief(project())
     field = item(brief, "field_budget")
     assert "Design relative budget 3%" in field.value
-    assert "Independent-sheet relative budget 5%" in field.value
+    assert "Independent stream function field budget 5%" in field.value
     assert "realized-wire acceptance" in field.scope
     assert "No separate absolute winding" in item(brief, "wire_budget").value
 
@@ -117,7 +117,7 @@ def test_current_spacing_show_actual_effective_sheet_limit_and_policy():
     hardware = item(brief, "hardware")
     assert "current ≤ 20 A" in hardware.value
     assert "spacing ≥ 4 mm" in hardware.value
-    assert "sheet K ≤ 5000 A/m (wire_current_and_spacing)" in hardware.value
+    assert "surface current density K ≤ 5000 A/m (wire_current_and_spacing)" in hardware.value
     assert "not a conductor current-density" in hardware.scope
     assert "scale_to_limit" in hardware.scope
 

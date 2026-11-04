@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from hashlib import sha256
 import json
+import re
 from zipfile import BadZipFile
 
 import numpy as np
@@ -104,6 +105,12 @@ def _surface(arrays, vertices="vertices_m", faces="faces"):
     return "", False
 
 
+def path_array_names(arrays, dataset):
+    """Only numbered physical paths, excluding profile frames and other auxiliary samples."""
+    pattern = re.compile(PATH_PREFIXES[dataset] + r"\d+(?:_\d+)?_points_m")
+    return sorted(name for name in arrays if pattern.fullmatch(name))
+
+
 def resolve_dataset(arrays, key, *, original=False):
     """Validate the exact geometry/map/current pair, including legitimate zeros.
 
@@ -140,7 +147,7 @@ def resolve_dataset(arrays, key, *, original=False):
             if reason:
                 break
         if not reason and len(arrays["sheet_current_density_points_m"]) != len(arrays["sheet_current_density_A_per_m"]):
-            reason, invalid = "Sheet current-density coordinates and values have incompatible dimensions.", True
+            reason, invalid = "Surface current density coordinates and values have incompatible dimensions.", True
     elif key in {"support", "stream_function"}:
         reason, invalid = _surface(arrays)
         if not reason and key == "stream_function":
@@ -164,7 +171,7 @@ def resolve_dataset(arrays, key, *, original=False):
                 except (TypeError, ValueError):
                     reason, invalid = "Invalid stream function coefficients.", True
     elif key in PATH_PREFIXES:
-        names = sorted(name for name in arrays if name.startswith(PATH_PREFIXES[key]) and name.endswith("_points_m"))
+        names = path_array_names(arrays, key)
         if not names:
             reason = "No saved paths for this dataset."
         for name in names:
@@ -403,14 +410,22 @@ def load_saved_request(record) -> dict:
     """Read verified original settings; never infer from currently applied inputs."""
     from ..research.requests import ResearchRequest
 
-    metadata, _manifest, _report = _checked_snapshot_metadata(record)
+    metadata, manifest, _report = _checked_snapshot_metadata(record)
     if not any(item.get("name") == "request.json" for item in metadata.get("artifacts", ())):
         raise ValueError("This run has no verified original request.json; its saved settings cannot be inferred.")
     raw = _artifact_bytes(record, "request.json")
     try:
-        request = ResearchRequest.from_dict(json.loads(raw))
+        original = json.loads(raw)
+        request = ResearchRequest.from_dict(original)
     except (ValueError, TypeError, KeyError) as exc:
         raise EvidenceIntegrityError("The verified original request is invalid: " + str(exc)) from exc
-    if request.project_id != metadata.get("project_id") or request.project_revision != metadata.get("project_revision"):
+    if "request" in manifest and original != manifest["request"]:
+        raise EvidenceIntegrityError("The original request and manifest disagree.")
+    if any(
+        getattr(request, key) != metadata[key]
+        for key in ("project_id", "project_revision", "project_fingerprint", "project_model_fingerprint")
+        if key in metadata
+    ):
         raise EvidenceIntegrityError("The original request and result have different project/revision identities.")
-    return request.to_dict()
+    # Validation fills defaults for execution. Preserve missing historical fields in the inspection.
+    return original

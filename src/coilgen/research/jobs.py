@@ -18,6 +18,7 @@ import uuid
 
 from .requests import ResearchRequest
 from .storage import DirectoryOwner, atomic_json, file_digest, request_identity, verified_result, verify_input_files
+from ..persistence import numerical_source_digest
 from ..pipeline_stages import PipelineStage
 from ..progress import update_work_progress
 
@@ -98,8 +99,20 @@ def _worker(request: dict, directory: str, events, cancel, threads: int) -> None
 
     relay = ProgressRelay(send)
     try:
+        submitted = json.loads((Path(directory) / "job.json").read_text(encoding="utf-8"))
+        frozen = ResearchRequest.from_dict(request)
+        digest, manifest = request_identity(frozen.to_dict(), asdict(frozen.to_config(threads=threads)))
+        source = manifest["numerical_source_sha256"]
+        if submitted.get("submitted_numerical_source_sha256") not in (None, source):
+            raise RuntimeError("Numerical code changed after submission. Submit a new job under the current version.")
+        if digest != submitted.get("request_sha256"):
+            raise RuntimeError(
+                "The worker request differs from the submitted digest. Check the numerical code, inputs and environment, then submit a new job."
+            )
         with threadpool_limits(limits=threads), progress_context(relay.report, cancel.is_set):
-            run_design(ResearchRequest.from_dict(request), Path(directory), threads=threads)
+            run_design(frozen, Path(directory), threads=threads)
+        if numerical_source_digest(Path(__file__).resolve().parents[1]) != source:
+            raise RuntimeError("Numerical code changed during computation. Submit a new job under a stable version.")
         relay.flush()
         events.put({"kind": "completed"}, timeout=5)
     except DesignCancelled:
@@ -112,6 +125,9 @@ def _worker(request: dict, directory: str, events, cancel, threads: int) -> None
             events.put({"kind": "failed", "error": f"{type(exc).__name__}: {exc}"}, timeout=5)
         except queue.Full:
             pass
+        # A lost terminal IPC event must not promote an invalid result on the
+        # supervisor's clean-exit fallback (including code drift after a solve).
+        raise SystemExit(1) from exc
 
 
 class JobManager:
@@ -235,7 +251,7 @@ class JobManager:
                     raise RuntimeError("Resume checkpoint changed while its job snapshot was being created.")
                 request = replace(request, resume_checkpoint=str(copied))
             request = replace(request, config={**request.config, **replacements})
-            digest, _manifest = request_identity(
+            digest, manifest = request_identity(
                 request.to_dict(), asdict(request.to_config(threads=self.policy.threads_per_worker))
             )
             atomic_json(directory / "request.json", request.to_dict())
@@ -250,6 +266,7 @@ class JobManager:
                 "log": [],
                 "error": None,
                 "request_sha256": digest,
+                "submitted_numerical_source_sha256": manifest["numerical_source_sha256"],
                 "project_id": request.project_id,
                 "project_revision": request.project_revision,
                 "project_fingerprint": request.project_fingerprint,
@@ -317,6 +334,11 @@ class JobManager:
             result = verified_result(directory, digest)
             if result is None or not isinstance(result.get("summary"), dict):
                 return None
+            request = manifest.get("request") or {}
+            for key in ("project_id", "project_revision", "project_fingerprint", "project_model_fingerprint"):
+                submitted = self._states[id_].get(key)
+                if submitted not in (None, "") and (request.get(key) != submitted or result.get(key) != submitted):
+                    return None
             verify_input_files(manifest)
             return result
         except (OSError, ValueError, TypeError, AttributeError, RuntimeError):

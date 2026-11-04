@@ -157,6 +157,18 @@ def test_explicit_template_has_one_compute_and_tree_navigation(window, applicati
     assert window.service.submissions == []
 
 
+def test_welcome_browse_loads_a_chosen_gradient_without_submitting_or_opening_editors(window):
+    window.welcome.findChild(QPushButton, "welcome_load_template").click()
+    assert window.template_menu.isVisible() and window.project is None
+    gradients = next(action.menu() for action in window.template_menu.actions() if action.text() == "Gradients")
+    next(action for action in gradients.actions() if action.text() == "Cylindrical Y gradient (Gy)").trigger()
+    assert window.project.name == "Cylindrical Y gradient (Gy)"
+    assert window.project.study["pipeline_stage"] == "evaluated"
+    assert window.compute_button.isEnabled() and window.compute_button.text() == "Compute full design"
+    assert window.findChild(QDockWidget, "settings_dock").isHidden()
+    assert not window.service.submissions
+
+
 @pytest.mark.parametrize("family", ["Linear gradient", "Analytic expression", "Spherical harmonic"])
 def test_blank_target_popup_only_changes_field_after_explicit_tile_choice(window, application, tmp_path, family):
     window.new_project(name="Target family first")
@@ -186,6 +198,14 @@ def test_blank_target_popup_only_changes_field_after_explicit_tile_choice(window
     index = control.findText(family)
     assert index >= 0 and control.buttons[index].isEnabled()
     QTest.mouseClick(control.buttons[index], Qt.MouseButton.LeftButton)
+    application.processEvents()
+    assert window.project is before and window._draft_dirty
+    section.dialog.reject()
+    assert window.project is before and not window._draft_dirty
+    assert control.currentIndex() == -1
+    section.open()
+    QTest.mouseClick(control.buttons[index], Qt.MouseButton.LeftButton)
+    assert window.apply_settings()
     application.processEvents()
     assert window.project.config.coil_mesh_file == "none"
     assert window.project.config.field_shape_function != "none"

@@ -6,298 +6,15 @@ field arrays nor calculates residuals, current fits or engineering acceptance.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
-import math
-from numbers import Real
-
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QFontMetrics, QPalette
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout
 
-from ..application.diagnostics import run_verdicts
 from ..application.routing_analysis import routing_analysis_available
-from ..field_components import field_component_label, normalize_field_component
 from .colors import apply_tone, tone_color
 from .coil_statistics import build_coil_statistics
 from .icons import icon
-from .run_metadata import read_run_metadata
-
-
-@dataclass(frozen=True, slots=True)
-class FieldResultSummary:
-    visible: bool = False
-    title: str = ""
-    badge: str = ""
-    tone: str = "neutral"
-    source_key: str = ""
-    source_label: str = ""
-    component: str = ""
-    rms_uT: float | None = None
-    peak_uT: float | None = None
-    relative_percent: float | None = None
-    current_A: float | None = None
-    current_label: str = "Original current"
-    current_display: str = ""
-    context: str = ""
-    tooltip: str = ""
-    analysis_available: bool = False
-
-
-def _mapping(value):
-    return value if isinstance(value, Mapping) else {}
-
-
-def _text(value):
-    return " ".join(value.split()) if isinstance(value, str) else ""
-
-
-def _number(value, scale=1.0, *, nonnegative=False):
-    if isinstance(value, bool) or not isinstance(value, Real):
-        return None
-    try:
-        result = float(value) * scale
-    except (ValueError, OverflowError):
-        return None
-    return result if math.isfinite(result) and (not nonnegative or result >= 0) else None
-
-
-def _count(value):
-    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
-
-
-def _component(evidence, parent, metadata):
-    value = (
-        evidence.get("component")
-        or parent.get("component")
-        or _mapping(metadata.get("config")).get("target_field_component")
-        or metadata.get("target_field_component")
-    )
-    if not value:
-        return ""
-    try:
-        return normalize_field_component(value, allow_bmag=True)
-    except ValueError:
-        return ""
-
-
-def _candidate(record, metadata):
-    names = set(getattr(record, "array_names", ()))
-    wires = _mapping(metadata.get("wire_fields"))
-
-    def wire(kind):
-        parent = _mapping(wires.get(kind))
-        original = _mapping(parent.get("at_stream_current"))
-        label = "Routed winding" if kind == "routed" else "Unconnected contours"
-        if original.get("available") is True and {"target_points_m", kind + "_field_at_stream_current_T"} <= names:
-            return kind + "_at_stream_current", label, original, parent, "original contour current", "design"
-        if (
-            parent.get("available") is True
-            and parent.get("current_refitted") is False
-            and {"target_points_m", kind + "_field_T"} <= names
-        ):
-            return kind, label, parent, parent, "original recorded current", "design"
-        return None
-
-    physics = _mapping(metadata.get("fabricated_physics"))
-    winding = _mapping(metadata.get("winding_validation"))
-    if (
-        winding.get("available") is True
-        and winding.get("current_refitted") is False
-        and winding.get("current_source") == "original_contour_current_no_refit"
-        and {"winding_validation_points_m", "winding_validation_field_T"} <= names
-    ):
-        return "winding_validation", "Reviewed winding", winding, winding, "original contour current", "independent"
-    if (
-        "fabricated_field_T" in names
-        and {"fabricated_points_m", "target_points_m"} & names
-        and physics.get("current_source") == "original_contour_current_no_refit"
-    ):
-        rows = physics.get("checks", ())
-        for row in rows if isinstance(rows, (list, tuple)) else ():
-            if (
-                isinstance(row, Mapping)
-                and row.get("name") == "Fabricated path field error (original current)"
-                and row.get("verified") is True
-                and _number(row.get("rms_error_T"), nonnegative=True) is not None
-            ):
-                return "fabricated", "Reviewed conductor", row, physics, "original contour current", "design"
-    if candidate := wire("routed"):
-        return candidate
-    if candidate := wire("contour"):
-        return candidate
-    validation = _mapping(metadata.get("validation"))
-    if validation.get("available") is True and {"validation_points_m", "validation_field_T"} <= names:
-        return "validation", "Continuous sheet", validation, validation, "sheet solution", "independent"
-    if {"target_points_m", "sheet_field_T"} <= names:
-        return "sheet", "Continuous sheet", {}, {}, "sheet solution", "design"
-    # Legacy results may retain only a refitted wire field. Identify that fact
-    # rather than presenting it as the physical original-current result.
-    for kind in ("routed", "contour"):
-        parent = _mapping(wires.get(kind))
-        if parent.get("available") is True and {"target_points_m", kind + "_field_T"} <= names:
-            return (
-                kind,
-                "Routed winding" if kind == "routed" else "Unconnected contours",
-                parent,
-                parent,
-                (
-                    "refitted recorded current"
-                    if parent.get("current_refitted") is True
-                    else "current policy unrecorded"
-                ),
-                "design",
-            )
-    return None
-
-
-def _identity(metadata):
-    name = _text(metadata.get("name")) or "Saved run"
-    revision = metadata.get("project_revision", _mapping(metadata.get("job")).get("project_revision"))
-    return f"Results · {name}" + (
-        f" · revision {revision}" if isinstance(revision, int) and not isinstance(revision, bool) else ""
-    )
-
-
-def _badge(metadata, source_error, stale):
-    verdicts = run_verdicts(metadata)
-    summary = _mapping(metadata.get("summary"))
-    independent_failed = any(
-        _mapping(metadata.get(key)).get("available") is True and _mapping(metadata.get(key)).get("passed") is False
-        for key in ("validation", "winding_validation")
-    )
-    checks = (
-        "Checks failed"
-        if "Failed" in verdicts.values() or summary.get("accepted") is False or independent_failed
-        else (
-            "Saved checks passed"
-            if all(value == "Passed" for value in verdicts.values())
-            else "Sheet passed"
-            if verdicts["sheet"] == "Passed"
-            else "Checks unverified"
-        )
-    )
-    badge, tone = (
-        ("Verification failed", "error")
-        if source_error
-        else ("Earlier model", "warning")
-        if stale
-        else (
-            checks,
-            "error"
-            if checks == "Checks failed"
-            else "success"
-            if checks == "Saved checks passed"
-            else "info"
-            if checks == "Sheet passed"
-            else "warning",
-        )
-    )
-    return checks, badge, tone
-
-
-def summarize_field_result(record, *, source_error="", stale=False):
-    """Read saved error metrics without mistaking generic field RMS for error."""
-    if record is None:
-        return FieldResultSummary()
-    metadata = read_run_metadata(record)
-    title = _identity(metadata)
-    checks, badge, tone = _badge(metadata, source_error, stale)
-    candidate = _candidate(record, metadata)
-    if candidate is None:
-        context = "Field not calculated · saved coil properties" + (" · " + checks if stale else "")
-        if source_error:
-            context = "Retained snapshot · source verification failed · " + context
-        return FieldResultSummary(
-            title=title, badge=badge, tone=tone, context=context, tooltip=str(source_error) if source_error else context
-        )
-    key, label, evidence, parent, policy, sampling = candidate
-    component = _component(evidence, parent, metadata)
-    component_label = field_component_label(component) if component else "component unrecorded"
-    count = _count(evidence.get("sample_count")) or _count(evidence.get("point_count"))
-    rms = _number(evidence.get("rms_error_T"), 1e6, nonnegative=True)
-    peak = _number(evidence.get("peak_error_T"), 1e6, nonnegative=True)
-    target_rms = _number(evidence.get("target_rms_T"), nonnegative=True)
-    relative = (
-        _number(evidence.get("relative_rms_error", evidence.get("relative_field_error")), 100, nonnegative=True)
-        if target_rms is not None and target_rms > 0
-        else None
-    )
-    current = _number(evidence.get("current_A"))
-    current_label = (
-        "Refitted current"
-        if policy == "refitted recorded current"
-        else ("Recorded current" if policy == "current policy unrecorded" else "Original current")
-    )
-    current_display = ""
-    if key == "winding_validation" and _mapping(evidence.get("currents_A")):
-        current, current_label, current_display = None, "Original body currents", "Per body"
-    summary = _mapping(metadata.get("summary"))
-    if key == "fabricated" and summary.get("scope") == "fabrication_review":
-        current = _number(summary.get("current_a"))
-        if current is None:
-            currents = _mapping(parent.get("currents_A"))
-            if any(_number(value) is not None for value in currents.values()):
-                current_label, current_display = "Original body currents", "Per body"
-            else:
-                electrical = _mapping(_mapping(metadata.get("fabrication")).get("electrical_metrics"))
-                bodies = electrical.get("bodies", ())
-                if isinstance(bodies, (list, tuple)) and any(
-                    _number(_mapping(body).get("current_A")) is not None for body in bodies
-                ):
-                    current_label, current_display = "Original body currents", "Per body"
-    if key in {"sheet", "validation"}:
-        current, current_label, current_display = None, "Wire current", "Not applicable"
-    sampled = "Independent samples" if sampling == "independent" else "Design samples"
-    sample_text = sampled + (f" · n={count:,}" if count is not None else " · sample count unrecorded")
-    detail = (
-        "Independent quadrature unverified"
-        if key == "validation" and evidence.get("independent_quadrature_check") is not True
-        else "Independent thin-wire winding check"
-        if key == "winding_validation"
-        else (
-            "Field diagnostic; wire acceptance is separate"
-            if key not in {"sheet", "validation"}
-            else "Sheet evidence; wire acceptance is separate"
-        )
-    )
-    context = f"{label} · {policy} · {component_label} error\n{sample_text} · {detail}"
-    if source_error:
-        context = "Retained snapshot · source verification failed · " + context
-    elif stale:
-        context = "Earlier applied model · " + context + f" · {checks}"
-    convention = _text(evidence.get("rms_convention")) or "unrecorded"
-    tooltip = (
-        f"{title}\n{context}\nResidual: calculated minus target. Recorded RMS convention: {convention}. "
-        "Relative RMS uses the recorded global target RMS, never pointwise division at target zeros. "
-        "These scalar summaries are retained from the saved run; no field is recalculated for this panel."
-    )
-    if key.startswith(("routed", "contour")) and parent.get("scope") == "design_grid_wire_field":
-        tooltip += " Wire RMS uses active unsuppressed positive-weight design samples; thin-wire Biot–Savart model."
-    if current_display == "Per body":
-        tooltip += " Signed original body currents are recorded separately; no aggregate circuit current is inferred."
-    if key in {"sheet", "validation"}:
-        tooltip += " A continuous sheet solution does not define a single discrete wire current."
-    if source_error:
-        tooltip += "\n" + str(source_error)
-    return FieldResultSummary(
-        visible=True,
-        title=title,
-        badge=badge,
-        tone=tone,
-        source_key=key,
-        source_label=label,
-        component=component,
-        rms_uT=rms,
-        peak_uT=peak,
-        relative_percent=relative,
-        current_A=current,
-        current_label=current_label,
-        current_display=current_display,
-        context=context,
-        tooltip=tooltip,
-        analysis_available=not bool(source_error),
-    )
+from .result_summary import FieldResultSummary, coil_metric_cards, field_metric_cards, summarize_field_result
 
 
 class _Heading(QLabel):
@@ -460,16 +177,13 @@ class ResultsOverviewPanel(QFrame):
         self.buttons = {}
         for key, text, drawing in (
             ("field", "Field map", "field-error"),
-            ("slices", "Slices", "slice"),
-            ("errors", "Errors", "chart"),
-            ("harmonics", "Harmonics", "target-harmonic"),
             ("coil", "Coil stats", "conductor-profile"),
-            ("checks", "Checks", "check"),
+            ("checks", "Engineering checks", "check"),
         ):
             button = QPushButton(icon(drawing), text, self)
             button.setObjectName("results_overview_" + key)
             button.setMinimumHeight(32)
-            button.setAccessibleName("Open saved field " + text.lower())
+            button.setAccessibleName("Open " + text.lower() + " for the selected run")
             button.clicked.connect(lambda _checked=False, action=key: self.action_requested.emit(action))
             actions.addWidget(button, 1)
             self.buttons[key] = button
@@ -525,65 +239,15 @@ class ResultsOverviewPanel(QFrame):
         return self.coil_report.has_values
 
     def _set_coil_statistics(self):
-        scopes = []
-        for key in self.coil_metric_values:
-            row = self.coil_report.row("coil:" + key)
-            number = _number(row.value, nonnegative=True) if row is not None else None
-            body_suffix = {
-                "resistance": ":resistance_ohm",
-                "inductance": ":inductance_H",
-                "volume": ":mesh_volume",
-            }.get(key)
-            volume_prefix = (
-                "reviewed:" if any(item.key.startswith("reviewed:") for item in self.coil_report.rows) else "pipeline:"
-            )
-            prefix = volume_prefix if key == "volume" else "body:"
-            body_rows = tuple(
-                item
-                for item in self.coil_report.rows
-                if body_suffix
-                and item.key.startswith(prefix)
-                and item.key.endswith(body_suffix)
-                and _number(item.value, nonnegative=True) is not None
-            )
-            display = "Needs density" if key == "mass" and number is None else "Not recorded"
-            if number is None and body_rows:
-                display = "Per body"
-            if number is not None:
-                scale, unit = {
-                    "resistance": (1.0, "Ω"),
-                    "inductance": (1e6, "µH"),
-                    "mass": (1e3, "g"),
-                    "volume": (1e6, "cm³"),
-                }[key]
-                converted = _number(number, scale, nonnegative=True)
-                display = f"{converted:.4g} {unit}" if converted is not None else "Not recorded"
+        cards, scope, tooltip = coil_metric_cards(self.coil_report)
+        for card in cards:
+            key = card["key"]
             value = self.coil_metric_values[key]
-            value.set_value(display, unavailable=number is None, point_size=13.0)
-            scope = row.scope if row is not None else "No saved quantity or scope."
-            source = row.source_key if row is not None else ""
-            tooltip = f"{row.quantity}: {row.status}.\n{scope}\nSaved source: {source}" if row is not None else scope
-            if number is None and body_rows:
-                body_word = "body" if len(body_rows) == 1 else "bodies"
-                tooltip += f"\nSaved values for {len(body_rows)} {body_word}; open Coil stats for values and individual scopes."
-            if key == "mass" and number is None:
-                tooltip += "\n" + self.coil_report.mass_unavailable_reason
-            value.setToolTip(tooltip)
-            self.coil_metric_labels[key].setToolTip(tooltip)
-            if key in {"resistance", "volume"}:
-                scopes.append(("R/L" if key == "resistance" else "Volume") + ": " + scope)
-        scopes.append(
-            "Mass: recorded conductor only"
-            if _number(self.coil_report.row("coil:mass").value, nonnegative=True) is not None
-            else "Mass: density required; insulation, feed and former excluded"
-        )
-        mass_scope = (
-            "recorded conductor mass"
-            if _number(self.coil_report.row("coil:mass").value, nonnegative=True) is not None
-            else "mass needs density"
-        )
-        self.coil_scope.setText(self.coil_report.overview_scope + " · " + mass_scope)
-        self.coil_scope.setToolTip("\n".join(scopes) + "\n" + self.coil_report.message)
+            value.set_value(card["value"], unavailable=card["unavailable"], point_size=13.0)
+            value.setToolTip(card["tooltip"])
+            self.coil_metric_labels[key].setToolTip(card["tooltip"])
+        self.coil_scope.setText(scope)
+        self.coil_scope.setToolTip(tooltip)
 
     def set_record(self, record, *, source_error="", stale=False):
         key = (id(record), str(source_error), bool(stale))
@@ -607,23 +271,17 @@ class ResultsOverviewPanel(QFrame):
         self.context.setToolTip(summary.tooltip)
         self.setToolTip(summary.tooltip)
         self._set_coil_statistics()
-        for key, value, unit in (
-            ("rms", summary.rms_uT, "µT"),
-            ("peak", summary.peak_uT, "µT"),
-            ("relative", summary.relative_percent, "%"),
-            ("current", summary.current_A, "A"),
-        ):
-            text = (
-                (summary.current_display if key == "current" and summary.current_display else "Not recorded")
-                if (value is None)
-                else (f"{value:+.4g}" if key == "current" else f"{value:.4g}") + " " + unit
-            )
-            self.metric_values[key].set_value(text, unavailable=value is None)
-            self.metric_values[key].setToolTip(summary.tooltip)
+        for card in field_metric_cards(summary):
+            value = self.metric_values[card["key"]]
+            value.set_value(card["value"], unavailable=card["unavailable"])
+            value.setToolTip(summary.tooltip)
         self.metric_labels["current"].setText(summary.current_label)
         self.metric_values["current"].setAccessibleName(summary.current_label)
         for key, button in self.buttons.items():
-            button.setEnabled((key in {"checks", "coil"} and not source_error) or summary.analysis_available)
+            button.setEnabled(
+                not source_error
+                and (key == "checks" or (key == "coil" and self.has_coil_statistics) or summary.analysis_available)
+            )
             button.setToolTip(
                 "Inspect saved checks and source diagnostics."
                 if key == "checks"
@@ -645,3 +303,5 @@ class ResultsOverviewPanel(QFrame):
         for key, button in self.buttons.items():
             if key not in {"checks", "coil"}:
                 button.setEnabled(bool(available) and self.summary.visible and self.summary.analysis_available)
+            elif key == "coil":
+                button.setEnabled(self.buttons["checks"].isEnabled() and (bool(available) or self.has_coil_statistics))

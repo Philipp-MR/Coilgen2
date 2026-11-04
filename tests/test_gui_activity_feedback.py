@@ -95,6 +95,18 @@ def test_open_and_nested_modal_editors_receive_latest_activity(owned, app):
     assert _footer(nested).progress.value() == 63
 
 
+def test_large_scientific_editor_fits_the_available_screen_when_reopened(owned, app):
+    root, _, _ = owned()
+    dialog, edit = _dialog(root)
+    dialog.hide()
+    bounds = dialog.screen().availableGeometry()
+    dialog.resize(bounds.width() + 100, bounds.height() + 100)
+    dialog.show()
+    app.processEvents()
+    assert dialog.width() <= bounds.width() - 20 and dialog.height() <= bounds.height() - 50
+    assert edit.text() == "unchanged"
+
+
 @pytest.mark.parametrize("layout_type", (QVBoxLayout, QFormLayout, QGridLayout))
 def test_footers_follow_queue_work_terminal_and_hidden_window_updates(owned, app, layout_type):
     root, monitor, _ = owned()

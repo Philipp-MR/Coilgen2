@@ -134,7 +134,7 @@ class GraphicalChoiceCombo(QComboBox):
         self.change_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.change_button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.change_button.setAccessibleName(f"{title}: change selection")
-        self.change_button.setToolTip("Open the graphical choices. Closing keeps the current selection.")
+        self.change_button.setToolTip("Open the graphical choices. Cancel returns without choosing a value.")
         self.change_button.clicked.connect(self.showPopup)
         summary.addWidget(self.selected_button, 1)
         summary.addWidget(self.change_button)
@@ -169,7 +169,7 @@ class GraphicalChoiceCombo(QComboBox):
         self.scroll.setWidget(self.content)
         self.scroll.viewport().installEventFilter(self)
         layout.addWidget(self.scroll, 1)
-        footer = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self.dialog)
+        footer = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel, parent=self.dialog)
         footer.rejected.connect(self.dialog.reject)
         layout.addWidget(footer)
         self.dialog.finished.connect(lambda _result: self.setFocus(Qt.FocusReason.PopupFocusReason))
@@ -385,7 +385,7 @@ class GraphicalChoiceCombo(QComboBox):
         if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_F4, Qt.Key.Key_Down):
             self.showPopup()
             event.accept()
-        elif event.key() == Qt.Key.Key_Escape:
+        elif event.key() == Qt.Key.Key_Escape and self.dialog.isVisible():
             self.hidePopup()
             event.accept()
         else:

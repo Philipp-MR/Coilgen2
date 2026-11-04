@@ -9,7 +9,7 @@ from test_native_workbench import FakeJobs
 
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QFileDialog, QMessageBox, QPushButton
+from PySide6.QtWidgets import QDialogButtonBox, QFileDialog, QMessageBox, QPushButton
 from shiboken6 import isValid
 
 from coilgen.application import ProjectDocument
@@ -53,21 +53,28 @@ def _wait_for_project_open(application, window):
     pytest.fail("Background project opening did not finish")
 
 
-def test_expert_window_is_modeless_and_reuses_uncommitted_draft_after_close(expert_window, application):
+@pytest.mark.parametrize("dismiss", ["cancel", "close", "escape"])
+def test_expert_dismiss_discards_only_edits_since_apply(expert_window, application, dismiss):
     window = expert_window
-    original, expert = window.project, window.expert_window
+    expert = window.expert_window
     assert not expert.isModal() and expert.windowModality() == Qt.WindowModality.NonModal
     _edit(expert, text="4.12345678912345")
-    draft = expert.draft
-    assert window.project is original and window.undo_stack.count() == 0
-    expert.close()
-    assert expert.isHidden()
+    assert expert.apply_changes()
+    applied = window.project
+    _edit(expert, text="7")
+    if dismiss == "cancel":
+        cancel = expert.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Cancel)
+        assert cancel.text().replace("&", "") == "Cancel"
+        cancel.click()
+    elif dismiss == "escape":
+        QTest.keyClick(expert, Qt.Key.Key_Escape)
+    else:
+        expert.close()
+    assert window.expert_window is None and not window._has_input_drafts()
     window._advanced_dialog()
     application.processEvents()
-    assert window.expert_window is expert and expert.isVisible()
-    assert expert.draft == draft
-    assert expert.fields["min_turn_distance"].control.text() == "4.12345678912345"
-    assert window.project is original and window.undo_stack.count() == 0
+    assert window.expert_window.draft["min_turn_distance"] == applied.config.min_turn_distance
+    assert window.project is applied and window.undo_stack.count() == 1
 
 
 def test_valid_expert_apply_is_one_atomic_undoable_edit_and_updates_comparison_baseline(expert_window):
@@ -151,21 +158,21 @@ def test_explicit_discard_and_reload_replaces_expert_baseline_with_current_model
     assert window.project.config.levels == 19
 
 
-def test_incomplete_expert_numeric_text_is_retained_on_close_and_reopen(expert_window):
+def test_incomplete_expert_text_cannot_reach_save_after_close(expert_window, tmp_path):
     window = expert_window
     original, expert = window.project, window.expert_window
     _edit(expert, text="1e")
     assert not expert.apply_changes()
     expert.close()
-    window._advanced_dialog()
-    assert window.expert_window is expert
-    assert expert.fields["min_turn_distance"].control.text() == "1e"
     assert window.project is original and window.undo_stack.count() == 0
+    saved = window.save_project(tmp_path / "dismissed.coilgen.json")
+    assert ProjectDocument.load(saved).values == original.values
+    assert window.project.revision == original.revision and window.undo_stack.count() == 0
 
 
 @pytest.mark.parametrize("draft_kind", ("typed-valid", "typed-incomplete", "json-incomplete"))
 @pytest.mark.parametrize("operation", ("single", "channels"))
-def test_compute_reopens_unapplied_expert_draft_and_does_not_submit_old_values(expert_window, draft_kind, operation):
+def test_compute_with_open_expert_draft_does_not_submit_old_values(expert_window, draft_kind, operation):
     window = expert_window
     original, expert = window.project, window.expert_window
     if draft_kind == "json-incomplete":
@@ -173,7 +180,6 @@ def test_compute_reopens_unapplied_expert_draft_and_does_not_submit_old_values(e
         expert.json_editor.setPlainText('{"min_turn_distance":')
     else:
         _edit(expert, text="4" if draft_kind == "typed-valid" else "1e")
-    expert.close()
     if operation == "channels":
 
         def submit_assembly(*args):

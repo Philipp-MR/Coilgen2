@@ -26,7 +26,7 @@ class FakeViewport(QWidget):
     def render_config(self, config):
         self.config = config
 
-    def display_run(self, arrays, metadata=None):
+    def display_run(self, arrays, metadata=None, *, follow_latest=False):
         self.arrays = arrays
         self.metadata = metadata
 
@@ -189,6 +189,7 @@ def test_conical_support_editor_geometry_and_export_roundtrip(window, tmp_path):
 
     cylinder = window.project
     window.findChild(QComboBox, "support_type").setCurrentText("Conical frustum")
+    assert window.apply_settings()
     assert window.project.config.coil_mesh_file == "create conical frustum mesh"
     assert not window.project.config.surface_is_cylinder_flag
     controls = window._draft_controls
@@ -227,6 +228,7 @@ def test_gui_cone_harmonic_configuration_reaches_actual_sheet_solver(window):
 
     pytest.importorskip("cvxpy")
     window.findChild(QComboBox, "support_type").setCurrentText("Conical frustum")
+    assert window.apply_settings()
     for key, value in {
         "bottom_radius_mm": 180,
         "top_radius_mm": 140,
@@ -238,6 +240,7 @@ def test_gui_cone_harmonic_configuration_reaches_actual_sheet_solver(window):
     assert window.apply_settings()
     window.select_node("target")
     window.findChild(QComboBox, "target_mode").setCurrentText("Spherical harmonic")
+    assert window.apply_settings()
     window._draft_controls["harmonic_reference_radius_mm"].setValue(50)
     window._draft_controls["target_region_radius"].setValue(50)
     window._draft_controls["target_region_resolution"].setValue(12)
@@ -262,6 +265,7 @@ def test_harmonic_target_is_analytic_absolute_and_roi_does_not_rescale_it(window
     window.select_node("target")
     previous = window.project.config
     window.findChild(QComboBox, "target_mode").setCurrentText("Spherical harmonic")
+    assert window.apply_settings()
     controls = window._draft_controls
     assert "target_gradient_strength" not in controls
     controls["harmonic_degree"].setValue(2)
@@ -288,6 +292,7 @@ def test_harmonic_target_is_analytic_absolute_and_roi_does_not_rescale_it(window
     restored = ProjectDocument.load(path.with_suffix(".coilgen.json"))
     assert restored.config.field_shape_function == expression
     window.findChild(QComboBox, "target_mode").setCurrentText("Analytic expression")
+    assert window.apply_settings()
     config = window.project.config
     for key in ("field_shape_function", "target_gradient_normalization", "target_gradient_strength", "design_context"):
         assert getattr(config, key) == getattr(previous, key)
@@ -312,6 +317,7 @@ def test_harmonic_editor_order_bounds_and_native_expression_preservation(window)
     assert recipe.center_m == original.center_m
     window.undo_stack.undo()
     window.findChild(QComboBox, "target_mode").setCurrentText("Analytic expression")
+    assert window.apply_settings()
     assert "field_shape_function" in window._draft_controls
     expression = window.project.config.field_shape_function
     window._draft_controls["target_region_radius"].setValue(60)
@@ -419,7 +425,7 @@ def test_fabrication_failures_and_electrical_scope_are_visible_in_results(window
     assert "route_clearance_violation" in text
     assert "support_surface_penetration" in text
     table = window.findChild(QTableWidget, "selected_run_metrics")
-    assert table.item(0, 0).text() == "Continuous sheet"
+    assert table.item(0, 0).text() == "Stream function model"
     assert table.item(2, 0).text() == "Review: body001"
     assert table.item(4, 1).text() == "Inductance [µH]"
     assert table.item(4, 2).text() == "100"
@@ -456,12 +462,13 @@ def test_default_full_result_with_null_fabrication_opens_review(window, tmp_path
     table = panel.findChild(QTableWidget, "selected_run_metrics")
     assert table is not None
     assert table.rowCount() == 3
-    assert table.item(0, 0).text() == "Continuous sheet"
-    assert table.item(1, 0).text() == "Independent sheet grid"
-    assert table.item(2, 0).text() == "Original contours"
+    assert table.item(0, 0).text() == "Stream function model"
+    assert table.item(1, 0).text() == "Independent stream function validation grid"
+    assert table.item(2, 0).text() == "Contours before routing"
+    assert table.item(2, 1).text() == "Original contour current [A]"
     texts = [label.text() for label in panel.findChildren(QLabel)]
     assert any("Fabrication review: Not run" in text for text in texts)
-    assert any("Continuous-sheet acceptance: Passed" in text and "continuous_sheet" in text for text in texts)
+    assert any("Stream function acceptance: Passed" in text and "continuous_sheet" in text for text in texts)
     diagnostics = panel.findChild(QPlainTextEdit, "fabrication_failure_reasons")
     assert "Missing or unverified checks remain unverified." in diagnostics.toPlainText()
     assert window.tree.currentItem() is window.tree_items["results"]
@@ -824,9 +831,11 @@ def test_settings_forms_fit_default_and_narrow_docks_without_horizontal_scrollin
         assert_fits()
     window.select_node("geometry")
     window.findChild(QComboBox, "support_type").setCurrentText("Conical frustum")
+    assert window.apply_settings()
     assert_fits()
     window.select_node("target")
     window.findChild(QComboBox, "target_mode").setCurrentText("Spherical harmonic")
+    assert window.apply_settings()
     assert_fits()
 
 

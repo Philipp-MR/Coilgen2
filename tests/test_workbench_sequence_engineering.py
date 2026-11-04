@@ -14,6 +14,32 @@ application = usability.application
 windows = usability.windows
 
 
+def test_independent_turns_hide_connector_controls_and_keep_their_saved_preferences(windows):
+    config = replace(
+        preset_config(),
+        skip_postprocessing=True,
+        contour_only_sweep_mode=True,
+        interconnection_axis="support_axis",
+        normal_shift_length=0.007,
+    )
+    window = windows(ProjectDocument.from_config(config))
+    window.select_node("material")
+    section = window._settings_decisions["Physical placement"]
+    assert all(
+        not section.form.isRowVisible(window._draft_controls[k].parentWidget())
+        for k in ("normal_shift_mm", "return_path_lift")
+    )
+    window.select_node("winding")
+    assert "Interconnection direction" not in window._settings_decisions
+    window._draft_controls["winding_intent"].setCurrentText("Connected circuit")
+    assert window.apply_settings()
+    assert "Interconnection direction" in window._settings_decisions
+    assert (
+        window.project.config.interconnection_axis == "support_axis"
+        and window.project.config.normal_shift_length == 0.007
+    )
+
+
 def test_physical_placement_is_explicit_si_edit_with_exact_profile_and_undo(windows):
     points = ((0.0021, 0.0007), (0.0024, -0.0007), (0.0004, -0.0007), (0.0001, 0.0007))
     project = ProjectDocument.from_config(replace(preset_config(), cross_sectional_points=points))

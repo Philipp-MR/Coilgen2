@@ -7,7 +7,7 @@ import test_workbench_usability as usability
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QComboBox, QDockWidget, QPushButton
+from PySide6.QtWidgets import QApplication, QComboBox, QDockWidget, QLabel, QPushButton
 
 from coilgen.application import ProjectAssembly, ProjectDocument
 from coilgen.application import preflight
@@ -346,12 +346,10 @@ def test_selected_study_step_primary_compute_checks_actual_missing_inputs(window
     project = ProjectDocument.from_config(config).update_study({"pipeline_stage": "sheet"})
     window = windows(project)
     window.navigate_workflow("compute")
-    button = window.settings.widget().findChild(QPushButton, "compute_through_stage")
-
-    button.click()
+    assert window.settings.widget().findChild(QLabel, "study_scope").isVisibleTo(window.settings.widget())
     assert window.stage_selector.currentData() == "sheet"
     assert not window.service.submissions and not window.jobs.states  # Selecting a boundary is not execution.
-    assert window.compute_button.text() == "Optimize sheet"
+    assert window.compute_button.text() == "Optimize stream function"
     window.compute_button.click()
 
     assert not window.service.submissions
@@ -493,7 +491,7 @@ def test_explicit_saved_partial_stage_survives_construction_reopen_and_button_su
         initial.compute_button.text()
         == {
             "prepared": "Prepare model",
-            "sheet": "Optimize sheet",
+            "sheet": "Optimize stream function",
             "contours": "Generate contours",
             "routed": "Connect / sweep",
         }[stage]

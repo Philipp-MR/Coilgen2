@@ -929,7 +929,8 @@ def _coherent_axial_ring_group_indices(part, config) -> tuple[int, ...]:
     return tuple(
         index
         for index, group in enumerate(part.groups)
-        if len(group.loops) > 1 and _axial_ring_cut_frame(group, part.mesh, config.b_0_direction) is not None
+        if len(group.loops) > 1
+        and _axial_ring_cut_frame(group, part.mesh, interconnection_axis(config, part.mesh)) is not None
     )
 
 
@@ -947,7 +948,7 @@ def _coherent_axial_ring_rails(part, config, geodesic_solver, *, allow_direct_fa
     for index in indices:
         group = part.groups[index]
         cuts[index] = generate_group_cutshapes(
-            group, np.zeros(3), part.mesh, _within_group_cut_width(config), config.b_0_direction
+            group, np.zeros(3), part.mesh, _within_group_cut_width(config), interconnection_axis(config, part.mesh)
         )
         candidates[index] = {
             side: _build_within_group_cut_rail(
@@ -1084,7 +1085,7 @@ def interconnect_within_groups(
                         group_center_v,
                         part.mesh,
                         _within_group_cut_width(config),
-                        config.b_0_direction,
+                        interconnection_axis(config, part.mesh),
                         cut_plane_definition="nearest",
                         cut_height_ratio=0.5,
                         align_axial_rings=align_axial_rings,
@@ -1699,7 +1700,10 @@ def _inter_group_cut_alignment_state(
         candidate_factor=max(int(getattr(config, "inter_group_cut_alignment_candidate_factor", 1)), 1),
         return_corridor_aligned=return_corridor_aligned,
         axial_ring_alignment=bool(part.groups)
-        and all(_axial_ring_cut_frame(group, part.mesh, config.b_0_direction) is not None for group in part.groups),
+        and all(
+            _axial_ring_cut_frame(group, part.mesh, interconnection_axis(config, part.mesh)) is not None
+            for group in part.groups
+        ),
     )
 
 
@@ -3143,6 +3147,27 @@ def _rotate_wire_path_to_max_z(path: WirePath) -> WirePath:
         else transfer_segment_geometry(path.v, path.segment_geometry, rotated)
     )
     return WirePath(v=rotated, segment_owners=owners, segment_geometry=geometry)
+
+
+def interconnection_axis(config, mesh=None) -> np.ndarray:
+    """Direction followed by opening cuts, return rails and the routing guide.
+
+    ``"b0"`` reproduces the conventional choice: returns parallel to B0, which
+    is also the bore axis of a conventional cylinder. A transverse-field bore
+    (Halbach, axis perpendicular to B0) needs ``"support_axis"`` so returns run
+    along the bore instead of around it across neighbouring turns. Supports
+    without two boundary loops fall back to B0. Field targets and metrics
+    always use the true ``b_0_direction``.
+    """
+    b0 = np.asarray(getattr(config, "b_0_direction", (0.0, 0.0, 1.0)), dtype=float)
+    setting = getattr(config, "interconnection_axis", "b0")
+    if isinstance(setting, str):
+        if setting == "support_axis" and mesh is not None:
+            axis = _mesh_boundary_axis(mesh)
+            if axis is not None:
+                return axis[1]
+        return b0
+    return np.asarray(setting, dtype=float)
 
 
 def _cut_plane_direction(

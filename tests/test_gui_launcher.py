@@ -16,6 +16,7 @@ import pytest
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows batch launcher")
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "Start CoilGen2 GUI.cmd"
+FINDER = ROOT / "tools" / "find_python.cmd"
 
 
 def _run_launcher(launcher, arguments, cwd, environment):
@@ -63,6 +64,8 @@ def test_launcher_resolves_local_source_forwards_arguments_and_preserves_exit(tm
     )
     launcher = checkout / LAUNCHER.name
     launcher.write_bytes(LAUNCHER.read_bytes())
+    (checkout / "tools").mkdir()
+    (checkout / "tools" / FINDER.name).write_bytes(FINDER.read_bytes())
     conflicting = tmp_path / "other checkout"
     (conflicting / "coilgen").mkdir(parents=True)
     (conflicting / "coilgen" / "__init__.py").write_text("raise RuntimeError('wrong checkout')")
@@ -71,6 +74,7 @@ def test_launcher_resolves_local_source_forwards_arguments_and_preserves_exit(tm
     environment.update(
         PATH=str(Path(sys.executable).parent) + os.pathsep + environment.get("PATH", ""),
         PYTHONPATH=str(conflicting),
+        COILGEN_VENV=str(tmp_path / "no shared environment"),
     )
     completed = _run_launcher(
         launcher,
@@ -88,6 +92,41 @@ def test_launcher_resolves_local_source_forwards_arguments_and_preserves_exit(tm
     assert "Python: available Python on PATH" in completed.stdout
     if exit_code:
         assert "could not start (exit code 7)" in completed.stdout
+
+
+def _probe_checkout(tmp_path):
+    checkout = tmp_path / "probe checkout"
+    module = checkout / "src" / "coilgen" / "gui"
+    module.mkdir(parents=True)
+    (module.parent / "__init__.py").write_text("")
+    (module / "__init__.py").write_text("")
+    (module / "__main__.py").write_text("import sys\nprint('interpreter=' + sys.executable)\n")
+    (checkout / "tools").mkdir()
+    (checkout / "tools" / FINDER.name).write_bytes(FINDER.read_bytes())
+    launcher = checkout / LAUNCHER.name
+    launcher.write_bytes(LAUNCHER.read_bytes())
+    return launcher
+
+
+@pytest.mark.skipif(Path(sys.executable).parent.name != "Scripts", reason="needs a virtual environment interpreter")
+def test_launcher_prefers_configured_environment(tmp_path):
+    launcher = _probe_checkout(tmp_path)
+    environment = os.environ.copy()
+    environment.update(COILGEN_VENV=str(Path(sys.executable).parents[1]), PATH=r"C:\Windows\System32")
+    completed = _run_launcher(launcher, "", tmp_path, environment)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "Python: configured environment (COILGEN_VENV)" in completed.stdout
+    interpreter = completed.stdout.split("interpreter=", 1)[1].strip()
+    assert Path(interpreter).resolve() == Path(sys.executable).resolve()
+
+
+def test_launcher_without_python_points_to_setup(tmp_path):
+    launcher = _probe_checkout(tmp_path)
+    environment = os.environ.copy()
+    environment.update(COILGEN_VENV=str(tmp_path / "missing"), PATH=r"C:\Windows\System32")
+    completed = _run_launcher(launcher, "", tmp_path, environment)
+    assert completed.returncode == 9009
+    assert "Setup CoilGen2.cmd" in completed.stdout
 
 
 def test_invalid_project_reports_loading_and_failure_without_ready(tmp_path):
@@ -169,6 +208,8 @@ def test_repository_launcher_enters_qt_event_loop_without_live_jobs(tmp_path, lo
         PYTHONPATH=str(tmp_path) + os.pathsep + str(ROOT / "tests"),
         TEMP=str(tmp_path),
         TMP=str(tmp_path),
+        PATH=str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", ""),
+        COILGEN_VENV=str(tmp_path / "no shared environment"),
     )
     arguments = f'--background --jobs-directory "{jobs}"'
     if load_project:

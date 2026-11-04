@@ -1,8 +1,17 @@
 """Small scientific Qt controls with concise display and explicit units."""
 
 from PySide6.QtGui import QDoubleValidator, QValidator
-from PySide6.QtCore import QLocale, QSignalBlocker
-from PySide6.QtWidgets import QDoubleSpinBox, QFormLayout, QWidget
+from PySide6.QtCore import QLocale, QSignalBlocker, Signal
+from PySide6.QtWidgets import QDockWidget, QDoubleSpinBox, QFormLayout, QWidget
+
+
+class SettingsDock(QDockWidget):
+    dismissed = Signal()
+
+    def closeEvent(self, event):
+        super().closeEvent(event)
+        if event.isAccepted():
+            self.dismissed.emit()
 
 
 class SettingsPanel(QWidget):
@@ -78,6 +87,10 @@ class ScientificSpinBox(QDoubleSpinBox):
     def setValue(self, value):
         self._incomplete_text = None
         super().setValue(value)
+
+    def restore_draft_text(self, text):
+        self._remember_incomplete_text(text)
+        self.lineEdit().setText(text)
 
     def stepBy(self, steps):
         pending = self._incomplete_text is not None

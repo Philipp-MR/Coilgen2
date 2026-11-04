@@ -401,7 +401,9 @@ def propose_joint_group_routes(
         result.reason = "singleton_cut_context_required"
         return result
     if b0_direction is None:
-        b0_direction = getattr(config, "b_0_direction", (0.0, 0.0, 1.0))
+        from .layout import interconnection_axis
+
+        b0_direction = interconnection_axis(config, part.mesh)
     if b0_weight is None:
         b0_weight = getattr(config, "joint_group_routing_b0_weight", 1.0)
     # Validate the objective even if there is no mutable interval in a group.

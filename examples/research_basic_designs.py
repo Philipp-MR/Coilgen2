@@ -2,7 +2,7 @@
 
 Run from the repository root after installing ``.[research]``:
     python examples/research_basic_designs.py
-Outputs use SI units. Accepted continuous sheets still require routing and
+Outputs use SI units. Accepted stream function solutions still require routing and
 fabrication validation. These examples deliberately reserve a field margin.
 """
 

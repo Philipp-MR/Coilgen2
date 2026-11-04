@@ -78,7 +78,6 @@ def test_rectangle_requires_physical_dimensions(width, height):
         # A non-neighbouring edge touches another vertex.
         ([[0, 0], [2, 0], [2, 2], [1, 0], [0, 2]], "touch"),
         ([[0, 0], [1, 0], [2, 0]], "zero or numerically"),
-        ([[0, 0], [2, 0], [1, 1], [2, 2], [0, 2]], "strictly convex"),
         ([[0, 0], [1, 0], [2, 0], [2, 2], [0, 2]], "collinear"),
         ([[-1e308, 0], [1e308, 0], [0, 1]], "span is too large"),
     ],
@@ -86,6 +85,12 @@ def test_rectangle_requires_physical_dimensions(width, height):
 def test_invalid_geometry_has_actionable_error(points, message):
     with pytest.raises(ValueError, match=message):
         validate_conductor_profile(points)
+
+
+def test_simple_concave_profile_is_accepted():
+    # Concave holders (e.g. omega shapes) sweep with ear-clipped end caps.
+    summary = validate_conductor_profile([[0, 0], [2, 0], [1, 1], [2, 2], [0, 2]])
+    assert summary.area_m2 == pytest.approx(3.0)
 
 
 def test_si_profile_reaches_sweep_centroid_and_resistance(tmp_path):

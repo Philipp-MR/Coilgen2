@@ -62,14 +62,64 @@ def canonical_profile_points(points: Sequence[Sequence[float]]) -> tuple[tuple[f
     return tuple((float(point[0]), float(point[1])) for point in values)
 
 
+def round_wire_profile(diameter_m: float, segments: int = 16) -> tuple[tuple[float, float], ...]:
+    """Regular polygon approximating a round (litz) wire centred on the origin."""
+    if not np.isfinite(diameter_m) or diameter_m <= 0 or segments < 6:
+        raise ValueError("A round profile needs a positive diameter and at least six segments.")
+    angles = np.linspace(0.0, 2.0 * np.pi, segments, endpoint=False)
+    radius = diameter_m / 2.0
+    return tuple((float(radius * np.cos(angle)), float(radius * np.sin(angle))) for angle in angles)
+
+
+def omega_holder_profile(
+    wire_diameter_m: float,
+    wall_m: float = 0.0008,
+    base_width_m: float | None = None,
+    opening_angle_deg: float = 70.0,
+    segments: int = 20,
+) -> tuple[tuple[float, float], ...]:
+    """Printable omega-shaped holder around a round wire at the origin.
+
+    The holder is a ring of thickness ``wall_m`` around the wire channel, open
+    away from the support (+n) by ``opening_angle_deg`` so the wire can be
+    snapped in, standing on a flat foot of ``base_width_m`` on the support (-n).
+    Sweep it with ``conductor_path_reference = "profile_origin"`` so the
+    exported path and the field source follow the wire centre.
+    """
+    if not (np.isfinite(wire_diameter_m) and wire_diameter_m > 0 and np.isfinite(wall_m) and wall_m > 0):
+        raise ValueError("Wire diameter and wall thickness must be positive.")
+    if not 10.0 <= opening_angle_deg <= 160.0:
+        raise ValueError("The omega opening angle must lie between 10 and 160 degrees.")
+    inner = wire_diameter_m / 2.0
+    outer = inner + wall_m
+    foot = base_width_m if base_width_m is not None else 2.0 * outer + 2.0 * wall_m
+    half_gap = np.radians(opening_angle_deg) / 2.0
+    # Outer arc from the right lip, around the bottom, to the left lip (clockwise in u-n).
+    start, stop = np.pi / 2 - half_gap, -3 * np.pi / 2 + half_gap
+    outer_arc = [(outer * np.cos(t), outer * np.sin(t)) for t in np.linspace(start, stop, segments)]
+    inner_arc = [(inner * np.cos(t), inner * np.sin(t)) for t in np.linspace(stop, start, segments)]
+    bottom = -outer
+    lowest = [index for index, point in enumerate(outer_arc) if point[1] <= -outer * np.cos(np.radians(35))]
+    first, last = lowest[0], lowest[-1]
+    footprint = [
+        (foot / 2.0, outer_arc[first][1]),
+        (foot / 2.0, bottom - wall_m),
+        (-foot / 2.0, bottom - wall_m),
+        (-foot / 2.0, outer_arc[last][1]),
+    ]
+    points = outer_arc[: first + 1] + footprint + outer_arc[last:] + inner_arc
+    return tuple((float(u), float(n)) for u, n in points)
+
+
 def validate_conductor_profile(
     points: Sequence[Sequence[float]], *, width_m: float | None = None, height_m: float | None = None
 ) -> ConductorProfile:
-    """Validate a sweepable, strictly convex profile and report physical dimensions.
+    """Validate a sweepable simple profile and report physical dimensions.
 
     Rectangle-sentinel input requires positive finite ``width_m``/``height_m``.
     Width and height are only used for that sentinel; custom coordinates define
-    the physical profile. Convexity is an existing loft/cap-fan requirement.
+    the physical profile. Concave simple polygons (e.g. omega holders) are
+    accepted; open-path end caps are then ear-clipped instead of fanned.
     Geometry tolerances match the sweep: max(1e-12 * span, 1e-15) metres
     for edge lengths and max(1e-12 * span**2, 1e-30) square metres for area.
     Segment contact checks also detect collinear overlaps and touching edges.
@@ -122,10 +172,8 @@ def validate_conductor_profile(
     if abs(signed_area) <= area_tolerance:
         raise ValueError("Conductor profile has zero or numerically negligible area.")
     turns = edges[:, 0] * np.roll(edges[:, 1], -1) - edges[:, 1] * np.roll(edges[:, 0], -1)
-    if not (np.all(turns > area_tolerance) or np.all(turns < -area_tolerance)):
-        raise ValueError(
-            "Use a strictly convex profile: concave or collinear corners are unsupported by the current sweep."
-        )
+    if np.any(np.abs(turns) <= area_tolerance):
+        raise ValueError("Remove collinear profile points: every corner must turn.")
     # Preserve the scientific kernel's acceptance boundary; this call does not
     # mutate submitted points even when the sweep internally reverses winding.
     from coilgen.manufacturing import _validated_cross_section

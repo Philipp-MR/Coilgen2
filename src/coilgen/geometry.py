@@ -1573,7 +1573,9 @@ def build_shielded_biplanar_mesh(
         _offset_mesh(primary_plus, separation * normal_unit),
         _offset_mesh(primary_minus, -separation * normal_unit),
     ]
-    return merge_raw_meshes(meshes)
+    combined = merge_raw_meshes(meshes)
+    combined.metadata["part_roles"] = ["primary", "primary", "active_shield", "active_shield"]
+    return combined
 
 
 def _place_disc(mesh: Mesh, z0: float, rot: np.ndarray, center: np.ndarray, normal_plus: bool) -> Mesh:
@@ -1648,7 +1650,9 @@ def build_split_bore_flange_mesh(
     if not np.isfinite(separation) or separation <= 0.0:
         raise ValueError("shield_r_inner must exceed r_outer; the difference is the shield separation.")
     shield_mesh = _offset_split_bore_flange_mesh(primary, separation, r_inner, gap)
-    return merge_raw_meshes([primary, shield_mesh])
+    combined = merge_raw_meshes([primary, shield_mesh])
+    combined.metadata["part_roles"] = ["primary", "primary", "active_shield", "active_shield"]
+    return combined
 
 
 def _offset_split_bore_flange_mesh(primary: Mesh, separation: float, r_inner: float, gap: float) -> Mesh:

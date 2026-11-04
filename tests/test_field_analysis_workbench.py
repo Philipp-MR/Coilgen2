@@ -57,7 +57,7 @@ def test_imported_target_never_gets_inert_native_recipe():
     assert not _target_analysis_recipe(request, target)
 
 
-def test_analysis_action_requires_computed_healthy_evidence_including_real_zero_fields(windows, tmp_path):
+def test_analysis_action_requires_computed_healthy_evidence_including_real_zero_fields(windows, tmp_path, monkeypatch):
     window = windows()
     arrays = {"target_points_m": np.zeros((2, 3)), "target_field_T": np.zeros((2, 3))}
     record = RunRecord(tmp_path / "target-only", {}, arrays)
@@ -65,13 +65,24 @@ def test_analysis_action_requires_computed_healthy_evidence_including_real_zero_
     window._selected_run = "source"
     window._update_execution_feedback()
     assert not window.field_analysis_action.isEnabled()
+    assert not window.shielding_action.isEnabled()
     record = RunRecord(tmp_path / "computed-zero", {}, {**arrays, "sheet_field_T": np.zeros((2, 3))})
     window.runs["source"] = record
     window._update_execution_feedback()
     assert window.field_analysis_action.isEnabled()
+    assert not window.shielding_action.isEnabled()
+    record = RunRecord(tmp_path / "suppression", {}, {**record.arrays, "target_suppressed": np.array([0, 1])})
+    window.runs["source"] = record
+    window._update_execution_feedback()
+    assert window.shielding_action.isEnabled()
+    views = []
+    monkeypatch.setattr(window, "_field_analysis_dialog", lambda *, view: views.append(view))
+    window.shielding_action.trigger()
+    assert views == ["shielding"]
     window._source_health.mark_failed(record.directory, "Modified scientific result")
     window._update_execution_feedback()
     assert not window.field_analysis_action.isEnabled()
+    assert not window.shielding_action.isEnabled()
 
 
 @pytest.mark.parametrize(

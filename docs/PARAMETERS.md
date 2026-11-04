@@ -157,6 +157,34 @@ request a separate bounding box derived from saved target-sample coordinates;
 that diagnostic does not claim shaped-region coverage. Imported maps and legacy
 `target_region_geometry=None` retain their previous diagnostic behavior.
 
+## Interconnection direction, sweep reference and combined targets
+
+- `interconnection_axis`: `"b0"` (default), `"support_axis"` or an explicit
+  `(x, y, z)` vector.
+  - It sets the direction of opening cuts, return rails, the axial ring seam and
+    the joint-routing guide. Field targets and field metrics always use
+    `b_0_direction`.
+  - `support_axis` takes the bore axis from the support's two boundary loops; a
+    closed support falls back to B0.
+  - For transverse-field (Halbach) bores, compare both settings. On the generated
+    80 mm template neither is better in general: Gz is similar either way (the
+    first-reported Gz crossing was a false positive of the contact check), and
+    for Gx the bore axis collides two connectors.
+- `conductor_path_reference`: `"centroid"` (default) or `"profile_origin"`.
+  - This is the profile point followed by the exported 3D path, the
+    fabricated-field source and the bend checks.
+  - `profile_origin` sweeps about the profile's `(0, 0)` point. Use it, for
+    example, for a round litz wire at the origin inside a printed omega holder
+    (`omega_holder_profile()`).
+  - The swept solid is identical in both modes.
+- Conductor profiles may be simple concave polygons. Collinear corners are rejected,
+  and open-path end caps of concave profiles are ear-clipped.
+- `target_gradient_axis = "magnitude"` scales and reports |G|.
+  - `auto` selects `magnitude` when the fitted target gradient has more than one
+    significant component (for example `x+y`, `x-y`); before, a tie silently chose x.
+  - The needed current and the field error always use the complete target
+    expression. The report also lists per-axis efficiencies for combined targets.
+
 ## Closed-series interconnection
 
 Controls are available on `CoilGenConfig` or through `advanced_parameters`:
@@ -497,12 +525,22 @@ Relevant low-level fields:
 
 ## Mesh-Coupled Contour Smoothing
 
-Smoothing is optional and off by default. In the GUI, open **Winding and
-routing → Contour smoothing → Smooth on surface**. The engine fits the closed
-contours before grouping, cutting and interconnection; it does not cosmetically
-smooth plotted wire paths. Changing these settings invalidates the contour
-stage and downstream geometry while allowing the unchanged current sheet to
-be reused.
+New gallery designs, including each system channel, enable **Smooth on
+surface**. To review or disable it in the desktop GUI, open **Winding and
+routing → Contour smoothing**. The gallery mesh-relative fit requests 10%
+amplitude at one mesh wavelength and checks turn spacing. Its 0.5 mm
+displacement limit is measured from sampled vertices to the opposite polyline
+in both directions. If the whole-loop fit fails the displacement, face passage
+or spacing check, the gallery tries rounding individual corners within the
+available clearance. A contour stays at its extracted position when both fits
+fail. Saved projects keep their recorded
+settings. A bare `CoilGenConfig` still defaults to processing off.
+
+The engine fits the closed contours before grouping, cutting and interconnection.
+Changing smoothing invalidates the contour stage and downstream geometry while
+allowing the optimized stream function to be reused. The fitted paths change the
+discrete wire field and can change routing choices. Check the fixed-current
+wire field, bend radii, and clearances in the new run.
 
 `contour_path_regularization_mode="parameterized_bspline"` supports two
 smoothing-scale policies. The default `contour_smoothing_scale_mode="legacy"`
@@ -518,6 +556,7 @@ calibrates a periodic second-difference filter to that physical wavelength.
 | `contour_smoothing_output_samples_per_mesh_length` | - | Minimum output samples per estimated mesh length; must be at least 2. |
 | `contour_resample_target_segment_length` | m | Independent upper bound on final contour segment length. |
 | `contour_smoothing_max_displacement` | m | Maximum movement from the extracted contour. Set to `0.0` to disable this cap; turn-spacing preservation remains independent. |
+| `contour_smoothing_local_fallback` | bool | Try local corner fits on rejected loops. Requires the mesh-coupled mode, a positive displacement cap and an active turn-spacing guard. Defaults to `False` in the base configuration. |
 
 The effective output segment length is the smaller of
 `contour_resample_target_segment_length` and the estimated mesh length divided
@@ -533,6 +572,7 @@ config.contour_smoothing_scale_mode = "mesh_coupled"
 config.contour_smoothing_mesh_gain = 0.1
 config.contour_smoothing_max_displacement = 0.001  # metres
 config.contour_smoothing_preserve_min_turn_distance = True
+config.contour_smoothing_local_fallback = True
 ```
 
 A smaller mesh gain attenuates mesh-scale oscillations more strongly. The fit
@@ -546,6 +586,18 @@ requirement, otherwise it preserves the original minimum spacing. The field
 must be evaluated again at the unchanged contour current because smoothing
 changes the wire geometry. Surface attachment does not imply exact circular
 geometry on a coarse faceted cylinder.
+
+With the local fallback enabled, the engine fits a quadratic arc at each
+eligible corner in the surface chart. Each arc joins the adjacent straight
+spans tangentially. Its extent is limited by the two incident segments, the
+displacement cap and half the spare distance to neighboring turns. Corners
+at the limiting clearance can stay pinned while corners elsewhere on the
+same turn move. CoilGen traces the candidate back through the mesh triangles
+and checks orientation, self-intersection in the chart, face passage, measured
+displacement and inter-turn segment distances. The recorded local-fit count
+is a subset of the total number of accepted contours. Scope ends at the
+extracted loops. Connections, return paths and the mounted conductor each
+need their own field and bend checks.
 
 ## Example Defaults
 

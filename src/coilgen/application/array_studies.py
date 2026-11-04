@@ -2,7 +2,7 @@
 
 Each channel is an independently driven electrical combination of saved bodies.
 This layer calls the existing bounded fit and cohort solvers; it never modifies
-the independently solved channels or promotes a sheet basis to routed hardware.
+the independently solved channels or promotes a stream function basis to routed hardware.
 """
 
 from __future__ import annotations
@@ -577,7 +577,7 @@ def evaluate_array(spec, *, run_resolver=None, progress=None):
 
 
 def synthesize_cohort(project, spec, *, channel_count=None, current_limit_A=None, strategy=None, progress=None):
-    """Design an opt-in common-topology sheet basis using training cases only.
+    """Design a common-topology stream function basis using training cases only.
 
     Existing POD/adaptive sectorization solvers enforce their usual rank and
     current-density conditions. Held-out cases only evaluate the finished basis.
@@ -607,7 +607,7 @@ def synthesize_cohort(project, spec, *, channel_count=None, current_limit_A=None
     training = tuple(case for case in spec.cases if case.membership == "training")
     _check_holdout(spec)
     if strategy not in {"pod", "sectorization"}:
-        raise ValueError("Sheet synthesis strategy must be pod or sectorization.")
+        raise ValueError("Stream function synthesis strategy must be pod or sectorization.")
     if (
         isinstance(channel_count, bool)
         or not isinstance(channel_count, int)
@@ -796,7 +796,7 @@ def synthesize_cohort(project, spec, *, channel_count=None, current_limit_A=None
             "channel_count": channel_count,
             "current_limit_A": current_limit_A,
         },
-        "scope": "continuous current sheet basis; contouring and electrical routing remain to be evaluated",
+        "scope": "Continuous stream function basis. Contouring and electrical routing remain to be evaluated.",
         "routing_validated": False,
     }
 

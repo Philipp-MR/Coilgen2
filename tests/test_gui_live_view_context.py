@@ -66,7 +66,7 @@ def test_live_source_submitted_revision_and_compatibility_remain_distinct_from_a
     context = build_view_context(_project(), dataset_key="sheet", stage_preview=preview)
     assert context.source == "live"
     assert "Editing: Conical Z2 · revision 14" in context.editing_text
-    assert "Live sheet preview · submitted revision 12" in context.viewing_text
+    assert "Live stream function preview · submitted revision 12" in context.viewing_text
     assert context.identity == "Current applied model/study"
     assert "Current applied model/study" in context.viewing_tooltip
     assert "Exact request: " + "a" * 64 in context.viewing_tooltip
@@ -209,7 +209,31 @@ def test_live_scopes_do_not_describe_snapshot_arrays_as_saved_run_evidence(tmp_p
         arrays = {**_arrays(), "contour_0_0_points_m": np.zeros((2, 3))}
         context = build_view_context(_project(), dataset_key=key, stage_preview=_preview(tmp_path, arrays=arrays))
         assert "Saved geometry" not in context.viewing_tooltip
-        assert "Saved continuous-sheet solution" not in context.viewing_tooltip
+        assert "Saved stream function solution" not in context.viewing_tooltip
+
+
+def test_live_evaluated_winding_uses_the_current_of_the_displayed_map(tmp_path):
+    wire_fields = {
+        "routed": {
+            "available": True,
+            "current_A": 1.25,
+            "current_refitted": True,
+            "current_source": "least_squares",
+            "geometry_sources": ["realized_centerline"],
+            "at_stream_current": {"available": True, "current_A": 0.8, "current_refitted": False},
+        }
+    }
+    preview = _preview(
+        tmp_path,
+        metadata=_metadata(pipeline_stage="evaluated", preview_feature="evaluated_winding", wire_fields=wire_fields),
+        arrays={**_arrays(), "routed_field_T": np.ones((4, 3)), "routed_field_at_stream_current_T": np.ones((4, 3))},
+    )
+    for policy, amps in (("stored", 1.25), ("original", 0.8)):
+        context = build_view_context(_project(), dataset_key="routed_field", stage_preview=preview, wire_current=policy)
+        assert context.available and context.current_A == amps
+        assert "Live evaluated wire field preview" in context.viewing_text
+        assert context.sampling == "Design samples · 4 samples"
+        assert "realized_centerline" in context.viewing_tooltip
 
 
 def test_live_sample_slab_is_described_without_interpolation(tmp_path):

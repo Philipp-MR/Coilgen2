@@ -36,7 +36,7 @@ def _failing_design(monkeypatch):
 
     def sheet(pipeline, state, context):
         state.parts[0].stream_function = np.array([0.0, 1.0, 2.0])
-        context.stage("solved sheet")
+        context.stage("solved stream function")
 
     def routed(pipeline, state, context):
         pipeline.config = replace(pipeline.config, gauss_order=7)

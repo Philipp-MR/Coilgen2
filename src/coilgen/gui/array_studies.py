@@ -243,6 +243,7 @@ class ArrayStudyDialog(QDialog):
         self.cases = list(self.spec.cases)
         self.channel_sources = list(self.spec.channels)
         self.result_value, self.results, self.worker = None, None, None
+        self._close_pending = False
         self.cache = TemporaryDirectory(prefix="coilgen-array-archives-")
         self.layout_ = QVBoxLayout(self)
         note = QLabel(
@@ -292,7 +293,7 @@ class ArrayStudyDialog(QDialog):
         cohort = QWidget()
         cohort_layout = QVBoxLayout(cohort)
         cohort_note = QLabel(
-            "Create a basis using training cases only, then fit held-out cases with that finished basis. POD and adaptive sectorization create portable channel projects on the active support. Contour-family assignment uses imported world/scanner contour dictionaries. Sheet and source-contour studies do not certify final routing."
+            "Create a basis using training cases only, then fit held-out cases with that finished basis. POD and adaptive sectorization create portable channel projects on the active support. Contour-family assignment uses imported world/scanner contour dictionaries. Stream function and source-contour studies do not certify final routing."
         )
         cohort_note.setWordWrap(True)
         cohort_layout.addWidget(cohort_note)
@@ -394,7 +395,7 @@ class ArrayStudyDialog(QDialog):
         self.cancel.clicked.connect(lambda: self.worker and self.worker.cancel.set())
         self.cancel.hide()
         self.layout_.addWidget(self.cancel)
-        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Apply | QDialogButtonBox.StandardButton.Close)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Apply | QDialogButtonBox.StandardButton.Cancel)
         self.buttons.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(self._apply)
         self.buttons.rejected.connect(self.reject)
         self.layout_.addWidget(self.buttons)
@@ -689,7 +690,7 @@ class ArrayStudyDialog(QDialog):
         self.worker.signals.details.connect(self._progress_details)
         self.worker.signals.finished.connect(self._finished)
         self.tabs.setEnabled(False)
-        self.buttons.setEnabled(False)
+        self.buttons.button(QDialogButtonBox.StandardButton.Apply).setEnabled(False)
         self.progress.show()
         self.cancel.show()
         self.status.setText("Computing array study…")
@@ -708,6 +709,8 @@ class ArrayStudyDialog(QDialog):
 
     def _finished(self, result, error):
         try:
+            if self._close_pending:
+                return
             if error:
                 self.status.setText("Array study failed: " + error)
                 return
@@ -723,11 +726,14 @@ class ArrayStudyDialog(QDialog):
         finally:
             self.worker = None
             self.tabs.setEnabled(True)
-            self.buttons.setEnabled(True)
+            self.buttons.button(QDialogButtonBox.StandardButton.Apply).setEnabled(True)
             self.progress.hide()
             self.cancel.hide()
             self.cancel.setEnabled(True)
             self.busyChanged.emit(False)
+            if self._close_pending:
+                self._close_pending = False
+                super().reject()
 
     def _publish_results(self, result):
         self.results = result
@@ -830,6 +836,7 @@ class ArrayStudyDialog(QDialog):
 
     def reject(self):
         if self.worker is not None:
+            self._close_pending = True
             self.worker.cancel.set()
             self.status.setText("Cancellation requested. Waiting for the current numerical operation to finish.")
             return

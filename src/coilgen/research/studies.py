@@ -19,8 +19,8 @@ from .storage import DirectoryOwner, atomic_json, file_digest, operator_fingerpr
 def pareto_front(results: Iterable[dict], metrics=("validated_relative_field_error", "power_w")) -> list[int]:
     """Indices of accepted, finite, nondominated candidates (all metrics minimize).
 
-    Compare one physical scope at a time: sheet and fabrication results are not
-    interchangeable. Duplicate objective vectors are retained for inspection.
+    Compare one physical scope at a time, such as the stream function model or
+    the fabricated winding. Duplicate objective vectors are retained for inspection.
     """
     candidates = []
     scopes = set()
@@ -200,7 +200,7 @@ class ResearchStudy:
 class ToleranceStudy:
     """One conic graph/operator assembly and one fixed objective reference.
 
-    This solves a *continuous sheet* against the supplied sampled operators.
+    This solves for the *stream function* against the supplied sampled operators.
     It does not claim independent-grid or fabricated-wire acceptance. Different
     meshes belong in ResearchStudy; fixed operators belong here and reuse DPP.
     """

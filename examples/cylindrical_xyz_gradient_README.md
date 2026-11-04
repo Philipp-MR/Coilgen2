@@ -32,9 +32,9 @@ span convention without changing that numerical generator.
 
 Each channel uses **2 × 2 mm copper**, 18 nΩ·m resistivity, 0.1 mm insulation per
 side, 50 µm manufacturing tolerance and 6 mm minimum bend radius. The **1 mm
-homogenized sheet thickness** used for continuous-sheet power minimization is
-separate from the physical conductor size. Each study requests a 3% RMS sheet
-design budget, a distinct 5% independent sheet check, 16 contour levels, winding
+homogenized sheet thickness** used to model Joule loss during stream function optimization is
+separate from the physical conductor size. Each study requests a 3% RMS field error
+budget on the design grid, a 5% independent check, 16 contour levels, winding
 connection, conductor sweeping, inductance calculation and strict fabrication
 review. Fields are evaluated at the solved stream-function current. Failed
 discrete-wire or geometry checks remain visible; the template contains no saved
@@ -74,13 +74,13 @@ assembly = system_assembly("cylindrical_xyz_gradient", project_root="outputs/xyz
 assembly.save("outputs/cylindrical_xyz_gradient.coilgen.json")
 ```
 
-## Recorded sheet smoke
+## Stream function validation
 
-The three default sheet studies completed with 257 design samples and 3112
+The three default stream function solves completed with 257 design samples and 3112
 distinct independent-grid samples. Independent Bz RMS error was **3.1089% for
 Gx**, **3.1077% for Gy** and **3.1910% for Gz**, all within the saved 5% budget.
 The three single-thread numerical runs totaled about 20 s locally. This checks
-continuous-sheet feasibility at the initial discretization and original solved
+field feasibility for the stream function at the initial discretization and original solved
 current; it does not establish mesh convergence, discrete winding quality,
 fabrication readiness or system qualification.
 
@@ -91,7 +91,7 @@ conductor sweeping, field evaluation and strict fabrication review, with no
 execution failures. Each completed run was embedded in the single editable
 assembly JSON; the full three-channel artifact was approximately **316 MB**.
 
-| Channel | Independent sheet RMS | Contour RMS | Native routed RMS | Fabrication-centroid RMS | Original current | Runtime |
+| Channel | Stream function RMS error (independent grid) | Contour RMS | Native routed RMS | Fabrication-centroid RMS | Original current | Runtime |
 |---|---|---|---|---|---|---|
 | Gx | 3.1089% | 2.9892% | 4.5797% | 4.1120% | 18.6343 A | 108.6 s |
 | Gy | 3.1077% | 2.9903% | 4.5755% | 4.0883% | 21.4784 A | 95.9 s |

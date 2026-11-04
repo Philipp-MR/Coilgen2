@@ -109,6 +109,28 @@ def test_archive_roundtrip_is_detached_content_addressed_and_reusable(completed,
     assert recaptured.id == archive.id and recaptured.alias == "other-alias"
 
 
+def test_archive_reopen_retries_windows_directory_sharing_violation_and_verifies_result(
+    completed, tmp_path, monkeypatch
+):
+    _, record, _ = completed
+    archive = RunArchive.capture(record)
+    rename = Path.rename
+    attempts = []
+
+    def scanner_holds_directory(path, destination):
+        attempts.append(destination)
+        if len(attempts) == 1:
+            error = PermissionError("temporary sharing violation")
+            error.winerror = 32
+            raise error
+        return rename(path, destination)
+
+    monkeypatch.setattr(Path, "rename", scanner_holds_directory)
+    reopened = archive.materialize(tmp_path / "workspace")
+    assert len(attempts) >= 2 and all(destination == reopened.directory for destination in attempts)
+    assert reopened.metadata_view["request_sha256"] == record.metadata_view["request_sha256"]
+
+
 @pytest.mark.parametrize(
     "name",
     [

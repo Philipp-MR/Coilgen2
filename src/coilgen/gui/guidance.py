@@ -23,7 +23,7 @@ from .run_metadata import read_run_metadata
 
 
 CONTINUATION_STAGES = {
-    "prepared": ("sheet", "Optimize sheet"),
+    "prepared": ("sheet", "Optimize stream function"),
     "sheet": ("contours", "Generate contours"),
     "contours": ("routed", "Connect / sweep"),
     "routed": ("evaluated", "Full design evaluation"),
@@ -195,7 +195,7 @@ def _stages(metadata, blockers, issues, *, pending, stale):
             if index >= boundary
             else "not_computed"
         )
-        detail = "Saved current-sheet solution." if key == "solve" else _winding_detail(metadata)
+        detail = "Saved stream function." if key == "solve" else _winding_detail(metadata)
         output.append(
             GuidanceStage(
                 key,
@@ -238,7 +238,7 @@ def _stages(metadata, blockers, issues, *, pending, stale):
             "check",
             "Check",
             status,
-            f"Sheet: {verdicts['sheet']}; pipeline solids: {verdicts['sweeps']}; fabrication review: {verdicts['fabrication']}. These scopes do not establish construction release.",
+            f"Stream function: {verdicts['sheet']}; pipeline solids: {verdicts['sweeps']}; fabrication review: {verdicts['fabrication']}. These scopes do not establish construction release.",
             "error"
             if status in {"failed", "needs_input"}
             else "success"
@@ -386,7 +386,7 @@ def assess_guidance(project, record=None, *, issues=(), active_job=None, readine
     if not metadata:
         return state(
             "Model inputs defined",
-            "Compute the full design to optimize the sheet, create the requested winding, evaluate fields and check conductor geometry. Numerical feasibility is determined by the study.",
+            "Compute the full design to optimize the stream function, create the requested winding, evaluate fields and check conductor geometry. Numerical feasibility is determined by the study.",
             "Compute full design",
             "compute_full",
             "info",
@@ -396,10 +396,10 @@ def assess_guidance(project, record=None, *, issues=(), active_job=None, readine
     if failed:
         verdicts = run_verdicts(metadata)
         detail = (
-            f"Saved sheet checks: {verdicts['sheet']}; pipeline conductor geometry: {verdicts['sweeps']}; "
+            f"Saved stream function checks: {verdicts['sheet']}; pipeline conductor geometry: {verdicts['sweeps']}; "
             f"fabrication review: {verdicts['fabrication']}. "
             "Inspect the recorded field and conductor failures before changing model settings. "
-            "A passed sheet cannot override failed conductor checks."
+            "A passing stream function check cannot override failed conductor checks."
         )
         warnings = sum(getattr(issue, "severity", "error") == "warning" for issue in issues)
         if errors or warnings:
@@ -407,8 +407,14 @@ def assess_guidance(project, record=None, *, issues=(), active_job=None, readine
                 f" The saved problem list contains {len(errors)} {'error' if len(errors) == 1 else 'errors'}"
                 f" and {warnings} {'warning' if warnings == 1 else 'warnings'}."
             )
-        if solids:
-            detail += f" {len(solids)} solid CAD files remain available for the saved geometry; that availability does not resolve the failed checks."
+        drafts = sum("_DRAFT_" in PurePosixPath(name).name for name in solids)
+        if drafts:
+            detail += (
+                f" {drafts} DRAFT solid {'file is' if drafts == 1 else 'files are'} available for inspection or "
+                "prototyping export (Export conductor geometry); they are not construction-released."
+            )
+        if len(solids) > drafts:
+            detail += f" {len(solids) - drafts} solid CAD files remain available for the saved geometry; that availability does not resolve the failed checks."
         return state(
             "Review computed engineering failures",
             detail,
@@ -489,6 +495,19 @@ def _model_summary(project):
                 target = f"Uniform Bz = {field * 1e6:g} µT (absolute{' Hz input' if units == 'Hz' else ''})."
             else:
                 target = f"Absolute Bz = {expression[:160]} [{units}]; world x, y, z in metres."
+        elif method == "linear_fit":
+            gradient = config.target_gradient_strength * (1000 if units == "T" else 1)
+            scaled = (
+                "|G| (gradient magnitude)"
+                if chosen in {"magnitude", "norm"}
+                else f"G{chosen}"
+                if chosen in {"x", "y", "z"}
+                else "the auto-resolved gradient (|G| when several axes vary)"
+            )
+            target = (
+                f"Bz expression {expression[:160]} [{units}], scaled so {scaled} = {gradient:g} "
+                f"{'mT/m' if units == 'T' else 'Hz/m'}. Needed current and field error use the complete expression."
+            )
         else:
             scaling = (
                 f"dimensionless multiplier {config.target_gradient_strength:g}"

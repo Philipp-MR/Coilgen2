@@ -31,7 +31,7 @@ from .run_context import run_compatibility, run_timestamp
 
 _STUDY_LABELS = {
     "prepared": "Mesh / target",
-    "sheet": "Sheet solve",
+    "sheet": "Stream function solve",
     "contours": "Contours",
     "routed": "Routing",
     "evaluated": "Wire evaluation",
@@ -119,7 +119,7 @@ class ChannelOverview(QDialog):
                 "Study",
                 "Execution",
                 "Saved result",
-                "Sheet checks",
+                "Stream function checks",
                 "Geometry checks",
             ]
         )
@@ -148,7 +148,7 @@ class ChannelOverview(QDialog):
             "Requested study boundary and fabrication-review settings. Configured requests are not recorded passes.",
             "Recorded execution state is separate from engineering acceptance. Hover for revision and submission date.",
             "Prefer verified evidence matching the current model/study fingerprint. Earlier evidence remains clearly identified.",
-            "Saved continuous-sheet acceptance only. Wire metrics retain their separate design-grid/current scope in Results.",
+            "Saved stream function acceptance only. Wire metrics retain their separate design-grid/current scope in Results.",
             "Pipeline sweep geometry and strict fabrication review are distinct saved scopes. This is not combined hardware qualification.",
         )
         for column, description in enumerate(self._descriptions):
@@ -368,7 +368,8 @@ class ChannelOverview(QDialog):
             details = (
                 execution_detail,
                 record_detail,
-                record_detail + "\nContinuous sheet only; original and refitted wire fields are separate evidence.",
+                record_detail
+                + "\nStream function model only; original and refitted wire fields are separate evidence.",
                 record_detail
                 + "\nPipeline sweep screen and strict fabrication review remain separate from field acceptance and inter-channel checks.",
             )

@@ -1233,17 +1233,17 @@ def result_performance_table_rows(result: CoilGenResult) -> list[list[str]]:
 
     add("Optimization", "stream-function solver", "stream_function_scheme")
     if "research_objective" in summary:
-        add("Sheet physics", "physical objective", "research_objective")
-        add("Sheet physics", "continuous-sheet Joule power", "sheet_power_W", "W")
-        add("Sheet physics", "continuous-current magnetic energy", "energy_J", "J")
-        add("Sheet physics", "peak surface current density", "max_surface_current_density_A_per_m", "A/m")
-        add("Sheet physics", "net force [x,y,z]", "force_N", "N")
-        add("Sheet physics", "net torque [x,y,z]", "torque_Nm", "N m")
-        add("Sheet physics", "torque origin [x,y,z]", "torque_origin_m", "m")
-        add("Sheet physics", "prescribed uniform background [x,y,z]", "b0_T", "T")
-        add("Sheet physics", "background load model", "force_model")
-        add("Sheet physics", "fixed objective reference scales", "research_objective_scales", "W, J, A/m")
-        add("Sheet physics", "finite uncertainty scenarios", "research_scenario_count")
+        add("Stream function model", "physical objective", "research_objective")
+        add("Stream function model", "sheet Joule power", "sheet_power_W", "W")
+        add("Stream function model", "continuous-current magnetic energy", "energy_J", "J")
+        add("Stream function model", "peak surface current density", "max_surface_current_density_A_per_m", "A/m")
+        add("Stream function model", "net force [x,y,z]", "force_N", "N")
+        add("Stream function model", "net torque [x,y,z]", "torque_Nm", "N m")
+        add("Stream function model", "torque origin [x,y,z]", "torque_origin_m", "m")
+        add("Stream function model", "prescribed uniform background [x,y,z]", "b0_T", "T")
+        add("Stream function model", "background load model", "force_model")
+        add("Stream function model", "fixed objective reference scales", "research_objective_scales", "W, J, A/m")
+        add("Stream function model", "finite uncertainty scenarios", "research_scenario_count")
     add("Optimization", "regularization method", "regularization_method")
     add("Optimization", "regularization factor", "regularization_factor")
     add("Optimization", "regularization lambda", "regularization_lambda")
@@ -1730,6 +1730,12 @@ def target_mode_summary_dict(result: CoilGenResult) -> dict[str, Any]:
         summary[f"{source}_gradient_efficiency_mT_per_m_per_A"] = (
             1000.0 * target_strength / abs(current) if gradient_available else float("nan")
         )
+        if axis == "magnitude":
+            # |G| for a combined target; also report each Cartesian component.
+            for index, name in enumerate("xyz"):
+                summary[f"{source}_gradient_efficiency_{name}_mT_per_m_per_A"] = (
+                    1000.0 * abs(float(target_gradient[index])) / abs(current) if gradient_available else float("nan")
+                )
         summary[f"{source}_field_efficiency_mT_per_A"] = float(fit["field_efficiency_mT_per_A"])
         summary[f"{source}_needed_current_A"] = float(fit["needed_current_A"])
         summary[f"{source}_mean_rel_error_percent"] = float(fit["mean_rel_error_percent"])

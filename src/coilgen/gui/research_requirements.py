@@ -382,7 +382,7 @@ class PhysicalScenarioDialog(EngineeringDialog):
         self.form.addRow("Move all supports", self.support)
         self.form.addRow("Move samples and desired vectors", self.samples)
         self.note(
-            "Positive dimensional factors act about the authored scale centre before rotation about the world origin and translation. Factors such as 1.001,1.001,1 model a finite radial dimension error. All support nodes and saved winding segments retain their correspondence. Sample motion rotates points and desired vectors. Each design case shares one sheet solution and original currents. Coverage is limited to these listed geometric perturbations; conductivity, conductor profile variation, power under perturbed resistance, arbitrary bowing and an uncertainty continuum remain unassessed."
+            "Positive dimensional factors act about the authored scale centre before rotation about the world origin and translation. Factors such as 1.001,1.001,1 model a finite radial dimension error. All support nodes and saved winding segments retain their correspondence. Sample motion rotates points and desired vectors. Each design case shares one stream function solution and original currents. Coverage is limited to these listed geometric perturbations; conductivity, conductor profile variation, power under perturbed resistance, arbitrary bowing and an uncertainty continuum remain unassessed."
         )
 
     def value(self):

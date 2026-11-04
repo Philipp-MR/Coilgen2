@@ -295,13 +295,13 @@ def build_coil_statistics(record=None) -> CoilStatisticsReport:
         "",
     )
     for field, quantity, unit, scope in (
-        ("power_w", "Sheet Joule power", "W", "Continuous sheet before contouring/routing; not conductor loss."),
-        ("energy_j", "Sheet magnetic energy", "J", "Continuous-sheet solution; separate from circuit inductance."),
+        ("power_w", "Sheet Joule power", "W", "Stream function model before contouring/routing; not conductor loss."),
+        ("energy_j", "Sheet magnetic energy", "J", "Stream function solution; separate from circuit inductance."),
         (
             "max_current_density_a_per_m",
             "Maximum surface current density K",
             "A/m",
-            "Continuous sheet; not volume current density A/m².",
+            "Stream function model; not volume current density A/m².",
         ),
         (
             "minimum_spacing_m",
@@ -323,7 +323,7 @@ def build_coil_statistics(record=None) -> CoilStatisticsReport:
     ):
         add(
             "model:" + field,
-            "Continuous sheet" if field in {"power_w", "energy_j", "max_current_density_a_per_m"} else "Model",
+            "Stream function model" if field in {"power_w", "energy_j", "max_current_density_a_per_m"} else "Model",
             quantity,
             summary.get(field),
             unit,
@@ -331,8 +331,8 @@ def build_coil_statistics(record=None) -> CoilStatisticsReport:
             "summary." + field,
         )
     for field, quantity, category, unit in (
-        ("force_n", "Sheet force", "Continuous sheet", "N"),
-        ("torque_nm", "Sheet torque", "Continuous sheet", "N·m"),
+        ("force_n", "Sheet force", "Stream function model", "N"),
+        ("torque_nm", "Sheet torque", "Stream function model", "N·m"),
         ("fabricated_force_n", "Reviewed conductor force", "Reviewed circuit", "N"),
         ("fabricated_torque_nm", "Reviewed conductor torque", "Reviewed circuit", "N·m"),
     ):

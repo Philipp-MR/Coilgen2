@@ -272,6 +272,18 @@ def test_original_request_inspection_preserves_settings_without_solver_conversio
     assert read_verified_artifact(selected, "request.json") == (selected.directory / "request.json").read_bytes()
 
 
+def test_original_request_inspection_does_not_fill_unrecorded_study_controls(tmp_path):
+    directory = _saved_run(tmp_path)
+    path = directory / "request.json"
+    original = {"config": {"levels": 7}, "project_id": "fixture-project", "project_revision": 3}
+    atomic_json(path, original)
+    result = json.loads((directory / "result.json").read_text())
+    next(a for a in result["artifacts"] if a["name"] == "request.json")["sha256"] = file_digest(path)
+    result["metadata_sha256"] = result_metadata_digest(result)
+    atomic_json(directory / "result.json", result)
+    assert load_saved_request(DesignService.load_run(directory)) == original
+
+
 def test_missing_optional_original_request_is_unavailable_not_source_corruption(tmp_path):
     selected = DesignService.load_run(_saved_run(tmp_path, request=False))
     with pytest.raises(ValueError, match="no verified original request") as caught:

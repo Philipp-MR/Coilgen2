@@ -16,6 +16,21 @@ import test_native_workbench as native
 application = native.application
 
 
+@pytest.mark.parametrize("ext", (".coilgen", ".coilgen.json"))
+@pytest.mark.parametrize("collection", (False, True))
+def test_desktop_launcher_opens_same_saved_formats_as_the_file_menu(tmp_path, monkeypatch, ext, collection):
+    from coilgen.gui import __main__ as cli
+
+    project = ProjectDocument.from_config(preset_config(), name="Run design")
+    document = ProjectAssembly.new("Pair", (project, project.duplicate("Second"))) if collection else project
+    path = document.save(tmp_path / ("run" + ext))
+    opened = []
+    monkeypatch.setattr(cli, "launch", lambda doc, **kwargs: opened.append((doc, kwargs)) or 0)
+    assert cli.main([str(path), "--background"]) == 0
+    assert opened[0][0].fingerprint == document.fingerprint
+    assert opened[0][1]["project_path"] == path and opened[0][1]["background"]
+
+
 def _window(project, jobs_directory):
     window = CoilGenWorkbench(
         project=project,
@@ -190,17 +205,21 @@ def test_gui_collection_save_embeds_completed_runs_for_each_channel(application,
         _close(reopened)
 
 
-def test_gui_new_independent_turn_demo_selects_strict_complete_review(application, tmp_path):
+def test_gui_reopens_user_configured_independent_turns_with_full_review(application, tmp_path):
+    project = (
+        ProjectDocument.from_config(preset_config(), name="Separate Gy circuits")
+        .update_config({"skip_postprocessing": True, "contour_only_sweep_mode": True})
+        .update_study({"pipeline_stage": "evaluated", "fabricate": True})
+    )
+    path = project.save(tmp_path / "gy-circuits.coilgen")
     window = _window(ProjectDocument.from_config(preset_config()), tmp_path / "jobs")
     try:
-        window.new_project("independent_turns")
-        assert window.project.name == "Independent-turn sweep demo"
+        window.open_project(path)
+        assert window.project.fingerprint == project.fingerprint
         assert window.stage_selector.currentData() == "evaluated"
         assert window.fabricate
         assert window.project.config.skip_postprocessing
         assert window.project.config.contour_only_sweep_mode
-        assert window.project.config.field_shape_function == "1e-4"
-        assert window.project.config.target_gradient_normalization == "none"
     finally:
         _close(window)
 

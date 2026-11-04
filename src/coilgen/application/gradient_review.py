@@ -32,7 +32,7 @@ def gradient_review(metadata):
         "Maximum surface current density K",
         summary.get("max_current_density_a_per_m"),
         "A/m",
-        "Continuous current sheet; not copper volume current density",
+        "Surface current density derived from the stream function",
     )
     row(
         "contour_spacing",

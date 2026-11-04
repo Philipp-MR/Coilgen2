@@ -249,7 +249,7 @@ def _conductor_profile_issue(config, stage):
 
     The sweep uses the polygon in either connected or independent-turn mode.
     Connected return-path shifting also reads its physical envelope, even when
-    sweeping is disabled. Preparation, sheet optimization, contour extraction,
+    sweeping is disabled. Preparation, stream function optimization, contour extraction,
     and bare centreline routing do not require the sweep's convexity contract.
     """
     connected_routing = not config.skip_postprocessing and not config.contour_only_sweep_mode
@@ -353,6 +353,30 @@ def check_preflight(project, *, validator=None, pipeline_stage=None) -> Prefligh
                 else "Modeling note",
             )
         )
+    physics = config.research_physics
+    if physics is not None and not any(issue.blocking for issue in issues):
+        from ..field_components import normalized_b0_direction
+        from ..research.convex import ResearchPhysicsSpec
+
+        spec = ResearchPhysicsSpec.from_dict(physics)
+        reference = normalized_b0_direction(config.b_0_direction) * config.b_0_strength_T
+        if (
+            spec.background_B_per_face_T is None
+            and spec.b0_T is not None
+            and not np.allclose(spec.b0_T, reference, rtol=1e-12, atol=1e-15)
+        ):
+            mechanical = ", ".join(f"{v:.5g}" for v in spec.b0_T)
+            mri = ", ".join(f"{v:.5g}" for v in reference)
+            issues.append(
+                PreflightIssue(
+                    f"Mechanical loads use ({mechanical}) T, while the MRI reference is ({mri}) T. Check research_physics.b0_T in Advanced settings.",
+                    "target",
+                    "research_physics",
+                    "Confirm the independent mechanical load case or align the two vectors.",
+                    severity="warning",
+                    title="Separate mechanical background",
+                )
+            )
     if profile_issue is not None:
         from .conductor_profiles import is_rectangular_profile
 

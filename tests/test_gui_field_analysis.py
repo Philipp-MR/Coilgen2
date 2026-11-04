@@ -55,7 +55,7 @@ def dataset():
     points = np.random.default_rng(81).uniform(-0.04, 0.04, (150, 3))
     desired = np.column_stack((points[:, 0], points[:, 1], points[:, 2])) * 1e-3
     actual = desired + [0, 0, 2e-6]
-    return FieldDataset("sheet", "Continuous sheet", points, actual, desired, scope="continuous_sheet")
+    return FieldDataset("sheet", "Stream function model", points, actual, desired, scope="continuous_sheet")
 
 
 @pytest.fixture
@@ -304,6 +304,114 @@ def test_field_slices_do_not_require_a_valid_desired_field(application, record, 
     ).slices[0]
     result = dialog._slice_values(dataset, mapped, piece, selection)
     assert np.isfinite(result[1, 1]) and np.isnan(result[0, 0])
+    dialog.reject()
+
+
+def test_shielding_tab_compares_saved_contributions_on_matching_scales_and_excludes_roi(application, tmp_path):
+    primary = np.array([[1, 0, 0], [0, -2, 0], [0, 0, 3]]) * 1e-6
+    net = primary * 0.25
+    points = np.array([[0.1, 0, 0], [0, -0.12, 0], [0, 0, 0.2]])
+    record = RunRecord(
+        tmp_path,
+        {"name": "Shielded Gx"},
+        {
+            "target_suppressed": np.array([0, 1, 1, 1]),
+            "target_points_m": np.vstack([[0, 0, 0], points]),
+            "sheet_field_T": np.vstack([[9, 9, 9], net]),
+            "target_field_T": np.zeros((4, 3)),
+            "shielding_sheet_primary_T": primary,
+            "shielding_sheet_shield_T": net - primary,
+            "shielding_surface_normals": np.eye(3),
+            "shielding_surface_area_weights_m2": np.array([1, 4, 5]) * 1e-5,
+            "shielding_surface_faces": np.array([[0, 1, 2]]),
+        },
+    )
+    dialog = gui.FieldAnalysisDialog(record, initial_view="shielding", plot_factory=FakePlot, cloud_factory=FakeCloud)
+    application.processEvents()
+    assert dialog.worker is None and dialog.export_plot.isEnabled()
+    assert dialog.tabs.tabText(dialog.tabs.currentIndex()) == "Shielding surface"
+    dialog.shield_component.setCurrentIndex(dialog.shield_component.findData("normal"))
+    figure = dialog.shield_plot.figure
+    assert "Combined / primary RMS = 25%" in dialog.shield_note.text()
+    assert "Attenuation 12 dB" in dialog.shield_note.text()
+    assert "area-weighted RMS" in dialog.shield_note.text()
+    expected = np.sqrt(np.average([1.0, 4.0, 9.0], weights=[1, 4, 5]))
+    assert f"RMS {expected:.3g} µT" in figure.axes[0].get_title()
+    assert "Combined field" in figure.axes[2].get_title()
+    for axis in figure.axes[:-1]:
+        assert axis.collections[0].get_clim() == pytest.approx((-3, 3))
+        assert axis.get_xlim() == pytest.approx(figure.axes[0].get_xlim())
+        assert axis.get_ylim() == pytest.approx(figure.axes[0].get_ylim())
+        assert axis.get_zlim() == pytest.approx(figure.axes[0].get_zlim())
+    assert figure.axes[0].get_zlim()[1] > 200  # world coordinates in mm
+    dialog.shield_scale.setCurrentIndex(1)
+    assert len(figure.axes) == 3
+    assert figure.axes[0].collections[0].get_clim() == pytest.approx((-0.75, 0.75))
+    assert "Peak vertex at (0, 0, 200) mm" in dialog.shield_note.text()
+    dialog.reject()
+
+
+def test_shielding_tab_displays_legacy_total_and_nonzero_target_residual(application, tmp_path):
+    record = RunRecord(
+        tmp_path,
+        {},
+        {
+            "target_suppressed": np.array([1, 1]),
+            "target_points_m": np.array([[0.1, 0, 0], [0, 0.1, 0]]),
+            "routed_field_T": np.array([[4, 0, 0], [4, 0, 0]]) * 1e-6,
+            "target_field_T": np.array([[0, 3, 0], [0, -3, 0]]) * 1e-6,
+        },
+    )
+    dialog = gui.FieldAnalysisDialog(record, initial_view="shielding", plot_factory=FakePlot, cloud_factory=FakeCloud)
+    assert "Separate primary and shield contributions unavailable" in dialog.shield_note.text()
+    assert "equal-sample RMS" in dialog.shield_note.text()
+    assert "Combined − requested" in dialog.shield_plot.figure.axes[1].get_title()
+    assert "RMS 5 µT" in dialog.shield_plot.figure.axes[1].get_title()  # norm of the vector difference
+    assert not dialog.shield_component.model().item(dialog.shield_component.findData("normal")).isEnabled()
+    dialog.reject()
+
+
+def test_triangle_interior_check_is_explicit_cancellable_and_cached(application, tmp_path, monkeypatch):
+    from threading import Event, get_ident
+
+    points = np.array([[0.1, 0, 0], [0, 0.1, 0]])
+    record = RunRecord(
+        tmp_path, {}, {"target_suppressed": np.ones(2, bool), "target_points_m": points, "sheet_field_T": points * 1e-6}
+    )
+    native = gui.shielding_surface_fields(record, "sheet")
+    monkeypatch.setattr(gui, "shielding_sources", lambda _: ("sheet", "sheet_interior"))
+    started, release = Event(), Event()
+    threads = []
+
+    def fields(_, source, *, cancel_check=None):
+        if source == "sheet":
+            return native
+        threads.append(get_ident())
+        started.set()
+        assert release.wait(5)
+        if cancel_check():
+            raise gui.DesignCancelled("Cancelled direct check")
+        return replace(native, sampling="triangle_interior")
+
+    monkeypatch.setattr(gui, "shielding_surface_fields", fields)
+    dialog = gui.FieldAnalysisDialog(record, initial_view="shielding", plot_factory=FakePlot, cloud_factory=FakeCloud)
+    dialog.shield_source.setCurrentIndex(1)
+    assert not threads and dialog.worker is None and not dialog.export_plot.isEnabled()
+    dialog.shield_compute.click()
+    assert started.wait(3) and threads[0] != get_ident()
+    dialog.shield_source.setCurrentIndex(0)
+    assert dialog.worker.cancel.is_set()
+    release.set()
+    wait_worker(application, dialog)
+    assert dialog._shield_plot_key == ("sheet", "magnitude", False)
+    assert not dialog._shield_interiors
+    dialog.shield_source.setCurrentIndex(1)
+    dialog.shield_compute.click()
+    wait_worker(application, dialog)
+    assert dialog.export_plot.isEnabled()
+    assert "triangle-interior samples" in dialog.shield_note.text()
+    dialog.shield_component.setCurrentIndex(dialog.shield_component.findData("Bz"))
+    assert dialog._shield_plot_key == ("sheet_interior", "Bz", False) and len(threads) == 2
     dialog.reject()
 
 

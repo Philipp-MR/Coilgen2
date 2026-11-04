@@ -3,7 +3,7 @@
 Direct evaluations use stored stream functions or exact electrical polylines
 and signed currents. Display interpolation is separately labelled, confined to
 the sampling hull and screened for large sampling gaps. Neither is a new design
-or independent acceptance test. Singular current-sheet/wire samples stay masked.
+or independent acceptance test. Samples on the coil surface or wire stay masked.
 """
 
 from __future__ import annotations
@@ -144,15 +144,15 @@ def _sheet_source(record, config, scenario):
     names = {"vertices_m", "faces", "stream_function_A"}
     if not names <= set(record.array_names):
         raise ValueError(
-            "Saved surface vertices, triangles and nodal stream function are required for direct sheet evaluation."
+            "Direct field evaluation requires saved surface vertices, triangles and a nodal stream function."
         )
     arrays = record.select_arrays(names, copy=False)
     if sum(value.nbytes for value in arrays.values()) > MAX_SOURCE_BYTES:
-        raise ValueError("Saved sheet exceeds the explicit 256 MiB direct-source budget.")
+        raise ValueError("Saved stream function source exceeds the explicit 256 MiB direct-source budget.")
     vertices = _support_points(arrays["vertices_m"], scenario)
     faces, sf = np.asarray(arrays["faces"]), np.asarray(arrays["stream_function_A"])
     if vertices.ndim != 2 or vertices.shape[1] != 3 or not len(vertices) or not np.all(np.isfinite(vertices)):
-        raise ValueError("Saved sheet vertices are invalid.")
+        raise ValueError("Saved coil surface vertices are invalid.")
     if (
         faces.ndim != 2
         or faces.shape[1] != 3
@@ -161,7 +161,7 @@ def _sheet_source(record, config, scenario):
         or faces.min() < 0
         or faces.max() >= len(vertices)
     ):
-        raise ValueError("Saved sheet triangles are invalid.")
+        raise ValueError("Saved coil surface triangles are invalid.")
     if sf.shape != (len(vertices),) or sf.dtype.kind not in "fiu" or not np.all(np.isfinite(sf)):
         raise ValueError("Saved nodal stream function must match the exact saved vertex order.")
     mesh = Mesh(vertices=vertices, faces=faces)
@@ -173,7 +173,7 @@ def _sheet_source(record, config, scenario):
         )
         == 0
     ):
-        raise ValueError("Saved sheet contains degenerate triangles.")
+        raise ValueError("Saved coil surface contains degenerate triangles.")
     part = CoilPart(mesh)
     calculate_one_ring_by_mesh([part])
     calculate_basis_functions([part])
@@ -273,7 +273,7 @@ def _sheet_mask(points, part, check=None):
         if not counts.sum():
             continue
         if counts.sum() > 1000000:
-            raise ValueError("Sheet proximity candidates exceed the bounded slice workspace.")
+            raise ValueError("Surface proximity candidates exceed the bounded slice workspace.")
         ids = np.concatenate([np.asarray(ids, int) for ids in candidates])
         repeated = np.repeat(query, counts, axis=0)
         near = _point_triangle_sq_numpy(repeated, triangles[ids]) <= tolerance**2

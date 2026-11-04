@@ -21,6 +21,7 @@ class OptimizationSummary:
     solver_text: str
     formulation: str
     is_draft: bool = False
+    constraint_lines: tuple[str, ...] = ()
 
 
 _METHODS = {
@@ -126,7 +127,171 @@ def _has_values(value):
         return False
 
 
-def build_optimization_summary(config, draft=None) -> OptimizationSummary:
+def _standard_field_bounds(get):
+    metric = normalize_field_budget_metric(get("target_error_constraint_metric", "norm"))
+    combined = _key(get("target_error_constraint_mode", "separate")) in {
+        "combined",
+        "weighted",
+        "weighted_combined",
+        "legacy",
+    }
+    region = "Combined target and suppression rows" if combined else "DSV"
+    operator = {"norm": "‖√W({})‖₂", "rms": "RMS_W({})", "std": "STD_W({})"}.get(metric)
+    if operator is None or (combined and metric != "norm"):
+        return ["Unsupported field metric or grouping. Check the field-budget settings."]
+    explicit = get(f"target_error_{metric}_limit_T", 0) if metric in {"rms", "std"} else 0
+    absolute = get("target_error_tolerance_absolute_T", 0)
+    budget = (
+        f"{_text(explicit)} T"
+        if _positive(explicit)
+        else (
+            f"{_text(get('target_error_tolerance_percent', 5))}% × {operator.format('b')}"
+            + (f" + {_text(absolute)} T" if _positive(absolute) else "")
+        )
+    )
+    component = get("target_field_component", "Bz")
+    lines = [f"{region} · {component}   {operator.format('Ax − b')} ≤ {budget}"]
+    source = get("target_field_definition_file", "none")
+    if source and str(source).lower() != "none":
+        lines.append(f"b from {source}, field {get('target_field_definition_field_name', 'none')}")
+    else:
+        lines.append(
+            f"Target shape {get('field_shape_function', 'x')} · normalization {get('target_gradient_normalization', 'auto')}"
+        )
+    lines.append("Ax is the calculated field [T], b the requested field [T], and W the sample weights.")
+    if combined:
+        return lines
+    if metric == "std":
+        lines.append("STD_W subtracts the weighted mean residual. DC offset is free in this bound.")
+    # Suppressed rows can also be supplied by an imported target dataset.
+    rms, peak = get("suppression_field_rms_limit_T", 0), get("suppression_field_peak_limit_T", 0)
+    suppression = get("suppression_field_component", "target")
+    if suppression == "target":
+        suppression = component
+    residual = f"r_s({suppression})"
+    suppression_sources = (
+        "secondary_target_mesh_file",
+        "target_field_definition_file",
+        "create_split_bore_field_suppression_surface",
+        "create_flanged_split_bore_field_suppression_surface",
+        "create_circular_biplanar_field_suppression_surface",
+        "create_mesh_topology_field_suppression_surface",
+    )
+    possible_suppression = any(str(get(key, "none")).strip().lower() not in {"", "none"} for key in suppression_sources)
+    if _positive(rms) and possible_suppression:
+        lines.append(
+            f"Suppression samples · RMS({residual}, {get('suppression_surface_weighting', 'uniform')} weights) ≤ {_text(rms)} T"
+        )
+    if _positive(peak) and possible_suppression:
+        lines.append(f"Suppression samples · peak({residual}) ≤ {_text(peak)} T")
+    if possible_suppression and not _positive(rms) and not _positive(peak):
+        limit = f"{_text(get('suppression_error_tolerance_percent', 5))}% × ‖b_DSV‖₂"
+        absolute = get("suppression_error_tolerance_absolute_T", 0)
+        if _positive(absolute):
+            limit += f" + {_text(absolute)} T"
+        lines.append(f"If suppression samples exist · ‖{residual}‖₂ ≤ {limit}")
+    for key, lhs, reference in (
+        ("gradient_strength_tolerance_percent", "|g_parallel − G_ref|", "|G_ref|"),
+        ("linearity_cross_gradient_tolerance_percent", "‖g_perp‖₂", "|G_ref|"),
+        ("linearity_rms_tolerance_percent", "RMS(B − affine fit)", "B_ref"),
+        ("linearity_peak_tolerance_percent", "peak(B − affine fit)", "B_ref"),
+    ):
+        if _positive(get(key)):
+            lines.append(f"{get('linearity_region', 'dsv')} · {lhs} ≤ {_text(get(key))}% × {reference}")
+    return lines
+
+
+def _configured_bounds(get, physics, method, requirements, current, distance):
+    lines = []
+    if requirements:
+        poses = [
+            "nominal",
+            *(
+                str(_read(item, "name"))
+                for item in _read(requirements, "scenarios", ())
+                if _read(item, "membership", "design") == "design"
+            ),
+        ]
+        lines.append("Named design poses · " + ", ".join(poses))
+        for region in _read(requirements, "regions", ()):
+            for metric, key in (("RMS", "rms_limit_T"), ("peak", "peak_limit_T")):
+                limit = _read(region, key)
+                if limit is not None:
+                    lines.append(
+                        f"{_read(region, 'name')} · {_read(region, 'component', 'Bz')}   {metric}(A_pose ψ − b_pose) ≤ {_text(limit)} T"
+                    )
+    elif _read(physics, "include_default_field_constraints", True):
+        lines.extend(_standard_field_bounds(get))
+    else:
+        lines.append("Default DSV and suppression bounds disabled.")
+
+    explicit = get("surface_current_density_limit_A_per_m", 0)
+    safety = get("engineering_contour_step_safety_factor", 1)
+    step = current * min(safety, 1) if _positive(current) and _positive(safety) else 0
+    density_limits = [v for v in (explicit, step / distance if _positive(distance) else 0) if _positive(v)]
+    if density_limits:
+        lines.append(f"Peak surface current · max_f ‖K_f x‖₂ ≤ {_text(min(density_limits))} A/m")
+    step_limits = [v for v in (step, get("regularization_auto_range_max_contour_step_A", 0)) if _positive(v)]
+    if step_limits:
+        lines.append(
+            f"Contour step · Δψ ≤ {_text(min(step_limits))} A (stream function span / contour-grid denominator)"
+        )
+    if get("shield_gradient_opposition_enabled", False):
+        lines.append(
+            f"Shield gradient along target axis ≤ {_text(get('shield_gradient_max_fraction_of_target', 0))} × |G_target|"
+        )
+    for key, lhs, unit in (
+        ("sheet_power_limit_W", "xᵀRx", "W"),
+        ("magnetic_energy_limit_J", "xᵀM_E x", "J"),
+        ("force_limit_N", "‖F(x)‖₂", "N"),
+        ("torque_limit_Nm", "‖τ(x)‖₂", "N m"),
+        ("force_equality_N", "F(x)", "N"),
+        ("torque_equality_Nm", "τ(x)", "N m"),
+    ):
+        value = _read(physics, key)
+        if value is not None:
+            relation = "=" if "equality" in key else "≤"
+            lines.append(f"{lhs} {relation} {_text(value)} {unit}")
+    for item in _read(physics, "field_constraints", ()):
+        norm = _read(item, "norm", "linf")
+        limit = f"{_text(_read(item, 'tolerance', 0))} {_read(item, 'unit', 'T')}"
+        bound = {"equality": "Aᵢψ = bᵢ", "upper": f"Aᵢψ − bᵢ ≤ {limit}"}.get(norm, f"{norm}(Aᵢψ − bᵢ) ≤ {limit}")
+        lines.append(f"{_read(item, 'name')} · {bound} (group size {_read(item, 'group_size', 1)})")
+    for scenario in _read(physics, "scenarios", ()):
+        for key, norm in (("rms_limit_T", "RMS"), ("peak_limit_T", "peak")):
+            limit = _read(scenario, key)
+            if limit is not None:
+                lines.append(f"{_read(scenario, 'name')} · {norm}(Aᵢψ − bᵢ) ≤ {_text(limit)} T")
+    formulas = _read(physics, "custom_constraints", ()) or ()
+    if isinstance(formulas, str):
+        formulas = tuple(line.strip() for line in formulas.splitlines() if line.strip())
+    lines.extend(formulas)
+    authored = "\n".join((str(_read(physics, "custom_objective", "")), *formulas))
+    if any(
+        _read(physics, key) is not None
+        for key in ("force_limit_N", "torque_limit_Nm", "force_equality_N", "torque_equality_Nm")
+    ) or any(symbol in authored for symbol in ("force_N", "torque_Nm")):
+        background = (
+            "prescribed field per face"
+            if _read(physics, "background_B_per_face_T") is not None
+            else f"B₀ = {_text(_read(physics, 'b0_T', (0, 0, 3)))} T"
+        )
+        lines.append(
+            f"Mechanical model · {background}, torque origin {_text(_read(physics, 'torque_origin_m', (0, 0, 0)))} m"
+        )
+    if physics is None and method == "tikhonov":
+        lines.insert(0, "Post-fit checks · the field term is a soft objective.")
+    else:
+        lines.insert(
+            0,
+            "Candidate feasibility bounds"
+            if physics is None and method == "target_error_constrained_efficiency"
+            else "Subject to",
+        )
+    return tuple(lines)
+
+
+def build_optimization_summary(config, draft=None, *, requirements=None) -> OptimizationSummary:
     """Describe a config or a parsed draft of config overrides, without mutation.
 
     ``draft`` replaces complete config fields, including ``research_physics``;
@@ -143,6 +308,8 @@ def build_optimization_summary(config, draft=None) -> OptimizationSummary:
         return _read(config, name, default)
 
     physics = get("research_physics")
+    if requirements and physics is None:
+        physics = {}
     source = str(get("preoptimized_stream_function_file", "none")).strip()
     if not source or source.lower() == "none":
         source = str(get("sf_source_file", "none")).strip()
@@ -201,6 +368,9 @@ def build_optimization_summary(config, draft=None) -> OptimizationSummary:
         terms.extend(physical_terms)
         notes.extend(physical_notes)
         formulation = "research_physical_convex"
+        if _read(physics, "objective") == "custom" or _read(physics, "custom_constraints", ()):
+            title = "Custom formulation · " + str(_read(physics, "objective", "power")).replace("_", " ")
+            formulation = "research_custom"
         notes.append(
             "research_physics overrides sf_opt_method. Native cost, native objective mode, Tikhonov selection/factor, linear solver and native scan fallback are inactive."
         )
@@ -261,7 +431,7 @@ def build_optimization_summary(config, draft=None) -> OptimizationSummary:
         if mode == "minimax_current_density":
             title, equation = (
                 "Native minimax · peak surface current",
-                "min_x max_f ‖K_f x‖₂ [A/m], subject to configured field and hardware bounds",
+                "min_x max_f ‖K_f x‖₂ [A/m]",
             )
             if _positive(smooth) or _positive(spacing):
                 notes.append(
@@ -274,7 +444,7 @@ def build_optimization_summary(config, draft=None) -> OptimizationSummary:
                 if mode == "smoothness_priority"
                 else "1"
             )
-            equation = f"min_x {alpha} xᵀRx" + penalties + ", subject to configured field and hardware bounds"
+            equation = f"min_x {alpha} xᵀRx" + penalties
             if mode == "smoothness_priority" and not smooth_active:
                 notes.append(
                     "Incompatible settings: smoothness-priority mode requires a positive stream-function smoothness factor in config validation."
@@ -327,7 +497,7 @@ def build_optimization_summary(config, draft=None) -> OptimizationSummary:
     terms.append(
         f"Field component: {component}; DSV residual metric {get('target_error_constraint_metric', 'norm')}, budget grouping {get('target_error_constraint_mode', 'separate')}."
     )
-    native_fields = not physical or _read(physics, "include_default_field_constraints", True)
+    native_fields = not requirements and (not physical or _read(physics, "include_default_field_constraints", True))
     if (method != "tikhonov" or physical) and native_fields:
         notes.append(
             "Requested residual/suppression, gradient, current-density and current-step bounds depend on available sample/operator data; actual enforced bounds are recorded after compilation and solve."
@@ -365,16 +535,38 @@ def build_optimization_summary(config, draft=None) -> OptimizationSummary:
             )
     if _key(get("mri_shim_metric_mode", "off")) != "off":
         notes.append(
-            "MRI shim residual/CVaR/gradient objective weights belong to joint-shim optimization; they do not change this sheet objective."
+            "MRI shim residual/CVaR/gradient objective weights belong to joint-shim optimization; they do not change this stream function objective."
         )
     notes.append(
         "Configured solver tolerances govern numerical termination; engineering acceptance and independent field validation remain separate."
     )
     solver = _solver_text(get, physical or method == "constrained_quadratic", physical)
+    if formulation == "research_custom":
+        mode = _read(physics, "custom_solver", "auto")
+        local = (
+            f"SciPy SLSQP · local constrained optimum sought · tolerance {_text(get('constrained_optimization_tolerance', 1e-7))}"
+            f" · maximum {_text(get('constrained_optimization_max_iterations', 20000))} iterations."
+        )
+        if mode == "auto":
+            solver = f"Auto · convex (DCP) formulas use {solver}\nOther formulas use {local}"
+        elif mode == "local":
+            solver = f"{local}\nInitial feasible point from the minimum-power solve · {solver}"
+        elif mode == "conic":
+            solver = "Convex (DCP) formulas required · " + solver
     notes.extend(_solver_notes(physical or method == "constrained_quadratic"))
     if not physical and method not in {"tikhonov", "target_error_constrained_efficiency", "constrained_quadratic"}:
         solver = "No implemented inverse solver for this method selection."
-    return OptimizationSummary(title, equation, tuple(terms), tuple(notes), solver, formulation, draft is not None)
+    constraints = _configured_bounds(get, physics, method, requirements, current, distance)
+    solver += f"\nStream function basis · {basis}, ψ = E x [A]."
+    if physical:
+        solver += f" Feasibility slack · relative {_text(_read(physics, 'acceptance_relative_tolerance', 1e-5))}, field {_text(_read(physics, 'acceptance_absolute_by_unit', {'T': 1e-10}).get('T', 0))} T."
+    elif method == "tikhonov":
+        solver += f" Regularization · {get('regularization_selection_method', 'l_curve')}, factor {_text(get('tikonov_reg_factor', 1))}."
+    elif method == "constrained_quadratic":
+        solver += f" Fallback · {get('constrained_quadratic_fallback_policy', 'target_error_scan')}."
+    return OptimizationSummary(
+        title, equation, tuple(terms), tuple(notes), solver, formulation, draft is not None, constraints
+    )
 
 
 def _physical_objective(physics):
@@ -389,7 +581,7 @@ def _physical_objective(physics):
     }
     terms, notes = [], []
     if objective == "mixture":
-        equation = "min_x Σ_j w_j F_j(x)/s_j, subject to configured physical bounds"
+        equation = "min_x Σ_j w_j F_j(x)/s_j"
         weights, scales = get("objective_weights", {"power": 1, "magnetic_energy": 1}), get("objective_scales", {})
         if not isinstance(weights, Mapping) or not isinstance(scales, Mapping):
             weights, scales = {}, {}
@@ -415,12 +607,11 @@ def _physical_objective(physics):
         notes.append(
             f"Reference field-tolerance scale: {_text(get('reference_tolerance_scale', 1))}; any missing scale must be strictly positive at the feasible reference, otherwise supply an explicit scale."
         )
+        equation += "\n" + "\n".join(term for term in terms if "weight " in term)
+    elif objective == "custom":
+        equation = "minimize   " + str(get("custom_objective", "") or "(enter a scalar formula)")
     else:
-        equation = (
-            "min_x "
-            + expressions.get(objective, f"unsupported objective '{objective}'")
-            + ", subject to configured physical bounds"
-        )
+        equation = "min_x " + expressions.get(objective, f"unsupported objective '{objective}'")
         notes.append(
             "A single physical objective is numerically normalized by a positive scale. The normalized solver objective is dimensionless; reconstructed physical P/E/K quantities carry the stated SI units. Mixture weights and reference-tolerance scale are inactive for a single objective."
         )
@@ -437,6 +628,7 @@ def _physical_objective(physics):
         get("evaluate_energy", False) or get("magnetic_energy_limit_J") is not None or objective == "magnetic_energy"
     )
     energy |= objective == "mixture" and _positive(weights.get("magnetic_energy", 0))
+    energy |= "energy_J" in str(get("custom_objective", "")) or "energy_J" in str(get("custom_constraints", ()))
     terms.append(
         "Energy quadrature settings are "
         + (
@@ -458,10 +650,10 @@ def _nonnegative(value):
 def _solver_text(get, conic, physical=False):
     if conic:
         backend = str(get("constrained_optimization_solver", "auto")).upper()
-        route = "auto: installed CLARABEL → ECOS → SCS" if backend == "AUTO" else backend
+        route = "auto · available backends in order CLARABEL → ECOS → SCS" if backend == "AUTO" else backend
         return (
-            f"CVXPY conic · {route}; tolerance {_text(get('constrained_optimization_tolerance', 1e-7))}; "
-            f"iterations {_text(get('constrained_optimization_max_iterations', 20000))}; "
+            f"CVXPY conic · {route}; tolerance {_text(max(get('constrained_optimization_tolerance', 1e-7), 1e-12))}; "
+            f"iterations {_text(max(get('constrained_optimization_max_iterations', 20000), 1))}; "
             f"requested threads {_text(get('constrained_optimization_threads', 0))} (0: backend/runtime default); "
             + ("verbose inactive." if physical else f"verbose {get('constrained_optimization_verbose', False)}.")
         )

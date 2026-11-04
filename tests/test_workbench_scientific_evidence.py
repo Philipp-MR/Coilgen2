@@ -93,7 +93,7 @@ def test_full_run_reviews_distinct_verdicts_and_visible_pipeline_problems(window
     window.load_run(window.service.record.directory)
     window.navigate_workflow("review")
     banner = window.result_state.text()
-    assert "Sheet checks: Passed" in banner and "Sweep geometry: Failed" in banner
+    assert "Stream function checks: Passed" in banner and "Sweep geometry: Failed" in banner
     assert "Fabrication review: Not run" in banner
     assert "engineering acceptance: Passed" not in banner
     texts = [label.text() for label in window.settings.widget().findChildren(QLabel)]

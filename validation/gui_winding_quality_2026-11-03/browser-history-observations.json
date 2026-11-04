@@ -1,0 +1,494 @@
+{
+  "e6b3db38922f0f6b9ec2d0637b85d45b05fdf2bec3359e0e8735355589070c1a": {
+    "label": "Actively shielded Y gradient (Gy) · r4 · evaluated · e6b3db38",
+    "before_routing": "Before routing: 40 of 40 contours smoothed; 28 using local corner blends.",
+    "reviewed_dsv_rms": "4.438 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 500 µm",
+      "- strong: Support 2",
+      "- generic: Largest applied displacement 498.6 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "d51daeafd8d271bdcd461ec04fa5057a73040b92534f6ac0c174b6c66d45f4a4": {
+    "label": "Halbach transverse-field Z gradient (Gz) · r2 · evaluated · d51daeaf",
+    "before_routing": "Before routing: 32 of 32 contours smoothed.",
+    "reviewed_dsv_rms": "5.39 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 499.5 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "c560b7bea35644df7781bd74e46ca15f0bbcaccc91b26379ddee3ea93ec474dd": {
+    "label": "Biplanar YZ · r2 · evaluated · c560b7be",
+    "before_routing": "Before routing: 32 of 32 contours smoothed; 8 using local corner blends.",
+    "reviewed_dsv_rms": "4.06 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 482.8 µm",
+      "- strong: Support 2",
+      "- generic: Largest applied displacement 482.8 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "c19b0a1b97668a9ea8a29f84fe24565dea44a00be6ae2587603389332bde4e58": {
+    "label": "Biplanar X²−Y² · r2 · evaluated · c19b0a1b",
+    "before_routing": "Before routing: 72 of 72 contours smoothed; 14 using local corner blends.",
+    "reviewed_dsv_rms": "16.49 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 495.8 µm",
+      "- strong: Support 2",
+      "- generic: Largest applied displacement 495.8 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "c06c81d986554fe451e9c3bb64433ec896a5c60352d16d99219dce52f1b156ee": {
+    "label": "Biplanar Gy · r2 · evaluated · c06c81d9",
+    "before_routing": "Before routing: 62 of 64 contours smoothed; 26 using local corner blends, 2 kept for spacing.",
+    "reviewed_dsv_rms": "4.099 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 497.5 µm",
+      "- strong: Support 2",
+      "- generic: Largest applied displacement 497.5 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "b7ce33ce66c1086c3ae35915a901a8ef249764470c03549688e80a17c85755b7": {
+    "label": "Halbach transverse-field Y gradient (Gy) · r2 · evaluated · b7ce33ce",
+    "before_routing": "Before routing: 32 of 32 contours smoothed.",
+    "reviewed_dsv_rms": "4.349 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 495.6 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "affa753e91bf98df901d8832f2cc395905b9365b2a90a5926946758a6ce09acb": {
+    "label": "Biplanar XZ · r2 · evaluated · affa753e",
+    "before_routing": "Before routing: 26 of 26 contours smoothed; 4 using local corner blends.",
+    "reviewed_dsv_rms": "7.729 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 494.8 µm",
+      "- strong: Support 2",
+      "- generic: Largest applied displacement 494.8 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "a14e3426a4df9dd30c481ff7e452cce4a44a58a2475b37e82288271ee93b351e": {
+    "label": "Cylindrical Z gradient (Gz) · r2 · evaluated · a14e3426",
+    "before_routing": "Before routing: 32 of 32 contours smoothed.",
+    "reviewed_dsv_rms": "4.21 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 73.81 nm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "9f179254a6a0e04f57bf39ed6306d5563df1cf14e272bcf4fc52b9c0e7d6ef62": {
+    "label": "Halbach transverse-field X gradient (Gx) · r2 · evaluated · 9f179254",
+    "before_routing": "Before routing: 32 of 32 contours smoothed.",
+    "reviewed_dsv_rms": "5.674 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 498.2 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "95b248fda4ae81bd498d17eeabfad2478e6c5c8103e32525633f1faec449ecd5": {
+    "label": "Uniform B0 shim (Z0) · r2 · evaluated · 95b248fd",
+    "before_routing": "Before routing: 12 of 12 contours smoothed.",
+    "reviewed_dsv_rms": "4.133 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 3.309 nm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "951cda393b6bb3531e2659ec02ff11237010de685d6e164e90258e28de9536dc": {
+    "label": "Biplanar Gz · r2 · evaluated · 951cda39",
+    "before_routing": "Before routing: 34 of 34 contours smoothed; 10 using local corner blends.",
+    "reviewed_dsv_rms": "4.113 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 500 µm",
+      "- strong: Support 2",
+      "- generic: Largest applied displacement 500 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "89bce95f0bae6284164ee3198ac06f5873604a598f7a2251dd55acb797aaae0c": {
+    "label": "Biplanar Z0 · r2 · evaluated · 89bce95f",
+    "before_routing": "Before routing: 24 of 24 contours smoothed; 10 using local corner blends.",
+    "reviewed_dsv_rms": "4.033 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 488.4 µm",
+      "- strong: Support 2",
+      "- generic: Largest applied displacement 488.4 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "701855c610a591ccca40034362ff44efdf3c4de2511f25551d6172d103dbb8b4": {
+    "label": "Second-order shim — YZ · r2 · evaluated · 701855c6",
+    "before_routing": "Before routing: 12 of 12 contours smoothed.",
+    "reviewed_dsv_rms": "4.674 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 421.2 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "6782d39deeeede21d599d4fe04eb7f4ae1a31f7b99122ae1c9f76d39d7e3ddae": {
+    "label": "Biplanar X gradient (Gx) · r2 · evaluated · 6782d39d",
+    "before_routing": "Before routing: 32 of 32 contours smoothed; 8 using local corner blends.",
+    "reviewed_dsv_rms": "11.88 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 487.5 µm",
+      "- strong: Support 2",
+      "- generic: Largest applied displacement 487.5 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "5627415cfd7fff016bd184c83438d736e537d65bc5522b0c989d8f44884501b1": {
+    "label": "Biplanar Y gradient (Gy) · r2 · evaluated · 5627415c",
+    "before_routing": "Before routing: 69 of 72 contours smoothed; 25 using local corner blends, 3 kept for spacing.",
+    "reviewed_dsv_rms": "4.097 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 491.5 µm",
+      "- strong: Support 2",
+      "- generic: Largest applied displacement 491.5 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "4c54a647d0bc0e161a9cc1a7d4ab24522053794a28baa16ddafd24a2ad1b2180": {
+    "label": "Second-order shim — X²−Y² · r2 · evaluated · 4c54a647",
+    "before_routing": "Before routing: 48 of 48 contours smoothed.",
+    "reviewed_dsv_rms": "5.019 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 415.3 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "3f36430e34f1b02b214199fe9b6e6e8ab8a1d80d9dc6630b0b9820e637a3d27d": {
+    "label": "Cylindrical Y gradient (Gy) · r2 · evaluated · 3f36430e",
+    "before_routing": "Before routing: 32 of 32 contours smoothed.",
+    "reviewed_dsv_rms": "4.125 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 499.2 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "3a40ee6e9fd646120ddb249e283330f6e93c7ce60033bfba8f72c1a811599434": {
+    "label": "Biplanar Gx · r2 · evaluated · 3a40ee6e",
+    "before_routing": "Before routing: 32 of 32 contours smoothed; 14 using local corner blends.",
+    "reviewed_dsv_rms": "11.87 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 498.9 µm",
+      "- strong: Support 2",
+      "- generic: Largest applied displacement 498.9 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "2f86b4c37b7947b17aef33e39a5eb3ab5cae94b9b7e200647250823d53c6457a": {
+    "label": "Cylindrical X gradient (Gx) · r2 · evaluated · 2f86b4c3",
+    "before_routing": "Before routing: 32 of 32 contours smoothed.",
+    "reviewed_dsv_rms": "4.124 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 499.2 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "28c76249b1e7be775fb13e46e334190f73d72ae5ba42a4d1c5b721474bdeab32": {
+    "label": "Conical Z2 · r2 · evaluated · 28c76249",
+    "before_routing": "Before routing: 16 of 37 contours smoothed; 10 using local corner blends, 21 kept after fit checks.",
+    "reviewed_dsv_rms": "20.73 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 495.3 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "1d5a70a9615d1e5114761fa54aa5fe2561f0d30d73205e9820d1e8e9d0bf6f96": {
+    "label": "Second-order shim — XZ · r2 · evaluated · 1d5a70a9",
+    "before_routing": "Before routing: 12 of 12 contours smoothed.",
+    "reviewed_dsv_rms": "4.656 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 429.5 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "1cdab884c13bd1356798ee8d3f29dc6926640e9e0293af9cf85fec5d25005922": {
+    "label": "Biplanar Z2 · r2 · evaluated · 1cdab884",
+    "before_routing": "Before routing: 52 of 52 contours smoothed; 50 using local corner blends.",
+    "reviewed_dsv_rms": "6.389 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 498.7 µm",
+      "- strong: Support 2",
+      "- generic: Largest applied displacement 498.7 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "140b51bd0a19c036d390e69e5fe8ba1d4737c84adcb27ecbd0ff5eccfe657307": {
+    "label": "Second-order shim — Z2 · r2 · evaluated · 140b51bd",
+    "before_routing": "Before routing: 32 of 32 contours smoothed.",
+    "reviewed_dsv_rms": "34.01 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 1.126 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "00e9ed52f3e89fed2fedec7f497c30d79746aaf335ea881feb174f8bdddb9269": {
+    "label": "Biplanar Z gradient (Gz) · r2 · evaluated · 00e9ed52",
+    "before_routing": "Before routing: 34 of 34 contours smoothed; 6 using local corner blends.",
+    "reviewed_dsv_rms": "3.975 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 497 µm",
+      "- strong: Support 2",
+      "- generic: Largest applied displacement 497 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "fad53b52852b84731603cff633ef56ea99ec40b9b55874e3c6534a67611b9812": {
+    "label": "Second-order shim — XY · r2 · evaluated · fad53b52",
+    "before_routing": "Before routing: 48 of 48 contours smoothed.",
+    "reviewed_dsv_rms": "5.206 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 396.7 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "e4a3b5c9451c585bfacc507a6430bc39419f5360139d5cf18647bac0bdad3b88": {
+    "label": "Biplanar Gy · r3 · evaluated · e4a3b5c9",
+    "before_routing": "Before routing: 62 of 64 contours smoothed; 26 using local corner blends, 2 kept for spacing.",
+    "reviewed_dsv_rms": "4.115 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 497.5 µm",
+      "- strong: Support 2",
+      "- generic: Largest applied displacement 497.5 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "93f1df0ecaeee3db46779ab4bfeac40db25f76cf5c3cff27b237163f9e28eecd": {
+    "label": "Cylindrical Gz · r2 · evaluated · 93f1df0e",
+    "before_routing": "Before routing: 32 of 32 contours smoothed.",
+    "reviewed_dsv_rms": "4.294 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 45.9 nm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "5e5ded94807e7891e692103cd049a6b96955a73f3bfdff696cd237a38ed69889": {
+    "label": "Biplanar X²−Y² · r3 · evaluated · 5e5ded94",
+    "before_routing": "Before routing: 72 of 72 contours smoothed; 58 using local corner blends.",
+    "reviewed_dsv_rms": "10.88 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 495.5 µm",
+      "- strong: Support 2",
+      "- generic: Largest applied displacement 495.5 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "598fcf9842af6930e267aa56b6ce16fbd282d7d89ae74b6517f610d74d07cc4c": {
+    "label": "Conical Z2 · r3 · evaluated · 598fcf98",
+    "before_routing": "Before routing: 35 of 35 contours smoothed; 7 using local corner blends.",
+    "reviewed_dsv_rms": "5.461 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 499.6 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "59733e0ae760598845e75a99fb9e139988a28d9ec9e8c692043d68d806823819": {
+    "label": "Cylindrical Gy · r2 · evaluated · 59733e0a",
+    "before_routing": "Before routing: 32 of 32 contours smoothed.",
+    "reviewed_dsv_rms": "4.092 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 490.2 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "350e1dc8545c2f1a1131a18b5dc8b66d10ef30ffb58ad6be6ee4697c9b694837": {
+    "label": "Cylindrical Gx · r2 · evaluated · 350e1dc8",
+    "before_routing": "Before routing: 32 of 32 contours smoothed.",
+    "reviewed_dsv_rms": "4.124 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 499.2 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "28defdf2ee3afd4ccbd54fdb72bfee8593783dc2b553711619e9ff567c78e792": {
+    "label": "Biplanar XY · r2 · evaluated · 28defdf2",
+    "before_routing": "Before routing: 48 of 48 contours smoothed; 8 using local corner blends.",
+    "reviewed_dsv_rms": "7.571 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 487.3 µm",
+      "- strong: Support 2",
+      "- generic: Largest applied displacement 487.3 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  },
+  "4820b9d10a2927e93b3e5a87ec081af7be3a61260d30af0df051f44ebdc76acc": {
+    "label": "Second-order shim — Z2 · r3 · evaluated · 4820b9d1",
+    "before_routing": "Before routing: 32 of 32 contours smoothed.",
+    "reviewed_dsv_rms": "32.24 %",
+    "support": [
+      "- strong: Support 1",
+      "- generic: Largest applied displacement 3.072 µm"
+    ],
+    "checks": [
+      "Continuous sheet · Passed",
+      "Pipeline conductor sweep · Failed",
+      "Strict fabrication review · Failed"
+    ]
+  }
+}

@@ -184,8 +184,10 @@ def test_insulation_clearance_failure_blocks_otherwise_valid_sweep_export(tmp_pa
     assert not diagnostics["sweep_mesh_self_intersection"]
     assert diagnostics["sweep_capsule_clearance_violation"]
     assert not diagnostics["manufacturing_ok"]
-    assert "sweep_clearance_violation" in diagnostics["manufacturing_failure_reasons"]
-    with pytest.raises(ValueError, match="sweep_clearance_violation"):
+    assert "insufficient_copper_gap" in diagnostics["manufacturing_failure_reasons"]
+    assert diagnostics["exact_collision_completed"]
+    assert 0 < diagnostics["copper_gap_minimum_lower_bound_m"] < diagnostics["required_copper_gap_m"]
+    with pytest.raises(ValueError, match="insufficient_copper_gap"):
         save_swept_bodies_as_stl(SimpleNamespace(coil_parts=[part]), tmp_path, fail_on_violations=True)
     assert not list(tmp_path.glob("*.stl"))
 

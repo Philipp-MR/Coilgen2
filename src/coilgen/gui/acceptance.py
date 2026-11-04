@@ -1,7 +1,7 @@
 """Decision-facing summaries of immutable evidence; no solve or new acceptance.
 
 Saved constraint limits are authoritative. Descriptive wire-field metrics never
-borrow a sheet budget, and unknown evidence never becomes a passed check.
+borrow a stream function field budget, and unknown evidence never becomes a passed check.
 """
 
 from __future__ import annotations
@@ -61,8 +61,8 @@ class AcceptanceReport:
 
 
 _STAGES = (
-    ("sheet", "Continuous sheet"),
-    ("contours", "Original contours"),
+    ("sheet", "Stream function model"),
+    ("contours", "Contours before routing"),
     ("routed", "Connected winding"),
     ("physical", "Physical conductor"),
 )
@@ -203,7 +203,7 @@ def _constraint(index, row, metadata):
         )
     elif stage == "sheet" and ("field" in lower_name or lower_name.startswith("standard:")):
         count = (metadata.get("validation") or {}).get("point_count") if sampling == "independent grid" else None
-        scope = f"Continuous sheet · {sampling}" + (
+        scope = f"Stream function model · {sampling}" + (
             f" · {count} samples" if isinstance(count, int) and count > 0 else ""
         )
         if sampling == "independent grid":
@@ -217,7 +217,7 @@ def _constraint(index, row, metadata):
             scope += " · solver residual contract, not an RMS field metric"
     elif stage == "sheet":
         scope = (
-            "Continuous sheet · solver contract"
+            "Stream function model · solver contract"
             if row.get("scope") == "continuous_sheet"
             else "Saved constraint scope unverified"
         )
@@ -274,6 +274,32 @@ def _body_rows(metadata):
             body_id = str(body.get("body_id") or f"body {index + 1}")
             diagnostics = body.get("diagnostics") or {}
             for key, title, value_key, limit_key, flag, unit, comparison in _BODY_CHECKS:
+                if key == "clearance" and "copper_clearance_failure" in diagnostics:
+                    verified = diagnostics.get("exact_collision_completed") is True
+                    failure = diagnostics.get("copper_clearance_failure")
+                    limit = _number(diagnostics.get("required_copper_gap_m"))
+                    value = _number(diagnostics.get("copper_gap_minimum_lower_bound_m")) if verified else None
+                    if verified and diagnostics.get("exact_intersection_count", 0):
+                        value = 0.0
+                    status = "Unverified" if not verified else "Failed" if failure else "Passed"
+                    rows.append(
+                        AcceptanceCheck(
+                            f"body:{scope}:{body_id}:{key}",
+                            "physical",
+                            "Copper surface separation",
+                            status,
+                            value,
+                            limit,
+                            limit,
+                            value - limit if value is not None and limit is not None else None,
+                            "m",
+                            f"{scope} · {body_id} · tested copper facets; passing value is a lower bound",
+                            "winding",
+                            body_id=body_id,
+                            comparison="lower",
+                        )
+                    )
+                    continue
                 value, limit = (
                     _number(diagnostics.get(value_key)),
                     _number(diagnostics.get(limit_key, (metadata.get("config") or {}).get(limit_key))),
@@ -354,7 +380,7 @@ def acceptance_report(metadata=None, *, project=None, pending=False) -> Acceptan
     stages = [
         AcceptanceStage(
             "sheet",
-            "Continuous sheet",
+            "Stream function model",
             sheet_status,
             "Saved solver contract and independent-grid checks; current unchanged.",
         )
@@ -364,15 +390,15 @@ def acceptance_report(metadata=None, *, project=None, pending=False) -> Acceptan
         AcceptanceCheck(
             "sheet:acceptance",
             "sheet",
-            "Sheet acceptance",
+            "Stream function acceptance",
             sheet_status,
-            scope="Continuous sheet before contouring/routing",
+            scope="Stream function model before contouring/routing",
             settings_node="optimization",
         ),
     )
     wire_fields = metadata.get("wire_fields") or {}
     for key, kind, title, minimum in (
-        ("contours", "contour", "Original contours", 2),
+        ("contours", "contour", "Contours before routing", 2),
         ("routed", "routed", "Connected winding", 3),
     ):
         evidence = wire_fields.get(kind) or {}

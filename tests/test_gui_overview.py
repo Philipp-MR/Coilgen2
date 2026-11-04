@@ -31,7 +31,7 @@ def state(*, action="compute", tone="info"):
             ("target", "Target", "defined", "Absolute Bz in tesla; coordinates in metres.", "neutral"),
             ("support", "Support", "defined", "Open cylindrical support surface.", "neutral"),
             ("conductor", "Conductor", "defined", "Copper with 0.1 mm insulation.", "neutral"),
-            ("solve", "Solve", "not_computed", "No saved sheet solution.", "neutral"),
+            ("solve", "Solve", "not_computed", "No saved stream function solution.", "neutral"),
             ("winding", "Winding", "not_computed", "Contour generation and connected routes requested.", "neutral"),
             ("check", "Check", "unverified", "Independent field and conductor checks have not run.", "neutral"),
             ("export", "Export", "not_run", "No computed conductor solid is available.", "neutral"),
@@ -177,7 +177,7 @@ def test_scoped_status_retains_supplied_failure_and_plain_summary_text(overview)
     current = state()
     current.stages[-2].status = "failed"
     current.stages[-2].tone = "error"
-    current.stages[-2].detail = "Independent sheet passes; conductor clearance fails."
+    current.stages[-2].detail = "Stream function field on independent samples passes; conductor clearance fails."
     overview.set_state(current, {"target": "Bz < 100 µT & external map"})
     assert overview.status_labels["check"].text().endswith("Failed")
     assert overview.status_labels["check"].property("semanticTone") == "error"
@@ -346,7 +346,7 @@ def test_export_theme_repaint_preserves_failed_scope_and_selection(application):
     try:
         original = panel.status.text()
         selected = panel.selected_names()
-        assert panel.include_project.text() == "Include project JSON and results"
+        assert panel.include_project.text() == "Include matching run project"
         assert "self-contained" in panel.include_project.toolTip()
         for background, text in (("#ffffff", "#222222"), ("#202020", "#eeeeee")):
             _panel_palette(panel, background, text)

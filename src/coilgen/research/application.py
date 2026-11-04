@@ -13,8 +13,13 @@ from ..pipeline_stages import PipelineCheckpoint, PipelineStage
 from ..progress import DesignCancelled, ProgressReporter, progress_scope
 from ..reporting import write_design_report
 from ..scientific_arrays import scientific_arrays as _scientific_arrays
-from ..scientific_arrays import fabrication_frame_arrays, routing_evidence
-from ..application.stage_preview import MANIFEST_NAME as STAGE_PREVIEW_MANIFEST, publish_stage_preview
+from ..scientific_arrays import fabrication_frame_arrays, routing_evidence, shielding_contribution_arrays
+from ..application.stage_preview import (
+    MANIFEST_NAME as STAGE_PREVIEW_MANIFEST,
+    publish_evaluation_preview,
+    publish_feature_preview,
+    publish_stage_preview,
+)
 from .requests import ResearchRequest
 from .storage import (
     DirectoryOwner,
@@ -30,6 +35,37 @@ from .validation import (
     validate_fabricated_constraints,
     validate_winding_on_independent_grid,
 )
+
+
+def _contour_smoothing_evidence(parts) -> list[dict]:
+    """Retain each support's measured pre-routing smoothing outcome in portable results."""
+    recorded = {
+        "smoothed_count": "contour_path_smoothing_contour_count",
+        "fit_rejected_count": "contour_path_smoothing_failed_count",
+        "spacing_rejected_count": "contour_path_smoothing_spacing_rejected_count",
+        "max_displacement_m": "contour_path_smoothing_max_applied_displacement_m",
+    }
+    evidence = []
+    for index, part in enumerate(parts, 1):
+        diagnostics = part.contour_level_diagnostics
+        if diagnostics.get("contour_path_smoothing_method") in (None, "off"):
+            continue
+        if not all(key in diagnostics for key in recorded.values()):
+            # Don't infer fit or spacing rejections for incomplete old checkpoints.
+            continue
+        evidence.append(
+            {
+                "part_index": index,
+                **{name: diagnostics[key] for name, key in recorded.items()},
+                **(
+                    {"local_fit_count": diagnostics["contour_path_smoothing_local_fit_count"]}
+                    if "contour_path_smoothing_local_fit_count" in diagnostics
+                    else {}
+                ),
+                "failure_reasons": diagnostics.get("contour_path_smoothing_failure_reasons", {}),
+            }
+        )
+    return evidence
 
 
 def _pipeline_sweep_evidence(parts, config) -> dict:
@@ -172,6 +208,9 @@ def _wire_field_evidence(result) -> tuple[dict, dict]:
             entry.update(_wire_field_metrics(field, result.target_field, config))
             if entry["available"]:
                 arrays[f"{key}_field_T"] = np.asarray(field)
+                arrays.update(
+                    shielding_contribution_arrays(result.coil_parts, result.target_field, key, current_A=current)
+                )
                 if key == "routed":
                     for index, (points, _) in enumerate(geometry):
                         arrays[f"evaluated_winding_{index}_points_m"] = points
@@ -247,6 +286,8 @@ def _design_work_ranges(request):
     stage = PipelineStage(request.pipeline_stage)
     full = stage is PipelineStage.EVALUATED
     weights = [("inputs", 2), ("pipeline", 80), ("checkpoint", 2)]
+    if full:
+        weights.append(("wire_evidence", 2))
     if request.requirements is not None or stage.index >= PipelineStage.SHEET.index:
         weights.append(("validation", 10))
     if full and request.fabricate:
@@ -261,8 +302,6 @@ def _design_work_ranges(request):
         weights.append(("fabricated_requirements", 10))
     if request.scene is not None and (full or stage is PipelineStage.ROUTED):
         weights.append(("scene", 8))
-    if full:
-        weights.append(("wire_evidence", 2))
     weights.append(("save", 8))
     total, position, ranges = sum(weight for _, weight in weights), 0.0, {}
     for index, (name, weight) in enumerate(weights):
@@ -282,12 +321,13 @@ def _save_partial_result(
     arrays = _scientific_arrays(
         state.parts, state.target_field, state.combined_mesh, state.sf_b_field, include_routing=True
     )
+    arrays.update(state.shielding_arrays)
     pipeline_sweeps = _pipeline_sweep_evidence(state.parts, checkpoint.config)
     validation = {
         "available": False,
         "verified": False,
         "passed": None,
-        "reason": "The continuous sheet has not been solved.",
+        "reason": "The stream function has not been solved.",
     }
     constraints = _constraint_rows(diagnostics)
     relative = None
@@ -309,7 +349,9 @@ def _save_partial_result(
             regularization_diagnostics=diagnostics,
         )
         if request.requirements is None:
-            with progress_scope(*work_ranges["validation"], "Checking an independent sheet grid", overall=True):
+            with progress_scope(
+                *work_ranges["validation"], "Checking the stream function field on an independent grid", overall=True
+            ):
                 validation = validate_on_independent_grid(
                     sheet_view, resolution=request.validation_resolution, design_margin=request.design_margin
                 )
@@ -324,7 +366,7 @@ def _save_partial_result(
             validation = named_independent_sheet_validation(requirements_review, request.requirements)
         constraints.append(
             {
-                "name": "Regional independent sheet validation"
+                "name": "Regional independent stream function field validation"
                 if request.requirements is not None
                 else "Independent grid field error",
                 "value": validation.get("value"),
@@ -435,6 +477,7 @@ def _save_partial_result(
             key: value for key, value in validation.items() if key not in {"points_m", "field_T", "target_T"}
         },
         "pipeline_sweeps": pipeline_sweeps,
+        "contour_smoothing": _contour_smoothing_evidence(state.parts),
         "routing": routing_evidence(state.parts),
         **({"requirements_review": requirements_review} if requirements_review is not None else {}),
         **({"scene_review": scene_review} if scene_review is not None else {}),
@@ -443,9 +486,8 @@ def _save_partial_result(
         "checkpoint": "pipeline_checkpoint.cgstage",
         **_project_provenance(request),
     }
-    with progress_scope(save_start + 0.95 * save_span, save_end, "Saving checkpoint result evidence", overall=True):
-        atomic_json(directory / "result.json", payload)
-    return json_value(payload)
+    with progress_scope(save_start + 0.95 * save_span, save_end, "Preparing checkpoint result metadata", overall=True):
+        return json_value(payload)
 
 
 def _recorded_contour_surface_spacing(parts, config):
@@ -474,7 +516,7 @@ def _relative_field_error(actual, target, mask, component, direction):
 
 
 def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, threads=1) -> dict:
-    """Run a resolved design and retain evidence from sheet through fabrication.
+    """Run a resolved design and retain evidence from stream function optimization through fabrication.
 
     Completion means a result was computed. ``summary.accepted`` is a separate
     engineering decision; invalid/unknown fabrication is never promoted to pass.
@@ -556,16 +598,27 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
             error = f"{type(exc).__name__}: {exc}"
         progress.boundary(completed.stage.value, preview=preview, preview_error=error)
 
+    def publish_feature(feature, data, *, publisher=publish_feature_preview, **provenance):
+        try:
+            publisher(directory, data, feature, request, digest, **provenance)
+        except DesignCancelled:
+            raise
+        except Exception as exc:
+            # The previous snapshot stays available. A missing display update
+            # must not alter the scientific run or advance its completed stages.
+            progress.report(None, f"Live {feature} preview unavailable: {type(exc).__name__}: {exc}")
+
     with geometry_acceleration(request.kernel_backend):
         with progress_scope(*work_ranges["pipeline"], "Computing the requested numerical stages", overall=True):
             resumed = PipelineCheckpoint.load(request.resume_checkpoint) if request.resume_checkpoint else None
             pipeline_controls = {"requirements": request.requirements} if request.requirements is not None else {}
             checkpoint = CoilGenPipeline(config, project_root=directory, **pipeline_controls).run_stage(
-                request.pipeline_stage, resumed, checkpoint_callback=retain_stage
+                request.pipeline_stage,
+                resumed,
+                checkpoint_callback=retain_stage,
+                feature_callback=publish_feature,
+                resume_callback=publish_preview,
             )
-        if resumed is not None and checkpoint.stage is resumed.stage:
-            # run_stage has now checked compatibility; no new callback ran.
-            publish_preview(checkpoint)
         with progress_scope(*work_ranges["checkpoint"], "Saving the completed scientific checkpoint", overall=True):
             checkpoint.save(directory / "pipeline_checkpoint.cgstage")
     if checkpoint.stage is not PipelineStage.EVALUATED:
@@ -573,6 +626,27 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
             request, checkpoint, directory, manifest, digest, started, stage_artifacts, work_ranges
         )
     result = checkpoint.result
+    arrays = _scientific_arrays(
+        result.coil_parts, result.target_field, result.combined_mesh, result.b_field_opt_sf, include_routing=True
+    )
+    with progress_scope(
+        *work_ranges["wire_evidence"], "Retaining evaluated wire-field maps and current provenance", overall=True
+    ):
+        wire_arrays, wire_evidence = _wire_field_evidence(result)
+    arrays.update(wire_arrays)
+    fabricated_current_source = None
+
+    def publish_evaluation(feature):
+        publish_feature(
+            feature,
+            arrays,
+            publisher=publish_evaluation_preview,
+            wire_fields=wire_evidence,
+            fabricated_current_source=fabricated_current_source,
+        )
+
+    if "contour_field_T" in wire_arrays or "routed_field_T" in wire_arrays:
+        publish_evaluation("evaluated_winding")
     pipeline_sweeps = _pipeline_sweep_evidence(result.coil_parts, config)
     diagnostics = result.regularization_diagnostics
     requirements_review, requirements_arrays = None, {}
@@ -589,6 +663,13 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
             validation = validate_on_independent_grid(
                 result, resolution=request.validation_resolution, design_margin=request.design_margin
             )
+        if validation["available"]:
+            arrays.update(
+                validation_points_m=validation["points_m"],
+                validation_field_T=validation["field_T"],
+                validation_target_T=validation["target_T"],
+            )
+            publish_evaluation("independent_field")
     mask = ~np.asarray(result.target_field.suppressed, bool)
     relative = (
         None
@@ -601,7 +682,7 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
     validation_passed = validation.get("passed")
     constraints.append(
         {
-            "name": "Regional independent sheet validation"
+            "name": "Regional independent stream function field validation"
             if request.requirements is not None
             else "Independent grid field error",
             "value": validation.get("value"),
@@ -620,7 +701,7 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         row["passed"] is True for row in constraints
     )
     warnings = [
-        "Magnetostatic sheet model; RF loading, SAR, transient eddy currents and thermal cooling are not modeled."
+        "The stream function model assumes magnetostatics. RF loading, SAR, transient eddy currents and thermal cooling are outside its scope."
     ]
     if not validation["available"]:
         warnings.append(validation["reason"])
@@ -658,6 +739,19 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
                 kernel_backend=request.kernel_backend,
                 **({"circuits": engineering.circuit_map} if engineering else {}),
             )
+        # Review can intentionally re-realize on the FEM mesh while the native
+        # pipeline uses an analytic surface. Keep both physical datasets.
+        review_paths = {
+            f"review_conductor_{index}_points_m": record.points_m for index, record in enumerate(fabrication.paths)
+        }
+        for index, plan in enumerate(fabrication.winding_steps):
+            if plan.get("electrical_points_m") is not None:
+                review_paths[f"review_electrical_{index}_points_m"] = np.asarray(
+                    plan["electrical_points_m"], dtype=float
+                )
+        arrays.update(review_paths)
+        if any(len(path) >= 2 for path in review_paths.values()):
+            publish_evaluation("review_conductor")
         warnings.extend(fabrication.failure_reasons)
         if any(not plan.get("drive_feed_designed", False) for plan in fabrication.winding_steps):
             warnings.append(
@@ -679,6 +773,11 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
             fabricated_physics = validate_fabricated_constraints(
                 result, fabrication, design_margin=request.design_margin, **validation_controls
             )
+        if fabricated_physics.get("field_T") is not None:
+            arrays["fabricated_field_T"] = fabricated_physics["field_T"]
+            arrays["fabricated_points_m"] = result.target_field.coords
+            fabricated_current_source = fabricated_physics.get("current_source")
+            publish_evaluation("fabricated_field")
         constraints.extend(fabricated_physics["checks"])
         warnings.extend(fabricated_physics["unknown_reasons"])
         if engineering:
@@ -692,6 +791,13 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
                         resolution=request.validation_resolution,
                         design_margin=request.design_margin,
                     )
+                if winding_validation["available"]:
+                    arrays.update(
+                        winding_validation_points_m=winding_validation["points_m"],
+                        winding_validation_field_T=winding_validation["field_T"],
+                        winding_validation_target_T=winding_validation["target_T"],
+                    )
+                    publish_evaluation("winding_validation")
                 constraints.extend(winding_validation["checks"])
                 warnings.extend(winding_validation["unknown_reasons"])
                 if not winding_validation["available"]:
@@ -780,7 +886,7 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
             artifacts.append({"name": name, "kind": Path(path).suffix.lstrip(".")})
     else:
         warnings.append(
-            "Continuous-sheet/contour study: routing, terminals and fabrication readiness have not been established."
+            "This study covers the stream function and contours. Routing, terminals and fabrication readiness require separate checks."
         )
     if dynamic_analysis is not None:
         from ..application.dynamic_studies import review_dynamic_analyses
@@ -874,9 +980,9 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         "field_source": validation.get("source")
         if request.requirements is not None
         else (
-            "continuous sheet; independent grid without refit"
+            "stream function field on an independent grid without refitting"
             if validation["available"]
-            else "continuous sheet; independent validation unavailable"
+            else "independent stream function field validation unavailable"
         ),
         "power_w": values.get("sheet_power_W"),
         "energy_j": values.get("energy_J"),
@@ -903,43 +1009,12 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         "elapsed_seconds": time.perf_counter() - started,
     }
     array_file = directory / "scientific_result.npz"
-    arrays = _scientific_arrays(
-        result.coil_parts, result.target_field, result.combined_mesh, result.b_field_opt_sf, include_routing=True
-    )
-    with progress_scope(
-        *work_ranges["wire_evidence"], "Retaining evaluated wire-field maps and current provenance", overall=True
-    ):
-        wire_arrays, wire_evidence = _wire_field_evidence(result)
-    arrays.update(wire_arrays)
+    arrays.update(checkpoint.shielding_arrays)
     arrays.update(requirements_arrays)
-    if validation["available"] and request.requirements is None:
-        arrays.update(
-            validation_points_m=validation["points_m"],
-            validation_field_T=validation["field_T"],
-            validation_target_T=validation["target_T"],
-        )
-    if fabricated_physics and fabricated_physics.get("field_T") is not None:
-        arrays["fabricated_field_T"] = fabricated_physics["field_T"]
-        # Wire-field validation uses the design samples, not the independent
-        # sheet grid. Carry its own coordinates instead of implying a grid.
-        arrays["fabricated_points_m"] = result.target_field.coords
-    if winding_validation and winding_validation["available"]:
-        for source, name in (
-            ("points_m", "winding_validation_points_m"),
-            ("field_T", "winding_validation_field_T"),
-            ("target_T", "winding_validation_target_T"),
-        ):
-            arrays[name] = winding_validation[source]
     if fabrication is not None:
-        # Review can intentionally re-realize on the FEM mesh while the native
-        # pipeline uses an analytic surface. Keep both physical datasets.
         for index, record in enumerate(fabrication.paths):
-            arrays[f"review_conductor_{index}_points_m"] = record.points_m
             if getattr(record, "path", None) is not None:
                 arrays.update(fabrication_frame_arrays(f"review_conductor_{index}", record.path))
-        for index, plan in enumerate(fabrication.winding_steps):
-            if plan.get("electrical_points_m") is not None:
-                arrays[f"review_electrical_{index}_points_m"] = np.asarray(plan["electrical_points_m"], dtype=float)
     save_start, save_end = work_ranges["save"]
     save_span = save_end - save_start
     with progress_scope(
@@ -985,6 +1060,7 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         **({"requirements_review": requirements_review} if requirements_review is not None else {}),
         **({"scene_review": scene_review} if scene_review is not None else {}),
         "pipeline_sweeps": pipeline_sweeps,
+        "contour_smoothing": _contour_smoothing_evidence(result.coil_parts),
         "routing": routing_evidence(result.coil_parts),
         "fabrication": fabrication.summary() if fabrication else None,
         **(
@@ -1007,9 +1083,8 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         **_project_provenance(request),
         "timing": result.timing_summary,
     }
-    with progress_scope(save_start + 0.95 * save_span, save_end, "Saving research result evidence", overall=True):
-        atomic_json(directory / "result.json", payload)
-    return json_value(payload)
+    with progress_scope(save_start + 0.95 * save_span, save_end, "Preparing research result metadata", overall=True):
+        return json_value(payload)
 
 
 def execute_owned_design(request: ResearchRequest | dict, output_dir: str | Path, *, threads=1) -> dict:
@@ -1027,6 +1102,8 @@ def execute_owned_design(request: ResearchRequest | dict, output_dir: str | Path
         with progress_scope(98, 100, "Finalizing verified runtime and result metadata", overall=True):
             result["runtime"] = {"native_threads_requested": threads, "threadpools": threadpool_info()}
             result["metadata_sha256"] = result_metadata_digest(result)
+            # Publish once, after signing. An unfinished attempt must never look
+            # like a readable historical result without its metadata checksum.
             atomic_json(Path(output_dir) / "result.json", result)
         return result
 
