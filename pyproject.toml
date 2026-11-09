@@ -49,6 +49,8 @@ gui = [
     "scipy>=1.10",
     "cvxpy>=1.4",
     "threadpoolctl>=3.2",
+    # Boolean kernel for grooved support bodies (support_body_mode).
+    "manifold3d>=3.0",
 ]
 web = [
     "aiohttp>=3.9",
@@ -61,6 +63,7 @@ web = [
     "trame>=3.6",
     "trame-vtk>=2.8",
     "trame-vuetify>=2.7",
+    "manifold3d>=3.0",
 ]
 solver = [
     "cvxpy>=1.4",
@@ -68,8 +71,12 @@ solver = [
 spatial = [
     "scipy>=1.10",
 ]
+fabrication = [
+    "manifold3d>=3.0",
+]
 full = [
     "threadpoolctl>=3.2",
+    "manifold3d>=3.0",
     "numba>=0.61",
     "cvxpy>=1.4",
     "h5py>=3.9",
@@ -81,6 +88,7 @@ full = [
 ]
 dev = [
     "threadpoolctl>=3.2",
+    "manifold3d>=3.0",
     "numba>=0.61",
     "cvxpy>=1.4",
     "h5py>=3.9",

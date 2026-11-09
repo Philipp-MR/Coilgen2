@@ -185,6 +185,73 @@ that diagnostic does not claim shaped-region coverage. Imported maps and legacy
   - The needed current and the field error always use the complete target
     expression. The report also lists per-axis efficiencies for combined targets.
 
+## Grooved support body (printable former)
+
+With `support_body_mode` on, every coil part's support surface is thickened into
+a closed solid. The swept conductors are then subtracted from it, leaving
+channels the wire sits in. The result is a directly 3D-printable former. It needs
+the optional `manifold3d` package (included in the `gui`, `web`, `full`,
+`fabrication` and `dev` extras).
+
+| Field | Default | Meaning |
+|---|---:|---|
+| `support_body_mode` | `"off"` | `"off"`, `"inside"` or `"outside"`: which side of the support surface the solid grows to, relative to the conductor frame normal (the normal used by `conductor_mounting_mode`). |
+| `support_body_thickness` | `0.003` | Wall thickness in metres, measured from the support surface. |
+| `support_body_groove_clearance` | `0.0002` | Gap in metres around the conductor in the groove (print fit), added to `sweep_insulation_thickness`. |
+| `support_body_groove_extra_depth` | `0.0` | Extra groove depth in metres below the conductor. |
+
+- **Groove depth.** The slab spans `[-t, 0]` (inside) or `[0, t]` (outside) along
+  the normal, so the mounting mode sets the depth:
+
+  | Mode | `surface_inner` | `centered` | `surface_outer` |
+  |---|---|---|---|
+  | `inside` | fully recessed (flush) | half recessed | no groove (reported as `conductor_does_not_reach_support_body`) |
+  | `outside` | no groove | half recessed | fully recessed |
+
+- **Groove shape.** The profile is the convex hull of the conductor profile, grown
+  by insulation plus clearance (rounded corners). It continues straight out
+  through the slab face, so the channel has no undercut and the wire can be laid
+  in. A round wire therefore gets a U-shaped groove.
+- **Construction.**
+  - The support is offset along angle-weighted vertex normals. The offset grows
+    at creases so the wall stays at least `t` thick.
+  - Open surfaces (cylinders, planes, imported STLs) get side walls along every
+    boundary loop. Closed surfaces become hollow shells.
+  - Each groove is the union of convex hulls of consecutive profile rings along
+    the realized fabrication path, so bends and overlapping path sections never
+    produce a self-intersecting cutter.
+  - Every part's slab is cut by the grooves of all parts.
+- **Pipeline output.**
+  - The body is built right after the sweep. It is shown with the "Pipeline
+    swept conductor" view in both workbenches, and its checks are under
+    `pipeline_sweeps.grooved_supports` in the run metadata.
+  - `save_swept_bodies_as_stl` writes it as `<prefix>_part<n>_grooved_support.stl`.
+  - The fabrication review writes `part<nnn>_grooved_support_fabrication.stl`
+    (or a `_DRAFT_` file when checks fail). The export dialog lists it with the
+    conductor solids.
+- **Checks** (`support_body_ok`, `support_body_failure_reasons`; any failure is
+  also a fabrication-review failure reason):
+  - the result is a closed manifold;
+  - the slab volume is within 0.8–1.25 × area × thickness;
+  - no offset faces fold over (thickness larger than the concave radius of
+    curvature);
+  - the grooves remove material;
+  - the floor under the deepest groove (`support_groove_floor_thickness_m`) is
+    positive;
+  - the grooves do not split the former into more pieces than the slab had
+    (`support_body_component_count`).
+- **Limits.**
+  - The slab follows the support *mesh*, but with `sweep_surface_realization =
+    "analytic"` the conductor follows the ideal surface. On a coarse cylinder
+    (for example 32 facets) the groove depth then varies across each facet by
+    the facet sagitta. Refine the support mesh when the depth matters.
+  - Return paths lifted over crossings sit above the face, so their grooves get
+    shallower and the crossing wire passes over the other groove.
+  - Support meshes with non-manifold or inconsistently oriented edges are
+    rejected, not repaired.
+  - Wall thickness at sharp creases of faceted supports is approximate.
+  - Open-surface rims are cut square, without rounding.
+
 ## Closed-series interconnection
 
 Controls are available on `CoilGenConfig` or through `advanced_parameters`:

@@ -5318,9 +5318,11 @@ def save_swept_bodies_as_stl(
 
     STL carries only triangulated boundaries, not analytic volume semantics.
     Each contour-mode body is written separately.  The current-carrying support
-    surface is written once per coil part. Manufacturing diagnostics do not
-    prevent STL serialization by default. Pass ``fail_on_violations=True`` to
-    explicitly require manufacturing readiness before writing any STL.
+    surface is written once per coil part, followed by its grooved support body
+    (``*_grooved_support.stl``) when ``support_body_mode`` produced one.
+    Manufacturing diagnostics do not prevent STL serialization by default. Pass
+    ``fail_on_violations=True`` to explicitly require manufacturing readiness
+    (including the grooved support checks) before writing any STL.
     """
 
     output = Path(output_dir)
@@ -5341,6 +5343,12 @@ def save_swept_bodies_as_stl(
                 fail_on_violations,
                 format_name="STL",
             )
+        support_body = getattr(part, "support_body", None)
+        if fail_on_violations and support_body is not None and not support_body.diagnostics.get("support_body_ok"):
+            raise SweptBodyExportError(
+                f"Grooved support body for coil part {part_ind} failed its checks: "
+                f"{support_body.diagnostics.get('support_body_failure_reasons', 'unknown')}"
+            )
     for part_ind, part, bodies in swept_parts:
         for body in bodies:
             body_name = _swept_body_name(prefix, part_ind, body)
@@ -5359,6 +5367,11 @@ def save_swept_bodies_as_stl(
                 solid_name=surface_name,
             )
         )
+        support_body = getattr(part, "support_body", None)
+        if support_body is not None and len(support_body.mesh.faces):
+            # Printable former: support thickened into a solid minus the conductor grooves.
+            support_name = f"{prefix}_part{part_ind}_grooved_support"
+            saved.append(save_mesh_as_stl(support_body.mesh, output / f"{support_name}.stl", solid_name=support_name))
     return saved
 
 

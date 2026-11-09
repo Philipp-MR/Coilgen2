@@ -224,6 +224,9 @@ CONTROL_FIELDS = {
     "independent_turns": "contour_only_sweep_mode",
     "return_path_lift": "skip_normal_shift",
     "normal_shift_mm": "normal_shift_length",
+    "support_body_thickness_mm": "support_body_thickness",
+    "support_body_groove_clearance_mm": "support_body_groove_clearance",
+    "support_body_groove_extra_depth_mm": "support_body_groove_extra_depth",
     "min_wire_distance_mm": "min_wire_distance_m",
     "contour_segment_mm": "contour_resample_target_segment_length",
     "contour_displacement_mm": "contour_smoothing_max_displacement",
@@ -2403,6 +2406,48 @@ class CoilGenWorkbench(QMainWindow):
             self._draft_controls["normal_shift_mm"].setToolTip(
                 "Normal displacement used by connected return-path routing. This is separate from conductor mounting and profile coordinates."
             )
+            self._combo(
+                form,
+                "support_body_mode",
+                "Grooved support body",
+                ["off", "inside", "outside"],
+                config.support_body_mode,
+            )
+            self._draft_controls["support_body_mode"].setToolTip(
+                "Thicken the support surface into a printable former and cut the conductor grooves into it "
+                "(exported as *_grooved_support.stl). inside: the solid grows against the support normal, so "
+                "surface_inner conductors sit fully recessed and centered ones half. outside: the opposite side."
+            )
+            self._number(
+                form,
+                "support_body_thickness_mm",
+                "Support body thickness",
+                config.support_body_thickness * 1000,
+                " mm",
+                0,
+                10000,
+            )
+            self._number(
+                form,
+                "support_body_groove_clearance_mm",
+                "Groove clearance",
+                config.support_body_groove_clearance * 1000,
+                " mm",
+                0,
+                10000,
+            )
+            self._draft_controls["support_body_groove_clearance_mm"].setToolTip(
+                "Gap around the insulated conductor in the groove, e.g. the 3D-print fit tolerance."
+            )
+            self._number(
+                form,
+                "support_body_groove_extra_depth_mm",
+                "Extra groove depth",
+                config.support_body_groove_extra_depth * 1000,
+                " mm",
+                0,
+                10000,
+            )
             profile_editor = ConductorProfileEditor()
             profile_editor.set_profile(
                 config.cross_sectional_points,
@@ -2423,6 +2468,10 @@ class CoilGenWorkbench(QMainWindow):
                 "conductor_path_reference": self._value("conductor_path_reference"),
                 "skip_normal_shift": not self._value("return_path_lift"),
                 "normal_shift_length": self._value("normal_shift_mm") * 1e-3,
+                "support_body_mode": self._value("support_body_mode"),
+                "support_body_thickness": self._value("support_body_thickness_mm") / 1000,
+                "support_body_groove_clearance": self._value("support_body_groove_clearance_mm") / 1000,
+                "support_body_groove_extra_depth": self._value("support_body_groove_extra_depth_mm") / 1000,
             }
             conductor_preview = ConductorPreview(container)
             layout.addWidget(conductor_preview)

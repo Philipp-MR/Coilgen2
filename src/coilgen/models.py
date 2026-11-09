@@ -147,6 +147,18 @@ class SweptBody:
 
 
 @dataclass
+class SupportBody:
+    """Support surface thickened into a closed solid with conductor grooves cut out.
+
+    ``mesh`` is a triangulated boundary in metres. ``diagnostics`` records the
+    slab construction, groove subtraction and closed-solid checks.
+    """
+
+    mesh: Mesh
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class BasisElement:
     triangles: np.ndarray
     one_ring: np.ndarray
@@ -460,6 +472,7 @@ class CoilPart:
     swept_body: Mesh | None = None
     swept_bodies: list[SweptBody] = field(default_factory=list)
     manufacturing_diagnostics: ManufacturingDiagnostics = field(default_factory=dict)
+    support_body: SupportBody | None = None
     pcb_layout: PcbLayout | None = None
     shift_array: np.ndarray | None = None
     points_to_shift: np.ndarray | None = None

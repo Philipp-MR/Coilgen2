@@ -159,4 +159,8 @@ def scientific_arrays(parts, target, mesh=None, sheet_field=None, *, include_rou
         for body_index, body_mesh in enumerate(bodies):
             arrays[f"swept_{part_index}_{body_index}_vertices_m"] = body_mesh.vertices
             arrays[f"swept_{part_index}_{body_index}_faces"] = body_mesh.faces
+        support_body = getattr(part, "support_body", None)
+        if support_body is not None and len(support_body.mesh.faces):
+            arrays[f"grooved_support_{part_index}_vertices_m"] = support_body.mesh.vertices
+            arrays[f"grooved_support_{part_index}_faces"] = support_body.mesh.faces
     return arrays
