@@ -5,6 +5,7 @@ from base64 import b64encode
 from trame.widgets import html, vuetify3 as v3
 from trame_client.widgets.core import HtmlElement
 
+from ..application.preflight import SECTION_ORDER, section_readiness
 from ..application.session import SETTINGS_NODES
 from ..gui.pictograms import model_node_icons, pictogram_svg
 from .input_policy import PROJECT_UPLOAD_LIMIT
@@ -19,12 +20,31 @@ def _tree_symbol(name):
     return "data:image/svg+xml;base64," + b64encode(pictogram_svg(name, "#213746")).decode("ascii")
 
 
-def model_tree_nodes(config):
+def preflight_node(node):
+    """Browser name of a preflight settings section."""
+    return "conductor" if node == "material" else node
+
+
+def model_tree_nodes(config, report=None):
+    """Tree rows with each section's preflight state; "set" is not engineering acceptance."""
     symbols = model_node_icons(config)
-    return [
-        {"title": label, "value": key, "symbol": _tree_symbol(symbols["material" if key == "conductor" else key])}
-        for key, label in SETTINGS_NODES
-    ]
+    sections = section_readiness(report, nodes=SECTION_ORDER) if report is not None else {}
+    nodes = []
+    for key, label in SETTINGS_NODES:
+        native = "material" if key == "conductor" else key
+        section = sections.get(native)
+        nodes.append(
+            {
+                "title": label,
+                "value": key,
+                "symbol": _tree_symbol(symbols[native]),
+                "state": section.state if section else "unchecked",
+                "summary": section.summary if section else "",
+                "action": section.next_action if section else "",
+                "tooltip": f"{label} · {section.summary}\n{section.details}" if section else label,
+            }
+        )
+    return nodes
 
 
 def build_toolbar(ctrl):
@@ -234,9 +254,27 @@ def build_model_builder(ctrl):
                         classes="cg-tree-item",
                         disabled=("settings_dirty && node !== item.value",),
                         click="node = item.value; settings_dialog = true",
+                        title=("item.tooltip",),
+                        __properties=[("data_state", "data-state"), ("aria_label", "aria-label")],
+                        data_state=("item.state",),
+                        aria_label=("item.title + (item.summary ? ' · ' + item.summary : '')",),
                     ):
                         html.Img(src=("item.symbol",), alt="", classes="cg-tree-symbol")
-                        html.Span("{{ item.title }}")
+                        with html.Span(classes="cg-tree-text"):
+                            html.Span("{{ item.title }}")
+                            html.Span(
+                                "{{ item.summary }}",
+                                v_if="['blocking', 'warning'].includes(item.state)",
+                                classes="cg-tree-status",
+                            )
+                        v3.VIcon(
+                            "{{ item.state === 'blocking' ? 'mdi-alert-circle' : 'mdi-alert-outline' }}",
+                            v_if="['blocking', 'warning'].includes(item.state)",
+                            size="small",
+                            classes="cg-tree-state",
+                            __properties=[("aria_hidden", "aria-hidden")],
+                            aria_hidden="true",
+                        )
             with html.Div(classes="d-flex ga-1"):
                 v3.VBtn("Undo", v_if="can_undo", click=ctrl.undo, disabled=("settings_dirty",), variant="text")
                 v3.VBtn("Redo", v_if="can_redo", click=ctrl.redo, disabled=("settings_dirty",), variant="text")
@@ -329,13 +367,21 @@ def build_design_plan(ctrl):
                 v_if="batch_busy_channels.length",
                 classes="cg-hint",
             )
-            v3.VAlert(
-                "{{ issue.title }} Open the relevant section in Model Builder to resolve this input.",
+            with v3.VAlert(
                 v_for="issue in preflight.filter(i => i.blocking)",
                 type="error",
                 density="compact",
                 classes="mt-2",
-            )
+            ):
+                html.Div("{{ issue.section }}: {{ issue.title }}", classes="font-weight-medium")
+                html.Div("{{ issue.action }}", classes="text-caption")
+                v3.VBtn(
+                    "Open {{ issue.section }}",
+                    size="small",
+                    variant="text",
+                    disabled=("settings_dirty && node !== issue.node",),
+                    click="node = issue.node; settings_dialog = true",
+                )
         with html.Div(v_if="jobs.length", classes="cg-job-list"):
             html.H3("Jobs", classes="cg-tree-heading")
             html.P("Active jobs and recent attempts, newest first within each group.", classes="cg-hint")
