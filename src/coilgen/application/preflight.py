@@ -134,7 +134,9 @@ def settings_node(key):
         return "target"
     # Contour smoothing and group-connection settings are edited with the
     # winding, although some of their names mention the support mesh.
-    if key.startswith(("contour", "interconnection", "within_group", "joint_group_routing", "min_inter_group")) or key in {
+    if key.startswith(
+        ("contour", "interconnection", "within_group", "joint_group_routing", "min_inter_group")
+    ) or key in {
         "max_current_A",
         "max_wire_current_A",
     }:
@@ -150,7 +152,8 @@ def settings_node(key):
         "conductor_mounting_mode",
         "cross_sectional_points",
         "sweep_insulation_thickness",
-    }:
+    } or key.startswith("support_body"):
+        # The grooved support body is edited with the conductor.
         return "material"
     if key.startswith(
         ("sweep", "inter_", "intra_", "contour", "routing", "pcb", "normal_shift", "layout_terminal")
