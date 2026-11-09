@@ -411,12 +411,38 @@ path, while contour-only grid studies use the closed unconnected contour loops.
 
 ## Volumetric Sweep Controls
 
-`cross_sectional_points` is a strictly convex polygon in the physical local
-coordinates `(surface_transverse, surface_normal)`. Thus coordinate 0 is
-conductor width across the route and coordinate 1 is conductor height normal to
-the support. The default `((0.0, 0.0),)` is a sentinel that generates the
-configured rectangle. Repeated, concave, self-intersecting, zero-area, or
-non-finite custom profiles are rejected.
+`cross_sectional_points` is a simple (convex or concave) polygon in the
+physical local coordinates `(surface_transverse, surface_normal)`. Thus
+coordinate 0 is conductor width across the route and coordinate 1 is conductor
+height normal to the support. The default `((0.0, 0.0),)` is a sentinel that
+generates the configured rectangle. Repeated, collinear, self-intersecting,
+zero-area, or non-finite custom profiles are rejected.
+
+Profile helpers in `coilgen.application.conductor_profiles` return points in
+metres:
+
+- `round_wire_profile(diameter, segments=16, equal_area=False)`: regular
+  polygon with `segments` points (6–256). Fewer points give smaller swept STL
+  files. An inscribed polygon has less area than the round wire (16 points:
+  97 %, 8 points: 90 %, 6 points: 83 %), so it overestimates the resistance;
+  `equal_area=True` enlarges it to the true circle area.
+- `u_shape_profile(width, height, segments=16, arc_side="top")`: rectangle
+  plus a half circle of diameter `width`; `height` is the total height (at
+  least `width / 2`). The half circle uses `segments // 2` straight segments.
+  `"top"` points the arc away from the support, `"bottom"` towards it.
+- `omega_holder_profile(wire_diameter, ...)`: printable snap-in holder around a
+  round wire at the origin (use `conductor_path_reference="profile_origin"`).
+- `read_profile_table(path, length_scale_to_m=1e-3)` /
+  `parse_profile_table(text, ...)`: two-column `u, n` tables, millimetres by
+  default. Separators may be `;`, tab, `,` or spaces (decimal commas with `;`
+  or tab); `#` comments and one header line are skipped.
+
+```python
+from coilgen.application.conductor_profiles import read_profile_table, round_wire_profile
+
+config = replace(config, cross_sectional_points=round_wire_profile(0.0015, 8, equal_area=True))
+config = replace(config, cross_sectional_points=read_profile_table("profile_mm.csv"))
+```
 
 | Field | Unit | Meaning |
 |---|---:|---|

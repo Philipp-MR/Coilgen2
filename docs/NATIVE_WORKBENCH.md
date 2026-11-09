@@ -813,8 +813,21 @@ midpoint after the selected point; move it to make a convex corner. **Remove**
 deletes a point while keeping at least three. **Fit view** includes the origin
 and uses the same physical scale on both axes.
 
-The current sweep requires a strictly convex, nonintersecting polygon with
-finite coordinates and positive area. Invalid drafts remain editable and block
+Presets build a polygon from the current conductor width and height:
+**Round wire** (diameter = width), **U-shape** (half circle of diameter = width
+on a rectangle, total height = height, arc away from the support) and
+**Omega holder**. **Points** sets the number of points around a full circle for
+Round wire and U-shape (the U-shape half circle uses half as many); fewer points
+give smaller STL files. **Keep circle area** enlarges the round polygon so its
+area and resistance match the round wire. **Import table…** loads `u, n`
+millimetre coordinates from a CSV, TSV or TXT file (separators `;`, tab, `,` or
+spaces; one optional header line). A copied spreadsheet range of at least three
+rows can also be pasted into the point table with Ctrl+V. The browser
+workbench offers the same presets, point count and table import under
+**Conductor**.
+
+The current sweep requires a simple (convex or concave), nonintersecting
+polygon with finite coordinates, positive area and no collinear corners. Invalid drafts remain editable and block
 Apply, Compute and Save while the editor is open. **Cancel** or **×** discards
 the unapplied profile. **Apply & preview** creates one undoable model change.
 **Revert draft** restores the applied profile in the editor. The project JSON stores the points in metres, including their

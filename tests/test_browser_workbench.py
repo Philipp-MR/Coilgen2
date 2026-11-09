@@ -337,3 +337,45 @@ def test_hub_requires_password_and_binds_sessions_to_cookies(tmp_path):
             assert stolen.status == 302 and stolen.headers["Location"] == "/"
 
     asyncio.run(scenario())
+
+
+def test_browser_u_shape_point_count_and_profile_table(tmp_path):
+    from coilgen.application.conductor_profiles import validate_conductor_profile
+
+    server, browser = create_app(tmp_path, user="tester", server_name="test-profile-presets")
+    state = server.state
+    state.template = "cylinder"
+    browser.load_template()
+    state.node = "conductor"
+    browser._refresh_settings()
+    project = browser.session.project
+    state.profile_segments = "5"
+    state.profile_preset = "round"
+    browser.apply_settings()
+    assert browser.session.project is project
+    state.profile_segments = "8"
+    state.profile_equal_area = True
+    browser.apply_settings()
+    config = browser.session.project.config
+    assert len(config.cross_sectional_points) == 8
+    assert validate_conductor_profile(config.cross_sectional_points).area_m2 == pytest.approx(
+        np.pi * (config.conductor_cross_section_width / 2) ** 2
+    )
+    state.profile_preset = "u_shape"
+    browser.apply_settings()
+    assert browser.session.project.config.cross_sectional_points != config.cross_sectional_points
+    browser._refresh_settings()
+    assert state.profile_upload is None and not state.settings_dirty
+    table = {"name": "profile.csv", "content": list(b"u;n\n-1;0\n1;0\n0;1,5\n")}
+    state.profile_upload = table
+    state.profile_preset = "round"
+    browser.apply_settings()  # two pending replacements are refused together
+    assert len(browser.session.project.config.cross_sectional_points) != 3
+    state.profile_preset = None
+    browser.apply_settings()
+    points = browser.session.project.config.cross_sectional_points
+    assert [tuple(point) for point in points] == [(-0.001, 0.0), (0.001, 0.0), (0.0, 0.0015)]
+    browser._refresh_settings()
+    state.profile_upload = {"name": "profile.stl", "content": list(b"0 0")}
+    browser.apply_settings()
+    assert browser.session.project.config.cross_sectional_points == points

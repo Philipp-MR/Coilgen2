@@ -186,6 +186,9 @@ class BrowserWorkbench:
                 "settings_dirty": False,
                 "settings_dialog": False,
                 "profile_preset": None,
+                "profile_segments": 16,
+                "profile_equal_area": False,
+                "profile_upload": None,
                 "file_dialog": False,
                 "file_section": "examples",
                 "workspace_panel": "center",
@@ -265,7 +268,9 @@ class BrowserWorkbench:
         # All dismissal paths (Cancel, Escape and backdrop) update the dialog model.
         state.change("settings_dialog")(lambda **_: self._refresh_settings())
         state.change("advanced_dialog")(self._advanced_dialog_changed)
-        state.change("settings_values", "profile_preset", "mesh_upload")(lambda **_: self._check_edits())
+        state.change("settings_values", "profile_preset", "mesh_upload", "profile_upload")(
+            lambda **_: self._check_edits()
+        )
         state.change("active_channel")(lambda active_channel, **_: self._select_channel(active_channel))
         state.change("dataset", "component", "see_through_support")(lambda **_: self._render())
         state.change("selected_run")(lambda selected_run, **_: self._open_run(selected_run))
@@ -346,6 +351,7 @@ class BrowserWorkbench:
         state, project = self.server.state, self.session.project
         state.settings_dirty = False
         state.profile_preset, state.mesh_upload, state.mesh_scale = None, None, 0.001
+        state.profile_upload = None
         fields = self.session.settings_fields(state.node)
         state.settings_fields = [
             {
@@ -447,7 +453,9 @@ class BrowserWorkbench:
 
     def _check_edits(self):
         state = self.server.state
-        state.settings_dirty = self._settings_fields_changed() or bool(state.profile_preset or state.mesh_upload)
+        state.settings_dirty = self._settings_fields_changed() or bool(
+            state.profile_preset or state.mesh_upload or state.profile_upload
+        )
         return state.settings_dirty
 
     def _ready_to_submit(self):
@@ -545,12 +553,12 @@ class BrowserWorkbench:
             self.editing_identity = previous_identity
         return assembly
 
-    def _store_upload(self, upload):
+    def _store_upload(self, upload, suffixes=(".stl",), kind="an STL mesh file"):
         name, content = _upload_bytes(upload)
         if name is None or content is None:
             raise ValueError("Choose a readable file to upload.")
-        if not name.lower().endswith(".stl"):
-            raise ValueError("Choose an STL mesh file to import.")
+        if not name.lower().endswith(tuple(suffixes)):
+            raise ValueError(f"Choose {kind} to import.")
         uploads = self.session.workspace / "uploads"
         if uploads.resolve() != uploads:
             raise ValueError("Invalid uploads directory.")
@@ -597,6 +605,28 @@ class BrowserWorkbench:
                 success=f"Imported support mesh {path.name}.",
             )
 
+    def _import_profile_table(self, upload):
+        path = self._guard(self._store_upload, upload, (".csv", ".tsv", ".txt"), "a CSV, TSV or TXT point table")
+        if path:
+            self._guard(
+                self.session.import_profile_table,
+                path,
+                success=f"Imported the cross-section table {path.name}.",
+            )
+
+    def _profile_segments(self):
+        from ..application.conductor_profiles import MAX_CIRCLE_SEGMENTS, MIN_CIRCLE_SEGMENTS
+
+        try:
+            value = float(self.server.state.profile_segments)
+        except (TypeError, ValueError):
+            value = float("nan")
+        if not (value.is_integer() and MIN_CIRCLE_SEGMENTS <= value <= MAX_CIRCLE_SEGMENTS):
+            raise ValueError(
+                f"Circle points must be a whole number from {MIN_CIRCLE_SEGMENTS} to {MAX_CIRCLE_SEGMENTS}."
+            )
+        return int(value)
+
     @_bind("undo")
     def undo(self):
         self._guard(self.session.undo)
@@ -608,19 +638,31 @@ class BrowserWorkbench:
     @_bind("apply_settings")
     def apply_settings(self):
         state = self.server.state
-        if (state.mesh_upload or state.profile_preset) and (
-            self._settings_fields_changed() or (state.mesh_upload and state.profile_preset)
-        ):
-            self._notify("Apply field edits, conductor presets and mesh replacements separately.", "warning")
+        pending = [bool(item) for item in (state.mesh_upload, state.profile_preset, state.profile_upload)]
+        if any(pending) and (self._settings_fields_changed() or sum(pending) > 1):
+            self._notify(
+                "Apply field edits, conductor presets, profile tables and mesh replacements separately.", "warning"
+            )
             return
         if state.mesh_upload:
             self._import_mesh(state.mesh_upload)
             return
+        if state.profile_upload:
+            self._import_profile_table(state.profile_upload)
+            return
         if state.profile_preset:
+            try:
+                segments = self._profile_segments()
+            except ValueError as exc:
+                self._notify(str(exc), "error")
+                return
+            title = {"u_shape": "U-shape", "round": "round wire"}.get(state.profile_preset, state.profile_preset)
             self._guard(
                 self.session.apply_profile_preset,
                 state.profile_preset,
-                success=f"Applied the {state.profile_preset} conductor profile.",
+                segments=segments,
+                equal_area=bool(state.profile_equal_area),
+                success=f"Applied the {title} conductor profile.",
             )
             return
         values = dict(state.settings_values or {})
@@ -1576,7 +1618,9 @@ class BrowserWorkbench:
                                 label=("field.label",),
                                 type=("['number', 'integer'].includes(field.kind) ? 'number' : 'text'",),
                                 hint=("field.help",),
-                                disabled=("!!profile_preset || !!mesh_upload?.length || !!mesh_upload?.name",),
+                                disabled=(
+                                    "!!profile_preset || !!mesh_upload?.length || !!mesh_upload?.name || !!profile_upload",
+                                ),
                                 persistent_hint=("!!field.help",),
                                 density="compact",
                                 update_modelValue="flushState('settings_values')",
@@ -1587,7 +1631,9 @@ class BrowserWorkbench:
                                 items=("field.choices",),
                                 label=("field.label",),
                                 hint=("field.help",),
-                                disabled=("!!profile_preset || !!mesh_upload?.length || !!mesh_upload?.name",),
+                                disabled=(
+                                    "!!profile_preset || !!mesh_upload?.length || !!mesh_upload?.name || !!profile_upload",
+                                ),
                                 persistent_hint=("!!field.help",),
                                 density="compact",
                                 update_modelValue="flushState('settings_values')",
@@ -1598,7 +1644,9 @@ class BrowserWorkbench:
                                 label=("field.label",),
                                 density="compact",
                                 hint=("field.help",),
-                                disabled=("!!profile_preset || !!mesh_upload?.length || !!mesh_upload?.name",),
+                                disabled=(
+                                    "!!profile_preset || !!mesh_upload?.length || !!mesh_upload?.name || !!profile_upload",
+                                ),
                                 persistent_hint=("!!field.help",),
                                 hide_details=("!field.help",),
                                 update_modelValue="flushState('settings_values')",
@@ -1608,6 +1656,7 @@ class BrowserWorkbench:
                             for value, title in (
                                 ("rectangle", "Rectangle"),
                                 ("round", "Round wire"),
+                                ("u_shape", "U-shape"),
                                 ("omega", "Omega holder"),
                             ):
                                 v3.VBtn(
@@ -1617,6 +1666,39 @@ class BrowserWorkbench:
                                     active=(f"profile_preset === '{value}'",),
                                     click=f"profile_preset = '{value}'",
                                     disabled=("settings_dirty && !profile_preset",),
+                                )
+                            with html.Div(classes="d-flex flex-wrap ga-2 mt-2"):
+                                v3.VTextField(
+                                    v_model=("profile_segments",),
+                                    label="Circle points",
+                                    type="number",
+                                    density="compact",
+                                    style="max-width:10rem",
+                                    hint="Round wire and U-shape (half circle uses half). Fewer points: smaller STL.",
+                                    persistent_hint=True,
+                                    disabled=("settings_dirty && !profile_preset",),
+                                )
+                                v3.VCheckbox(
+                                    v_model=("profile_equal_area",),
+                                    label="Keep circle area",
+                                    density="compact",
+                                    hint="Enlarge the round polygon so area and resistance match the round wire.",
+                                    persistent_hint=True,
+                                    disabled=("settings_dirty && !profile_preset",),
+                                )
+                            with html.Details(classes="mt-2"):
+                                html.Summary("Import a cross-section table", style="cursor:pointer;font-weight:600")
+                                html.Div(
+                                    "Two columns u, n in millimetres, one point per row; separators ; tab , or "
+                                    "spaces; an optional header line.",
+                                    classes="text-caption",
+                                )
+                                v3.VFileInput(
+                                    v_model=("profile_upload",),
+                                    label="Import u, n table (mm)",
+                                    accept=".csv,.tsv,.txt",
+                                    density="compact",
+                                    disabled=("(settings_dirty && !profile_upload) || !channels.length",),
                                 )
                         with html.Div(v_if="node === 'geometry'", classes="mb-2"):
                             html.Div(

@@ -813,16 +813,24 @@ class WorkbenchSession:
         """Advanced settings: any CoilGenConfig field, validated by the engine."""
         return self.apply_inputs(changes)
 
-    def apply_profile_preset(self, kind: str):
-        from .conductor_profiles import omega_holder_profile, round_wire_profile
+    def apply_profile_preset(self, kind: str, *, segments: int = 16, equal_area: bool = False):
+        """Replace the cross-section with a preset built from conductor width/height.
+
+        ``segments`` (points around a full circle) applies to the round wire
+        and the U-shape half circle; ``equal_area`` keeps the round wire area.
+        """
+        from .conductor_profiles import omega_holder_profile, round_wire_profile, u_shape_profile
 
         project = self._require_project()
         width = float(project.config.conductor_cross_section_width)
+        height = float(project.config.conductor_cross_section_height)
         if kind == "rectangle":
             # The default rectangle sentinel follows conductor width and height.
             changes = {"cross_sectional_points": type(project.config)().cross_sectional_points}
         elif kind == "round":
-            changes = {"cross_sectional_points": round_wire_profile(width)}
+            changes = {"cross_sectional_points": round_wire_profile(width, segments, equal_area=equal_area)}
+        elif kind == "u_shape":
+            changes = {"cross_sectional_points": u_shape_profile(width, height, segments)}
         elif kind == "omega":
             changes = {
                 "cross_sectional_points": omega_holder_profile(width),
@@ -831,6 +839,14 @@ class WorkbenchSession:
         else:
             raise ValueError(f"Unknown conductor profile preset {kind!r}.")
         self._replace_project(project.update_config(changes))
+
+    def import_profile_table(self, path, *, length_scale_to_m: float = 1e-3):
+        """Replace the cross-section with a two-column (u, n) table, millimetres by default."""
+        from .conductor_profiles import read_profile_table, validate_conductor_profile
+
+        project = self._require_project()
+        points = validate_conductor_profile(read_profile_table(path, length_scale_to_m=length_scale_to_m)).points_m
+        self._replace_project(project.update_config({"cross_sectional_points": points}))
 
     def import_support_mesh(self, path, *, length_scale_to_m: float = 1.0):
         from ..geometry import read_stl, normalize_mesh
