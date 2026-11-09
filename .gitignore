@@ -19,8 +19,10 @@ dist/
 # Independent research repository and local investigation artifacts.
 /CoilGenResearch/
 /tmp/
+/RESTORE-CONTEXT.txt
 # Private patient/phantom workflows stay local; never publish them.
 /projects/dental_b0_local_shim/
 /projects/dental_b0_multichannel/
+/tests/test_dental_*.py
 # Website deployment drafts and private review artifacts are maintained separately.
 /website-draft/

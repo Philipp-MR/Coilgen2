@@ -44,7 +44,7 @@ def test_three_ready_studies_have_separate_coaxial_supports_and_real_conductor_s
         assert config.research_physics["objective"] == "power"
         assert config.field_evaluation_current_source == "stream_function"
         assert config.conductor_cross_section_width == config.conductor_cross_section_height == 0.002
-        assert config.sweep_min_bend_radius == 0.006
+        assert config.sweep_min_bend_radius == 0.003
         assert config.sweep_insulation_thickness == 0.0001
         assert config.specific_conductivity_conductor == 18e-9
         assert config.levels == 16 and config.conductor_thickness == 0.001

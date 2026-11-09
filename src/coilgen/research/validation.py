@@ -121,7 +121,10 @@ def field_budget_check(
         kind = "relative_rms_plus_absolute" if absolute else "relative_rms"
     limit = solve_limit / design_margin
     allowance = spec.acceptance_absolute_by_unit.get("T", 0.0) + spec.acceptance_relative_tolerance * limit
+    from ..metrics import current_scale_fit
+
     return {
+        **current_scale_fit(actual, target, weights),
         **sampling,
         "verified": True,
         "passed": bool(rms <= limit + allowance),
@@ -170,8 +173,11 @@ def sample_independent_target(result: Any, *, resolution: int = 12) -> TargetFie
             # Expressions remain in world coordinates, as define_target_field.
             points += result.combined_mesh.vertices.mean(axis=0)
     raw = np.zeros((len(points), 3))
-    scale = float(getattr(result, "regularization_diagnostics", {}).get("target_gradient_normalization_scale", 1.0))
-    raw[:, 2] = evaluate_field_expression(config.field_shape_function, points) * scale
+    diagnostics = getattr(result, "regularization_diagnostics", {})
+    scale = float(diagnostics.get("target_gradient_normalization_scale", 1.0))
+    # Older results placed expressions into Cartesian Bz without a component sign.
+    expression_sign = float(diagnostics.get("target_expression_bz_sign", 1.0))
+    raw[:, 2] = expression_sign * evaluate_field_expression(config.field_shape_function, points) * scale
     target = field_values_to_tesla(raw, config.target_field_units)
     return TargetField(points, target, np.ones(len(points)), np.zeros(len(points), bool), np.ones(len(points), int))
 

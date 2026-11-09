@@ -5209,20 +5209,77 @@ def _ensure_closed_path_array(v: np.ndarray, tolerance: float) -> np.ndarray:
     return np.vstack((v, v[0]))
 
 
+_COINCIDENT_VERTEX_TOLERANCE_M = 1e-9
+
+
+def _merge_coincident_vertices(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Drop through-running vertices within 1 nm of the last kept one.
+
+    Joins can leave sub-nanometre slivers. The segments on either side of such
+    a sliver are not index-adjacent, so a through-running wire would report a
+    false zero-distance "crossing". Where the wire reverses at the sliver, it is
+    kept, so the two legs remain non-adjacent and a real hairpin is still found.
+    A closing vertex of a closed path is always kept.
+    """
+    points = np.asarray(points, dtype=float)
+    tolerance = _COINCIDENT_VERTEX_TOLERANCE_M
+    if len(points) < 3 or np.all(np.linalg.norm(np.diff(points, axis=0), axis=1) > tolerance):
+        return points, np.arange(len(points))
+    closed = bool(np.linalg.norm(points[0] - points[-1]) <= 1e-8)
+    kept = [0]
+    for index in range(1, len(points)):
+        anchor = points[kept[-1]]
+        if np.linalg.norm(points[index] - anchor) > tolerance or (closed and index == len(points) - 1):
+            kept.append(index)
+            continue
+        following = next(
+            (later for later in range(index + 1, len(points)) if np.linalg.norm(points[later] - anchor) > tolerance),
+            None,
+        )
+        if len(kept) >= 2 and following is not None:
+            incoming = anchor - points[kept[-2]]
+            outgoing = points[following] - anchor
+            if float(incoming @ outgoing) <= 0.0:
+                kept.append(index)
+    kept_indices = np.asarray(kept, dtype=np.int64)
+    return points[kept_indices], kept_indices
+
+
+def _original_segment(kept: np.ndarray, merged_segment: int) -> int:
+    """The real (last) original segment of a merged run of coincident vertices."""
+    return int(kept[int(merged_segment) + 1]) - 1
+
+
 def find_wire_segment_contacts_3d(
     points: np.ndarray,
     threshold: float,
     config: CoilGenConfig | None = None,
 ) -> list[tuple[int, int, float]]:
-    """Find non-adjacent 3D wire segments closer than ``threshold``."""
+    """Find non-adjacent 3D wire segments closer than ``threshold``.
 
+    Indices refer to segment starts in ``points``; coincident vertices are
+    merged first so sub-nanometre slivers cannot fake a crossing.
+    """
+
+    merged, kept = _merge_coincident_vertices(points)
+    return [
+        (_original_segment(kept, seg_a), _original_segment(kept, seg_b), distance)
+        for seg_a, seg_b, distance in _find_wire_segment_contacts_3d(merged, threshold, config)
+    ]
+
+
+def _find_wire_segment_contacts_3d(
+    points: np.ndarray,
+    threshold: float,
+    config: CoilGenConfig | None = None,
+) -> list[tuple[int, int, float]]:
     points = np.asarray(points, dtype=float)
     threshold = max(float(threshold), 0.0)
     n_segments = max(0, len(points) - 1)
     if n_segments < 2:
         return []
     starts, directions, valid_segments, closed = _wire_segment_data(points)
-    local_exclusion = _wire_local_continuation_length(threshold)
+    local_exclusion = _wire_local_continuation_length(threshold, config)
     method = _wire_distance_method(config)
     if method == "spatial" or (method == "auto" and _should_attempt_spatial_wire_distance(n_segments, config)):
         contacts = _find_wire_segment_contacts_spatial(
@@ -5279,14 +5336,29 @@ def find_min_wire_segment_distance_3d(
     points: np.ndarray,
     config: CoilGenConfig | None = None,
 ) -> tuple[int, int, float]:
-    """Return the closest non-adjacent pair of 3D wire segments."""
+    """Return the closest non-adjacent pair of 3D wire segments.
 
+    Indices refer to segment starts in ``points``; coincident vertices are
+    merged first, as in :func:`find_wire_segment_contacts_3d`.
+    """
+
+    merged, kept = _merge_coincident_vertices(points)
+    seg_a, seg_b, distance = _find_min_wire_segment_distance_3d(merged, config)
+    if seg_a < 0:
+        return seg_a, seg_b, distance
+    return _original_segment(kept, seg_a), _original_segment(kept, seg_b), distance
+
+
+def _find_min_wire_segment_distance_3d(
+    points: np.ndarray,
+    config: CoilGenConfig | None = None,
+) -> tuple[int, int, float]:
     points = np.asarray(points, dtype=float)
     n_segments = max(0, len(points) - 1)
     if n_segments < 2:
         return -1, -1, 0.0
     starts, directions, valid_segments, closed = _wire_segment_data(points)
-    local_exclusion = _wire_local_continuation_length(_wire_clearance_failure_threshold(config))
+    local_exclusion = _wire_local_continuation_length(_wire_clearance_failure_threshold(config), config)
     method = _wire_distance_method(config)
     if method == "spatial" or (method == "auto" and _should_attempt_spatial_wire_distance(n_segments, config)):
         closest = _find_min_wire_segment_distance_spatial(
@@ -5886,8 +5958,25 @@ def _wire_contact_threshold(config: CoilGenConfig) -> float:
     )
 
 
-def _wire_local_continuation_length(clearance: float) -> float:
-    return 2.0 * max(float(clearance), 0.0)
+def _wire_local_continuation_length(clearance: float, config: CoilGenConfig | None = None) -> float:
+    """Arc length within which non-reversing segments are one continuing wire.
+
+    Two segments joined by a short third one are at most that short length
+    apart, so without a floor the "minimum wire distance" collapses to the
+    shortest segment whenever the configured clearance is zero. Parts of one
+    continuing wire closer along the arc than the required centerline
+    clearance overlap their own conductor body anyway, so that clearance is
+    the floor. Near-reversals (hairpins) stay checked.
+    """
+    floor = 0.0
+    if config is not None:
+        try:
+            from .manufacturing import _required_centerline_clearance, conductor_cross_section_points
+
+            floor = _required_centerline_clearance(conductor_cross_section_points(config), config)
+        except (ValueError, TypeError, AttributeError):
+            floor = 0.5 * max(float(getattr(config, "conductor_cross_section_width", 0.0) or 0.0), 0.0)
+    return max(2.0 * max(float(clearance), 0.0), float(floor) if np.isfinite(floor) else 0.0)
 
 
 def _point_polyline_distance_3d(point: np.ndarray, polyline: np.ndarray) -> float:

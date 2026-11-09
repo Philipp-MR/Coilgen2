@@ -139,7 +139,9 @@ def preset_config(kind: str = "cylinder") -> CoilGenConfig:
         sweep_surface_realization="mesh",
         interconnection_cut_width=0.006,
         sweep_bend_mode="fillet",
-        sweep_min_bend_radius=0.006 if kind in ("cylinder", "biplanar") else 0.003,
+        # 3 mm (1.5 wire widths) fits an S-bend between adjacent turns inside
+        # the 6 mm opening cut; 6 mm needed a cut of about 7 mm or more.
+        sweep_min_bend_radius=0.003,
         # A manufactured bend can round a sharp cut inside this local corridor.
         sweep_corner_cluster_max_source_deviation_m=0.006 if kind in ("cylinder", "biplanar") else 0.003,
         sweep_insulation_thickness=0.0001,

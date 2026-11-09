@@ -295,6 +295,7 @@ def build_center_panel(workbench):
             with html.Div(classes="cg-board-heading"):
                 html.Strong("Results")
                 v3.VChip("{{ summary.label }}", color=("summary.color",), variant="outlined", size="small")
+            _metric_cards("drive")
             _metric_cards("field")
             _metric_cards("coil")
             html.Div("{{ summary.overview.partial_note }}", v_if="summary.overview.partial_note", classes="cg-scope")

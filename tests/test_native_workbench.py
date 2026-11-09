@@ -961,9 +961,9 @@ def test_fabrication_review_field_uses_its_actual_sampling_coordinates(scientifi
         arrays["fabricated_points_m"] = expected
     viewport.display_run(arrays)
     viewport.dataset.setCurrentIndex(viewport.dataset.findData("fabricated"))
-    assert "unavailable" not in viewport.caption.text()
+    assert viewport._dataset_mesh is not None
     np.testing.assert_array_equal(viewport._dataset_mesh.points, expected)
-    np.testing.assert_array_equal(viewport._dataset_mesh.active_scalars, field[:, 2])
+    np.testing.assert_array_equal(viewport._dataset_mesh.active_scalars, field[:, 2] * 1e6)
 
 
 def test_pipeline_and_review_conductor_datasets_are_distinct(scientific_viewport):

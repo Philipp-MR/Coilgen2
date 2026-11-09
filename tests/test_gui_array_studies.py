@@ -48,7 +48,7 @@ def test_registered_import_dialog_and_membership_edit(application, tmp_path):
     editor = ArrayCaseDialog()
     editor.filename.setText(str(path))
     editor.name.setText("disturbance")
-    editor.fields.setCurrentText("uT")
+    editor.fields.setCurrentText("µT")
     editor.membership.setCurrentIndex(1)
     case = editor.value()
     np.testing.assert_allclose(case.desired_field_T, [-1e-6, -2e-6])

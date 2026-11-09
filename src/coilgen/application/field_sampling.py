@@ -505,15 +505,21 @@ def _target_evaluator(record, dataset, request, row, scenario):
         scale = recipe.get("normalization_scale")
         if isinstance(scale, bool) or not isinstance(scale, Real) or not np.isfinite(scale):
             raise ValueError("Saved target normalization scale is unavailable.")
+        # Missing signs retain the Cartesian Bz convention of older saved runs.
+        expression_sign = recipe.get("expression_bz_sign", 1.0)
+        if isinstance(expression_sign, bool) or not isinstance(expression_sign, Real) or expression_sign not in (-1, 1):
+            raise ValueError("Saved target expression Bz sign must be +1 or -1.")
 
         def evaluate(points):
             values = np.zeros_like(points)
-            values[:, 2] = evaluate_field_expression(recipe["field_shape_function"], points) * scale
+            values[:, 2] = expression_sign * evaluate_field_expression(recipe["field_shape_function"], points) * scale
             return field_values_to_tesla(values, recipe["target_field_units"])
 
         return evaluate
     # Explicit no-normalization is replayable without a saved scale. No old
     # extrema/linear-fit scale is estimated from the new display grid.
+    # Runs using component signs save an explicit recipe above; this fallback
+    # retains the Cartesian Bz convention of legacy records.
     config = (request or {}).get("config", {})
     if (
         config.get("target_gradient_normalization") == "none"

@@ -277,6 +277,78 @@ def _conductor_profile_issue(config, stage):
     return None
 
 
+def _buildability_issues(config, stage):
+    """Warn when routing settings cannot satisfy the conductor's own checks.
+
+    These are geometric necessities, derived from the same required
+    centerline clearance the fabrication review enforces. They warn rather
+    than block, so DRAFT geometry can still be computed for inspection.
+    """
+    connected = not config.skip_postprocessing and not config.contour_only_sweep_mode
+    if stage not in {"routed", "evaluated"} or not connected or config.skip_sweep:
+        return []
+    from ..layout import _within_group_cut_width
+    from ..manufacturing import _required_centerline_clearance, conductor_cross_section_points
+
+    try:
+        clearance = _required_centerline_clearance(conductor_cross_section_points(config), config)
+        cut_width = float(_within_group_cut_width(config))
+    except (ValueError, TypeError, AttributeError):
+        return []
+    issues = []
+    mm = 1e3
+    if not config.skip_normal_shift and float(config.normal_shift_length) < clearance:
+        issues.append(
+            PreflightIssue(
+                f"Return paths are lifted {config.normal_shift_length * mm:.3g} mm, but this conductor needs "
+                f"{clearance * mm:.3g} mm centerline clearance, so every crossing will fail the clearance check.",
+                settings_node("normal_shift_length"),
+                "normal_shift_length",
+                f"Set Return-path lift to at least {np.ceil(clearance * mm * 10) / 10:.3g} mm.",
+                severity="warning",
+                title="Return-path lift below conductor clearance",
+            )
+        )
+    pitch = max(
+        float(config.min_turn_distance),
+        float(config.conductor_cross_section_width) + 2.0 * float(config.sweep_insulation_thickness),
+    )
+    radius = float(config.sweep_min_bend_radius)
+    if radius > 0.0:
+        # Beyond two quarter-circle bends, extra pitch adds a straight bridge.
+        bend_rise = min(pitch, 2.0 * radius)
+        needed = float(np.sqrt(bend_rise * (4.0 * radius - bend_rise)))
+        if cut_width < needed:
+            issues.append(
+                PreflightIssue(
+                    f"The {cut_width * mm:.3g} mm opening cut is too narrow for an S-bend of {radius * mm:.3g} mm "
+                    f"radius between turns: at least {needed * mm:.3g} mm at {pitch * mm:.3g} mm pitch.",
+                    settings_node("sweep_min_bend_radius"),
+                    "sweep_min_bend_radius",
+                    "Reduce Minimum bend radius, or widen the within-group cut in Advanced settings.",
+                    severity="warning",
+                    title="Opening cut narrower than the bend radius allows",
+                )
+            )
+    spacing = float(config.min_turn_distance)
+    if 0.0 < spacing < clearance:
+        # Zero leaves spacing to the stream function; only an explicit
+        # spacing below the conductor's own clearance is self-contradictory.
+        issues.append(
+            PreflightIssue(
+                f"Minimum centerline spacing is set to {spacing * mm:.3g} mm, below the {clearance * mm:.3g} mm "
+                "this conductor needs; turns that close fail the clearance check.",
+                settings_node("min_turn_distance"),
+                "min_turn_distance",
+                f"Set Minimum centerline spacing to at least {np.ceil(clearance * mm * 10) / 10:.3g} mm, or to 0 "
+                "to leave it to the optimizer.",
+                severity="warning",
+                title="Turn spacing below conductor clearance",
+            )
+        )
+    return issues
+
+
 def check_preflight(project, *, validator=None, pipeline_stage=None) -> PreflightReport:
     """Map actual validator/file/environment failures to settings and actions.
 
@@ -444,4 +516,6 @@ def check_preflight(project, *, validator=None, pipeline_stage=None) -> Prefligh
             issues.append(_input_issue(key, f"Configured input cannot be used: {exc}"))
     if not any(issue.blocking and issue.node == "optimization" for issue in issues):
         issues.extend(_solver_issues(config, prepared_only=prepared_only))
+    if not any(issue.blocking for issue in issues):
+        issues.extend(_buildability_issues(config, stage))
     return PreflightReport(tuple(issues))

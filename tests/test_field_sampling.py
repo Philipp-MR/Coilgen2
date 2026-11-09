@@ -186,9 +186,11 @@ def test_rotated_registered_roi_uses_exact_owned_geometry_and_outline(tmp_path):
     np.testing.assert_array_equal(selected.target_valid_mask, selected.roi_mask)
 
 
-def test_native_target_replays_saved_normalization_and_excludes_suppressed_points(tmp_path):
+@pytest.mark.parametrize("expression_sign", [None, -1.0, 1.0])
+def test_native_target_replays_saved_normalization_and_excludes_suppressed_points(tmp_path, expression_sign):
     points = cube_points(0.05)
-    target = np.column_stack((np.zeros((8, 2)), (points[:, 0] + 2 * points[:, 2]) * 0.002))
+    sign = 1.0 if expression_sign is None else expression_sign
+    target = np.column_stack((np.zeros((8, 2)), sign * (points[:, 0] + 2 * points[:, 2]) * 0.002))
     suppressed_points = np.asarray([[0.5, 0, 0]])
     arrays = {
         "target_points_m": np.vstack((points, suppressed_points)),
@@ -203,8 +205,10 @@ def test_native_target_replays_saved_normalization_and_excludes_suppressed_point
             "field_component": "Bz",
             "coordinate_frame": "world",
         },
-        "config": {"target_region_radius": 0.1},
+        "config": {"target_region_radius": 0.1, "target_field_component": "BdotB0", "b_0_direction": [0, 0, -1]},
     }
+    if expression_sign is not None:
+        metadata["target_recipe"]["expression_bz_sign"] = expression_sign
     record = RunRecord(tmp_path, metadata, arrays)
     result = sample_slices(
         record, "target", representation="direct", offsets_m=(0.03,), resolution=5, size_m=(0.3, 0.3)
@@ -212,7 +216,7 @@ def test_native_target_replays_saved_normalization_and_excludes_suppressed_point
     selected = result.slices[0]
     assert result.representation == "owned_analytic_target"
     assert result.target_representation == "owned_analytic"
-    assert selected.field_T[2, 2, 2] == pytest.approx(0.00012)
+    assert selected.field_T[2, 2, 2] == pytest.approx(sign * 0.00012)
     assert not selected.target_valid_mask[0, 0]  # Out-of-ROI suppression cannot become analytic desired truth.
     assert selected.available_mask.all()
     wrong = RunRecord(

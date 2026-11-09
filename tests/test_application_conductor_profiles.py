@@ -103,6 +103,8 @@ def test_si_profile_reaches_sweep_centroid_and_resistance(tmp_path):
             "conductor_cross_section_height": 1e-3,
             "sweep_max_segment_length": 0.0,
             "sweep_bend_mode": "miter",
+            # The cylinder preset's corner corridor needs fillet bends.
+            "sweep_corner_cluster_max_source_deviation_m": 0.0,
             "sweep_insulation_thickness": 0.1e-3,
             "inductance_source": "fabricated_centroid",
         }

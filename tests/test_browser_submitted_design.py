@@ -160,7 +160,7 @@ def test_named_regional_target_is_the_source_for_preview_and_design_review(tmp_p
     assert project.values["field_shape_function"] == expression
     server.state.dataset = "preview_target"
     browser._render()
-    assert "0.002" in server.state.scene_caption
+    assert "Bz [µT] 2000" in server.state.scene_caption
     groups = design_choice_groups({"config": project.values, **project.study})
     rows = {row["name"]: row["value"] for group in groups for row in group["rows"]}
     assert rows["Imaging ROI"] == "Bz · RMS limit 4 µT"

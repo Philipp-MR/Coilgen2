@@ -147,8 +147,8 @@ exact segment distances. Results retain the established pair order and distance
 kernel. Dense cases that exceed the candidate budget fall back to the existing
 chunked search instead of allocating an unbounded pair list. The saved GY
 benchmark produces identical contact pairs and bitwise-identical distances in
-about 2.2 seconds instead of 113--115 seconds; see the
-[benchmark artifacts](../outputs/wire_distance_bvh_benchmark_20260916/).
+about 2.2 seconds instead of 113--115 seconds. The local benchmark artifacts
+were recorded under `outputs/wire_distance_bvh_benchmark_20260916/`.
 
 ## Frames and bends
 
@@ -229,7 +229,10 @@ See [PLOT_BOOK.md](PLOT_BOOK.md) for the plotting controls.
 
 ## Validation and remaining constraints
 
-The latest [crossing replay report](../outputs/unshifted_crossings_20260916/REPLAY_REPORT.md)
+The historical reports in this section are local generated artifacts under
+the repository's ignored `outputs/` directory.
+
+The crossing replay report (`outputs/unshifted_crossings_20260916/REPLAY_REPORT.md`)
 records repairs and complete remote swept-triangle checks against the
 September 16 saved source routes. It supersedes the crossing status in the
 older reports below. It does not rerun electromagnetic optimization, and its
@@ -238,7 +241,7 @@ constraints remain unsatisfied.
 
 Earlier validation stages:
 
-The [saved GZ connector replay](../outputs/sweep_connector_fix_20260916/FINAL_REPORT.md)
+The saved GZ connector replay (`outputs/sweep_connector_fix_20260916/FINAL_REPORT.md`)
 inserts the production bridge stage into the exact saved post-lift surroundings
 and runs cleanup and sweeping. The repaired connector's maximum actual frame
 step falls from 94.88 to 2.14 degrees; its minimum profile-centroid radius is
@@ -248,7 +251,7 @@ target, another unsupported connector, and physical octagonal crease failures
 remain unresolved. This replay does not rerun optimization or certify the
 whole winding for manufacture.
 
-The [saved-run replay report](../outputs/sweep_implementation_20260914/README.md)
+The saved-run replay report (`outputs/sweep_implementation_20260914/README.md`)
 records source/input hashes, numerical regressions, and timings. The saved GX
 post-lift route still contains the original connector backtrack, physical
 octagonal crease violations, and a confirmed remote branch intersection. It
@@ -256,8 +259,8 @@ correctly remains rejected. The upstream fixes are validated on independent
 pre-lift fixtures; no new three-channel optimization or claim of a corrected
 GX winding is made.
 
-The geometric basis and alternatives are reviewed in the
-[research report](../outputs/sweep_research_20260914/HALBACH_GX_SWEEP_REVIEW.md).
+The geometric basis and alternatives are reviewed in the local research report
+`outputs/sweep_research_20260914/HALBACH_GX_SWEEP_REVIEW.md`.
 Free-frame transport follows [Wang et al., 2008](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/12/Computation-of-rotation-minimizing-frames.pdf).
 Material orientation relative to transported frames is informed by
 [Bergou et al., 2008](https://www.cs.columbia.edu/cg/pdfs/143-rods.pdf); the guide

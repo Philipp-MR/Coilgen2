@@ -355,6 +355,7 @@ def test_production_review_passes_geometry_verified_references_to_drive_evaluato
     checkpoint = SimpleNamespace(
         stage=PipelineStage.EVALUATED,
         result=result,
+        shielding_arrays={},
         save=lambda path: Path(path).write_bytes(b"deterministic stage evidence"),
     )
     fabrication = _fabrication()

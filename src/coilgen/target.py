@@ -81,6 +81,32 @@ _ALLOWED_FUNCTIONS = {
 }
 
 
+EXPRESSION_COMPONENT_HELP = (
+    "A field expression defines Cartesian Bz; a full-vector target is (0, 0, Bz). "
+    "BdotB0 expressions require B0 along ±z. For B0 along x or y, "
+    "rotate the support so that B0 points along z, or import a field map with Bx/By/Bz columns."
+)
+
+
+def expression_target_sign(config: CoilGenConfig) -> float:
+    """Sign that places a scalar field expression into the selected component.
+
+    Expression targets are written as Cartesian Bz, including the full-vector
+    target (0, 0, Bz). For "BdotB0" when B0 is along ±z, B·b0 = ±Bz.
+    Other component selections require an explicitly imported vector field.
+    """
+    from .field_components import normalize_field_component, normalized_b0_direction
+
+    component = normalize_field_component(getattr(config, "target_field_component", "Bz"))
+    if component in {"Bz", "vector"}:
+        return 1.0
+    if component == "BdotB0":
+        direction = normalized_b0_direction(getattr(config, "b_0_direction", (0.0, 0.0, 1.0)))
+        if np.allclose(np.abs(direction), (0.0, 0.0, 1.0), atol=1e-12):
+            return float(np.sign(direction[2]))
+    raise ValueError(f"Target component {component} cannot be set by a field expression. {EXPRESSION_COMPONENT_HELP}")
+
+
 def define_target_field(
     coil_meshes: list[Mesh],
     target_mesh: Mesh | None,
@@ -113,7 +139,8 @@ def define_target_field(
         )
     target_points = _unique_rows_stable(target_points)
     target_b = np.zeros((len(target_points), 3), dtype=float)
-    target_b[:, 2] = evaluate_field_expression(config.field_shape_function, target_points)
+    expression_sign = expression_target_sign(config)
+    target_b[:, 2] = expression_sign * evaluate_field_expression(config.field_shape_function, target_points)
 
     suppressed = np.zeros(len(target_points), dtype=bool)
     suppression_normals = None
@@ -127,7 +154,7 @@ def define_target_field(
         target_b = np.vstack((target_b, np.zeros((len(suppress_points), 3), dtype=float)))
         suppressed = np.concatenate((suppressed, np.ones(len(suppress_points), dtype=bool)))
 
-    gradient = symbolic_gradient_fallback(config.field_shape_function, target_points)
+    gradient = expression_sign * symbolic_gradient_fallback(config.field_shape_function, target_points)
     target_b, gradient, target_diagnostics = _normalise_target_gradient_field(
         target_points,
         target_b,
@@ -136,6 +163,7 @@ def define_target_field(
         config,
         source="expression",
     )
+    target_diagnostics["target_expression_bz_sign"] = expression_sign
     target_b = _finite_target_array(field_values_to_tesla(target_b, config.target_field_units), "Target b field")
     gradient = field_values_to_tesla(gradient, config.target_field_units)
     weights = np.ones(len(target_points), dtype=float)

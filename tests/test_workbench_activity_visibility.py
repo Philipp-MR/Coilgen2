@@ -6,7 +6,6 @@ import time
 import pytest
 
 from PySide6.QtCore import Qt
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialog, QLineEdit, QVBoxLayout
 
 from coilgen.application.stage_preview import MANIFEST_NAME
@@ -54,7 +53,8 @@ def _wait(application, predicate, *, timeout=3):
         application.processEvents()
         if predicate():
             return
-        QTest.qWait(5)
+        # Release the GIL so the background evidence hasher can make progress.
+        time.sleep(0.005)
     pytest.fail("Background preview did not finish")
 
 

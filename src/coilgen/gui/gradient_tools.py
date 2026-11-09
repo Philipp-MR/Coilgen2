@@ -798,7 +798,7 @@ class MeasuredFieldDialog(EngineeringDialog):
         self.form.addRow("Measured map", row)
         self.length_unit, self.field_unit = QComboBox(), QComboBox()
         self.length_unit.addItems(["m", "mm"])
-        self.field_unit.addItems(["T", "mT", "uT"])
+        self.field_unit.addItems(["T", "mT", "µT"])
         self.form.addRow("Coordinate unit", self.length_unit)
         self.form.addRow("Field unit", self.field_unit)
         self.rotation = QPlainTextEdit("1 0 0\n0 1 0\n0 0 1")

@@ -411,6 +411,7 @@ class ScientificViewport(QWidget):
         self.units = QComboBox()
         self.units.setAccessibleName("Field display units")
         self.units.addItems(["T", "mT", "µT", "nT"])
+        self.units.setCurrentText("µT")
         units_label.setBuddy(self.units)
         field_toolbar.addWidget(units_label)
         field_toolbar.addWidget(self.units)
@@ -1180,13 +1181,10 @@ class ScientificViewport(QWidget):
             component = component if component in {"Bx", "By", "Bz"} else "|B|"
             with (
                 QSignalBlocker(self.component),
-                QSignalBlocker(self.units),
                 QSignalBlocker(self.slice_axis),
                 QSignalBlocker(self.clip),
             ):
                 self.component.setCurrentText(component)
-                if self.units.findText(config.field_display_units) >= 0:
-                    self.units.setCurrentText(config.field_display_units)
                 self.slice_axis.setCurrentText("All points")
                 self.clip.setChecked(False)
 

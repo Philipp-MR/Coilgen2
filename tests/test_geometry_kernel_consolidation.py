@@ -67,7 +67,13 @@ def test_analytic_distances_across_scalar_batched_and_compiled_paths(scale, reve
 def test_fine_wire_routing_uses_the_interior_closest_points(method, gap):
     # The former m^4 cutoff returned 50 um clearance for this 100 um crossing.
     points = 1e-4 * np.array([[0.0, 0, 0], [1, 0, 0], [0.5, -0.5, gap], [0.5, 0.5, gap]])
-    config = CoilGenConfig(wire_distance_method=method, wire_distance_chunk_size=1)
+    config = CoilGenConfig(
+        wire_distance_method=method,
+        wire_distance_chunk_size=1,
+        # Keep the conductor smaller than this 100 um routing fixture.
+        conductor_cross_section_width=1e-6,
+        conductor_cross_section_height=1e-6,
+    )
     first, second, distance = find_min_wire_segment_distance_3d(points, config)
     assert (first, second) == (0, 2)
     assert distance == pytest.approx(1e-4 * gap, abs=1e-17)

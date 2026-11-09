@@ -66,7 +66,7 @@ class ArrayCaseDialog(EngineeringDialog):
         self.form.addRow("Subject / specimen", self.subject)
         self.units, self.fields = QComboBox(), QComboBox()
         self.units.addItems(["m", "mm", "cm"])
-        self.fields.addItems(["T", "mT", "uT"])
+        self.fields.addItems(["T", "mT", "µT"])
         self.form.addRow("Coordinate unit", self.units)
         self.form.addRow("Field unit", self.fields)
         self.membership = QComboBox()

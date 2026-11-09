@@ -62,6 +62,8 @@ _WIRE_METRICS = {
     "peak_error_T",
     "target_rms_T",
     "relative_rms_error",
+    "best_fit_current_scale",
+    "best_fit_relative_rms_error",
     "rms_convention",
     "current_A",
     "current_source",
@@ -355,6 +357,14 @@ def _validate_wire_maps(arrays, evidence, component):
                 "reason" in metric and not isinstance(metric["reason"], str)
             ):
                 raise ValueError("Wire field arrays disagree with recorded availability.")
+            fit_keys = {"best_fit_current_scale", "best_fit_relative_rms_error"}
+            if fit_keys & metric.keys() and (
+                not fit_keys <= metric.keys()
+                or not all(_finite_number(metric[key]) for key in fit_keys)
+                or metric["best_fit_current_scale"] <= 0
+                or metric["best_fit_relative_rms_error"] < 0
+            ):
+                raise ValueError("Invalid wire current-fit provenance.")
             if name not in arrays:
                 continue
             if (

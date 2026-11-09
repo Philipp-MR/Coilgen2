@@ -136,7 +136,7 @@ def test_explicit_discard_and_reload_replaces_expert_baseline_with_current_model
     discard = next(
         button
         for button in previous.findChildren(QPushButton)
-        if button.text() == "Discard expert draft & reload current model"
+        if button.text() == "Discard expert draft && reload current model"
     )
     QTest.mouseClick(discard, Qt.MouseButton.LeftButton)
     application.processEvents()

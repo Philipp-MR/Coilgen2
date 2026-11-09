@@ -241,6 +241,31 @@ def test_contour_only_winding_preview_does_not_advertise_a_connected_field(tmp_p
     assert not preview.metadata["wire_fields"]["routed"]["available"]
 
 
+@pytest.mark.parametrize("invalid", [None, "missing_error", "zero_scale", "negative_error", "nonfinite_scale"])
+def test_preview_retains_valid_current_fit_and_rejects_invalid_provenance(tmp_path, invalid):
+    arrays, wire = evaluated_arrays(tmp_path)
+    metrics = wire["contour"]
+    metrics.update(best_fit_current_scale=1.25, best_fit_relative_rms_error=0.02)
+    if invalid == "missing_error":
+        metrics.pop("best_fit_relative_rms_error")
+    elif invalid == "zero_scale":
+        metrics["best_fit_current_scale"] = 0.0
+    elif invalid == "negative_error":
+        metrics["best_fit_relative_rms_error"] = -0.02
+    elif invalid == "nonfinite_scale":
+        metrics["best_fit_current_scale"] = np.inf
+    if invalid is not None:
+        with pytest.raises(ValueError, match="current-fit provenance"):
+            publish_evaluation_preview(
+                tmp_path, arrays, "evaluated_winding", request("evaluated"), DIGEST, wire_fields=wire
+            )
+        return
+    publish_evaluation_preview(tmp_path, arrays, "evaluated_winding", request("evaluated"), DIGEST, wire_fields=wire)
+    preview = load_stage_preview(tmp_path, **identity())
+    assert preview.metadata["wire_fields"]["contour"]["best_fit_current_scale"] == 1.25
+    assert preview.metadata["wire_fields"]["contour"]["best_fit_relative_rms_error"] == 0.02
+
+
 @pytest.mark.parametrize("invalid", ["current", "refit", "grid", "geometry", "scope", "future", "unreported"])
 def test_loader_rejects_mismatched_wire_evidence_and_sampling(tmp_path, invalid):
     arrays, wire = evaluated_arrays(tmp_path)

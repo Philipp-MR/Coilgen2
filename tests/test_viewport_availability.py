@@ -89,7 +89,9 @@ def test_current_policy_is_preserved_on_source_change_and_can_be_explicitly_reco
     assert item(viewport, "routed_field").isEnabled()
     assert viewport.inspect_task("field")
     assert viewport.dataset.currentData() == "routed_residual"
-    np.testing.assert_array_equal(viewport._dataset_mesh.active_scalars, new["routed_field_T"][:, 2])
+    np.testing.assert_allclose(
+        viewport._dataset_mesh.active_scalars, 1e6 * new["routed_field_T"][:, 2], rtol=1e-12
+    )  # µT default
 
 
 @pytest.mark.parametrize("follow", [True, False])
@@ -165,7 +167,7 @@ def test_live_evaluation_and_review_follow_each_field_on_its_recorded_grid(scien
     viewport.display_stage_preview(live, {**metadata, "preview_feature": "evaluated_winding"})
     assert viewport.dataset.currentData() == "routed_field"
     assert viewport.roi_layer.isChecked() and list(viewport._actors.values()).count("target") == 1
-    np.testing.assert_array_equal(viewport._dataset_mesh.active_scalars, field[:, 2])
+    np.testing.assert_allclose(viewport._dataset_mesh.active_scalars, 1e6 * field[:, 2], rtol=1e-12)  # µT default
     assert "-2 A" in viewport.caption.text()
     viewport.dataset.setCurrentIndex(viewport.dataset.findData("contour_field"))
     viewport.display_stage_preview(live, {**metadata, "preview_feature": "evaluated_winding"})
@@ -175,7 +177,7 @@ def test_live_evaluation_and_review_follow_each_field_on_its_recorded_grid(scien
     viewport.display_stage_preview(live, {**metadata, "preview_feature": "independent_field"})
     assert viewport.dataset.currentData() == "validation"
     np.testing.assert_array_equal(viewport._dataset_mesh.points, independent)
-    np.testing.assert_array_equal(viewport._dataset_mesh.active_scalars, 2 * field[:, 2])
+    np.testing.assert_allclose(viewport._dataset_mesh.active_scalars, 1e6 * 2 * field[:, 2], rtol=1e-12)  # µT default
     assert list(viewport._actors.values()).count("target") == 2
 
     live.update(review_conductor_0_points_m=points, review_electrical_0_points_m=independent)
@@ -189,7 +191,7 @@ def test_live_evaluation_and_review_follow_each_field_on_its_recorded_grid(scien
     assert viewport.dataset.currentData() == "fabricated"
     assert list(viewport._actors.values()).count("target") == 1
     assert "original signed per-body contour currents" in viewport.caption.text()
-    np.testing.assert_array_equal(viewport._dataset_mesh.active_scalars, 3 * field[:, 2])
+    np.testing.assert_allclose(viewport._dataset_mesh.active_scalars, 1e6 * 3 * field[:, 2], rtol=1e-12)  # µT default
 
     live.update(
         winding_validation_points_m=independent, winding_validation_field_T=4 * field, winding_validation_target_T=field
@@ -197,9 +199,11 @@ def test_live_evaluation_and_review_follow_each_field_on_its_recorded_grid(scien
     viewport.display_stage_preview(live, {**metadata, "preview_feature": "winding_validation"})
     assert viewport.dataset.currentData() == "winding_validation" and item(viewport, "swept").isEnabled()
     np.testing.assert_array_equal(viewport._dataset_mesh.points, independent)
-    np.testing.assert_array_equal(viewport._dataset_mesh.active_scalars, 4 * field[:, 2])
+    np.testing.assert_allclose(viewport._dataset_mesh.active_scalars, 1e6 * 4 * field[:, 2], rtol=1e-12)  # µT default
     viewport.dataset.setCurrentIndex(viewport.dataset.findData("winding_validation_residual"))
-    np.testing.assert_array_equal(viewport._dataset_mesh.active_scalars, (4 * field - field)[:, 2])
+    np.testing.assert_allclose(
+        viewport._dataset_mesh.active_scalars, 1e6 * (4 * field - field)[:, 2], rtol=1e-12
+    )  # µT default
     assert "independent" in viewport.caption.text() and "acceptance pending" in viewport.caption.text()
 
 

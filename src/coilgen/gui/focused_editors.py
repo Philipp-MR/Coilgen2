@@ -112,7 +112,7 @@ class FocusedFormSection(QWidget):
         footer.rejected.connect(self.dialog.reject)
         self.dialog.rejected.connect(self._discard)
         if apply_callback is not None:
-            apply = QPushButton("Apply & preview", self.dialog)
+            apply = QPushButton("Apply && preview", self.dialog)
             apply.setIcon(icon("model-tree"))
 
             def apply_edits():

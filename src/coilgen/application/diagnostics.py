@@ -380,7 +380,75 @@ _BODY_REASONS = {
         "",
         None,
     ),
+    "curvature_envelope_violation": (
+        "Bend is too tight for the conductor width",
+        "The saved final path curves so tightly that the inner side of the conductor envelope would fold; "
+        "the curvature-to-envelope ratio reaches its configured limit.",
+        "sweep_final_max_curvature_envelope_ratio",
+        "sweep_curvature_envelope_limit",
+        "",
+        None,
+    ),
 }
+
+_RECORD_REASON_TITLES = {
+    "missing_fabrication_path": "No fabrication path was saved",
+    "invalid_sweep": "Conductor sweep is invalid",
+    "weighted_turns_not_physically_expanded": "Weighted turns were not expanded into physical turns",
+    "no_fabrication_paths": "No fabrication paths exist",
+    "assembly_clearance_violation": "Bodies of the assembly are too close to each other",
+    "external_return_not_modeled": "Return conductor is not modelled (open circuit)",
+    "return_conductor_clearance_not_certified": "Return-conductor clearance is not certified",
+    "drive_lead_conductor_clearance_not_certified": "Drive-lead clearance is not certified",
+    "physical_feed_break_not_swept": "Feed break is not swept",
+    "pipeline_sweep_checks_failed": "Pipeline sweep checks failed",
+}
+
+
+def failure_reason_title(code) -> str:
+    """Human title for one recorded failure code; unknown codes are returned unchanged."""
+    code = str(code).strip()
+    if code in _BODY_REASONS:
+        return _BODY_REASONS[code][0]
+    if code in _RECORD_REASON_TITLES:
+        return _RECORD_REASON_TITLES[code]
+    if code.startswith("fabrication_field_") and code.endswith("_budget_exceeded"):
+        name = code[len("fabrication_field_") : -len("_budget_exceeded")].replace("_", " ")
+        return f"Fabricated field exceeds its {name} budget"
+    return code
+
+
+def readable_failure_reasons(failure_reasons) -> list[str]:
+    """Group recorded ``body:code;code`` failure reasons by human title.
+
+    Free text (already readable titles, or messages containing spaces) passes
+    through unchanged. Each title lists the bodies it affects, or their count.
+    """
+    grouped: dict[str, list[str]] = {}
+    for reason in failure_reasons or ():
+        text = str(reason).strip()
+        if not text:
+            continue
+        body, separator, codes = text.partition(":")
+        body = body.strip()
+        if not separator or not body or " " in body:
+            grouped.setdefault(failure_reason_title(text), [])
+            continue
+        items = [code.strip() for code in codes.split(";") if code.strip()] or [""]
+        for code in items:
+            title = (failure_reason_title(code) if " " not in code else code) or "Failed check"
+            bodies = grouped.setdefault(title, [])
+            if body not in bodies:
+                bodies.append(body)
+    readable = []
+    for title, bodies in grouped.items():
+        if not bodies:
+            readable.append(title)
+        elif len(bodies) <= 2:
+            readable.append(f"{title} ({', '.join(bodies)})")
+        else:
+            readable.append(f"{title} ({len(bodies)} bodies)")
+    return readable
 
 
 def _field_witness(record, name, scope=""):

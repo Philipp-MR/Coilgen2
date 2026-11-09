@@ -998,6 +998,18 @@ def result_summary_dict(result: CoilGenResult) -> dict[str, Any]:
     }
 
 
+def _target_error_limit_is_absolute(summary: dict) -> bool:
+    """True when the target-error constraint used an absolute field limit."""
+
+    def finite(name):
+        value = summary.get(name)
+        return isinstance(value, (float, int, np.number)) and not isinstance(value, bool) and np.isfinite(value)
+
+    tolerance = summary.get("target_error_tolerance_percent")
+    relative_inactive = not finite("target_error_tolerance_percent") or float(tolerance) <= 0.0
+    return relative_inactive and finite("target_error_allowed_field_metric_T")
+
+
 def _constraint_status_summary(result: CoilGenResult) -> dict[str, str]:
     """Distinguish inactive requirements, missing evidence, and assessed checks.
 
@@ -1278,8 +1290,19 @@ def result_performance_table_rows(result: CoilGenResult) -> list[list[str]]:
     add("Optimization", "target-error constraint mode", "target_error_constraint_mode")
     add("Optimization", "target-error constraint metric", "target_error_constraint_metric")
     add("Optimization", "target-error constraint met", "target_error_constraint_met")
-    add("Optimization", "target-error tolerance", "target_error_tolerance_percent", "%")
-    add("Optimization", "achieved target-error residual", "target_error_constraint_relative_residual_percent", "%")
+    if _target_error_limit_is_absolute(summary):
+        # An absolute field limit was enforced; a "0 %" relative tolerance next
+        # to a large relative residual and PASS would read as a contradiction.
+        add("Optimization", "target-error tolerance", value="absolute field limit (see allowed field metric)")
+        add(
+            "Optimization",
+            "relative residual (informative, not constrained)",
+            "target_error_constraint_relative_residual_percent",
+            "%",
+        )
+    else:
+        add("Optimization", "target-error tolerance", "target_error_tolerance_percent", "%")
+        add("Optimization", "achieved target-error residual", "target_error_constraint_relative_residual_percent", "%")
     add("Optimization", "target-error constrained field metric", "target_error_constraint_field_metric_T", "T")
     add("Optimization", "target-error allowed field metric", "target_error_allowed_field_metric_T", "T")
     add("Optimization", "linearity RMS constraint met", "linearity_rms_constraint_met")

@@ -95,12 +95,12 @@ def test_browser_legend_and_camera_use_the_rendered_data(tmp_path, monkeypatch):
     monkeypatch.setattr(browser.session, "export_options", lambda _record: ())
     state.dataset = "routed_residual"
     browser._open_run("saved")
-    assert (state.field_legend["low"], state.field_legend["high"]) == ("-5e-06", "5e-06")
-    assert state.field_legend["label"] == "ΔBz [T]"
+    assert (state.field_legend["low"], state.field_legend["high"]) == ("-5", "5")
+    assert state.field_legend["label"] == "ΔBz [µT]"
     state.component = "Bmag"
     browser._render()
-    assert (state.field_legend["low"], state.field_legend["high"]) == ("2e-06", "5e-06")
-    assert state.field_legend["label"] == "|B − target| [T]"
+    assert (state.field_legend["low"], state.field_legend["high"]) == ("2", "5")
+    assert state.field_legend["label"] == "|B − target| [µT]"
     state.dataset = "support"
     browser._render()
     assert state.field_legend is None
@@ -157,7 +157,7 @@ def test_historical_projection_uses_the_record_and_switching_documents_clears_re
     workbench.session.apply_inputs({"b_0_direction": (1, 0, 0)})
     workbench._render()
     assert state.b0_text == "B0 ∥ (0, 0, 1)"
-    assert "BdotB0 [T] 7e-06" in state.scene_caption
+    assert "BdotB0 [µT] 7" in state.scene_caption
     assert state.run_context.startswith("Earlier")
     assert all(step["code"] == "stale" for step in state.plan_channels[0]["steps"])
     state.dataset = "support"
@@ -178,7 +178,7 @@ def test_historical_projection_uses_the_record_and_switching_documents_clears_re
     assert state.summary["label"] == "Prepare model completed"
     state.component = "Bx"
     workbench._render()
-    assert "Bx [T] 2e-06" in state.scene_caption
+    assert "Bx [µT] 2" in state.scene_caption
 
 
 def test_pending_edits_advanced_json_and_physical_geometry(tmp_path):

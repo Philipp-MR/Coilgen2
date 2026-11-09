@@ -149,7 +149,7 @@ class ArrayCase:
         x_m,y_m,z_m,B_T or x_m,y_m,z_m,Bx_T,By_T,Bz_T. Scalar fields are
         invariant under registration; their declared projection axis rotates.
         """
-        length_scales, field_scales = {"m": 1.0, "mm": 1e-3, "cm": 1e-2}, {"T": 1.0, "mT": 1e-3, "uT": 1e-6}
+        length_scales, field_scales = {"m": 1.0, "mm": 1e-3, "cm": 1e-2}, {"T": 1.0, "mT": 1e-3, "µT": 1e-6, "uT": 1e-6}
         if length_unit not in length_scales or field_unit not in field_scales:
             raise ValueError("Choose explicit supported coordinate and field units.")
         path = Path(path).expanduser().resolve()

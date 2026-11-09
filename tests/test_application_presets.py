@@ -26,7 +26,7 @@ def test_examples_define_material_and_validation_assumptions(kind):
     gradient = kind in ("cylinder", "biplanar")
     assert config.conductor_cross_section_width == pytest.approx(0.002 if gradient else 0.001)
     assert config.conductor_cross_section_height == pytest.approx(0.002 if gradient else 0.001)
-    assert config.sweep_min_bend_radius == pytest.approx(0.006 if gradient else 0.003)
+    assert config.sweep_min_bend_radius == pytest.approx(0.003)
     assert config.conductor_cross_section_width * config.conductor_cross_section_height == pytest.approx(
         4e-6 if gradient else 1e-6
     )

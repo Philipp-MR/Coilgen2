@@ -4,7 +4,13 @@ import numpy as np
 
 from ..application.diagnostics import recorded_stage, run_problems
 from ..gui.coil_statistics import build_coil_statistics
-from ..gui.result_summary import coil_metric_cards, field_metric_cards, summarize_field_result
+from ..gui.result_summary import (
+    DRIVE_TOOLTIP,
+    coil_metric_cards,
+    drive_metric_cards,
+    field_metric_cards,
+    summarize_field_result,
+)
 
 
 _METRICS = (
@@ -77,6 +83,9 @@ def result_overview(record):
     coil = build_coil_statistics(record)
     cards, scope, scope_tooltip = coil_metric_cards(coil)
     field_cards = field_metric_cards(field) if field.visible else []
+    drive_cards = drive_metric_cards(field) if field.visible else []
+    if not any(not card["unavailable"] for card in drive_cards):
+        drive_cards = []
     coil_cards = cards if coil.has_values else []
     stage = recorded_stage(record.metadata_view)
     partial_note = ""
@@ -94,6 +103,11 @@ def result_overview(record):
         if not field_cards and not coil_cards:
             partial_note = boundaries[stage]
     return {
+        "drive_cards": drive_cards,
+        "drive_context": "At the drive current: the requested field, with the remaining shape error."
+        if drive_cards
+        else "",
+        "drive_tooltip": DRIVE_TOOLTIP,
         "field_cards": field_cards,
         # These datasets show the exact current policy used for the scalar board.
         # Other wire datasets may display a fitted current in older records.

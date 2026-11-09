@@ -14,7 +14,13 @@ from ..application.routing_analysis import routing_analysis_available
 from .colors import apply_tone, tone_color
 from .coil_statistics import build_coil_statistics
 from .icons import icon
-from .result_summary import FieldResultSummary, coil_metric_cards, field_metric_cards, summarize_field_result
+from .result_summary import (
+    FieldResultSummary,
+    coil_metric_cards,
+    drive_metric_cards,
+    field_metric_cards,
+    summarize_field_result,
+)
 
 
 class _Heading(QLabel):
@@ -96,6 +102,40 @@ class ResultsOverviewPanel(QFrame):
         self.routing_button.clicked.connect(lambda _checked=False: self.action_requested.emit("routing"))
         header.addWidget(self.routing_button)
         layout.addLayout(header)
+        # Headline: the current that produces the requested field, and the
+        # field-shape error that remains at that current.
+        self.drive_cards = QFrame(self)
+        drive_row = QHBoxLayout(self.drive_cards)
+        drive_row.setContentsMargins(0, 0, 0, 0)
+        drive_row.setSpacing(7)
+        self.drive_labels, self.drive_values = {}, {}
+        for key, text in (
+            ("drive", "Drive current"),
+            ("shape", "Shape error"),
+            ("gain", "Field at design current"),
+        ):
+            card = QFrame(self)
+            card.setObjectName("drive_result_" + key)
+            card.setFrameShape(QFrame.Shape.StyledPanel)
+            card.setMinimumWidth(0)
+            card.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(8, 4, 8, 4)
+            card_layout.setSpacing(0)
+            caption, value = QLabel(text, card), _Value(card)
+            for widget in (caption, value):
+                widget.setTextFormat(Qt.TextFormat.PlainText)
+                widget.setMinimumWidth(0)
+            font = value.font()
+            font.setPointSizeF(max(16.0, font.pointSizeF() + 4))
+            font.setBold(True)
+            value.setFont(font)
+            value.setAccessibleName(text)
+            card_layout.addWidget(caption)
+            card_layout.addWidget(value)
+            drive_row.addWidget(card, 1)
+            self.drive_labels[key], self.drive_values[key] = caption, value
+        layout.addWidget(self.drive_cards)
         self.field_cards = QFrame(self)
         cards = QHBoxLayout(self.field_cards)
         cards.setContentsMargins(0, 0, 0, 0)
@@ -202,9 +242,10 @@ class ResultsOverviewPanel(QFrame):
             f"QFrame#results_overview_panel {{ border: 1px solid {outline}; border-radius: 7px; }}"
             f"QFrame#field_result_rms, QFrame#field_result_peak, QFrame#field_result_relative, "
             f"QFrame#field_result_current, QFrame#coil_result_resistance, QFrame#coil_result_inductance, "
-            f"QFrame#coil_result_mass, QFrame#coil_result_volume {{ background: {background}; border: 1px solid {outline}; "
+            f"QFrame#coil_result_mass, QFrame#coil_result_volume, QFrame#drive_result_drive, "
+            f"QFrame#drive_result_shape, QFrame#drive_result_gain {{ background: {background}; border: 1px solid {outline}; "
             "border-radius: 5px; }"
-            f"QFrame#field_result_rms {{ border-left: 3px solid {accent}; }}"
+            f"QFrame#field_result_rms, QFrame#drive_result_drive {{ border-left: 3px solid {accent}; }}"
             f"QFrame#results_overview_panel QLabel {{ color: {foreground}; }}"
         )
         if self.summary.title:
@@ -271,6 +312,14 @@ class ResultsOverviewPanel(QFrame):
         self.context.setToolTip(summary.tooltip)
         self.setToolTip(summary.tooltip)
         self._set_coil_statistics()
+        drive = drive_metric_cards(summary)
+        self.drive_cards.setVisible(summary.visible and any(not card["unavailable"] for card in drive))
+        for card in drive:
+            value = self.drive_values[card["key"]]
+            value.set_value(card["value"], unavailable=card["unavailable"])
+            value.setToolTip(card["tooltip"])
+            self.drive_labels[card["key"]].setText(card["name"])
+            self.drive_labels[card["key"]].setToolTip(card["tooltip"])
         for card in field_metric_cards(summary):
             value = self.metric_values[card["key"]]
             value.set_value(card["value"], unavailable=card["unavailable"])

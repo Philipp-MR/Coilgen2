@@ -149,7 +149,10 @@ def _wire_field_metrics(field, target, config) -> dict:
     peak = scale * float(np.max(error_norm))
     if not np.all(np.isfinite([absolute, peak])):
         return {"available": False, "reason": "Wire residual magnitude exceeds finite SI reporting range."}
+    from ..metrics import current_scale_fit
+
     return {
+        **current_scale_fit(actual, reference, weights),
         "available": True,
         "component": component,
         "sample_count": point_count,
@@ -275,6 +278,7 @@ def _target_analysis_recipe(request, target):
             "target_field_units": config.target_field_units,
             "normalization_scale": float(scale),
             "normalization_method": diagnostics.get("target_gradient_normalization_method"),
+            "expression_bz_sign": float(diagnostics.get("target_expression_bz_sign", 1.0)),
             "field_component": "Bz",
             "coordinate_frame": "world",
         }

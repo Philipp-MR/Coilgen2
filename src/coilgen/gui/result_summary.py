@@ -30,6 +30,12 @@ class FieldResultSummary:
     context: str = ""
     tooltip: str = ""
     analysis_available: bool = False
+    # Fit of the shown field to the target with one free current scale s:
+    # drive current = s × design current; shape error after that fit; field
+    # amplitude at the design current relative to the target.
+    drive_current_A: float | None = None
+    shape_percent: float | None = None
+    gain_percent: float | None = None
 
 
 def _mapping(value):
@@ -268,6 +274,13 @@ def summarize_field_result(record, *, source_error="", stale=False):
         tooltip += " A stream function solution does not define a single discrete wire current."
     if source_error:
         tooltip += "\n" + str(source_error)
+    # Saved by the evaluation (metrics.current_scale_fit); never recomputed here.
+    scale = _number(evidence.get("best_fit_current_scale"), nonnegative=True)
+    shape = _number(evidence.get("best_fit_relative_rms_error"), 100, nonnegative=True)
+    # For the weighted least-squares fit, target-mode amplitude is (1-r²)/s.
+    # The shape residual r removes field components orthogonal to the target.
+    gain = 100.0 * ((1.0 - (shape / 100.0) ** 2) / scale - 1.0) if scale and shape is not None else None
+    drive_current = scale * current if scale and current is not None else None
     return FieldResultSummary(
         visible=True,
         title=title,
@@ -285,7 +298,52 @@ def summarize_field_result(record, *, source_error="", stale=False):
         context=context,
         tooltip=tooltip,
         analysis_available=not bool(source_error),
+        drive_current_A=drive_current,
+        shape_percent=shape,
+        gain_percent=gain,
     )
+
+
+DRIVE_TOOLTIP = (
+    "One free current scale is fitted so the shown field best matches the target. "
+    "Drive current: the current that produces the requested field. "
+    "Shape error: RMS residual relative to the target RMS after that fit — what a current change cannot fix. "
+    "Field at the design current: the weighted projection onto the target, shown as a percentage deviation "
+    "from the requested amplitude. Orthogonal field components contribute to shape error."
+)
+
+
+def drive_metric_cards(summary):
+    """Headline readouts at the current that produces the requested field."""
+    current = summary.current_A
+    cards = []
+    for key, name, number, text in (
+        (
+            "drive",
+            "Drive current",
+            summary.drive_current_A,
+            None if summary.drive_current_A is None else f"{summary.drive_current_A:.4g} A",
+        ),
+        (
+            "shape",
+            "Shape error",
+            summary.shape_percent,
+            None if summary.shape_percent is None else f"{summary.shape_percent:.3g} %",
+        ),
+        (
+            "gain",
+            f"Field at {current:.4g} A" if current is not None else "Field at design current",
+            summary.gain_percent,
+            None if summary.gain_percent is None else f"{summary.gain_percent:+.1f} %",
+        ),
+    ):
+        display = text or (
+            "Not applicable" if key == "drive" and summary.source_key in {"sheet", "validation"} else "Not recorded"
+        )
+        cards.append(
+            {"key": key, "name": name, "value": display, "unavailable": number is None, "tooltip": DRIVE_TOOLTIP}
+        )
+    return cards
 
 
 def field_metric_cards(summary):

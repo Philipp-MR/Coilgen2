@@ -5,6 +5,55 @@ from typing import Any
 import numpy as np
 
 
+def current_scale_fit(actual: np.ndarray, target: np.ndarray, weights: np.ndarray | None = None) -> dict[str, Any]:
+    """Weighted best single current scale for a field, and the shape error left.
+
+    A winding is driven by a current, so the useful field error is the one left
+    after choosing that current: ``scale`` minimizes the weighted RMS of
+    ``scale * actual - target``. ``relative_rms_error`` is that residual RMS
+    over the target RMS. Rows may be scalars or vectors (magnitude RMS).
+    Empty dict when undefined (no field, no target, invalid weights, or reversed
+    polarity). Zero-weight rows do not contribute to the fit.
+    """
+    actual = np.asarray(actual, dtype=float)
+    target = np.asarray(target, dtype=float)
+    if actual.ndim == 0 or target.ndim == 0 or actual.size == 0 or target.size == 0:
+        return {}
+    actual = actual.reshape(len(actual), -1)
+    target = target.reshape(len(target), -1)
+    if actual.shape != target.shape:
+        return {}
+    w = np.ones(len(target)) if weights is None else np.asarray(weights, dtype=float).reshape(-1)
+    if len(w) != len(target) or not np.all(np.isfinite(w)) or np.any(w < 0) or not np.any(w > 0):
+        return {}
+    active = w > 0
+    actual, target, w = actual[active], target[active], w[active]
+    if not np.all(np.isfinite(actual)) or not np.all(np.isfinite(target)):
+        return {}
+    actual_scale = float(np.max(np.abs(actual)))
+    target_scale = float(np.max(np.abs(target)))
+    if actual_scale == 0 or target_scale == 0:
+        return {}
+    # Normalize before squaring or summing to retain finite fits across SI scales.
+    actual, target = actual / actual_scale, target / target_scale
+    w = w / np.max(w)
+    w = w / np.sum(w)
+    ff = float(w @ np.sum(actual * actual, axis=1))
+    fb = float(w @ np.sum(actual * target, axis=1))
+    bb = float(w @ np.sum(target * target, axis=1))
+    if not (np.isfinite(ff) and np.isfinite(fb) and np.isfinite(bb)) or ff <= 0.0 or bb <= 0.0 or fb <= 0.0:
+        return {}
+    relative_scale = fb / ff
+    scale = relative_scale * (target_scale / actual_scale)
+    if not np.isfinite(scale) or scale <= 0:
+        return {}
+    residual = float(w @ np.sum((relative_scale * actual - target) ** 2, axis=1))
+    return {
+        "best_fit_current_scale": scale,
+        "best_fit_relative_rms_error": float(np.sqrt(max(residual, 0.0) / bb)),
+    }
+
+
 def dsv_target_mask(target_field: Any) -> np.ndarray:
     """Return the internal DSV samples used for gradient-performance metrics."""
 

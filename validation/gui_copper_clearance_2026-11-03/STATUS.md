@@ -10,6 +10,6 @@ Failed or cancelled native jobs: none observed.
 
 [Current per-channel progress](progress.csv)
 
-Final files will appear here after packaging and SHA-256 verification.
-
-[Report](README.md) · [Channel results](per-channel.csv) · [Interchannel pair results](interchannel-pairs.csv) · [Exported solids](stl-solids.csv) · [Copper STLs](copper-exports.zip) · [Verification evidence](verification-evidence.zip) · [File checksums](SHA256SUMS.txt)
+Final files are pending packaging and SHA-256 verification. The planned files are
+`README.md`, `per-channel.csv`, `interchannel-pairs.csv`, `stl-solids.csv`,
+`copper-exports.zip`, `verification-evidence.zip` and `SHA256SUMS.txt`.

@@ -80,7 +80,7 @@ def test_original_current_dataset_never_silently_falls_back(scientific_viewport)
     viewport.wire_current.setCurrentIndex(1)
     assert viewport.wire_current.currentIndex() == 0
     assert not viewport.wire_current.model().item(1).isEnabled()
-    np.testing.assert_array_equal(viewport._dataset_mesh.active_scalars, arrays["routed_field_T"][:, 2])
+    np.testing.assert_array_equal(viewport._dataset_mesh.active_scalars, arrays["routed_field_T"][:, 2] * 1e6)
     assert errors and "Current selection unavailable" in errors[-1]
 
 
@@ -107,9 +107,9 @@ def test_current_selector_is_inactive_for_fixed_reviewed_field_and_restored_for_
     viewport.dataset.setCurrentIndex(viewport.dataset.findData("fabricated"))
     assert not viewport.wire_current.isEnabled()
     assert "fixed saved current policy" in viewport.wire_current.toolTip()
-    np.testing.assert_array_equal(viewport._dataset_mesh.active_scalars, arrays["fabricated_field_T"][:, 2])
+    np.testing.assert_array_equal(viewport._dataset_mesh.active_scalars, arrays["fabricated_field_T"][:, 2] * 1e6)
     viewport.dataset.setCurrentIndex(viewport.dataset.findData("routed_field"))
     assert viewport.wire_current.isEnabled() and viewport.wire_current.currentIndex() == 1
     np.testing.assert_array_equal(
-        viewport._dataset_mesh.active_scalars, arrays["routed_field_at_stream_current_T"][:, 2]
+        viewport._dataset_mesh.active_scalars, arrays["routed_field_at_stream_current_T"][:, 2] * 1e6
     )

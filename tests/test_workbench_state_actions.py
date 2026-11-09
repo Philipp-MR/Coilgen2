@@ -79,7 +79,7 @@ def test_hidden_advanced_draft_is_visible_and_resolves_before_compute(windows):
     window._advanced_dialog()
     expert = window.expert_window
     expert.fields["min_turn_distance"].control.setText("4")
-    expert.close()
+    expert.hide()
     assert window._has_input_drafts()
     assert "Advanced edits pending" in window.view_context.context.editing_text
     assert window.compute_button.text() == "Resolve Advanced draft"
@@ -100,7 +100,7 @@ def test_resume_resolves_advanced_draft_before_applying_other_edits(windows):
     window._advanced_dialog()
     expert = window.expert_window
     expert.fields["min_turn_distance"].control.setText("4")
-    expert.close()
+    expert.hide()
     window._draft_controls["radius_mm"].setValue(174)
     assert window.resume_selected_run() is None
     assert window.project is original and window._draft_dirty

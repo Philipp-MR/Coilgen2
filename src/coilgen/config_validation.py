@@ -594,12 +594,27 @@ def _validate_target_settings(config: CoilGenConfig, error, warning, *, project_
     except ValueError as exc:
         error("target_field_component", str(exc))
         component = "Bz"
+    expression_target = str(config.target_field_definition_file).strip().lower() in {"", "none"} and str(
+        config.field_shape_function
+    ).strip().lower() not in {"", "none"}
     if component in {"Bx", "By", "BdotB0", "vector"}:
-        warning(
-            "target_field_component",
-            f"Target component {component} uses generalized field-component rows.",
-            "Confirm reports and plots are interpreted with this useful-field convention.",
-        )
+        from .target import EXPRESSION_COMPONENT_HELP, expression_target_sign
+
+        try:
+            if expression_target:
+                expression_target_sign(config)
+        except ValueError:
+            error(
+                "target_field_component",
+                f"The selected {component} convention is unsupported for a Bz field expression.",
+                EXPRESSION_COMPONENT_HELP,
+            )
+        else:
+            warning(
+                "target_field_component",
+                f"Target component {component} uses generalized field-component rows.",
+                "Confirm reports and plots are interpreted with this useful-field convention.",
+            )
     if str(config.field_shape_function).strip() == "" and str(config.target_field_definition_file).strip() == "none":
         error("field_shape_function", "Target field expression is empty.", "Use e.g. 'x', 'y', 'z', '1', or a CSV map.")
     target_file = str(config.target_field_definition_file).strip()

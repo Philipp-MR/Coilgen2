@@ -29,6 +29,7 @@ from ..persistence import atomic_json, file_digest
 from ..persistence import publish_exclusive as _publish_exclusive
 from ..progress import ProgressReporter, progress_scope
 from .service import RunRecord
+from .diagnostics import readable_failure_reasons
 from .evidence import verify_record
 
 
@@ -75,7 +76,7 @@ def default_export_selection(options) -> tuple[str, ...]:
 
 def draft_export_notice(failure_reasons=()) -> str:
     """Wording that must accompany any DRAFT export, in every client."""
-    reasons = list(dict.fromkeys(str(reason) for reason in failure_reasons))
+    reasons = readable_failure_reasons(dict.fromkeys(str(reason) for reason in failure_reasons))
     text = (
         "DRAFT geometry: recorded fabrication checks failed, so these files are NOT construction-released. "
         "Use them for inspection and prototyping only, and review clearance, bend radius and penetration "

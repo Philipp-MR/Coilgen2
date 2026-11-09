@@ -5,11 +5,12 @@ Actively shielded XYZ foil gradient system (Gx, Gy, Gz)**. The browser
 template picker offers the same assembly. **Compute enabled channels
 independently** runs one joint primary/shield solve per channel.
 
-The [evaluated project](../outputs/shielded_xyz_gradient/shielded_xyz_gradient.coilgen)
-opens in both workbenches and includes all three computed studies and their
-checkpoints (491.6 MiB). For a fresh solve, use the gallery template or open
-the [inputs-only project](../outputs/shielded_xyz_gradient/shielded_xyz_inputs.coilgen)
-(50 KiB).
+The recorded evaluation produced local artifacts under
+`outputs/shielded_xyz_gradient/`. The evaluated project,
+`shielded_xyz_gradient.coilgen`, opens in both workbenches and includes all
+three computed studies and their checkpoints (491.6 MiB).
+`shielded_xyz_inputs.coilgen` contains the inputs (50 KiB). Use the gallery
+template or the commands below to create a project in a fresh checkout.
 
 Open a completed channel result and select **View → Plot shielding surface…**
 on desktop or **Shielding surface** in the browser. Compare the primary, shield

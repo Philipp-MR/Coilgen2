@@ -86,6 +86,9 @@ PREFERRED_RUN_PLOTS = (
 )
 
 
+# Field maps are shown in µT: low-field gradients and residuals are µT-scale per ampere.
+FIELD_DISPLAY_UNIT = "µT"
+FIELD_DISPLAY_SCALE = 1e6
 B0_LABEL_OFFSET = 0.82  # label centre along B0, in arrow units
 
 
@@ -252,6 +255,7 @@ def scene_layers(arrays, key, *, component="Bz", b0_direction=(0.0, 0.0, 1.0), o
         scalars = np.asarray(field_component_values(values, component, b0_direction=b0_direction), dtype=float)
         if scalars.ndim == 2:
             scalars = np.linalg.norm(scalars, axis=1)
+        scalars = scalars * FIELD_DISPLAY_SCALE
         if has_support:
             layers.append(_support_layer(arrays, opacity=0.24 if key == "preview_target" else 0.15))
         label = "|B − target|" if residual and component == "Bmag" else f"{'Δ' if residual else ''}{component}"
@@ -261,7 +265,7 @@ def scene_layers(arrays, key, *, component="Bz", b0_direction=(0.0, 0.0, 1.0), o
                 "points",
                 np.asarray(arrays[points_name], dtype=float),
                 scalars=scalars,
-                scalar_label=f"{label} [T]",
+                scalar_label=f"{label} [{FIELD_DISPLAY_UNIT}]",
                 symmetric=residual and component != "Bmag",
             )
         )
