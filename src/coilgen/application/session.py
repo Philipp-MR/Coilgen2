@@ -394,6 +394,41 @@ SETTINGS = (
         "conductor", "normal_shift_mm", "Return-path lift", "number", _scaled("normal_shift_length", 1000.0), unit="mm"
     ),
     _field(
+        "conductor",
+        "support_body_mode",
+        "Grooved support body",
+        "choice",
+        _plain("support_body_mode"),
+        choices=("off", "inside", "outside"),
+        help="Thicken the support into a printable former and cut the conductor grooves into it. "
+        "inside grows the solid away from surface_outer conductors; surface_inner conductors sit fully recessed.",
+    ),
+    _field(
+        "conductor",
+        "support_body_thickness_mm",
+        "Support body thickness",
+        "number",
+        _scaled("support_body_thickness", 1000.0),
+        unit="mm",
+    ),
+    _field(
+        "conductor",
+        "support_body_groove_clearance_mm",
+        "Groove clearance",
+        "number",
+        _scaled("support_body_groove_clearance", 1000.0),
+        unit="mm",
+        help="Gap around the insulated conductor in the groove (print tolerance).",
+    ),
+    _field(
+        "conductor",
+        "support_body_groove_extra_depth_mm",
+        "Extra groove depth",
+        "number",
+        _scaled("support_body_groove_extra_depth", 1000.0),
+        unit="mm",
+    ),
+    _field(
         "optimization",
         "sf_opt_method",
         "Stream-function method",
@@ -746,6 +781,14 @@ class WorkbenchSession:
         inactive = set()
         if config.skip_postprocessing or config.contour_only_sweep_mode:
             inactive.update(("interconnection_axis", "return_path_lift", "normal_shift_mm"))
+        if str(getattr(config, "support_body_mode", "off")) == "off":
+            inactive.update(
+                (
+                    "support_body_thickness_mm",
+                    "support_body_groove_clearance_mm",
+                    "support_body_groove_extra_depth_mm",
+                )
+            )
         if self.project.study.get("requirements"):
             inactive.update(
                 (

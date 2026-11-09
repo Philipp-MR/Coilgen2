@@ -703,6 +703,14 @@ class CoilGenConfig:
     sweep_insulation_thickness: float = 0.0
     sweep_manufacturing_tolerance: float = 0.0
     sweep_bend_clearance_margin: float = 0.0
+    # Grooved support body: thicken the support surface into a printable solid
+    # and subtract the swept conductor grown by insulation + groove clearance.
+    # "off", "inside" (the solid grows against the conductor frame normal, away
+    # from surface_outer conductors) or "outside" (along the frame normal).
+    support_body_mode: str = "off"
+    support_body_thickness: float = 0.003
+    support_body_groove_clearance: float = 0.0002
+    support_body_groove_extra_depth: float = 0.0
     layout_terminal_strategy: str = "undefined"
     layout_terminal_pad_count: int = 0
     layout_terminal_exit_count: int = 0

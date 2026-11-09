@@ -43,6 +43,7 @@ from ..application.scene_spec import (
     PREFERRED_RUN_PLOTS,
     DENSITY_CMAP,
     FIELD_CMAP,
+    GROOVED_SUPPORT_COLOR,
     SUPPORT_COLOR,
     WINDING_COLOR,
     model_preview,
@@ -2072,6 +2073,25 @@ class ScientificViewport(QWidget):
                 }
                 caption += " · " + self._field_caption(key)
             elif key == "swept":
+                grooved_count = 0
+                for name in sorted(arrays):
+                    if not name.startswith("grooved_support_") or not name.endswith("_vertices_m"):
+                        continue
+                    face_key = name.removesuffix("_vertices_m") + "_faces"
+                    if face_key not in arrays:
+                        continue
+                    former = self._mesh(arrays[name], arrays[face_key])
+                    if former.n_points and former.n_cells:
+                        self._add(
+                            former,
+                            "geometry",
+                            color=GROOVED_SUPPORT_COLOR,
+                            show_edges=self.edges.isChecked(),
+                            opacity=0.08 if locating else 0.55,
+                        )
+                        grooved_count += 1
+                if grooved_count:
+                    caption += f" · grooved support {grooved_count} {'body' if grooved_count == 1 else 'bodies'}"
                 for name in sorted(arrays):
                     if not name.startswith("swept_") or not name.endswith("_vertices_m"):
                         continue

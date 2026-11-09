@@ -52,6 +52,7 @@ from .routing import (
 )
 from .inductance import calculate_inductance_by_coil_layout
 from .manufacturing import create_swept_coil_meshes, realize_coil_paths
+from .support_body import create_grooved_support_bodies, support_body_enabled
 from .joint_group_adoption import improve_group_routes, refresh_retained_route_diagnostics
 from .crossing_repair import crossing_repair_enabled, repair_swept_crossings
 from .routing_assembly import assemble_routing_parts
@@ -543,6 +544,9 @@ class CoilGenPipeline:
         state.regularization_diagnostics = regularization_diagnostics
         state.primary_surface_index = primary_surface_ind
 
+    def _grooved_support_enabled(self) -> bool:
+        return not self.config.skip_sweep and support_body_enabled(self.config)
+
     def _route_and_realize(self, state: PipelineState, context: _ExecutionContext) -> None:
         routing = not (self.config.skip_postprocessing or self.config.contour_only_sweep_mode)
         context.operations(
@@ -556,6 +560,7 @@ class CoilGenPipeline:
                 ("Select joint routes", 25 if routing else 0),
                 ("Check mounted crossing clearance", 10 if routing else 0),
                 ("Sweep conductors", 15 if not self.config.skip_sweep else 0),
+                ("Build grooved support", 3 if self._grooved_support_enabled() else 0),
                 ("Validate circuit assembly", 4 if routing else 0),
                 ("Generate PCB", 1 if self.config.make_cylndrical_pcb else 0),
             )
@@ -650,6 +655,9 @@ class CoilGenPipeline:
             context.feature_callback("sweep", replace(state, parts=parts))
         refresh_retained_route_diagnostics(parts)
         stage("finalized swept conductor meshes")
+        if self._grooved_support_enabled():
+            context.compute("Build grooved support", create_grooved_support_bodies, parts, self.config)
+            stage("built grooved support bodies")
         # Retain the actual final candidate before a strict assembly gate can
         # reject it. This is failure evidence, never a completed checkpoint.
         state.parts = parts

@@ -104,6 +104,18 @@ def _pipeline_sweep_evidence(parts, config) -> dict:
                 }
             )
     statuses = [body["manufacturing_ok"] for body in bodies]
+    # Grooved formers are reported separately: they never change conductor checks.
+    supports = [
+        {
+            "part_index": part_index + 1,
+            "vertices_key": f"grooved_support_{part_index}_vertices_m",
+            "faces_key": f"grooved_support_{part_index}_faces",
+            "support_body_ok": bool(part.support_body.diagnostics.get("support_body_ok", False)),
+            "diagnostics": json_value(part.support_body.diagnostics),
+        }
+        for part_index, part in enumerate(parts)
+        if getattr(part, "support_body", None) is not None
+    ]
     return {
         "scope": "pipeline_sweep_geometry",
         "surface_realization": config.sweep_surface_realization,
@@ -111,6 +123,7 @@ def _pipeline_sweep_evidence(parts, config) -> dict:
         "checked_body_count": sum(status is not None for status in statuses),
         "checks_passed": False if False in statuses else True if statuses and all(statuses) else None,
         "bodies": bodies,
+        "grooved_supports": supports,
     }
 
 
