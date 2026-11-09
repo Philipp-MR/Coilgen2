@@ -337,3 +337,41 @@ def test_hub_requires_password_and_binds_sessions_to_cookies(tmp_path):
             assert stolen.status == 302 and stolen.headers["Location"] == "/"
 
     asyncio.run(scenario())
+
+
+def test_model_tree_shows_each_section_readiness_and_filters_dialog_findings(tmp_path):
+    from coilgen.application.preflight import PreflightIssue, PreflightReport
+    from coilgen.config import CoilGenConfig
+    from coilgen.web.workbench_shell import model_tree_nodes
+
+    report = PreflightReport(
+        (
+            PreflightIssue("No target", "target", "field_shape_function", "Enter a target", title="Missing target"),
+            PreflightIssue("Thin wire", "material", "conductor_thickness", "Check wire", severity="warning"),
+        )
+    )
+    nodes = {node["value"]: node for node in model_tree_nodes(CoilGenConfig(), report)}
+    assert nodes["target"]["state"] == "blocking" and nodes["target"]["summary"] == "Missing target"
+    assert "Enter a target" in nodes["target"]["tooltip"] and nodes["target"]["action"] == "Enter a target"
+    # Preflight's material section is the browser's conductor node.
+    assert nodes["conductor"]["state"] == "warning" and nodes["conductor"]["summary"] == "1 modeling note"
+    assert nodes["geometry"]["state"] == "set"
+    assert {node["state"] for node in model_tree_nodes(CoilGenConfig())} == {"unchecked"}
+
+    server, browser = create_app(tmp_path, server_name="test-web-section-readiness")
+    try:
+        browser.load_template("cylinder")
+        state = server.state
+        assert all(node["state"] in {"set", "warning"} for node in state.nodes)
+        browser.session.apply_config({"field_shape_function": "none"})
+        browser._refresh_model()
+        target = next(node for node in state.nodes if node["value"] == "target")
+        assert target["state"] == "blocking" and target["summary"] == "Missing target"
+        issue = next(issue for issue in state.preflight if issue["blocking"])
+        assert issue["node"] == "target" and issue["section"] == "Target field and B0"
+        assert issue["heading"] == "Missing target" and issue["action"]
+        template = state.trame__template_main
+        assert "preflight.filter(i => i.node === node)" in template
+        assert 'data-state="item.state"' in template or ':data-state="item.state"' in template
+    finally:
+        browser.session.close()

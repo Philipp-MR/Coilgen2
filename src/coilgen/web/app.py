@@ -296,7 +296,7 @@ class BrowserWorkbench:
 
     # -- model ---------------------------------------------------------
     def _refresh_model(self):
-        from .workbench_shell import model_tree_nodes
+        from .workbench_shell import model_tree_nodes, preflight_node
 
         state, session = self.server.state, self.session
         assembly = session.assembly
@@ -320,8 +320,10 @@ class BrowserWorkbench:
             self.editing_identity = identity
             self._clear_result()
         if project is not None:
-            state.nodes = model_tree_nodes(project.config)
+            report = session.preflight(project.study["pipeline_stage"])
+            state.nodes = model_tree_nodes(project.config, report)
             state.stage = project.study["pipeline_stage"]
+            labels = dict(SETTINGS_NODES)
             state.preflight = [
                 {
                     "title": (
@@ -329,10 +331,14 @@ class BrowserWorkbench:
                         if issue.key == "skip_postprocessing" and project.values["contour_only_sweep_mode"]
                         else issue.message
                     ),
+                    "heading": issue.title,
+                    "action": issue.action,
+                    "node": preflight_node(issue.node),
+                    "section": labels.get(preflight_node(issue.node), "Settings"),
                     "blocking": issue.blocking,
                     "informational": issue.key == "skip_postprocessing" and project.values["contour_only_sweep_mode"],
                 }
-                for issue in session.preflight(project.study["pipeline_stage"]).issues
+                for issue in report.issues
             ]
         self._refresh_settings()
         self._refresh_jobs(select_matching=switched, restore_saved=switched)
@@ -1653,15 +1659,36 @@ class BrowserWorkbench:
                                 disabled=("!channels.length || settings_dirty",),
                             )
                         with html.Div(v_if="preflight.length", classes="mt-3"):
-                            html.Div("Readiness", classes="text-caption")
-                            v3.VAlert(
-                                "{{ issue.title }}",
-                                v_for="issue in preflight",
+                            html.Div("Readiness of this section", classes="text-caption")
+                            html.Div(
+                                "No missing or invalid inputs found in this section.",
+                                v_if="!preflight.some(i => i.node === node)",
+                                classes="text-caption text-medium-emphasis mb-1",
+                            )
+                            with v3.VAlert(
+                                v_for="issue in preflight.filter(i => i.node === node)",
                                 type=("issue.blocking ? 'error' : issue.informational ? 'info' : 'warning'",),
                                 density="compact",
                                 variant="tonal",
                                 classes="mb-1 text-caption",
-                            )
+                            ):
+                                html.Div("{{ issue.title }}")
+                                html.Div("→ {{ issue.action }}", v_if="issue.action && !issue.informational")
+                            with html.Div(
+                                v_if="nodes.some(n => n.value !== node && ['blocking', 'warning'].includes(n.state))",
+                                classes="d-flex flex-wrap align-center ga-1 text-caption",
+                            ):
+                                html.Span("Other sections:")
+                                v3.VBtn(
+                                    "{{ item.title }} · {{ item.summary }}",
+                                    v_for="item in nodes.filter(n => n.value !== node && ['blocking', 'warning'].includes(n.state))",
+                                    key="item.value",
+                                    size="x-small",
+                                    variant="tonal",
+                                    color=("item.state === 'blocking' ? 'error' : 'warning'",),
+                                    disabled=("settings_dirty",),
+                                    click="node = item.value",
+                                )
                     with v3.VCardActions(classes="flex-wrap"):
                         v3.VBtn(
                             "Apply",
