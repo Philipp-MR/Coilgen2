@@ -252,10 +252,14 @@ def test_model_tree_shows_section_readiness_and_opens_the_first_problem_field(wi
     monkeypatch.setattr(workbench, "check_readiness", lambda *_a, **_k: ReadinessReport((target, note)))
     window = windows()
     items = window.tree_items
-    assert items["target"].text(1) == "Missing target"
+    assert items["target"].text(1) == "Needs input"
     assert "Enter an analytic target expression." in items["target"].toolTip(1)
-    assert items["winding"].text(1) == "1 modeling note"
-    assert items["geometry"].text(1) == "Inputs set" and "after computation" in items["geometry"].toolTip(1)
+    assert items["winding"].text(1) == "1 tip" and "don't block" in items["winding"].toolTip(1)
+    assert items["geometry"].text(1) == "Ready" and "after computation" in items["geometry"].toolTip(1)
+    assert items["print"].text(1) == "Add"
+    banner = window.readiness_banner
+    assert banner.isVisibleTo(window) and banner.title.text() == "Fix 1 input before computing"
+    assert banner.detail.text() == "Target field and regions: Missing target" and banner.button.text() == "Fix"
     assert window._model_root.text(1) == "1 section needs input"
     assert "Target field" in window._model_root.toolTip(1) and window._study_root.text(1) == ""
     opened = []
@@ -263,7 +267,15 @@ def test_model_tree_shows_section_readiness_and_opens_the_first_problem_field(wi
     window.tree.setCurrentItem(items["target"])
     window._open_tree_item(items["target"])
     assert opened == [target]
-    # A section with only modeling notes opens normally, without jumping to a field.
+    banner.button.click()
+    assert opened == [target, target]
+    # Clicking a tip chip opens the field the tip is about; the name column only opens the page.
+    window.tree.setCurrentItem(items["winding"])
+    window._open_tree_item(items["winding"], 0)
+    assert opened == [target, target]
+    window._open_tree_item(items["winding"], 1)
+    assert opened == [target, target, note]
+    # Opening a section with only tips by its name opens the page, without jumping to a field.
     window.tree.setCurrentItem(items["winding"])
     window._open_tree_item(items["winding"])
-    assert opened == [target]
+    assert opened == [target, target, note]

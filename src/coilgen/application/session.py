@@ -269,6 +269,7 @@ SETTINGS_NODES = (
     ("conductor", "Conductor and material"),
     ("optimization", "Stream function optimization"),
     ("winding", "Winding and routing"),
+    ("print", "3D-print former"),
     ("validation", "Validation settings"),
 )
 MESH_SOURCES = tuple(_SUPPORT_PREFIXES)
@@ -394,39 +395,40 @@ SETTINGS = (
         "conductor", "normal_shift_mm", "Return-path lift", "number", _scaled("normal_shift_length", 1000.0), unit="mm"
     ),
     _field(
-        "conductor",
+        "print",
         "support_body_mode",
-        "Grooved support body",
+        "Print a former with wire grooves",
         "choice",
         _plain("support_body_mode"),
         choices=("off", "inside", "outside"),
-        help="Thicken the support into a printable former and cut the conductor grooves into it. "
-        "inside grows the solid away from surface_outer conductors; surface_inner conductors sit fully recessed.",
+        help="Optional. inside or outside: the side of the support the solid wall grows to; the conductor "
+        "paths are cut into it as grooves when the design is computed, and the former is exported as its own STL.",
     ),
     _field(
-        "conductor",
+        "print",
         "support_body_thickness_mm",
-        "Support body thickness",
+        "Wall thickness",
         "number",
         _scaled("support_body_thickness", 1000.0),
         unit="mm",
     ),
     _field(
-        "conductor",
+        "print",
         "support_body_groove_clearance_mm",
         "Groove clearance",
         "number",
         _scaled("support_body_groove_clearance", 1000.0),
         unit="mm",
-        help="Gap around the insulated conductor in the groove (print tolerance).",
+        help="Gap around the insulated conductor in the groove, e.g. your printer's fit tolerance.",
     ),
     _field(
-        "conductor",
+        "print",
         "support_body_groove_extra_depth_mm",
-        "Extra groove depth",
+        "Extra groove depth (advanced)",
         "number",
         _scaled("support_body_groove_extra_depth", 1000.0),
         unit="mm",
+        help="Optional: cut the groove deeper than the conductor.",
     ),
     _field(
         "optimization",

@@ -256,6 +256,11 @@ _DRAWINGS.update(
     }
 )
 _DRAWINGS["roi-sphere"] = _DRAWINGS["roi"]
+# A printed block with wire grooves under a print nozzle.
+_DRAWINGS["print-former"] = (
+    '<path d="M3 13h18v8H3z"/><path d="M6 13c0 2 2.5 2 2.5 0M10.75 13c0 2 2.5 2 2.5 0M15.5 13c0 2 2.5 2 2.5 0"/>'
+    '<path d="M9 3h6v4l-3 3-3-3z"/>'
+)
 
 ICON_NAMES = tuple(_DRAWINGS)
 WORKFLOW_ICONS = MappingProxyType(
@@ -347,6 +352,7 @@ NODE_ICONS = {
     "validation": "independent-validation",
     "results": "field-error",
     "export": "export-conductor",
+    "print": "print-former",
 }
 
 

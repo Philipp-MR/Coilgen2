@@ -276,7 +276,7 @@ def test_config_validation_and_front_end_fields():
 
     fields = {field.key: field for field in SETTINGS}
     thickness = fields["support_body_thickness_mm"]
-    assert thickness.node == "conductor"
+    assert thickness.node == "print"
     assert thickness.get(CoilGenConfig(), {}) == pytest.approx(3.0)
     assert thickness.set(2.5, CoilGenConfig(), {}) == {"support_body_thickness": pytest.approx(0.0025)}
     assert fields["support_body_mode"].choices == ("off", "inside", "outside")

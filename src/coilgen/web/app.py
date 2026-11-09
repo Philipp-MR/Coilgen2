@@ -186,6 +186,7 @@ class BrowserWorkbench:
                 "settings_dirty": False,
                 "settings_dialog": False,
                 "profile_preset": None,
+                "readiness": None,
                 "profile_segments": 16,
                 "profile_equal_area": False,
                 "profile_upload": None,
@@ -301,7 +302,7 @@ class BrowserWorkbench:
 
     # -- model ---------------------------------------------------------
     def _refresh_model(self):
-        from .workbench_shell import model_tree_nodes, preflight_node
+        from .workbench_shell import model_tree_nodes, preflight_node, readiness_summary
 
         state, session = self.server.state, self.session
         assembly = session.assembly
@@ -327,6 +328,7 @@ class BrowserWorkbench:
         if project is not None:
             report = session.preflight(project.study["pipeline_stage"])
             state.nodes = model_tree_nodes(project.config, report)
+            state.readiness = readiness_summary(project.config, report)
             state.stage = project.study["pipeline_stage"]
             labels = dict(SETTINGS_NODES)
             state.preflight = [
@@ -1451,6 +1453,8 @@ class BrowserWorkbench:
                     "gradient": f"linear-gradient(to right, {', '.join(stops)})",
                 }
         markers = self._orientation_widgets(bool(layers), b0)
+        if any(layer.name == "former_preview" for layer in layers):
+            caption += " · 3D-print former preview (grooves are cut after routing)"
         if layers:
             caption += " · corner arrows: x red, y green, z blue"
             if b0 is not None:

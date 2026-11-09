@@ -17,7 +17,7 @@ import re
 import numpy as np
 
 from PySide6.QtCore import QEvent, QSignalBlocker, QSize, QStandardPaths, Qt, QThreadPool, QTimer
-from PySide6.QtGui import QAction, QKeySequence, QPalette, QUndoCommand, QUndoStack
+from PySide6.QtGui import QAction, QBrush, QKeySequence, QPalette, QUndoCommand, QUndoStack
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
@@ -82,7 +82,7 @@ from ..application.design_studies import (
     set_study_notes_batch,
 )
 from ..attribution import AUTHOR_CREDIT, AUTHOR_ROLE, PROJECT_URL, software_attribution
-from ..application.preflight import section_readiness
+from ..application.preflight import overall_readiness, section_readiness
 from ..application.session import PIPELINE_STAGES, request_controls, stage_study_changes, submit_design
 from ..config import INTERCONNECTION_AXIS_MODES
 from ..persistence import atomic_text, json_value
@@ -94,6 +94,7 @@ from .editors import SUPPORT_EDITORS
 from .history import HistoryPanel
 from .problems import ProblemsPanel
 from .readiness import ReadinessIssue, ReadinessPanel, check_readiness
+from .status_chips import ReadinessBanner, chip_background, legend_widget, status_icon
 from .colors import apply_tone, item_foreground, tone_color
 from .guidance import CONTINUATION_STAGES, assess_guidance, resolved_model_summary
 from .overview import DesignOverview
@@ -159,6 +160,7 @@ NODES = (
     ("material", "Conductor and material"),
     ("optimization", "Stream function optimization"),
     ("winding", "Winding and routing"),
+    ("print", "3D-print former"),
     ("validation", "Validation settings"),
     ("results", "Results and provenance"),
     ("export", "Export conductor geometry"),
@@ -169,6 +171,7 @@ WORKFLOW_PAGES = (
     "target",
     "material",
     "winding",
+    "print",
     "optimization",
     "validation",
     "compute",
@@ -226,6 +229,7 @@ CONTROL_FIELDS = {
     "independent_turns": "contour_only_sweep_mode",
     "return_path_lift": "skip_normal_shift",
     "normal_shift_mm": "normal_shift_length",
+    "support_body_side": "support_body_mode",
     "support_body_thickness_mm": "support_body_thickness",
     "support_body_groove_clearance_mm": "support_body_groove_clearance",
     "support_body_groove_extra_depth_mm": "support_body_groove_extra_depth",
@@ -632,7 +636,7 @@ class CoilGenWorkbench(QMainWindow):
         self.tree = QTreeWidget()
         self.tree.setObjectName("model_tree")
         self.tree.setIconSize(QSize(22, 22))
-        self.tree.setHeaderLabels(["Model Builder", "Solution state"])
+        self.tree.setHeaderLabels(["Model Builder", "Status"])
         self.tree.header().setStretchLastSection(False)
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
@@ -647,7 +651,12 @@ class CoilGenWorkbench(QMainWindow):
         study.setIcon(0, icon("compute-study"))
         study.setData(0, Qt.ItemDataRole.UserRole, "study")
         self.tree.addTopLevelItem(study)
-        self._model_root, self._study_root = model, study
+        run = QTreeWidgetItem(["Run", ""])
+        run.setIcon(0, icon("compute-study"))
+        run.setData(0, Qt.ItemDataRole.UserRole, "run")
+        run.setToolTip(0, "The five computation steps. Click Compute full design to run them.")
+        self.tree.addTopLevelItem(run)
+        self._model_root, self._study_root, self._run_root = model, study, run
         self._section_readiness = {}
         for key, label in NODES:
             item = QTreeWidgetItem([label])
@@ -667,10 +676,11 @@ class CoilGenWorkbench(QMainWindow):
             item = QTreeWidgetItem([label, "Not computed"])
             item.setIcon(0, icon(STAGE_ICONS[stage], badge="unverified"))
             item.setData(0, Qt.ItemDataRole.UserRole, f"stage:{stage}")
-            study.addChild(item)
+            run.addChild(item)
             self.stage_items[stage] = item
         model.setExpanded(True)
         study.setExpanded(True)
+        run.setExpanded(False)
         self.tree_items["results"].setExpanded(False)
         self.result_tree_items = {}
         for key, label, symbol in (
@@ -691,20 +701,46 @@ class CoilGenWorkbench(QMainWindow):
         self.tree.itemActivated.connect(self._open_tree_item)
         dock = QDockWidget("Model Builder", self)
         dock.setObjectName("model_dock")
-        dock.setWidget(self.tree)
+        panel = QWidget()
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(4)
+        self.readiness_banner = ReadinessBanner(panel)
+        self.readiness_banner.action_requested.connect(self._readiness_banner_action)
+        panel_layout.addWidget(self.readiness_banner)
+        panel_layout.addWidget(self.tree, 1)
+        self.readiness_legend = legend_widget(panel)
+        panel_layout.addWidget(self.readiness_legend)
+        dock.setWidget(panel)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
-        self.resizeDocks([dock], [280], Qt.Orientation.Horizontal)
+        self.resizeDocks([dock], [330], Qt.Orientation.Horizontal)
 
-    def _open_tree_item(self, item, *_args):
+    def _open_tree_item(self, item, *args):
         key = item.data(0, Qt.ItemDataRole.UserRole) or ""
         if key.startswith("result:"):
             self._results_action(key.partition(":")[2])
             return
         self._show_dock("settings_dock")
-        # A section that blocks computation opens at its first problem field.
+        # A section that blocks computing opens at its first problem field;
+        # clicking a tip chip opens the field the tip is about.
         section = getattr(self, "_section_readiness", {}).get(key)
-        if section is not None and section.blocking and self.tree.currentItem() is item and not self._draft_dirty:
+        column = args[0] if args else 0
+        if section is None or self.tree.currentItem() is not item or self._draft_dirty:
+            return
+        if section.blocking:
             self._open_readiness_issue(section.blocking[0])
+        elif column == 1 and section.active and section.warnings:
+            self._open_readiness_issue(section.warnings[0])
+
+    def _readiness_banner_action(self):
+        if self.project is None:
+            return
+        if self.readiness_banner.state == "pending":
+            self.apply_settings()
+            return
+        overall = getattr(self, "_overall_readiness", None)
+        if overall is not None and overall.issue is not None:
+            self._open_readiness_issue(overall.issue)
 
     def _refresh_results_overview(self):
         if not hasattr(self, "results_overview"):
@@ -2129,8 +2165,10 @@ class CoilGenWorkbench(QMainWindow):
         if self._restoring_project_view:
             self._current_node = item
             return  # Build only the final restored settings page after installation.
-        if key in {"model", "study"}:
-            self.select_node("geometry" if key == "model" else f"stage:{self.stage_selector.currentData()}")
+        if key in {"model", "study", "run"}:
+            self.select_node(
+                {"model": "geometry", "study": "optimization"}.get(key, f"stage:{self.stage_selector.currentData()}")
+            )
             return
         if self._draft_dirty and not self._applying:
             if not self.apply_settings():
@@ -2185,6 +2223,7 @@ class CoilGenWorkbench(QMainWindow):
                     "material": "Material",
                     "optimization": "Optimization",
                     "winding": "Winding",
+                    "print": "3D print",
                     "validation": "Validation",
                     "compute": "Study",
                     "results": "Results",
@@ -2414,48 +2453,6 @@ class CoilGenWorkbench(QMainWindow):
             self._draft_controls["normal_shift_mm"].setToolTip(
                 "Normal displacement used by connected return-path routing. This is separate from conductor mounting and profile coordinates."
             )
-            self._combo(
-                form,
-                "support_body_mode",
-                "Grooved support body",
-                ["off", "inside", "outside"],
-                config.support_body_mode,
-            )
-            self._draft_controls["support_body_mode"].setToolTip(
-                "Thicken the support surface into a printable former and cut the conductor grooves into it "
-                "(exported as *_grooved_support.stl). inside: the solid grows against the support normal, so "
-                "surface_inner conductors sit fully recessed and centered ones half. outside: the opposite side."
-            )
-            self._number(
-                form,
-                "support_body_thickness_mm",
-                "Support body thickness",
-                config.support_body_thickness * 1000,
-                " mm",
-                0,
-                10000,
-            )
-            self._number(
-                form,
-                "support_body_groove_clearance_mm",
-                "Groove clearance",
-                config.support_body_groove_clearance * 1000,
-                " mm",
-                0,
-                10000,
-            )
-            self._draft_controls["support_body_groove_clearance_mm"].setToolTip(
-                "Gap around the insulated conductor in the groove, e.g. the 3D-print fit tolerance."
-            )
-            self._number(
-                form,
-                "support_body_groove_extra_depth_mm",
-                "Extra groove depth",
-                config.support_body_groove_extra_depth * 1000,
-                " mm",
-                0,
-                10000,
-            )
             profile_editor = ConductorProfileEditor()
             profile_editor.set_profile(
                 config.cross_sectional_points,
@@ -2476,10 +2473,6 @@ class CoilGenWorkbench(QMainWindow):
                 "conductor_path_reference": self._value("conductor_path_reference"),
                 "skip_normal_shift": not self._value("return_path_lift"),
                 "normal_shift_length": self._value("normal_shift_mm") * 1e-3,
-                "support_body_mode": self._value("support_body_mode"),
-                "support_body_thickness": self._value("support_body_thickness_mm") / 1000,
-                "support_body_groove_clearance": self._value("support_body_groove_clearance_mm") / 1000,
-                "support_body_groove_extra_depth": self._value("support_body_groove_extra_depth_mm") / 1000,
             }
             conductor_preview = ConductorPreview(container)
             layout.addWidget(conductor_preview)
@@ -2530,6 +2523,80 @@ class CoilGenWorkbench(QMainWindow):
             show_cross_section()
             note(
                 "Sheet thickness belongs to the continuous optimization model. Copper area sets resistance and Joule loss; larger profiles need more routing clearance. Custom points define the swept shape. Nominal width also affects PCB and legacy routing settings, so use a value consistent with the polygon extent."
+            )
+        elif key == "print":
+            mode = str(config.support_body_mode)
+            self._check(form, "support_body_enabled", "Print a former with wire grooves", mode != "off")
+            self._draft_controls["support_body_enabled"].setToolTip(
+                "Turns the support surface into a 3D-printable solid with grooves for the wire. "
+                "It is built in the Route / sweep step and exported as its own STL."
+            )
+            self._combo(
+                form, "support_body_side", "Solid side", ["inside", "outside"], mode if mode != "off" else "inside"
+            )
+            self._draft_controls["support_body_side"].setToolTip(
+                "Which side of the support surface the solid grows to. inside: against the conductor normal, so "
+                "conductors mounted on the inner surface sit fully in the groove and centered ones half. "
+                "outside: the opposite side."
+            )
+            self._number(
+                form,
+                "support_body_thickness_mm",
+                "Wall thickness",
+                config.support_body_thickness * 1000,
+                " mm",
+                0,
+                10000,
+            )
+            self._number(
+                form,
+                "support_body_groove_clearance_mm",
+                "Groove clearance",
+                config.support_body_groove_clearance * 1000,
+                " mm",
+                0,
+                10000,
+            )
+            self._draft_controls["support_body_groove_clearance_mm"].setToolTip(
+                "Gap around the insulated conductor in the groove, e.g. your printer's fit tolerance."
+            )
+            self._number(
+                form,
+                "support_body_groove_extra_depth_mm",
+                "Extra groove depth (advanced)",
+                config.support_body_groove_extra_depth * 1000,
+                " mm",
+                0,
+                10000,
+            )
+            self._draft_controls["support_body_groove_extra_depth_mm"].setToolTip(
+                "Optional: cut the groove deeper than the conductor, e.g. to sink the wire below the surface."
+            )
+            self._draft_fields["support_body_enabled"] = ("support_body_mode",)
+            self._draft_builder = lambda: {
+                "support_body_mode": self._value("support_body_side") if self._value("support_body_enabled") else "off",
+                "support_body_thickness": self._value("support_body_thickness_mm") / 1000,
+                "support_body_groove_clearance": self._value("support_body_groove_clearance_mm") / 1000,
+                "support_body_groove_extra_depth": self._value("support_body_groove_extra_depth_mm") / 1000,
+            }
+
+            def former_rows(*_args):
+                enabled = self._draft_controls["support_body_enabled"].isChecked()
+                for name in (
+                    "support_body_side",
+                    "support_body_thickness_mm",
+                    "support_body_groove_clearance_mm",
+                    "support_body_groove_extra_depth_mm",
+                ):
+                    control = self._draft_controls[name]
+                    control_form(self, control, form).setRowVisible(control.parentWidget(), enabled)
+
+            self._draft_controls["support_body_enabled"].toggled.connect(former_rows)
+            former_rows()
+            note(
+                "Optional. Switch it on to get a printable former: the support grows into a solid wall and the "
+                "conductor paths are cut into it as grooves. After Apply, Support preview shows the wall in beige; "
+                "the grooves are cut when the design is computed, and the former is exported as its own STL."
             )
         elif key == "optimization":
             native_objective = "Native objective (see below)"
@@ -4779,6 +4846,12 @@ class CoilGenWorkbench(QMainWindow):
             )
             item.setToolTip(0, tooltip)
             item.setToolTip(1, tooltip)
+        done = sum(
+            item.text(1) in {"Cached", "Computed", "Complete", "Unverified", "Review needed", "Checks failed"}
+            for item in self.stage_items.values()
+        )
+        self._run_root.setText(1, "Not run yet" if not done else f"{done} of {len(self.stage_items)} steps done")
+        self._run_root.setIcon(1, status_icon("set" if done == len(self.stage_items) else "run", self.palette()))
         if refresh_reuse and self._reuse_plan.diagnostics:
             self.recompute.appendPlainText("\nUnavailable cached evidence:\n" + "\n".join(self._reuse_plan.diagnostics))
         current = self._current_node.data(0, Qt.ItemDataRole.UserRole) if self._current_node else ""
@@ -8018,28 +8091,38 @@ class CoilGenWorkbench(QMainWindow):
         self._refresh_view_context()
 
     def _refresh_section_readiness(self):
-        """Show each settings section's preflight state in the model tree."""
-        sections = section_readiness(self._guidance_readiness)
+        """Show each settings section's status chip, the Model/Study roots and the banner."""
+        config = self.project.config
+        sections = section_readiness(self._guidance_readiness, config=config)
         self._section_readiness = sections
-        node_icons = model_node_icons(self.project.config)
+        node_icons = model_node_icons(config)
         current = self._current_node.data(0, Qt.ItemDataRole.UserRole) if self._current_node else None
+        palette = self.palette()
         for node, item in self.tree_items.items():
             section = sections.get(node)
             badge = None if section is None else {"blocking": "failed", "warning": "unverified"}.get(section.state)
             item.setIcon(0, icon(node_icons[node], badge=badge))
             if section is None:
                 continue
-            text, tone, tooltip = section.summary, section.tone, section.details
+            state, text, tooltip = section.state, section.summary, section.details
             if self._draft_dirty and node == current:
-                text, tone = "Edits pending", "warning"
+                state, text = "warning", "Edits pending"
                 tooltip = "Apply the open edits to check this section again.\n\n" + tooltip
             item.setText(1, text)
-            item.setForeground(1, item_foreground(tone, self.palette()))
+            item.setIcon(1, status_icon(state, palette))
+            item.setForeground(
+                1,
+                item_foreground(
+                    {"set": "success", "warning": "warning", "blocking": "error"}.get(state, "info"), palette
+                ),
+            )
+            background = chip_background(state, palette)
+            item.setBackground(1, background if background is not None else QBrush())
             label = NODE_LABELS[node]
             item.setToolTip(0, f"{label} · {text}\n{tooltip}")
             item.setToolTip(1, f"{label} · {text}\n{tooltip}")
         for root, nodes in (
-            (self._model_root, ("geometry", "target", "material", "winding")),
+            (self._model_root, ("geometry", "target", "material", "winding", "print")),
             (self._study_root, ("optimization", "validation")),
         ):
             blocked = [node for node in nodes if sections[node].blocking]
@@ -8047,11 +8130,13 @@ class CoilGenWorkbench(QMainWindow):
                 f"{len(blocked)} {'section needs' if len(blocked) == 1 else 'sections need'} input" if blocked else ""
             )
             root.setText(1, text)
-            root.setForeground(1, item_foreground("error" if blocked else "neutral", self.palette()))
+            root.setForeground(1, item_foreground("error" if blocked else "neutral", palette))
             root.setToolTip(
                 1,
                 "Next: " + NODE_LABELS[blocked[0]] + " · " + sections[blocked[0]].next_action if blocked else "",
             )
+        self._overall_readiness = overall = overall_readiness(sections)
+        self.readiness_banner.set_readiness(overall, NODE_LABELS, pending_edits=self._draft_dirty, palette=palette)
 
     def _open_overview_section(self, key):
         self.select_node(

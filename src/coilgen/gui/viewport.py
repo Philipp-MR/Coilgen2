@@ -2040,6 +2040,13 @@ class ScientificViewport(QWidget):
                 mesh = self._support if self._active_support_visible() else None
                 caption += " · support hidden" if hidden_support else " · current model support"
                 options = {"color": SUPPORT_COLOR, "show_edges": self.edges.isChecked(), "opacity": 0.72}
+                preview = self._preview_arrays or {}
+                if mesh is not None and {"former_preview_vertices_m", "former_preview_faces"} <= preview.keys():
+                    former = self._mesh(preview["former_preview_vertices_m"], preview["former_preview_faces"])
+                    if former.n_points and former.n_cells:
+                        self._add(former, "geometry", color=GROOVED_SUPPORT_COLOR, show_edges=False, opacity=0.85)
+                        options["opacity"] = 0.3
+                        caption += " · 3D-print former preview (grooves are cut after routing)"
             elif key == "stream_function" and {"vertices_m", "faces", "stream_function_A"} <= arrays.keys():
                 mesh = self._mesh(arrays["vertices_m"], arrays["faces"])
                 values = np.asarray(arrays["stream_function_A"], dtype=float).reshape(-1)

@@ -157,7 +157,27 @@ def model_preview(config, root, requirements=None):
             # A failed target should not erase a valid current-carrying support
             # or substitute samples from the previous model or saved result.
             message = f"Target preview unavailable: {type(exc).__name__}: {exc}"
+    arrays.update(former_preview_arrays(config, mesh))
     return mesh, arrays, message, preview_diagnostics(config, mesh, target, message=message)
+
+
+def former_preview_arrays(config, mesh):
+    """Thickened support (without grooves) shown before computing a 3D-print former.
+
+    The grooves need the routed conductor; the solid side of the preview
+    follows the support normal and is confirmed against the conductor frame
+    when the former is built.
+    """
+    mode = str(getattr(config, "support_body_mode", "off"))
+    if mode == "off" or mesh is None:
+        return {}
+    try:
+        from ..support_body import thickened_support_mesh
+
+        slab, _ = thickened_support_mesh(mesh, float(config.support_body_thickness), -1.0 if mode == "inside" else 1.0)
+    except Exception:  # noqa: BLE001 - a preview must never block the model view
+        return {}
+    return {"former_preview_vertices_m": slab.vertices, "former_preview_faces": slab.faces}
 
 
 @dataclass(frozen=True)
@@ -201,7 +221,21 @@ def scene_layers(arrays, key, *, component="Bz", b0_direction=(0.0, 0.0, 1.0), o
     has_support = resolve_dataset(arrays, "support").available
     layers = []
     if key == "support":
-        layers.append(_support_layer(arrays, opacity=0.72))
+        former = {"former_preview_vertices_m", "former_preview_faces"} <= arrays.keys()
+        # With a former preview, the thin support recedes so the printed wall reads clearly.
+        layers.append(_support_layer(arrays, opacity=0.3 if former else 0.72))
+        if former:
+            layers.append(
+                SceneLayer(
+                    "former_preview",
+                    "surface",
+                    np.asarray(arrays["former_preview_vertices_m"], dtype=float),
+                    faces=np.asarray(arrays["former_preview_faces"], dtype=np.int64),
+                    color=GROOVED_SUPPORT_COLOR,
+                    opacity=0.85,
+                    extra={"role": "former_preview"},
+                )
+            )
     elif key == "stream_function":
         values = np.asarray(arrays["stream_function_A"], dtype=float).reshape(-1)
         layers.append(_support_layer(arrays, scalars=values, label="Stream function [A]"))

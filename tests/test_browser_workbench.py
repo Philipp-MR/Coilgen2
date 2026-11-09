@@ -86,7 +86,7 @@ def test_rendered_workbench_has_labeled_panel_navigation_and_selectors(tmp_path)
         original = {node["value"]: node["symbol"] for node in server.state.nodes}
         browser.load_template("biplanar")
         updated = {node["value"]: node["symbol"] for node in server.state.nodes}
-        assert len(updated) == 6 and all(src.startswith("data:image/svg+xml;base64,") for src in updated.values())
+        assert len(updated) == 7 and all(src.startswith("data:image/svg+xml;base64,") for src in updated.values())
         assert original["geometry"] != updated["geometry"] and original["conductor"] == updated["conductor"]
     finally:
         browser.session.close()
@@ -393,10 +393,11 @@ def test_model_tree_shows_each_section_readiness_and_filters_dialog_findings(tmp
         )
     )
     nodes = {node["value"]: node for node in model_tree_nodes(CoilGenConfig(), report)}
-    assert nodes["target"]["state"] == "blocking" and nodes["target"]["summary"] == "Missing target"
+    assert nodes["target"]["state"] == "blocking" and nodes["target"]["summary"] == "Needs input"
     assert "Enter a target" in nodes["target"]["tooltip"] and nodes["target"]["action"] == "Enter a target"
     # Preflight's material section is the browser's conductor node.
-    assert nodes["conductor"]["state"] == "warning" and nodes["conductor"]["summary"] == "1 modeling note"
+    assert nodes["conductor"]["state"] == "warning" and nodes["conductor"]["summary"] == "1 tip"
+    assert nodes["print"]["state"] == "unchecked" or nodes["print"]["summary"] == "Add"
     assert nodes["geometry"]["state"] == "set"
     assert {node["state"] for node in model_tree_nodes(CoilGenConfig())} == {"unchecked"}
 
@@ -404,15 +405,19 @@ def test_model_tree_shows_each_section_readiness_and_filters_dialog_findings(tmp
     try:
         browser.load_template("cylinder")
         state = server.state
-        assert all(node["state"] in {"set", "warning"} for node in state.nodes)
+        assert all(node["state"] in {"set", "warning", "off"} for node in state.nodes)
         browser.session.apply_config({"field_shape_function": "none"})
         browser._refresh_model()
         target = next(node for node in state.nodes if node["value"] == "target")
-        assert target["state"] == "blocking" and target["summary"] == "Missing target"
+        assert target["state"] == "blocking" and target["summary"] == "Needs input"
+        assert state.readiness["state"] == "blocking" and state.readiness["action"] == "Fix"
+        assert state.readiness["node"] == "target" and "Missing target" in state.readiness["detail"]
+        assert next(node for node in state.nodes if node["value"] == "print")["summary"] == "Add"
         issue = next(issue for issue in state.preflight if issue["blocking"])
         assert issue["node"] == "target" and issue["section"] == "Target field and B0"
         assert issue["heading"] == "Missing target" and issue["action"]
         template = state.trame__template_main
+        assert "readiness.action" in template and "cg-readiness" in template
         assert "preflight.filter(i => i.node === node)" in template
         assert 'data-state="item.state"' in template or ':data-state="item.state"' in template
     finally:

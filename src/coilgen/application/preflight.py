@@ -55,19 +55,28 @@ class PreflightReport:
 
 
 # Settings sections in model order; the browser presents "material" as "conductor".
-SECTION_ORDER = ("geometry", "target", "material", "winding", "optimization", "validation")
+SECTION_ORDER = ("geometry", "target", "material", "winding", "print", "optimization", "validation")
+# Sections that are optional features; they read "Add" while switched off.
+OPTIONAL_SECTIONS = ("print",)
+
+
+def _plural(count, word):
+    return f"{count} {word}{'' if count == 1 else 's'}"
 
 
 @dataclass(frozen=True, slots=True)
 class SectionReadiness:
-    """Preflight findings of one settings section.
+    """Preflight findings of one settings section, phrased for the user.
 
-    "set" only means preflight found nothing missing or invalid in this
-    section; it is not an engineering acceptance of the inputs.
+    States: "blocking" (an input must be fixed before computing), "warning"
+    (tips worth a look that never block), "set" (nothing missing or invalid;
+    not an engineering acceptance) and "off" (an optional feature that is
+    switched off). Engineering checks run after computation.
     """
 
     node: str
     issues: tuple[PreflightIssue, ...] = ()
+    active: bool = True
 
     @property
     def blocking(self):
@@ -79,45 +88,122 @@ class SectionReadiness:
 
     @property
     def state(self):
-        return "blocking" if self.blocking else "warning" if self.issues else "set"
+        if self.blocking:
+            return "blocking"
+        if not self.active:
+            return "off"
+        return "warning" if self.issues else "set"
 
     @property
     def tone(self):
-        return {"blocking": "error", "warning": "warning"}.get(self.state, "neutral")
+        return {"blocking": "error", "warning": "warning", "set": "success"}.get(self.state, "neutral")
 
     @property
     def summary(self):
-        blocking, warnings = self.blocking, self.warnings
-        if len(blocking) == 1:
-            return blocking[0].title
-        if blocking:
-            return f"{len(blocking)} inputs to fix"
-        if warnings:
-            return f"{len(warnings)} modeling {'note' if len(warnings) == 1 else 'notes'}"
-        return "Inputs set"
+        """Short status chip text: Ready, 2 tips, Needs input or Add."""
+        state = self.state
+        if state == "blocking":
+            count = len(self.blocking)
+            return "Needs input" if count == 1 else f"{count} need input"
+        if state == "warning":
+            return _plural(len(self.warnings), "tip")
+        if state == "off":
+            return "Add"
+        return "Ready"
 
     @property
     def next_action(self):
-        first = (self.blocking or self.warnings or (None,))[0]
+        first = self.first_issue
         return first.action if first is not None else ""
 
     @property
+    def first_issue(self):
+        return (self.blocking or self.warnings or (None,))[0]
+
+    @property
     def details(self):
-        """Plain-text tooltip: every finding with its corrective action."""
-        if not self.issues:
-            return "No missing or invalid inputs found. Engineering checks run after computation."
-        return "\n".join(f"{issue.title}: {issue.message}\n→ {issue.action}" for issue in self.blocking + self.warnings)
+        """Plain-text tooltip: what the state means and every finding with its fix."""
+        state = self.state
+        if state == "off":
+            return "Optional and switched off. Click to add it."
+        if state == "set":
+            return "Ready: nothing missing or invalid. Engineering checks run after computation."
+        lines = []
+        if self.blocking:
+            lines.append("Needs input: fix these before computing.")
+            lines.extend(f"• {issue.title}: {issue.message}\n  → {issue.action}" for issue in self.blocking)
+        if self.warnings:
+            lines.append("Tips: worth a look, but they don't block computing.")
+            lines.extend(f"• {issue.title}: {issue.message}\n  → {issue.action}" for issue in self.warnings)
+        return "\n".join(lines)
 
 
-def section_readiness(report, nodes=SECTION_ORDER):
-    """Group one preflight report by settings section, in the given order."""
+@dataclass(frozen=True, slots=True)
+class OverallReadiness:
+    """One verdict for the whole model: what the user should do next."""
+
+    state: str  # "blocking", "tips" or "ready"
+    blocking_count: int = 0
+    tip_count: int = 0
+    node: str = ""
+    issue: PreflightIssue | None = None
+
+    @property
+    def tone(self):
+        return "error" if self.state == "blocking" else "success"
+
+    def title(self):
+        if self.state == "blocking":
+            return f"Fix {_plural(self.blocking_count, 'input')} before computing"
+        return "Ready to compute"
+
+    def detail(self, labels=None):
+        """Second line; ``labels`` maps section nodes to the front end's names."""
+        label = (labels or {}).get(self.node, self.node)
+        if self.state == "blocking" and self.issue is not None:
+            return f"{label}: {self.issue.title}"
+        if self.state == "tips":
+            return f"{_plural(self.tip_count, 'optional tip')} to review. Tips never block computing."
+        return "All inputs are set."
+
+    @property
+    def action(self):
+        return {"blocking": "Fix", "tips": "Review"}.get(self.state, "")
+
+
+def section_readiness(report, nodes=SECTION_ORDER, *, config=None):
+    """Group one preflight report by settings section, in the given order.
+
+    With ``config``, optional sections (the 3D-print former) read "off" while
+    their feature is switched off.
+    """
     issues = tuple(getattr(report, "issues", ()))
-    return {node: SectionReadiness(node, tuple(issue for issue in issues if issue.node == node)) for node in nodes}
+    inactive = set()
+    if config is not None and str(getattr(config, "support_body_mode", "off")) == "off":
+        inactive.add("print")
+    return {
+        node: SectionReadiness(node, tuple(issue for issue in issues if issue.node == node), node not in inactive)
+        for node in nodes
+    }
 
 
 def next_section(sections):
     """The first section, in model order, that blocks computation."""
     return next((section for section in sections.values() if section.blocking), None)
+
+
+def overall_readiness(sections):
+    """Summarize sections into one banner: the first blocking input, else tips, else ready."""
+    values = tuple(sections.values())
+    blocking = sum(len(section.blocking) for section in values)
+    tips = sum(len(section.warnings) for section in values if section.active)
+    if blocking:
+        first = next_section(sections)
+        return OverallReadiness("blocking", blocking, tips, first.node, first.blocking[0])
+    if tips:
+        first = next(section for section in values if section.active and section.warnings)
+        return OverallReadiness("tips", 0, tips, first.node, first.warnings[0])
+    return OverallReadiness("ready")
 
 
 def settings_node(key):
@@ -152,9 +238,11 @@ def settings_node(key):
         "conductor_mounting_mode",
         "cross_sectional_points",
         "sweep_insulation_thickness",
-    } or key.startswith("support_body"):
-        # The grooved support body is edited with the conductor.
+    }:
         return "material"
+    if key.startswith("support_body"):
+        # The grooved support body has its own "3D-print former" section.
+        return "print"
     if key.startswith(
         ("sweep", "inter_", "intra_", "contour", "routing", "pcb", "normal_shift", "layout_terminal")
     ) or key in {

@@ -23,15 +23,15 @@ def _children(item):
 
 def test_model_study_results_tree_has_predictable_operation_order(windows):
     window = windows()
-    assert window.tree.topLevelItemCount() == 3
-    model, study, results = (window.tree.topLevelItem(index) for index in range(3))
+    assert window.tree.topLevelItemCount() == 4
+    model, study, run, results = (window.tree.topLevelItem(index) for index in range(4))
 
     assert model.text(0) == "Model"
-    assert _children(model) == ("geometry", "target", "material", "winding")
+    assert _children(model) == ("geometry", "target", "material", "winding", "print")
     assert study.text(0) == "Study"
-    assert _children(study) == (
-        "optimization",
-        "validation",
+    assert _children(study) == ("optimization", "validation")
+    assert run.text(0) == "Run" and run.text(1) == "Not run yet"
+    assert _children(run) == (
         "stage:prepared",
         "stage:sheet",
         "stage:contours",
@@ -56,7 +56,7 @@ def test_study_parent_opens_requested_boundary_without_changing_model(windows):
     window = windows(project)
     window.select_node("material")
 
-    window.tree.setCurrentItem(window.tree.topLevelItem(1))
+    window.tree.setCurrentItem(window.tree.topLevelItem(2))
 
     assert _key(window.tree.currentItem()) == "stage:contours"
     assert window.stage_selector.currentData() == "contours"
@@ -157,6 +157,7 @@ def test_next_navigation_follows_visible_model_then_study_then_results(windows):
         "target",
         "material",
         "winding",
+        "print",
         "optimization",
         "validation",
         f"stage:{selected_stage}",

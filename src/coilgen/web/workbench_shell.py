@@ -5,7 +5,7 @@ from base64 import b64encode
 from trame.widgets import html, vuetify3 as v3
 from trame_client.widgets.core import HtmlElement
 
-from ..application.preflight import SECTION_ORDER, section_readiness
+from ..application.preflight import SECTION_ORDER, overall_readiness, section_readiness
 from ..application.session import SETTINGS_NODES
 from ..gui.pictograms import model_node_icons, pictogram_svg
 from .input_policy import PROJECT_UPLOAD_LIMIT
@@ -28,7 +28,7 @@ def preflight_node(node):
 def model_tree_nodes(config, report=None):
     """Tree rows with each section's preflight state; "set" is not engineering acceptance."""
     symbols = model_node_icons(config)
-    sections = section_readiness(report, nodes=SECTION_ORDER) if report is not None else {}
+    sections = section_readiness(report, nodes=SECTION_ORDER, config=config) if report is not None else {}
     nodes = []
     for key, label in SETTINGS_NODES:
         native = "material" if key == "conductor" else key
@@ -45,6 +45,21 @@ def model_tree_nodes(config, report=None):
             }
         )
     return nodes
+
+
+def readiness_summary(config, report):
+    """Banner above the browser tree: what blocks computing, or that it's ready."""
+    if report is None:
+        return None
+    labels = {("material" if key == "conductor" else key): label for key, label in SETTINGS_NODES}
+    overall = overall_readiness(section_readiness(report, nodes=SECTION_ORDER, config=config))
+    return {
+        "state": overall.state,
+        "title": overall.title(),
+        "detail": overall.detail(labels),
+        "action": overall.action,
+        "node": preflight_node(overall.node) if overall.node else "",
+    }
 
 
 def build_toolbar(ctrl):
@@ -243,8 +258,37 @@ def build_model_builder(ctrl):
                 hide_details=True,
                 classes="mb-2",
             )
+            with html.Div(
+                v_if="readiness",
+                classes="cg-readiness",
+                role="status",
+                __properties=[("data_state", "data-state")],
+                data_state=("settings_dirty ? 'pending' : readiness.state",),
+            ):
+                v3.VIcon(
+                    "{{ settings_dirty ? 'mdi-pencil-outline' : readiness.state === 'blocking' ? "
+                    "'mdi-close-circle-outline' : 'mdi-check-circle-outline' }}",
+                    classes="cg-readiness-icon",
+                    __properties=[("aria_hidden", "aria-hidden")],
+                    aria_hidden="true",
+                )
+                with html.Div(classes="cg-readiness-text"):
+                    html.Div(
+                        "{{ settings_dirty ? 'Edits not applied yet' : readiness.title }}", classes="cg-readiness-title"
+                    )
+                    html.Div(
+                        "{{ settings_dirty ? 'Apply them to check the inputs again.' : readiness.detail }}",
+                        classes="cg-readiness-detail",
+                    )
+                v3.VBtn(
+                    "{{ readiness.action }}",
+                    v_if="readiness.action && !settings_dirty",
+                    size="small",
+                    variant="outlined",
+                    click="node = readiness.node; settings_dialog = true",
+                )
             for group, keys in (
-                ("Model", "['geometry','target','conductor','winding']"),
+                ("Model", "['geometry','target','conductor','winding','print']"),
                 ("Study", "['optimization','validation']"),
             ):
                 html.H3(group, classes="cg-tree-heading")
@@ -264,17 +308,22 @@ def build_model_builder(ctrl):
                             html.Span("{{ item.title }}")
                             html.Span(
                                 "{{ item.summary }}",
-                                v_if="['blocking', 'warning'].includes(item.state)",
+                                v_if="['blocking', 'warning', 'set', 'off'].includes(item.state)",
                                 classes="cg-tree-status",
                             )
                         v3.VIcon(
-                            "{{ item.state === 'blocking' ? 'mdi-alert-circle' : 'mdi-alert-outline' }}",
-                            v_if="['blocking', 'warning'].includes(item.state)",
+                            "{{ {blocking: 'mdi-close-circle-outline', warning: 'mdi-information-outline', "
+                            "set: 'mdi-check-circle-outline', off: 'mdi-plus-circle-outline'}[item.state] }}",
+                            v_if="['blocking', 'warning', 'set', 'off'].includes(item.state)",
                             size="small",
                             classes="cg-tree-state",
                             __properties=[("aria_hidden", "aria-hidden")],
                             aria_hidden="true",
                         )
+            html.P(
+                "Ready: nothing missing · Tip: worth a look, never blocks · Needs input: blocks computing",
+                classes="cg-hint cg-readiness-legend",
+            )
             with html.Div(classes="d-flex ga-1"):
                 v3.VBtn("Undo", v_if="can_undo", click=ctrl.undo, disabled=("settings_dirty",), variant="text")
                 v3.VBtn("Redo", v_if="can_redo", click=ctrl.redo, disabled=("settings_dirty",), variant="text")

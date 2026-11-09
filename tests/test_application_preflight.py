@@ -160,14 +160,16 @@ def test_section_readiness_groups_findings_by_settings_section_in_model_order():
         "target": "blocking",
         "material": "set",
         "winding": "warning",
+        "print": "set",
         "optimization": "set",
         "validation": "set",
     }
-    assert sections["target"].summary == "Missing target" and sections["target"].next_action == "Enter a target"
-    assert sections["geometry"].summary == "2 inputs to fix" and sections["geometry"].tone == "error"
-    assert sections["winding"].summary == "1 modeling note" and sections["winding"].next_action == "Inspect routing"
-    assert sections["material"].summary == "Inputs set" and sections["material"].next_action == ""
-    # "Inputs set" never claims engineering acceptance.
+    assert sections["target"].summary == "Needs input" and sections["target"].next_action == "Enter a target"
+    assert sections["geometry"].summary == "2 need input" and sections["geometry"].tone == "error"
+    assert sections["winding"].summary == "1 tip" and sections["winding"].next_action == "Inspect routing"
+    assert "never" not in sections["winding"].summary and "don't block" in sections["winding"].details
+    assert sections["material"].summary == "Ready" and sections["material"].next_action == ""
+    # "Ready" never claims engineering acceptance.
     assert "after computation" in sections["material"].details
     assert "No target" in sections["target"].details and "Enter a target" in sections["target"].details
     assert next_section(sections).node == "geometry"
@@ -177,7 +179,33 @@ def test_section_readiness_groups_findings_by_settings_section_in_model_order():
 def test_missing_target_marks_only_the_target_section():
     project = ProjectDocument.from_config(replace(numeric_config(), field_shape_function="none"))
     sections = section_readiness(check_preflight(project))
-    assert sections["target"].state == "blocking" and sections["target"].summary == "Missing target"
+    assert sections["target"].state == "blocking" and sections["target"].summary == "Needs input"
+    assert sections["target"].blocking[0].title == "Missing target"
     assert not any(section.blocking for node, section in sections.items() if node != "target")
     # Default connected routing keeps its terminal-handling notes in the winding section.
     assert sections["winding"].state == "warning"
+
+
+def test_print_former_section_reads_add_while_off_and_overall_banner_names_the_next_step():
+    from coilgen.application.preflight import overall_readiness
+
+    config = numeric_config()
+    off = section_readiness(PreflightReport(()), config=config)
+    assert off["print"].state == "off" and off["print"].summary == "Add" and "Click to add" in off["print"].details
+    on = section_readiness(PreflightReport(()), config=replace(config, support_body_mode="inside"))
+    assert on["print"].state == "set" and on["print"].summary == "Ready"
+    # Switched-off optional sections never count as tips or block computing.
+    assert overall_readiness(off).state == "ready" and overall_readiness(off).title() == "Ready to compute"
+
+    tip = PreflightIssue("Fallback selected", "winding", "routing", "Inspect routing", severity="warning")
+    target = PreflightIssue("No target", "target", "field_shape_function", "Enter a target", title="Missing target")
+    tips = overall_readiness(section_readiness(PreflightReport((tip,))))
+    assert tips.state == "tips" and tips.action == "Review" and tips.issue is tip
+    assert tips.title() == "Ready to compute" and "1 optional tip" in tips.detail()
+    blocked = overall_readiness(section_readiness(PreflightReport((tip, target))))
+    assert blocked.state == "blocking" and blocked.action == "Fix" and blocked.issue is target
+    assert blocked.title() == "Fix 1 input before computing"
+    assert blocked.detail({"target": "Target field"}) == "Target field: Missing target"
+    from coilgen.application.preflight import settings_node
+
+    assert settings_node("support_body_thickness") == "print"

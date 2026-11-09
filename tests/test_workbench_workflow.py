@@ -112,6 +112,7 @@ def test_back_next_visit_all_sections_without_study_edits(windows):
         "target",
         "material",
         "winding",
+        "print",
         "optimization",
         "validation",
         f"stage:{stage}",
