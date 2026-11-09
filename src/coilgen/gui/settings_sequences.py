@@ -423,6 +423,22 @@ def build_settings_sequence(window, page, form, layout):
                 )
             ),
         )
+        sequence.add(
+            "Grooved support body",
+            (
+                "support_body_mode",
+                "support_body_thickness_mm",
+                "support_body_groove_clearance_mm",
+                "support_body_groove_extra_depth_mm",
+            ),
+            "surface-normal",
+            summary=lambda: (
+                "off"
+                if controls["support_body_mode"].currentText() == "off"
+                else f"{sequence.text('support_body_mode')} · {sequence.text('support_body_thickness_mm')} thick · "
+                f"clearance {sequence.text('support_body_groove_clearance_mm')}"
+            ),
+        )
         sequence.add("Continuous-sheet material", ("resistivity", "sheet_thickness"), "resistance")
     elif page == "winding":
         sequence.add(
@@ -816,6 +832,19 @@ def _configure_visibility(sequence, page):
 
         controls["return_path_lift"].toggled.connect(lift)
         lift()
+        if "support_body_mode" in controls:
+
+            def grooved_support(*_args):
+                enabled = controls["support_body_mode"].currentText() != "off"
+                for key in (
+                    "support_body_thickness_mm",
+                    "support_body_groove_clearance_mm",
+                    "support_body_groove_extra_depth_mm",
+                ):
+                    visible(key, enabled)
+
+            controls["support_body_mode"].currentTextChanged.connect(grooved_support)
+            grooved_support()
     elif (
         page == "target"
         and "harmonic_degree" not in controls

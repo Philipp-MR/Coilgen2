@@ -54,14 +54,93 @@ class PreflightReport:
             raise ValueError("CoilGen preflight failed:\n" + details)
 
 
+# Settings sections in model order; the browser presents "material" as "conductor".
+SECTION_ORDER = ("geometry", "target", "material", "winding", "optimization", "validation")
+
+
+@dataclass(frozen=True, slots=True)
+class SectionReadiness:
+    """Preflight findings of one settings section.
+
+    "set" only means preflight found nothing missing or invalid in this
+    section; it is not an engineering acceptance of the inputs.
+    """
+
+    node: str
+    issues: tuple[PreflightIssue, ...] = ()
+
+    @property
+    def blocking(self):
+        return tuple(issue for issue in self.issues if issue.blocking)
+
+    @property
+    def warnings(self):
+        return tuple(issue for issue in self.issues if not issue.blocking)
+
+    @property
+    def state(self):
+        return "blocking" if self.blocking else "warning" if self.issues else "set"
+
+    @property
+    def tone(self):
+        return {"blocking": "error", "warning": "warning"}.get(self.state, "neutral")
+
+    @property
+    def summary(self):
+        blocking, warnings = self.blocking, self.warnings
+        if len(blocking) == 1:
+            return blocking[0].title
+        if blocking:
+            return f"{len(blocking)} inputs to fix"
+        if warnings:
+            return f"{len(warnings)} modeling {'note' if len(warnings) == 1 else 'notes'}"
+        return "Inputs set"
+
+    @property
+    def next_action(self):
+        first = (self.blocking or self.warnings or (None,))[0]
+        return first.action if first is not None else ""
+
+    @property
+    def details(self):
+        """Plain-text tooltip: every finding with its corrective action."""
+        if not self.issues:
+            return "No missing or invalid inputs found. Engineering checks run after computation."
+        return "\n".join(f"{issue.title}: {issue.message}\n→ {issue.action}" for issue in self.blocking + self.warnings)
+
+
+def section_readiness(report, nodes=SECTION_ORDER):
+    """Group one preflight report by settings section, in the given order."""
+    issues = tuple(getattr(report, "issues", ()))
+    return {node: SectionReadiness(node, tuple(issue for issue in issues if issue.node == node)) for node in nodes}
+
+
+def next_section(sections):
+    """The first section, in model order, that blocks computation."""
+    return next((section for section in sections.values() if section.blocking), None)
+
+
 def settings_node(key):
     key = key.split("[")[0]
     # Field-error limits belong to the study formulation, not the target
     # definition, even though their native keys share the "target" prefix.
-    if key.startswith("target_error_"):
+    if key.startswith(("target_error_", "layout_target_error_")):
         return "optimization"
-    if key.startswith(("secondary_target", "target", "field_shape", "mri_shim", "create_")) or "suppression" in key:
+    if (
+        key.startswith(("secondary_target", "target", "field_shape", "mri_shim", "create_", "b_0_"))
+        or "suppression" in key
+        or key == "design_context"
+    ):
         return "target"
+    # Contour smoothing and group-connection settings are edited with the
+    # winding, although some of their names mention the support mesh.
+    if key.startswith(
+        ("contour", "interconnection", "within_group", "joint_group_routing", "min_inter_group")
+    ) or key in {
+        "max_current_A",
+        "max_wire_current_A",
+    }:
+        return "winding"
     if "mesh" in key or key.startswith(("generated_mesh", "surface_is_cylinder", "geometry_source")):
         return "geometry"
     if key in {
@@ -73,7 +152,8 @@ def settings_node(key):
         "conductor_mounting_mode",
         "cross_sectional_points",
         "sweep_insulation_thickness",
-    }:
+    } or key.startswith("support_body"):
+        # The grooved support body is edited with the conductor.
         return "material"
     if key.startswith(
         ("sweep", "inter_", "intra_", "contour", "routing", "pcb", "normal_shift", "layout_terminal")

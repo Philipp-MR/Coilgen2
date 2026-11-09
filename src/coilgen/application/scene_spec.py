@@ -18,6 +18,7 @@ from .evidence import FIELD_KEYS, PATH_PREFIXES, WIRE_FIELDS, path_array_names, 
 B0_INDICATOR_COLOR = "#c2410c"
 SUPPORT_COLOR = "#79949d"
 WINDING_COLOR = "#205a75"
+GROOVED_SUPPORT_COLOR = "#c8b48a"  # printable former with conductor grooves
 FIELD_CMAP = "coolwarm"
 DENSITY_CMAP = "viridis"
 
@@ -226,7 +227,25 @@ def scene_layers(arrays, key, *, component="Bz", b0_direction=(0.0, 0.0, 1.0), o
             SceneLayer(key, "lines", np.vstack(paths), lines=paths, color=WINDING_COLOR, extra={"count": len(paths)})
         )
     elif key == "swept":
-        if has_support:
+        grooved = [
+            name.removesuffix("_vertices_m")
+            for name in sorted(arrays)
+            if name.startswith("grooved_support_") and name.endswith("_vertices_m")
+        ]
+        grooved = [stem for stem in grooved if f"{stem}_faces" in arrays]
+        for stem in grooved:
+            layers.append(
+                SceneLayer(
+                    stem,
+                    "surface",
+                    np.asarray(arrays[f"{stem}_vertices_m"], dtype=float),
+                    faces=np.asarray(arrays[f"{stem}_faces"], dtype=np.int64),
+                    color=GROOVED_SUPPORT_COLOR,
+                    opacity=0.55,
+                    extra={"role": "grooved_support"},
+                )
+            )
+        if has_support and not grooved:
             layers.append(_support_layer(arrays))
         for name in sorted(name for name in arrays if name.startswith("swept_") and name.endswith("_vertices_m")):
             layers.append(

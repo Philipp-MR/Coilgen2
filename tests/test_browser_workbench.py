@@ -337,3 +337,83 @@ def test_hub_requires_password_and_binds_sessions_to_cookies(tmp_path):
             assert stolen.status == 302 and stolen.headers["Location"] == "/"
 
     asyncio.run(scenario())
+
+
+def test_browser_u_shape_point_count_and_profile_table(tmp_path):
+    from coilgen.application.conductor_profiles import validate_conductor_profile
+
+    server, browser = create_app(tmp_path, user="tester", server_name="test-profile-presets")
+    state = server.state
+    state.template = "cylinder"
+    browser.load_template()
+    state.node = "conductor"
+    browser._refresh_settings()
+    project = browser.session.project
+    state.profile_segments = "5"
+    state.profile_preset = "round"
+    browser.apply_settings()
+    assert browser.session.project is project
+    state.profile_segments = "8"
+    state.profile_equal_area = True
+    browser.apply_settings()
+    config = browser.session.project.config
+    assert len(config.cross_sectional_points) == 8
+    assert validate_conductor_profile(config.cross_sectional_points).area_m2 == pytest.approx(
+        np.pi * (config.conductor_cross_section_width / 2) ** 2
+    )
+    state.profile_preset = "u_shape"
+    browser.apply_settings()
+    assert browser.session.project.config.cross_sectional_points != config.cross_sectional_points
+    browser._refresh_settings()
+    assert state.profile_upload is None and not state.settings_dirty
+    table = {"name": "profile.csv", "content": list(b"u;n\n-1;0\n1;0\n0;1,5\n")}
+    state.profile_upload = table
+    state.profile_preset = "round"
+    browser.apply_settings()  # two pending replacements are refused together
+    assert len(browser.session.project.config.cross_sectional_points) != 3
+    state.profile_preset = None
+    browser.apply_settings()
+    points = browser.session.project.config.cross_sectional_points
+    assert [tuple(point) for point in points] == [(-0.001, 0.0), (0.001, 0.0), (0.0, 0.0015)]
+    browser._refresh_settings()
+    state.profile_upload = {"name": "profile.stl", "content": list(b"0 0")}
+    browser.apply_settings()
+    assert browser.session.project.config.cross_sectional_points == points
+
+
+def test_model_tree_shows_each_section_readiness_and_filters_dialog_findings(tmp_path):
+    from coilgen.application.preflight import PreflightIssue, PreflightReport
+    from coilgen.config import CoilGenConfig
+    from coilgen.web.workbench_shell import model_tree_nodes
+
+    report = PreflightReport(
+        (
+            PreflightIssue("No target", "target", "field_shape_function", "Enter a target", title="Missing target"),
+            PreflightIssue("Thin wire", "material", "conductor_thickness", "Check wire", severity="warning"),
+        )
+    )
+    nodes = {node["value"]: node for node in model_tree_nodes(CoilGenConfig(), report)}
+    assert nodes["target"]["state"] == "blocking" and nodes["target"]["summary"] == "Missing target"
+    assert "Enter a target" in nodes["target"]["tooltip"] and nodes["target"]["action"] == "Enter a target"
+    # Preflight's material section is the browser's conductor node.
+    assert nodes["conductor"]["state"] == "warning" and nodes["conductor"]["summary"] == "1 modeling note"
+    assert nodes["geometry"]["state"] == "set"
+    assert {node["state"] for node in model_tree_nodes(CoilGenConfig())} == {"unchecked"}
+
+    server, browser = create_app(tmp_path, server_name="test-web-section-readiness")
+    try:
+        browser.load_template("cylinder")
+        state = server.state
+        assert all(node["state"] in {"set", "warning"} for node in state.nodes)
+        browser.session.apply_config({"field_shape_function": "none"})
+        browser._refresh_model()
+        target = next(node for node in state.nodes if node["value"] == "target")
+        assert target["state"] == "blocking" and target["summary"] == "Missing target"
+        issue = next(issue for issue in state.preflight if issue["blocking"])
+        assert issue["node"] == "target" and issue["section"] == "Target field and B0"
+        assert issue["heading"] == "Missing target" and issue["action"]
+        template = state.trame__template_main
+        assert "preflight.filter(i => i.node === node)" in template
+        assert 'data-state="item.state"' in template or ':data-state="item.state"' in template
+    finally:
+        browser.session.close()

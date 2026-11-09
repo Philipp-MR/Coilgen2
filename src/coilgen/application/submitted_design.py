@@ -54,6 +54,11 @@ _CHOICES = {
         "centered": "Centered on path",
     },
     "conductor_path_reference": {"centroid": "Profile centroid", "profile_origin": "Profile origin (0, 0)"},
+    "support_body_mode": {
+        "off": "Off",
+        "inside": "Grooved solid inside the winding",
+        "outside": "Grooved solid outside the winding",
+    },
     "routing_circuit_scope": {"per_part": "Separate circuit per support", "system": "System circuit"},
     "interconnection_axis": {"support_axis": "Along the support bore", "b0": "Along the main field"},
     "inter_group_connection_path_method": {
@@ -247,6 +252,19 @@ def design_choice_groups(request):
             ("conductor_mounting_mode", "Mounting reference"),
         ],
     )
+    if config.get("support_body_mode", "off") not in {"off", None}:
+        wire.append(
+            {"name": "Grooved support body", "value": choice_title("support_body_mode", config["support_body_mode"])}
+        )
+        wire.extend(
+            {"name": name, "value": f"{float(config[key]) * 1000:g} mm"}
+            for key, name in (
+                ("support_body_thickness", "Support body thickness"),
+                ("support_body_groove_clearance", "Groove clearance"),
+                ("support_body_groove_extra_depth", "Extra groove depth"),
+            )
+            if key in config
+        )
     if config.get("contour_only_sweep_mode"):
         wire.append({"name": "Winding topology", "value": "Independent closed turns"})
     elif config.get("skip_postprocessing") is False:

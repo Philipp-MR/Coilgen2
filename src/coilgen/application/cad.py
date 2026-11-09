@@ -194,6 +194,12 @@ def _body_sources(metadata: dict) -> dict[str, tuple[str, dict]]:
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", body["body_id"]):
                 raise ValueError("Saved conductor body identifiers must be portable names.")
             bodies[body["body_id"]] = ("fabrication_review_geometry", body)
+    # Grooved support formers are reviewed solids of their own, exported beside the conductors.
+    for body in fabrication.get("support_bodies", []):
+        if isinstance(body, dict) and isinstance(body.get("body_id"), str):
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", body["body_id"]):
+                raise ValueError("Saved support body identifiers must be portable names.")
+            bodies[body["body_id"]] = ("fabrication_review_geometry", body)
     for body in (metadata.get("pipeline_sweeps") or {}).get("bodies", []):
         if isinstance(body, dict) and isinstance(body.get("body_id"), str):
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", body["body_id"]):

@@ -2323,6 +2323,33 @@ def _validate_manufacturing_settings(config: CoilGenConfig, error, warning) -> N
     _at_least_float(
         error, "sweep bend clearance margin", "sweep_bend_clearance_margin", config.sweep_bend_clearance_margin, 0.0
     )
+    _enum(error, "support_body_mode", getattr(config, "support_body_mode", "off"), {"off", "inside", "outside"})
+    _at_least_float(
+        error, "support body thickness", "support_body_thickness", getattr(config, "support_body_thickness", 0.003), 0.0
+    )
+    _at_least_float(
+        error,
+        "support groove clearance",
+        "support_body_groove_clearance",
+        getattr(config, "support_body_groove_clearance", 0.0),
+        0.0,
+    )
+    _at_least_float(
+        error,
+        "support groove extra depth",
+        "support_body_groove_extra_depth",
+        getattr(config, "support_body_groove_extra_depth", 0.0),
+        0.0,
+    )
+    if str(getattr(config, "support_body_mode", "off")).strip().lower() != "off":
+        if not float(getattr(config, "support_body_thickness", 0.0)) > 0.0:
+            error("support_body_thickness", "A grooved support body needs a positive thickness.")
+        if config.skip_sweep:
+            warning(
+                "support_body_mode",
+                "Grooved support body is enabled but the conductor sweep is skipped.",
+                "Enable the sweep; grooves are cut from the swept conductor paths.",
+            )
     if (
         not config.skip_sweep
         and not bool(getattr(config, "contour_only_sweep_mode", False))

@@ -7,16 +7,19 @@ import math
 import numpy as np
 
 from PySide6.QtCore import QPointF, QRectF, QSignalBlocker, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QColor, QGuiApplication, QKeySequence, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractItemDelegate,
+    QCheckBox,
     QComboBox,
+    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QStyledItemDelegate,
     QTableWidget,
@@ -26,10 +29,16 @@ from PySide6.QtWidgets import (
 )
 
 from ..application.conductor_profiles import (
+    DEFAULT_CIRCLE_SEGMENTS,
+    MAX_CIRCLE_SEGMENTS,
+    MIN_CIRCLE_SEGMENTS,
     canonical_profile_points,
     is_rectangular_profile,
     omega_holder_profile,
+    parse_profile_table,
+    read_profile_table,
     round_wire_profile,
+    u_shape_profile,
     validate_conductor_profile,
 )
 from .icons import icon
@@ -61,6 +70,21 @@ class ConductorProfileEditor(QWidget):
         self.mode_combo.addItem(icon("conductor-profile"), "Rectangle from width / height", "rectangle")
         self.mode_combo.addItem(icon("mesh"), "Polygon from straight segments", "polygon")
         mode_row.addWidget(self.mode_combo, 1)
+        self.segments_spin = QSpinBox(self)
+        self.segments_spin.setObjectName("conductor_profile_circle_points")
+        self.segments_spin.setRange(MIN_CIRCLE_SEGMENTS, MAX_CIRCLE_SEGMENTS)
+        self.segments_spin.setValue(DEFAULT_CIRCLE_SEGMENTS)
+        self.segments_spin.setPrefix("Points ")
+        self.segments_spin.setToolTip(
+            "Points around a full circle for the Round wire and U-shape presets (the U-shape half circle uses "
+            "half as many segments). Fewer points give smaller swept STL files. Applies when a preset is clicked."
+        )
+        self.equal_area_check = QCheckBox("Keep circle area", self)
+        self.equal_area_check.setObjectName("conductor_profile_equal_area")
+        self.equal_area_check.setToolTip(
+            "Enlarge the Round wire polygon slightly so its area, and thus the computed resistance, equals that of "
+            "the round wire. Without it, 8 points give 90 % and 16 points 97 % of the circle area."
+        )
         layout.addLayout(mode_row)
         self.instructions = QLabel(
             "Edit coordinates or drag numbered points. The last point closes to the first.", self
@@ -114,29 +138,47 @@ class ConductorProfileEditor(QWidget):
         self.round_button = QPushButton("Round wire", self)
         self.round_button.setObjectName("conductor_profile_round")
         self.round_button.setToolTip("Round (litz) wire polygon centred on the origin; diameter = conductor width.")
+        self.u_shape_button = QPushButton("U-shape", self)
+        self.u_shape_button.setObjectName("conductor_profile_u_shape")
+        self.u_shape_button.setToolTip(
+            "Rectangle with a half circle away from the support: diameter = conductor width, "
+            "total height = conductor height (at least half the width)."
+        )
         self.omega_button = QPushButton("Omega holder", self)
         self.omega_button.setObjectName("conductor_profile_omega")
         self.omega_button.setToolTip(
             "Printable omega holder around a round wire at the origin (wire diameter = conductor width). "
             "Sweep about the profile origin so the exported path follows the wire centre."
         )
+        self.import_button = QPushButton("Import table…", self)
+        self.import_button.setObjectName("conductor_profile_import")
+        self.import_button.setToolTip(
+            "Load u, n coordinates in millimetres from a CSV, TSV or text file (one point per row; "
+            "separators ; tab , or spaces; optional header line). You can also paste a copied table."
+        )
+        shape_options = QHBoxLayout()
+        shape_options.addWidget(self.segments_spin)
+        shape_options.addWidget(self.equal_area_check)
+        shape_options.addStretch(1)
+        shape_options.addWidget(self.import_button)
+        shape_options.addWidget(self.fit_button)
+        layout.addLayout(shape_options)
         bottom.addWidget(self.rectangle_button)
         bottom.addWidget(self.round_button)
+        bottom.addWidget(self.u_shape_button)
         bottom.addWidget(self.omega_button)
         bottom.addStretch(1)
-        bottom.addWidget(self.fit_button)
         layout.addLayout(bottom)
         self.status_label = QLabel(self)
         self.status_label.setObjectName("conductor_profile_validation")
         self.status_label.setWordWrap(True)
         self.status_label.setTextFormat(Qt.TextFormat.PlainText)
         layout.addWidget(self.status_label)
-        axes = QLabel("u: in-surface, across wire · n: support normal · origin: modeled path reference", self)
-        axes.setWordWrap(True)
-        axes.setToolTip(
-            "Conductor mounting may subsequently offset this reference. Editing the profile does not move or recenter it."
+        # The preview draws the u/n axes; the reference-point note lives in tooltips.
+        self.instructions.setToolTip(
+            "u: in-surface, across wire · n: support normal · origin: modeled path reference. Conductor mounting "
+            "may subsequently offset this reference. Editing the profile does not move or recenter it."
         )
-        layout.addWidget(axes)
         self.table.itemChanged.connect(self._table_changed)
         self.table.itemSelectionChanged.connect(self._selection_changed)
         self.mode_combo.currentIndexChanged.connect(self._mode_changed)
@@ -144,7 +186,10 @@ class ConductorProfileEditor(QWidget):
         self.remove_button.clicked.connect(self.remove_point)
         self.rectangle_button.clicked.connect(self.start_rectangle)
         self.round_button.clicked.connect(lambda: self.start_preset("round"))
+        self.u_shape_button.clicked.connect(lambda: self.start_preset("u_shape"))
         self.omega_button.clicked.connect(lambda: self.start_preset("omega"))
+        self.import_button.clicked.connect(self.choose_table_file)
+        self.table.installEventFilter(self)
         self.fit_button.clicked.connect(self.preview.fit_view)
         self.preview.point_selected.connect(self.select_point)
         self.preview.point_moved.connect(self._move_point)
@@ -183,7 +228,7 @@ class ConductorProfileEditor(QWidget):
         return QSize(640, 390)
 
     def minimumSizeHint(self):
-        return QSize(460, 375)
+        return QSize(460, 380)
 
     def set_rectangle_dimensions(self, width_mm, height_mm):
         self._width_mm, self._height_mm = width_mm, height_mm
@@ -342,17 +387,69 @@ class ConductorProfileEditor(QWidget):
         self._emit_changed()
 
     def start_preset(self, kind):
-        """Replace the polygon with a round wire or an omega holder around it.
+        """Replace the polygon with a round wire, U-shape or omega holder.
 
-        The wire diameter is the current conductor width; both shapes are
-        centred on the origin (the modeled path reference).
+        The wire diameter is the current conductor width (the U-shape total
+        height is the conductor height). Round and U-shape use the circle
+        point count; all shapes are centred on the origin.
         """
-        diameter = self._width_mm * 1e-3
+        segments = self.segments_spin.value()
         try:
-            points = round_wire_profile(diameter) if kind == "round" else omega_holder_profile(diameter)
-        except ValueError as exc:
+            width, height = float(self._width_mm) * 1e-3, float(self._height_mm) * 1e-3
+            if kind == "round":
+                points = round_wire_profile(width, segments, equal_area=self.equal_area_check.isChecked())
+            elif kind == "u_shape":
+                points = u_shape_profile(width, height, segments)
+            else:
+                points = omega_holder_profile(width)
+        except (ValueError, TypeError, OverflowError) as exc:
             self.status_label.setText(str(exc))
             return
+        self.load_points(points)
+
+    def choose_table_file(self):
+        path, _filter = QFileDialog.getOpenFileName(
+            self, "Import cross-section table (mm)", "", "Point tables (*.csv *.tsv *.txt);;All files (*)"
+        )
+        if path:
+            self.import_table(path)
+
+    def import_table(self, path):
+        """Load u, n millimetre coordinates from a file; errors stay in the status line."""
+        try:
+            points = read_profile_table(path)
+        except (OSError, ValueError) as exc:
+            self.status_label.setText(f"Cannot import table · {exc}")
+            self.status_label.setStyleSheet("color: #ba3c32;")
+            return False
+        self.load_points(points)
+        return True
+
+    def paste_table(self, text):
+        """Replace the polygon with a pasted multi-row u, n table (mm).
+
+        Returns False, leaving the table untouched, when the text is not a
+        table of at least three points (e.g. a single copied number).
+        """
+        try:
+            points = parse_profile_table(text)
+        except ValueError:
+            return False
+        self.load_points(points)
+        return True
+
+    def eventFilter(self, watched, event):
+        if (
+            watched is self.table
+            and event.type() == event.Type.KeyPress
+            and event.matches(QKeySequence.StandardKey.Paste)
+            and self.paste_table(QGuiApplication.clipboard().text())
+        ):
+            return True
+        return super().eventFilter(watched, event)
+
+    def load_points(self, points):
+        """Show SI ``points`` as an editable polygon draft."""
         loading = self._loading
         self._loading = True
         self._set_points(points)
@@ -440,7 +537,7 @@ class ConductorProfileEditor(QWidget):
         self.table.setEnabled(polygon)
         self.add_button.setEnabled(polygon)
         self.instructions.setText(
-            "Edit coordinates or drag numbered points. The last point closes to the first."
+            "Edit coordinates, drag numbered points, or paste a u, n table (mm). The last point closes to the first."
             if polygon
             else "The rectangle uses width and height from Conductor settings. Choose polygon to edit its segments."
         )

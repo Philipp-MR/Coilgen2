@@ -270,3 +270,47 @@ def test_compact_profile_height_keeps_preview_and_validation_visible(editor, app
     application.processEvents()
     assert editor.status_label.geometry().bottom() < editor.height()
     assert "Cannot apply" in editor.status_label.text()
+
+
+def test_point_count_and_equal_area_drive_round_and_u_shape_presets(editor):
+    editor.set_rectangle_dimensions(2, 3)
+    editor.segments_spin.setValue(8)
+    signals = QSignalSpy(editor.changed)
+    editor.round_button.click()
+    assert editor.mode_combo.currentData() == "polygon"
+    assert editor.table.rowCount() == 8
+    assert signals.count() == 1
+    plain = editor.profile()
+    editor.equal_area_check.setChecked(True)
+    editor.round_button.click()
+    from coilgen.application.conductor_profiles import validate_conductor_profile
+
+    assert validate_conductor_profile(editor.profile()).area_m2 == pytest.approx(3.141592653589793e-6)
+    assert validate_conductor_profile(plain).area_m2 < 3.0e-6
+    editor.u_shape_button.click()
+    summary = validate_conductor_profile(editor.profile())
+    assert editor.table.rowCount() == 7  # base corners, two shoulders, 3 interior arc points
+    assert summary.width_m == pytest.approx(0.002) and summary.height_m == pytest.approx(0.003)
+    editor.set_rectangle_dimensions(4, 1)  # height below the half-circle radius
+    editor.u_shape_button.click()
+    assert "at least half its width" in editor.status_label.text()
+    assert editor.table.rowCount() == 7
+
+
+def test_table_import_and_paste_replace_the_polygon(editor, tmp_path, application):
+    path = tmp_path / "profile.csv"
+    path.write_text("u;n\n-1;0\n1;0\n0;1,5\n", encoding="utf-8")
+    assert editor.import_table(path)
+    assert editor.mode_combo.currentData() == "polygon"
+    assert editor.profile() == ((-0.001, 0.0), (0.001, 0.0), (0.0, 0.0015))
+    bad = tmp_path / "bad.txt"
+    bad.write_text("0 0\n1 x\n", encoding="utf-8")
+    assert not editor.import_table(bad)
+    assert "Cannot import table" in editor.status_label.text()
+    assert editor.profile() == ((-0.001, 0.0), (0.001, 0.0), (0.0, 0.0015))
+    application.clipboard().setText("0\t0\n2\t0\n2\t1\n0\t1\n")
+    editor.table.setFocus()
+    QTest.keyClick(editor.table, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
+    assert editor.profile() == ((0.0, 0.0), (0.002, 0.0), (0.002, 0.001), (0.0, 0.001))
+    assert not editor.paste_table("1.5")  # a single copied cell is not a table
+    assert editor.table.rowCount() == 4

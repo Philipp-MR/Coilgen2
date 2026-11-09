@@ -236,3 +236,34 @@ def test_export_navigation_preserves_current_inputs_and_does_not_compute(windows
     assert window.undo_stack.count() == 0
     assert not window.service.submissions
     assert not window.geometry_export_panel.export_button.isEnabled()
+
+
+def test_model_tree_shows_section_readiness_and_opens_the_first_problem_field(windows, monkeypatch):
+    from coilgen.application.preflight import PreflightIssue
+
+    target = PreflightIssue(
+        "No analytic target expression is configured.",
+        "target",
+        "field_shape_function",
+        "Enter an analytic target expression.",
+        title="Missing target",
+    )
+    note = PreflightIssue("Fallback routing.", "winding", "routing", "Inspect routing.", severity="warning")
+    monkeypatch.setattr(workbench, "check_readiness", lambda *_a, **_k: ReadinessReport((target, note)))
+    window = windows()
+    items = window.tree_items
+    assert items["target"].text(1) == "Missing target"
+    assert "Enter an analytic target expression." in items["target"].toolTip(1)
+    assert items["winding"].text(1) == "1 modeling note"
+    assert items["geometry"].text(1) == "Inputs set" and "after computation" in items["geometry"].toolTip(1)
+    assert window._model_root.text(1) == "1 section needs input"
+    assert "Target field" in window._model_root.toolTip(1) and window._study_root.text(1) == ""
+    opened = []
+    monkeypatch.setattr(window, "_open_readiness_issue", opened.append)
+    window.tree.setCurrentItem(items["target"])
+    window._open_tree_item(items["target"])
+    assert opened == [target]
+    # A section with only modeling notes opens normally, without jumping to a field.
+    window.tree.setCurrentItem(items["winding"])
+    window._open_tree_item(items["winding"])
+    assert opened == [target]

@@ -10,7 +10,14 @@ import pytest
 
 from coilgen.application import ProjectDocument
 from coilgen.application import preflight
-from coilgen.application.preflight import PreflightIssue, PreflightReport, check_preflight
+from coilgen.application.preflight import (
+    SECTION_ORDER,
+    PreflightIssue,
+    PreflightReport,
+    check_preflight,
+    next_section,
+    section_readiness,
+)
 from coilgen.application.support_parameters import SUPPORT_EDITORS
 from coilgen.config import CoilGenConfig
 
@@ -138,3 +145,39 @@ def test_shared_cylinder_adapter_preserves_actual_span_and_untouched_parameters(
     assert editor.display_value(length, updated) == pytest.approx(editor.display_value(length, original))
     np.testing.assert_array_equal(updated[1:3], original[1:3])
     np.testing.assert_array_equal(updated[4:], original[4:])
+
+
+def test_section_readiness_groups_findings_by_settings_section_in_model_order():
+    note = PreflightIssue("Fallback selected", "winding", "routing", "Inspect routing", severity="warning")
+    target = PreflightIssue("No target", "target", "field_shape_function", "Enter a target", title="Missing target")
+    second = PreflightIssue("Bad radius", "geometry", "cylinder_mesh_parameter_list", "Fix radius")
+    third = PreflightIssue("Bad length", "geometry", "cylinder_mesh_parameter_list", "Fix length")
+    sections = section_readiness(PreflightReport((note, target, second, third)))
+    assert tuple(sections) == SECTION_ORDER
+    states = {node: section.state for node, section in sections.items()}
+    assert states == {
+        "geometry": "blocking",
+        "target": "blocking",
+        "material": "set",
+        "winding": "warning",
+        "optimization": "set",
+        "validation": "set",
+    }
+    assert sections["target"].summary == "Missing target" and sections["target"].next_action == "Enter a target"
+    assert sections["geometry"].summary == "2 inputs to fix" and sections["geometry"].tone == "error"
+    assert sections["winding"].summary == "1 modeling note" and sections["winding"].next_action == "Inspect routing"
+    assert sections["material"].summary == "Inputs set" and sections["material"].next_action == ""
+    # "Inputs set" never claims engineering acceptance.
+    assert "after computation" in sections["material"].details
+    assert "No target" in sections["target"].details and "Enter a target" in sections["target"].details
+    assert next_section(sections).node == "geometry"
+    assert next_section(section_readiness(PreflightReport((note,)))) is None
+
+
+def test_missing_target_marks_only_the_target_section():
+    project = ProjectDocument.from_config(replace(numeric_config(), field_shape_function="none"))
+    sections = section_readiness(check_preflight(project))
+    assert sections["target"].state == "blocking" and sections["target"].summary == "Missing target"
+    assert not any(section.blocking for node, section in sections.items() if node != "target")
+    # Default connected routing keeps its terminal-handling notes in the winding section.
+    assert sections["winding"].state == "warning"

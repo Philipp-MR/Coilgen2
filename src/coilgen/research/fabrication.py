@@ -26,10 +26,11 @@ from ..manufacturing import (
     save_mesh_as_step,
     save_mesh_as_stl,
 )
-from ..models import CoilPart, FabricationPath, Mesh, WirePath
+from ..models import CoilPart, FabricationPath, Mesh, SupportBody, WirePath
 from ..physics import biot_savart_wire_path
 from ..gradient_engineering import CircuitSpec
 from ..progress import ProgressReporter, progress_scope
+from ..support_body import SupportBodyError, build_grooved_support, support_body_enabled
 from ..geometry_collision import (
     _segment_bvh_candidate_pairs,
     accelerated_mesh_collision_diagnostics as accelerated_mesh_collision_diagnostics,
@@ -409,6 +410,8 @@ class FabricationReport:
     strict: bool
     # Solids written although strict checks failed; never construction-released.
     draft_artifacts: list[str] = field(default_factory=list)
+    # (body_id, part_index, SupportBody) grooved formers cut from these paths.
+    support_bodies: list[tuple[str, int, SupportBody]] = field(default_factory=list)
 
     @property
     def ready(self):
@@ -438,11 +441,42 @@ class FabricationReport:
                 }
                 for record in self.paths
             ],
+            "support_bodies": [
+                {
+                    "body_id": body_id,
+                    "part_index": part_index,
+                    "support_body_ok": bool(support.diagnostics.get("support_body_ok", False)),
+                    "manufacturing_ok": bool(support.diagnostics.get("support_body_ok", False)),
+                    "mesh_solid_ok": bool(support.diagnostics.get("support_body_watertight", False)),
+                    "diagnostics": support.diagnostics,
+                }
+                for body_id, part_index, support in self.support_bodies
+            ],
             "winding": [
                 {key: value for key, value in item.items() if key not in {"electrical_points_m", "winding_points_m"}}
                 for item in self.winding_steps
             ],
         }
+
+
+def _grooved_supports(parts, records, config, reasons) -> list[tuple[str, int, SupportBody]]:
+    """Cut every reviewed conductor path from each part's thickened support."""
+
+    if not support_body_enabled(config) or not records:
+        return []
+    paths = [record.path for record in records]
+    supports = []
+    for part_index, part in enumerate(parts, start=1):
+        body_id = f"part{part_index:03d}_grooved_support"
+        try:
+            support = build_grooved_support(part.mesh, paths, config)
+        except SupportBodyError as exc:
+            reasons.append(f"{body_id}:{exc}")
+            continue
+        if not support.diagnostics.get("support_body_ok"):
+            reasons.append(f"{body_id}:{support.diagnostics.get('support_body_failure_reasons', 'invalid')}")
+        supports.append((body_id, part_index, support))
+    return supports
 
 
 def compile_fabrication(
@@ -526,6 +560,7 @@ def compile_fabrication(
                     reasons.append(f"{body_id}:weighted_turns_not_physically_expanded")
     if not records:
         reasons.append("no_fabrication_paths")
+    support_bodies = _grooved_supports(result.coil_parts, records, config, reasons)
     with progress_scope(35, 55):
         reporter.report(0, "Checking insulation and conductor clearance across every body pair")
         assembly = assembly_clearance(
@@ -699,6 +734,7 @@ def compile_fabrication(
         reasons,
         [],
         strict,
+        support_bodies=support_bodies,
     )
     if output_dir is not None:
         reporter.report(95.0, "Writing centroid paths, winding instructions and qualified solid artifacts")
@@ -757,6 +793,15 @@ def compile_fabrication(
                         continue
                     report.artifacts.append(str(path.resolve()))
                     report.draft_artifacts.append(str(path.resolve()))
+        for body_id, _part_index, support in report.support_bodies:
+            if not len(support.mesh.faces):
+                continue
+            released = (report.ready or not strict) and bool(support.diagnostics.get("support_body_ok"))
+            path = output / (f"{body_id}_fabrication.stl" if released else f"{body_id}_DRAFT_fabrication.stl")
+            save_mesh_as_stl(support.mesh, path, solid_name=body_id if released else f"DRAFT_{body_id}")
+            report.artifacts.append(str(path.resolve()))
+            if not released:
+                report.draft_artifacts.append(str(path.resolve()))
         for plan in plans:
             if plan["body_id"] not in leads and plan["body_id"] not in circuits:
                 continue

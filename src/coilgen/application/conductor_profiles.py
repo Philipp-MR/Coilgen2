@@ -62,13 +62,153 @@ def canonical_profile_points(points: Sequence[Sequence[float]]) -> tuple[tuple[f
     return tuple((float(point[0]), float(point[1])) for point in values)
 
 
-def round_wire_profile(diameter_m: float, segments: int = 16) -> tuple[tuple[float, float], ...]:
-    """Regular polygon approximating a round (litz) wire centred on the origin."""
-    if not np.isfinite(diameter_m) or diameter_m <= 0 or segments < 6:
-        raise ValueError("A round profile needs a positive diameter and at least six segments.")
+MIN_CIRCLE_SEGMENTS = 6
+MAX_CIRCLE_SEGMENTS = 256
+DEFAULT_CIRCLE_SEGMENTS = 16
+
+
+def _circle_segments(segments) -> int:
+    try:
+        whole = not isinstance(segments, bool) and int(segments) == segments
+    except (TypeError, ValueError, OverflowError):
+        whole = False
+    if not whole:
+        raise ValueError("The number of circle points must be a whole number.")
+    segments = int(segments)
+    if not MIN_CIRCLE_SEGMENTS <= segments <= MAX_CIRCLE_SEGMENTS:
+        raise ValueError(
+            f"Use between {MIN_CIRCLE_SEGMENTS} and {MAX_CIRCLE_SEGMENTS} points around a circle (got {segments})."
+        )
+    return segments
+
+
+def equal_area_radius_scale(segments: int) -> float:
+    """Radius factor that gives a regular inscribed ``segments``-gon the circle's area.
+
+    An inscribed polygon underestimates the circle area (16 points: 97.4 %,
+    8 points: 90.0 %, 6 points: 82.7 %), and therefore overestimates the DC
+    resistance computed from the profile area.
+    """
+    segments = _circle_segments(segments)
+    return float(np.sqrt(2.0 * np.pi / (segments * np.sin(2.0 * np.pi / segments))))
+
+
+def round_wire_profile(
+    diameter_m: float, segments: int = DEFAULT_CIRCLE_SEGMENTS, *, equal_area: bool = False
+) -> tuple[tuple[float, float], ...]:
+    """Regular polygon approximating a round (litz) wire centred on the origin.
+
+    ``segments`` is the number of polygon points; fewer points give smaller
+    swept STL files. With ``equal_area`` the polygon is enlarged slightly so
+    its area (used for resistance) equals that of the round wire.
+    """
+    if not np.isfinite(diameter_m) or diameter_m <= 0:
+        raise ValueError("A round profile needs a positive diameter.")
+    segments = _circle_segments(segments)
+    radius = diameter_m / 2.0 * (equal_area_radius_scale(segments) if equal_area else 1.0)
     angles = np.linspace(0.0, 2.0 * np.pi, segments, endpoint=False)
-    radius = diameter_m / 2.0
-    return tuple((float(radius * np.cos(angle)), float(radius * np.sin(angle))) for angle in angles)
+    return _snap_round_off(((radius * np.cos(angle), radius * np.sin(angle)) for angle in angles), radius)
+
+
+def _snap_round_off(points, scale) -> tuple[tuple[float, float], ...]:
+    """Replace trigonometric round-off such as cos(pi/2) = 6e-17 by exact zeros."""
+    tolerance = 1e-12 * scale
+    return tuple(tuple(0.0 if abs(value) < tolerance else float(value) for value in point) for point in points)
+
+
+def u_shape_profile(
+    width_m: float,
+    height_m: float,
+    segments: int = DEFAULT_CIRCLE_SEGMENTS,
+    *,
+    arc_side: str = "top",
+) -> tuple[tuple[float, float], ...]:
+    """Rectangle with a half circle on one side (a "U" or "D" profile).
+
+    The half circle has diameter ``width_m``; ``height_m`` is the total height,
+    so ``height_m == width_m / 2`` gives a plain half disc. ``segments`` is the
+    number of points around a *full* circle, i.e. the half circle uses
+    ``segments // 2`` straight segments (the same angular resolution as the
+    round wire). ``arc_side="top"`` points the arc away from the support
+    (+n, flat side on the support); ``"bottom"`` points it towards the support.
+    The profile is centred on its bounding box, like the rectangle.
+    """
+    if not all(np.isfinite(value) and value > 0 for value in (width_m, height_m)):
+        raise ValueError("A U-shape profile needs a positive width and height.")
+    if arc_side not in {"top", "bottom"}:
+        raise ValueError("The U-shape arc side must be 'top' or 'bottom'.")
+    radius = width_m / 2.0
+    straight = height_m - radius
+    tolerance = 1e-9 * height_m
+    if straight < -tolerance:
+        raise ValueError("A U-shape needs a height of at least half its width (the half circle radius).")
+    arc_segments = _circle_segments(segments) // 2
+    base = -height_m / 2.0
+    straight = straight if straight > tolerance else 0.0
+    centre = base + straight
+    points = [(-radius, base), (radius, base)]
+    for angle in np.linspace(0.0, np.pi, arc_segments + 1):
+        # A plain half disc shares its arc end points with the base corners.
+        if straight > 0.0 or 0.0 < angle < np.pi:
+            points.append((radius * np.cos(angle), centre + radius * np.sin(angle)))
+    if arc_side == "bottom":
+        points = [(u, -n) for u, n in reversed(points)]
+    return _snap_round_off(points, height_m)
+
+
+def parse_profile_table(text: str, *, length_scale_to_m: float = 1e-3) -> tuple[tuple[float, float], ...]:
+    """Read a two-column (u, n) point table, e.g. pasted from a spreadsheet.
+
+    Accepted separators are ``;``, tab, ``,`` or whitespace. With ``;`` or tab
+    separators a decimal comma is also accepted (German spreadsheet export).
+    Empty lines and lines starting with ``#`` are ignored; a non-numeric first
+    line is treated as a header. Values are multiplied by
+    ``length_scale_to_m`` (default: millimetres). Geometry is not validated
+    here, so a faulty table can still be loaded and corrected.
+    """
+    if not np.isfinite(length_scale_to_m) or length_scale_to_m <= 0:
+        raise ValueError("The table length scale must be positive.")
+    points = []
+    header_allowed = True
+    for number, raw in enumerate(str(text).splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ";" in line or "\t" in line:
+            cells = [cell.strip().replace(",", ".") for cell in line.replace("\t", ";").split(";")]
+        elif "," in line:
+            cells = [cell.strip() for cell in line.split(",")]
+        else:
+            cells = line.split()
+        cells = [cell for cell in cells if cell]
+        try:
+            values = [float(cell) for cell in cells]
+        except ValueError:
+            if header_allowed:
+                header_allowed = False
+                continue
+            raise ValueError(f"Line {number}: expected two numbers (u, n), got {line!r}.") from None
+        header_allowed = False
+        if len(values) != 2:
+            raise ValueError(f"Line {number}: expected two columns (u, n), found {len(values)}.")
+        if not all(np.isfinite(values)):
+            raise ValueError(f"Line {number}: coordinates must be finite.")
+        points.append((values[0] * length_scale_to_m, values[1] * length_scale_to_m))
+    if len(points) < 3:
+        raise ValueError("A profile table needs at least three rows of u, n coordinates.")
+    return canonical_profile_points(points)
+
+
+def read_profile_table(path, *, length_scale_to_m: float = 1e-3) -> tuple[tuple[float, float], ...]:
+    """Read a :func:`parse_profile_table` point table from a CSV/TSV/TXT file."""
+    from pathlib import Path
+
+    content = Path(path).read_bytes()
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = content.decode("latin-1")
+    return parse_profile_table(text, length_scale_to_m=length_scale_to_m)
 
 
 def omega_holder_profile(
