@@ -4,6 +4,7 @@ message: >-
   version or commit used for reproducibility.
 type: software
 title: CoilGen2
+license: GPL-3.0-only
 authors:
   - family-names: Amrein
     given-names: Philipp
