@@ -92,10 +92,14 @@ def publish_exclusive(source: Path, target: Path) -> None:
         os.link(source, target)
 
 
-def file_digest(path: Path) -> str:
+def file_digest(path: Path, *, cancel_check=None) -> str:
     digest = sha256()
     with Path(path).open("rb") as source:
         for block in iter(lambda: source.read(1024 * 1024), b""):
+            if cancel_check is not None and cancel_check():
+                from .progress import DesignCancelled
+
+                raise DesignCancelled("Saved evidence verification cancelled.")
             digest.update(block)
     return digest.hexdigest()
 

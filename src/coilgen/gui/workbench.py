@@ -9,6 +9,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
+from functools import partial
 import json
 import math
 from pathlib import Path
@@ -58,7 +59,7 @@ from ..application.acceptance import (
     field_acceptance_slack_overrides,
     independent_field_acceptance_slack_T,
 )
-from ..application.targets import recognize_solid_harmonic_target, solid_harmonic_target
+from ..application.targets import recognize_solid_harmonic_target, solid_harmonic_target, target_normalization_choices
 from ..application.reuse import plan_reuse, plan_stopped_reuse, ReusePlan
 from ..application.evidence import SourceHealth
 from ..application.execution import (
@@ -84,6 +85,17 @@ from ..application.design_studies import (
 from ..attribution import AUTHOR_CREDIT, AUTHOR_ROLE, PROJECT_URL, software_attribution
 from ..application.preflight import overall_readiness, section_readiness
 from ..application.session import PIPELINE_STAGES, request_controls, stage_study_changes, submit_design
+from ..application.workbench_presentation import (
+    ACTION_COLORS,
+    BROWSE_EXAMPLES_LABEL,
+    COMPUTE_CAPTIONS,
+    DESIGN_PLAN_TITLE,
+    FINALIZING_FABRICATION,
+    MODEL_BUILDER_TITLE,
+    OPEN_PROJECT_LABEL,
+    RUNS_LABEL,
+    is_finalizing_fabrication,
+)
 from ..config import INTERCONNECTION_AXIS_MODES
 from ..persistence import atomic_text, json_value
 from ..research.jobs import JobManager, RuntimePolicy
@@ -147,13 +159,6 @@ from .branding import LogoLabel
 
 
 STAGES = tuple((label, key) for key, label in PIPELINE_STAGES)
-COMPUTE_CAPTIONS = {
-    "prepared": "Prepare model",
-    "sheet": "Optimize stream function",
-    "contours": "Generate contours",
-    "routed": "Connect / sweep",
-    "evaluated": "Compute full design",
-}
 NODES = (
     ("geometry", "Geometry and mesh"),
     ("target", "Target field and regions"),
@@ -185,13 +190,14 @@ STAGE_ICONS = {
     "routed": "conductor-sweep",
     "evaluated": "independent-validation",
 }
-PRIMARY_ACTION_STYLE = """
-QPushButton { background: #075aaa; color: white; border: 1px solid #075aaa;
-              border-radius: 5px; padding: 8px 14px; font-weight: 600; }
-QPushButton:hover { background: #064b8e; }
-QPushButton:pressed { background: #04386d; }
-QPushButton:focus { border: 2px solid #002d5c; }
-QPushButton:disabled { background: #dce3eb; color: #596777; border-color: #b9c5d2; }
+PRIMARY_ACTION_STYLE = f"""
+QPushButton {{ background: {ACTION_COLORS["primary"]}; color: white; border: 1px solid {ACTION_COLORS["primary"]};
+              border-radius: 5px; padding: 8px 14px; font-weight: 600; }}
+QPushButton:hover {{ background: {ACTION_COLORS["action-hover"]}; }}
+QPushButton:pressed {{ background: {ACTION_COLORS["action-pressed"]}; }}
+QPushButton:focus {{ border: 2px solid {ACTION_COLORS["action-focus"]}; }}
+QPushButton:disabled {{ background: {ACTION_COLORS["action-disabled"]}; color: {ACTION_COLORS["action-disabled-text"]};
+                        border-color: {ACTION_COLORS["action-disabled-border"]}; }}
 """
 # Desktop implementation of each shared session action (application/session.py
 # ACTIONS). The browser binds the same ids; tests/test_browser_workbench.py checks both.
@@ -346,6 +352,7 @@ class CoilGenWorkbench(QMainWindow):
         self._draft_initial = {}
         self._widget_initial = {}
         self._changed_controls = set()
+        self._inactive_draft_controls = set()
         self._draft_builder = None
         self._draft_fields = {}
         self._field_errors = {}
@@ -403,6 +410,12 @@ class CoilGenWorkbench(QMainWindow):
         self.computation_indicator = ComputationIndicator(self)
         self.activity_feedback = ComputationFeedback(self, self.computation_indicator)
         self.statusBar().addPermanentWidget(self.computation_indicator, 1)
+        self.runs_button = QToolButton(self)
+        self.runs_button.setObjectName("workbench_runs")
+        self.runs_button.setDefaultAction(self.evidence_actions["Jobs"])
+        self.runs_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.runs_button.setToolTip("Inspect active runs, saved results and earlier attempts")
+        self.statusBar().addPermanentWidget(self.runs_button)
         self.statusBar().messageChanged.connect(self._refresh_computation_indicator)
         self.live_preview.preview_ready.connect(self._show_live_preview)
         self.live_preview.changed.connect(self._refresh_design_progress)
@@ -555,7 +568,6 @@ class CoilGenWorkbench(QMainWindow):
         self.design_progress = DesignPlanPanel(self)
         self.design_progress.follow_requested.connect(self._set_live_follow)
         self.design_progress.channel_requested.connect(self._inspect_plan_channel)
-        self.design_progress.job_requested.connect(self._focus_job)
         self.design_progress.compute_channels_requested.connect(self.compute_channels)
         self.design_progress.action_requested.connect(self._plan_action)
         plan_content = QWidget(self)
@@ -563,7 +575,7 @@ class CoilGenWorkbench(QMainWindow):
         plan_layout.setContentsMargins(0, 0, 0, 0)
         plan_layout.addWidget(self.design_progress, 1)
         plan_layout.addWidget(destinations)
-        self.design_plan_dock = QDockWidget("Design plan", self)
+        self.design_plan_dock = QDockWidget(DESIGN_PLAN_TITLE, self)
         self.design_plan_dock.setObjectName("design_plan_dock")
         self.design_plan_dock.setAllowedAreas(
             Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea
@@ -591,8 +603,8 @@ class CoilGenWorkbench(QMainWindow):
         subtitle.setWordWrap(True)
         welcome.addWidget(subtitle)
         for label, symbol, callback, name in (
-            ("Browse examples…", "load-template", self._welcome_template_menu, "welcome_load_template"),
-            ("Open project…", "open", self._open_dialog, "welcome_open_project"),
+            (BROWSE_EXAMPLES_LABEL, "load-template", self._welcome_template_menu, "welcome_load_template"),
+            (OPEN_PROJECT_LABEL, "open", self._open_dialog, "welcome_open_project"),
             ("New blank project…", "project-json", self._new_project_dialog, "welcome_new_project"),
         ):
             button = QPushButton(label, self.welcome)
@@ -636,7 +648,7 @@ class CoilGenWorkbench(QMainWindow):
         self.tree = QTreeWidget()
         self.tree.setObjectName("model_tree")
         self.tree.setIconSize(QSize(22, 22))
-        self.tree.setHeaderLabels(["Model Builder", "Status"])
+        self.tree.setHeaderLabels([MODEL_BUILDER_TITLE, "Status"])
         self.tree.header().setStretchLastSection(False)
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
@@ -699,7 +711,7 @@ class CoilGenWorkbench(QMainWindow):
         self.tree.currentItemChanged.connect(self._node_changed)
         self.tree.itemClicked.connect(self._open_tree_item)
         self.tree.itemActivated.connect(self._open_tree_item)
-        dock = QDockWidget("Model Builder", self)
+        dock = QDockWidget(MODEL_BUILDER_TITLE, self)
         dock.setObjectName("model_dock")
         panel = QWidget()
         panel_layout = QVBoxLayout(panel)
@@ -747,7 +759,9 @@ class CoilGenWorkbench(QMainWindow):
             return
         record = self.runs.get(self._selected_run) if self.project is not None else None
         error = self._run_verification_error(record) if record is not None else ""
-        key = (id(record), id(self.project), error)
+        former_source, former_available = getattr(self, "_former_plot_source", (None, False))
+        former_plot_available = former_source is record and former_available
+        key = (id(record), id(self.project), error, former_plot_available)
         previous_key = getattr(self, "_results_overview_key", None)
         if previous_key == key:
             return
@@ -769,7 +783,9 @@ class CoilGenWorkbench(QMainWindow):
                 and owner == self.project.id
                 and metadata.get("project_model_fingerprint") == self.project.model_fingerprint
             )
-        self.results_overview.set_record(record, source_error=error, stale=stale)
+        self.results_overview.set_record(
+            record, source_error=error, stale=stale, former_plot_available=former_plot_available
+        )
 
     def _results_action(self, action):
         record = self.runs.get(self._selected_run)
@@ -785,6 +801,16 @@ class CoilGenWorkbench(QMainWindow):
             return
         if action == "routing":
             self._routing_analysis_dialog()
+            return
+        if action == "export_former":
+            self._open_print_former_export(self._selected_run, record)
+            return
+        if action == "show_former" and hasattr(self.viewport, "restore_view_state"):
+            self.results_overview.metrics_button.setChecked(False)
+            self._pause_live_follow()
+            if hasattr(self.viewport, "clear_stage_preview"):
+                self.viewport.clear_stage_preview()
+            self.viewport.restore_view_state({"dataset": "print_former"})
             return
         if not self.field_analysis_action.isEnabled():
             self._error("This run contains no available computed field samples.")
@@ -978,7 +1004,7 @@ class CoilGenWorkbench(QMainWindow):
             self.channel_selector.setCurrentIndex(index)
 
     def _plan_action(self, action):
-        page = {"jobs": self.jobs_table, "review": self.acceptance_panel, "plan": self.recompute}.get(action)
+        page = {"review": self.acceptance_panel, "plan": self.recompute}.get(action)
         if page is not None:
             self._open_evidence(page)
 
@@ -1277,7 +1303,9 @@ class CoilGenWorkbench(QMainWindow):
             "New project…", self._new_project_dialog, QKeySequence.StandardKey.New, icon_name="project-json"
         )
         file_menu.addAction(self.new_action)
-        open_action = self._action("Open project…", self._open_dialog, QKeySequence.StandardKey.Open, icon_name="open")
+        open_action = self._action(
+            OPEN_PROJECT_LABEL, self._open_dialog, QKeySequence.StandardKey.Open, icon_name="open"
+        )
         file_menu.addAction(open_action)
         self.template_menu = file_menu.addMenu(icon("load-template"), "Load template")
         self.template_menu.setObjectName("load_template_menu")
@@ -1486,7 +1514,7 @@ class CoilGenWorkbench(QMainWindow):
                 else details_menu
             ).addAction(action)
             action.setText(
-                {"Design acceptance": "Results", "Project history": "History"}.get(
+                {"Jobs": RUNS_LABEL, "Design acceptance": "Results", "Project history": "History"}.get(
                     self.evidence.tabText(index), self.evidence.tabText(index)
                 )
             )
@@ -1530,7 +1558,7 @@ class CoilGenWorkbench(QMainWindow):
         for action in self.file_menu.actions():
             if action.isSeparator():
                 continue
-            action.setEnabled(active or action.text() in {"New project…", "Open project…", "Load template", "Exit"})
+            action.setEnabled(active or action.text() in {"New project…", OPEN_PROJECT_LABEL, "Load template", "Exit"})
         self.compute_button.setEnabled(active)
         self.compute_action.setEnabled(active)
         if not active:
@@ -1952,13 +1980,15 @@ class CoilGenWorkbench(QMainWindow):
 
     def _show_dock(self, name):
         if name == "evidence_dock":
-            self.evidence.open_current()
+            self._open_evidence(self.evidence.currentWidget() or self.evidence.widget(0))
             return
         dock = self.findChild(QDockWidget, name)
         dock.show()
         dock.raise_()
 
     def _open_evidence(self, page):
+        if page is self.jobs_table:
+            self.evidence.window_for(page).setWindowTitle(f"{RUNS_LABEL} — CoilGen2")
         self.evidence.open_page(page)
 
     def _close_evidence(self, index):
@@ -2009,7 +2039,7 @@ class CoilGenWorkbench(QMainWindow):
             )
             if view.get("evidence_panel_visible") is True:
                 for index in visible or [selected]:
-                    self.evidence.open_page(self.evidence.widget(index))
+                    self._open_evidence(self.evidence.widget(index))
                 self.evidence.setCurrentIndex(selected)
             else:
                 self.evidence.close_all()
@@ -2017,7 +2047,7 @@ class CoilGenWorkbench(QMainWindow):
             self._restoring_panels = False
 
     def _size_review_evidence(self):
-        self.evidence.open_current()
+        self._show_dock("evidence_dock")
 
     def _focus_draft_error(self):
         control = next(
@@ -2266,6 +2296,7 @@ class CoilGenWorkbench(QMainWindow):
         self._draft_initial = {}
         self._widget_initial = {}
         self._changed_controls = set()
+        self._inactive_draft_controls = set()
         self._draft_builder = None
         self._draft_fields = {}
         self._field_errors = {}
@@ -2345,29 +2376,31 @@ class CoilGenWorkbench(QMainWindow):
                 selected = selector.count() - 1
             selector.setCurrentIndex(selected)
             self._register(form, "support_type", "Winding support surface", selector)
-            self._draft_builder = dict
-            editor = next((entry for entry in SUPPORT_EDITORS if entry.source == config.coil_mesh_file), None)
-            if editor:
-                values = list(getattr(config, editor.parameter_field))
+            editors = {editor.source: editor for editor in SUPPORT_EDITORS}
+            applied_source = config.coil_mesh_file
+            applied_editor = editors.get(applied_source)
+            support_controls = {}
+
+            def add_support_fields(editor, destination, prefix=""):
+                values = getattr(config, editor.parameter_field)
+                keys = {}
                 for field in editor.fields:
+                    key = prefix + field.key
                     value = editor.display_value(field, values)
                     if field.integer:
-                        self._integer(form, field.key, field.label, int(value), int(field.minimum), int(field.maximum))
+                        self._integer(destination, key, field.label, int(value), int(field.minimum), int(field.maximum))
                     else:
-                        self._number(form, field.key, field.label, value, field.suffix, field.minimum, field.maximum)
-                    self._draft_fields[field.key] = (editor.parameter_field,)
+                        self._number(destination, key, field.label, value, field.suffix, field.minimum, field.maximum)
+                    self._draft_fields[key] = (editor.parameter_field,)
+                    keys[field.key] = key
+                support_controls[editor.source] = keys
+                return keys.values()
 
-                def geometry_changes():
-                    return {
-                        editor.parameter_field: editor.apply_edits(
-                            values,
-                            {f.key: self._value(f.key) for f in editor.fields if f.key in self._changed_controls},
-                        )
-                    }
-
-                self._draft_builder = geometry_changes
-                details(editor.description)
-            elif Path(config.coil_mesh_file).suffix.lower() == ".stl":
+            applied_keys = ()
+            if applied_editor:
+                applied_keys = tuple(add_support_fields(applied_editor, form))
+                details(applied_editor.description)
+            elif Path(applied_source).suffix.lower() == ".stl":
                 self._number(
                     form,
                     "imported_mesh_length_scale_to_m",
@@ -2377,17 +2410,57 @@ class CoilGenWorkbench(QMainWindow):
                     1e-12,
                     1e9,
                 )
-                self._draft_builder = lambda: {
-                    "imported_mesh_length_scale_to_m": self._value("imported_mesh_length_scale_to_m")
+                applied_keys = ("imported_mesh_length_scale_to_m",)
+
+            def geometry_changes():
+                source = selector.currentData()
+                editor = editors.get(source)
+                if editor is None:
+                    return {key: self._value(key) for key in applied_keys if key in self._changed_controls}
+                edits = {
+                    field: self._value(key)
+                    for field, key in support_controls[source].items()
+                    if key in self._changed_controls
                 }
+                return {editor.parameter_field: editor.apply_edits(getattr(config, editor.parameter_field), edits)}
+
+            self._draft_builder = geometry_changes
+
+            def show_support_fields():
+                source = selector.currentData()
+                editor = editors.get(source)
+                choose = next((section for section in self._focused_sections if selector in section.controls), None)
+                destination = choose.form if choose is not None else form
+                if editor is not None and source not in support_controls:
+                    for key in add_support_fields(editor, destination, prefix=f"pending_{editor.parameter_field}_"):
+                        if choose is not None:
+                            choose.track_control(self._draft_controls[key])
+                for candidate, keys in support_controls.items():
+                    for key in keys.values():
+                        self._set_draft_control_active(key, candidate == source)
+                        if candidate != applied_source:
+                            destination.setRowVisible(self._draft_controls[key].parentWidget(), candidate == source)
+                if applied_editor is None:
+                    for key in applied_keys:
+                        self._set_draft_control_active(key, source == applied_source)
+                if choose is not None:
+                    for section in self._focused_sections:
+                        if section is not choose:
+                            section.setEnabled(source == applied_source)
+                    if editor is not None and source != applied_source and choose.dialog.isVisible():
+                        first = self._draft_controls[next(iter(support_controls[source].values()))]
+                        destination.activate()
+                        choose.scroll_area.ensureWidgetVisible(first)
+                self._draft_dirty = bool(self._changed_controls)
+                self._update_pending()
+
+            selector.currentIndexChanged.connect(show_support_fields)
             import_button = QPushButton("Import and apply support mesh…")
             import_button.setObjectName("import_support")
             import_button.setIcon(icon("support-import"))
             import_button.clicked.connect(self._import_mesh_dialog)
             layout.addWidget(import_button)
-            note(
-                "Choose support contains the primitive gallery. Specialized mesh settings remain in Advanced settings. Preview uses the solver's geometry generator."
-            )
+            note("Choose a support and set its dimensions before Apply. Preview uses the solver's geometry generator.")
         elif key == "target":
             self._build_target_editor(config, form, layout, note)
         elif key == "material":
@@ -2454,26 +2527,37 @@ class CoilGenWorkbench(QMainWindow):
                 "Normal displacement used by connected return-path routing. This is separate from conductor mounting and profile coordinates."
             )
             profile_editor = ConductorProfileEditor()
+            nominal_width = config.conductor_cross_section_width
+            nominal_height = config.conductor_cross_section_height
             profile_editor.set_profile(
                 config.cross_sectional_points,
-                width_mm=config.conductor_cross_section_width * 1000,
-                height_mm=config.conductor_cross_section_height * 1000,
+                width_mm=nominal_width * 1000,
+                height_mm=nominal_height * 1000,
+                round_diameter_m=nominal_width if nominal_width == nominal_height else None,
             )
             self._register(
                 form, "cross_sectional_points", "Cross-section", profile_editor, initial=config.cross_sectional_points
             )
-            self._draft_builder = lambda: {
-                "specific_conductivity_conductor": self._value("resistivity") * 1e-9,
-                "conductor_thickness": self._value("sheet_thickness") / 1000,
-                "conductor_cross_section_width": self._value("wire_width") / 1000,
-                "conductor_cross_section_height": self._value("wire_height") / 1000,
-                "sweep_insulation_thickness": self._value("insulation") / 1000,
-                "cross_sectional_points": self._value("cross_sectional_points"),
-                "conductor_mounting_mode": self._value("conductor_mounting_mode"),
-                "conductor_path_reference": self._value("conductor_path_reference"),
-                "skip_normal_shift": not self._value("return_path_lift"),
-                "normal_shift_length": self._value("normal_shift_mm") * 1e-3,
-            }
+
+            def conductor_changes():
+                points = self._value("cross_sectional_points")
+                diameter = profile_editor.round_diameter_m()
+                return {
+                    "specific_conductivity_conductor": self._value("resistivity") * 1e-9,
+                    "conductor_thickness": self._value("sheet_thickness") / 1000,
+                    "conductor_cross_section_width": self._value("wire_width") / 1000 if diameter is None else diameter,
+                    "conductor_cross_section_height": self._value("wire_height") / 1000
+                    if diameter is None
+                    else diameter,
+                    "sweep_insulation_thickness": self._value("insulation") / 1000,
+                    "cross_sectional_points": points,
+                    "conductor_mounting_mode": self._value("conductor_mounting_mode"),
+                    "conductor_path_reference": self._value("conductor_path_reference"),
+                    "skip_normal_shift": not self._value("return_path_lift"),
+                    "normal_shift_length": self._value("normal_shift_mm") * 1e-3,
+                }
+
+            self._draft_builder = conductor_changes
             conductor_preview = ConductorPreview(container)
             layout.addWidget(conductor_preview)
 
@@ -2481,20 +2565,31 @@ class CoilGenWorkbench(QMainWindow):
                 width = self._draft_controls["wire_width"]
                 height = self._draft_controls["wire_height"]
                 insulation = self._draft_controls["insulation"]
-                polygon = profile_editor.mode_combo.currentData() == "polygon"
+                mode = profile_editor.mode_combo.currentData()
+                polygon, round_wire = mode != "rectangle", mode == "round"
+                self._draft_fields["cross_sectional_points"] = (
+                    ("cross_sectional_points", "conductor_cross_section_width", "conductor_cross_section_height")
+                    if round_wire
+                    else ("cross_sectional_points",)
+                )
                 for control, name in ((width, "width"), (height, "height")):
                     label = f"Nominal {name}" if polygon else f"Conductor {name}"
                     control_form(self, control, form).labelForField(control.parentWidget()).setText(label)
                     control.setAccessibleName(label)
+                    control.setEnabled(not round_wire)
                 width.setToolTip(
-                    "The polygon sets swept geometry, copper area and physical clearance. "
+                    "Change the diameter in Cross-section profile."
+                    if round_wire
+                    else "The polygon sets swept geometry, copper area and physical clearance. "
                     "Nominal width still sets PCB track width and some routing thresholds; "
                     "nominal dimensions remain in legacy reports."
                     if polygon
                     else "Rectangular conducting width, transverse to the wire within the support surface. Insulation is separate."
                 )
                 height.setToolTip(
-                    "The polygon sets its physical height. Nominal height remains a rectangle input and legacy report setting."
+                    "Change the diameter in Cross-section profile."
+                    if round_wire
+                    else "The polygon sets its physical height. Nominal height remains a rectangle input and legacy report setting."
                     if polygon
                     else "Rectangular conducting thickness along the support-surface normal. Insulation is separate."
                 )
@@ -2590,6 +2685,10 @@ class CoilGenWorkbench(QMainWindow):
                 ):
                     control = self._draft_controls[name]
                     control_form(self, control, form).setRowVisible(control.parentWidget(), enabled)
+                    self._set_draft_control_active(name, enabled)
+                self._draft_dirty = bool(self._changed_controls)
+                if _args:
+                    self._update_pending()
 
             self._draft_controls["support_body_enabled"].toggled.connect(former_rows)
             former_rows()
@@ -3874,7 +3973,9 @@ class CoilGenWorkbench(QMainWindow):
             initial_multiplier = initial_method == "scale"
             initial_hz = str(config.target_field_units).lower() == "hz"
             strength_scale = {"value": 1.0 if initial_multiplier or initial_hz else 1000.0}
-            self._text(form, "field_shape_function", "Expression → Bz", config.field_shape_function)
+            self._text(
+                form, "field_shape_function", "Expression → Bz (world x, y, z in metres)", config.field_shape_function
+            )
             components = ["Bx", "By", "Bz", "BdotB0", "vector"] if imported else ["Bz"]
             self._combo(form, "target_field_component", "Fitting component", components, config.target_field_component)
             self._number(
@@ -3886,13 +3987,12 @@ class CoilGenWorkbench(QMainWindow):
                 0.000001,
                 100000,
             )
-            self._combo(
-                form,
-                "target_gradient_normalization",
-                "Normalization",
-                ["auto", "off", "none", "linear_fit", "legacy"],
-                config.target_gradient_normalization,
-            )
+            normalization = QComboBox()
+            self._size_combo(normalization)
+            for value, label in target_normalization_choices(config.target_gradient_normalization):
+                normalization.addItem(label, value)
+            normalization.setCurrentIndex(normalization.findData(config.target_gradient_normalization))
+            self._register(form, "target_gradient_normalization", "Target scaling", normalization)
             self._combo(
                 form,
                 "target_gradient_axis",
@@ -3993,7 +4093,7 @@ class CoilGenWorkbench(QMainWindow):
                     if method == "none":
                         text = f"Absolute field: the expression supplies Bz in {units}, evaluated with x, y, z in metres. Gradient amplitude and axis are inactive. For example, 1e-4 in T means a constant 100 µT field."
                     elif method == "scale":
-                        text = f"Amplitude scaling: the expression supplies Bz in {units} with x, y, z in metres. A dimensionless multiplier scales it before conversion to tesla. Gradient axis is inactive. Use off/none for an absolute field."
+                        text = f"Amplitude scaling: the expression supplies Bz in {units} with x, y, z in metres. A dimensionless multiplier scales it before conversion to tesla. Choose Absolute field expression to use the entered field directly."
                     elif method == "linear_fit":
                         text = "Gradient normalization: x, y, z are world coordinates in metres. The backend rescales Bz to the requested linear-fit gradient magnitude along the selected axis. The expression retains its sign. "
                         text += (
@@ -4002,7 +4102,7 @@ class CoilGenWorkbench(QMainWindow):
                             else "For example, y with 20 mT/m gives Bz = 0.02·y T."
                         )
                     else:
-                        text = "Legacy extrema scaling uses the target extrema and coordinate span to scale the expression. Inspect the resolved target amplitude in the preview; use linear_fit for gradient examples or off/none for an absolute field."
+                        text = "Legacy extrema scaling uses the target extrema and coordinate span to scale the expression. Inspect the resolved target amplitude in the preview. Fit a gradient amplitude uses the fitted slope, and Absolute field expression uses the entered field directly."
                     policy_info.setText(text)
                     widget.setToolTip(text)
 
@@ -4328,7 +4428,22 @@ class CoilGenWorkbench(QMainWindow):
 
             widget.lineEdit().textEdited.connect(mark_numeric_edit)
 
+    def _set_draft_control_active(self, key, active):
+        widget = self._draft_controls[key]
+        widget.setEnabled(active)
+        if active:
+            self._inactive_draft_controls.discard(key)
+            pending_text = isinstance(widget, QAbstractSpinBox) and widget.lineEdit().isModified()
+            if pending_text or self._raw_value(key) != self._widget_initial[key]:
+                self._changed_controls.add(key)
+                return
+        else:
+            self._inactive_draft_controls.add(key)
+        self._changed_controls.discard(key)
+
     def _mark_draft_dirty(self, key):
+        if key in self._inactive_draft_controls:
+            return
         self._invalidate_project_open()
         widget = self._draft_controls[key]
         pending_text = isinstance(widget, QAbstractSpinBox) and widget.lineEdit().isModified()
@@ -4471,6 +4586,8 @@ class CoilGenWorkbench(QMainWindow):
             lines.append(
                 f"Normalization: {target.get('normalization_requested', '—')}; resolved scale {target.get('normalization_scale', '—')}. Sampling bounds do not certify mesh convergence."
             )
+            if target.get("normalization_fallback"):
+                lines.append("A fallback field scale was applied. Review Target scaling.")
             recipe = recognize_solid_harmonic_target(self.project.config.field_shape_function)
             if recipe is not None and recipe.degree == 2 and recipe.order == 0:
                 pole = recipe.coefficient_T * np.sqrt(5 / (4 * np.pi)) * 1e6
@@ -4496,6 +4613,8 @@ class CoilGenWorkbench(QMainWindow):
         if isinstance(widget, QCheckBox):
             return widget.isChecked()
         if isinstance(widget, QComboBox):
+            if key == "target_gradient_normalization":
+                return widget.currentData()
             return widget.currentText()
         if isinstance(widget, QLineEdit):
             return widget.text()
@@ -4513,7 +4632,7 @@ class CoilGenWorkbench(QMainWindow):
         # fewer digits than a saved model value, so parsing untouched controls
         # would introduce rounding into otherwise unrelated settings edits.
         for key, widget in tuple(self._draft_controls.items()):
-            if not isinstance(widget, QAbstractSpinBox):
+            if key in self._inactive_draft_controls or not isinstance(widget, QAbstractSpinBox):
                 continue
             if not widget.isEnabled() and key not in self._changed_controls and not widget.lineEdit().isModified():
                 continue
@@ -7834,7 +7953,8 @@ class CoilGenWorkbench(QMainWindow):
             status = state.get("status")
             text = {
                 "queued": "Queued · waiting for an available worker",
-                "running": f"Computing · {state.get('stage') or 'worker running'}",
+                "running": f"{FINALIZING_FABRICATION if is_finalizing_fabrication(state) else 'Computing'} · "
+                f"{state.get('stage') or 'worker running'}",
                 "cancelling": "Cancelling · waiting for the worker to stop",
                 "completed": "Execution completed · review engineering checks",
                 "failed": f"Execution failed · {state.get('error') or state.get('stage') or 'see Messages'}",
@@ -8234,16 +8354,64 @@ class CoilGenWorkbench(QMainWindow):
             )
         return original
 
-    def _geometry_export_dialog(self, names, unit, include_project):
+    def _open_print_former_export(self, source_id, record):
+        from ..application.cad import PRINT_FORMER_SCOPE, export_catalog
+
+        previous = getattr(self, "print_former_export_window", None)
+        key = export_record_key(record)
+        if previous is not None and previous.content.widget().record_key == key:
+            previous.open_panel()
+            return
         if self._geometry_export_task is not None:
             self.statusBar().showMessage("Geometry export is already running", 5000)
             return
-        source_id = self._selected_run
+        try:
+            options = tuple(option for option in export_catalog(record) if option.scope == PRINT_FORMER_SCOPE)
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+            self._error(f"Saved former geometry verification failed: {exc}")
+            return
+        if not options:
+            self._error("The selected run has no verified former STL.")
+            return
+        has_companion = self._has_export_source(record)
+        panel = GeometryExportPanel(
+            record,
+            options,
+            state=GeometryExportState(names=tuple(option.name for option in options), include_project=has_companion),
+            former_only=True,
+        )
+        panel.include_project.setEnabled(has_companion)
+        panel.export_button.setStyleSheet(PRIMARY_ACTION_STYLE)
+        panel.export_button.setIcon(icon("export-conductor", foreground="primary"))
+        panel.export_requested.connect(
+            lambda names, unit, include_project: self._geometry_export_dialog(
+                names, unit, include_project, source_id=source_id, source_panel=panel
+            )
+        )
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(panel)
+        if previous is not None:
+            previous.close()
+            previous.deleteLater()
+        self.print_former_export_window = PanelWindow("Export print former — CoilGen2", scroll, self, size=(790, 590))
+        self.print_former_export_window.open_panel()
+
+    def _geometry_export_dialog(self, names, unit, include_project, *, source_id=None, source_panel=None):
+        if self._geometry_export_task is not None:
+            self.statusBar().showMessage("Geometry export is already running", 5000)
+            return
+        source_id = self._selected_run if source_panel is None else source_id
         record = self.runs.get(source_id)
         key = export_record_key(record)
+        if source_panel is not None and source_panel.record_key != key:
+            self._error("The saved former source changed. Reopen the run before exporting.")
+            return
         panel = getattr(self, "geometry_export_panel", None) if self._workflow_page() == "export" else None
         feedback = (
-            panel.state
+            source_panel.state
+            if source_panel is not None
+            else panel.state
             if panel is not None and panel.record_key == key
             else self._geometry_export_states.setdefault(key, GeometryExportState())
         )
@@ -8264,6 +8432,7 @@ class CoilGenWorkbench(QMainWindow):
             project = self._export_source(record) if include_project else None
             task = GeometryExportTask(record, directory, names, unit, project)
             task.feedback_state, task.source_id = feedback, source_id
+            task.source_panel = source_panel
             task.signals.finished.connect(self._geometry_export_finished)
             if hasattr(task.signals, "progress"):
                 task.signals.progress.connect(self._background_work_progress)
@@ -8275,6 +8444,9 @@ class CoilGenWorkbench(QMainWindow):
             if panel is not None and panel.record_key == key:
                 panel.set_exporting(True)
                 panel.receipt.refresh()
+            if source_panel is not None:
+                source_panel.set_exporting(True)
+                source_panel.receipt.refresh()
             self.statusBar().showMessage("Writing verified geometry and provenance…")
             QThreadPool.globalInstance().start(task)
         except (ValueError, TypeError, OSError, RuntimeError, KeyError) as exc:
@@ -8283,6 +8455,8 @@ class CoilGenWorkbench(QMainWindow):
             panel = getattr(self, "geometry_export_panel", None) if self._workflow_page() == "export" else None
             if panel is not None and panel.record_key == key:
                 panel.receipt.refresh()
+            if source_panel is not None:
+                source_panel.receipt.refresh()
             self.messages.appendPlainText(f"Geometry export failed: {exc}")
             self.statusBar().showMessage(f"Geometry export failed: {exc}", 15000)
 
@@ -8318,6 +8492,9 @@ class CoilGenWorkbench(QMainWindow):
             panel.set_exporting(False)
             if panel.record_key == task.record_key:
                 panel.receipt.refresh()
+        if task.source_panel is not None:
+            task.source_panel.set_exporting(False)
+            task.source_panel.receipt.refresh()
         self._refresh_computation_indicator()
 
     def view_results(self, _checked=False):
@@ -8508,9 +8685,17 @@ class CoilGenWorkbench(QMainWindow):
         self._selected_run = id_
         record = self.runs[id_]
         metadata = read_run_metadata(record)
+        run_arrays = record.select_arrays(copy=False) if hasattr(record, "select_arrays") else record.arrays
+        from ..application.cad import has_saved_print_former, saved_print_former_arrays
+
+        former_loader = None
+        if hasattr(self.viewport, "set_print_former_loader"):
+            if isinstance(record, RunRecord) and has_saved_print_former(metadata):
+                former_loader = partial(saved_print_former_arrays, record)
+            self.viewport.set_print_former_loader(former_loader)
+        self._former_plot_source = record, bool(former_loader or resolve_dataset(run_arrays, "print_former").available)
         self.problems_panel.set_run(record, diagnostic=self._run_verification_error(id_))
         self._problems_health_key = (id(record), self._run_verification_error(id_))
-        run_arrays = record.select_arrays(copy=False) if hasattr(record, "select_arrays") else record.arrays
         # The viewport owns a detached mutable display snapshot; borrowed
         # MappingProxy metadata remains confined to read-only presentation.
         self.viewport.display_run(run_arrays, metadata=record.metadata, follow_latest=follow_latest)

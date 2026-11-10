@@ -69,6 +69,19 @@ def test_browser_opens_inline_json_and_compact_owned_mesh_but_never_loads_legacy
         load_browser_assembly(path)
 
 
+def test_saved_workspace_bundle_can_exceed_upload_limit_without_raising_import_limit(tmp_path, monkeypatch):
+    assembly = template_assembly("cylinder", project_root=tmp_path)
+    saved = assembly.save(tmp_path / "projects" / "saved.coilgen")
+    incoming = assembly.save(tmp_path / "uploads" / "incoming.coilgen")
+    monkeypatch.setattr("coilgen.web.input_policy.PROJECT_UPLOAD_LIMIT", 1)
+
+    assert load_browser_assembly(saved, workspace=tmp_path).fingerprint == assembly.fingerprint
+    with pytest.raises(ValueError, match="browser import limit"):
+        load_browser_assembly(incoming, workspace=tmp_path)
+    with pytest.raises(ValueError, match="browser import limit"):
+        load_browser_assembly(saved, workspace=tmp_path / "different-workspace")
+
+
 def test_live_browser_actions_reject_foreign_stl_and_preserve_valid_import(tmp_path):
     pytest.importorskip("trame")
     from coilgen.web.app import create_app

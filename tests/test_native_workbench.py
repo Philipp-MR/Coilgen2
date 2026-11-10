@@ -188,10 +188,23 @@ def test_conical_support_editor_geometry_and_export_roundtrip(window, tmp_path):
     from coilgen.geometry import load_mesh_from_config
 
     cylinder = window.project
-    window.findChild(QComboBox, "support_type").setCurrentText("Conical frustum")
-    assert window.apply_settings()
-    assert window.project.config.coil_mesh_file == "create conical frustum mesh"
-    assert not window.project.config.surface_is_cylinder_flag
+    gallery = window.findChild(QComboBox, "support_type")
+    choose = window._settings_decisions["Choose support"]
+    choose.open()
+    prefix = "pending_conical_frustum_mesh_parameter_list_"
+    gallery.setCurrentText("Conical frustum")
+    radius = window._draft_controls[prefix + "top_radius_mm"]
+    assert radius.isVisible() and window.project is cylinder
+    initial_radius = radius.value()
+    radius.setValue(100)
+    gallery.setCurrentText("Biplanar")
+    gallery.setCurrentText("Conical frustum")
+    assert radius.value() == 100
+    choose.dialog.reject()
+    assert not window._draft_dirty and window.project is cylinder
+    choose.open()
+    gallery.setCurrentText("Conical frustum")
+    assert radius.value() == initial_radius
     controls = window._draft_controls
     for key, value in {
         "bottom_radius_mm": 180,
@@ -202,9 +215,12 @@ def test_conical_support_editor_geometry_and_export_roundtrip(window, tmp_path):
         "rotation_angle_deg": 90,
         "center_y_mm": 15,
     }.items():
-        controls[key].setValue(value)
+        controls[prefix + key].setValue(value)
     assert window.apply_settings()
+    assert window.project.revision == cylinder.revision + 1
     config = window.project.config
+    assert config.coil_mesh_file == "create conical frustum mesh"
+    assert not config.surface_is_cylinder_flag
     parameters = config.conical_frustum_mesh_parameter_list
     assert parameters[:5] == pytest.approx((0.32, 0.18, 0.11, 12, 6))
     assert parameters[8] == pytest.approx(np.pi / 2)
@@ -217,7 +233,6 @@ def test_conical_support_editor_geometry_and_export_roundtrip(window, tmp_path):
     export = window.export_python(tmp_path / "cone.py")
     restored = ProjectDocument.load(export.with_suffix(".coilgen.json"))
     assert restored.config.conical_frustum_mesh_parameter_list == config.conical_frustum_mesh_parameter_list
-    window.undo_stack.undo()
     window.undo_stack.undo()
     assert window.project.fingerprint == cylinder.fingerprint
 

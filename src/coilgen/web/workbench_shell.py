@@ -7,6 +7,14 @@ from trame_client.widgets.core import HtmlElement
 
 from ..application.preflight import SECTION_ORDER, overall_readiness, section_readiness
 from ..application.session import SETTINGS_NODES
+from ..application.workbench_presentation import (
+    BROWSE_EXAMPLES_LABEL,
+    COMPUTE_CAPTIONS,
+    DESIGN_PLAN_TITLE,
+    MODEL_BUILDER_TITLE,
+    OPEN_PROJECT_LABEL,
+    RUNS_LABEL,
+)
 from ..gui.pictograms import model_node_icons, pictogram_svg
 from .input_policy import PROJECT_UPLOAD_LIMIT
 
@@ -77,13 +85,18 @@ def build_toolbar(ctrl):
             html.Span("{{ user }}", classes="cg-user")
             html.Button("Log out", type="submit")
         v3.VBtn(
-            "{{ stage === 'evaluated' ? 'Compute full design' : stages.find(s => s.value === stage)?.title }}",
+            "{{ stages.find(s => s.value === stage)?.compute }}",
             v_if="channels.length",
             color="primary",
             prepend_icon="mdi-play-outline",
             classes="cg-compute",
             disabled=("current_job_active || settings_dirty || preflight.some(i => i.blocking)",),
-            title="Compute the editing channel to the boundary selected in Design plan",
+            title=(
+                "settings_dirty ? 'Apply or discard pending model edits first' : "
+                "current_job_active ? 'This study is already queued or computing' : "
+                "readiness?.state === 'blocking' ? readiness.title : "
+                "'Compute the editing channel to the boundary selected in Design plan'",
+            ),
             click=ctrl.compute,
         )
 
@@ -93,16 +106,16 @@ def build_welcome(ctrl):
         _wordmark("large")
         html.H1("CoilGen² workbench", classes="cg-sr-only")
         html.P("Choose a gradient, shim coil or coil system in Browse examples.")
-        html.P("After loading a design, click Compute full design.")
+        html.P(f"Review the model, then choose {COMPUTE_CAPTIONS['evaluated']} when the inputs are ready.")
         with html.Div(classes="cg-welcome-actions"):
             v3.VBtn(
-                "Browse examples…",
+                BROWSE_EXAMPLES_LABEL,
                 color="primary",
                 prepend_icon="mdi-folder-multiple-outline",
                 click="file_section = 'examples'; file_dialog = true",
             )
             v3.VBtn(
-                "Open project…",
+                OPEN_PROJECT_LABEL,
                 variant="outlined",
                 prepend_icon="mdi-folder-open-outline",
                 click="file_section = 'open'; file_dialog = true",
@@ -112,12 +125,6 @@ def build_welcome(ctrl):
                 variant="outlined",
                 prepend_icon="mdi-file-outline",
                 click=ctrl.new_project,
-            )
-            v3.VBtn(
-                "Review workspace runs",
-                v_if="runs.length || jobs.length",
-                variant="text",
-                click="history_open = true; workspace_panel = 'center'; center_section = 'history'",
             )
 
 
@@ -244,7 +251,7 @@ def build_file_dialog(ctrl):
 
 
 def build_model_builder(ctrl):
-    html.H2("Model Builder", classes="cg-pane-heading")
+    html.H2(MODEL_BUILDER_TITLE, classes="cg-pane-heading")
     with html.Div(classes="cg-panel-body"):
         html.P("Open a project to edit the model.", v_if="!channels.length", classes="cg-hint")
         with html.Div(v_if="channels.length"):
@@ -353,17 +360,9 @@ def build_model_builder(ctrl):
                     variant="text",
                     disabled=("settings_dirty",),
                 )
-        with html.Div(v_if="channels.length || runs.length || jobs.length"):
+        with html.Div(v_if="export_options.length"):
             html.H3("Results and provenance", classes="cg-tree-heading")
             with html.Button(
-                type="button",
-                classes="cg-tree-item",
-                click="workspace_panel = 'center'; center_section = 'history'",
-            ):
-                html.Img(src=_tree_symbol("run-history"), alt="", classes="cg-tree-symbol")
-                html.Span("Completed runs")
-            with html.Button(
-                v_if="export_options.length",
                 type="button",
                 classes="cg-tree-item",
                 click="workspace_panel = 'center'; center_section = 'export'",
@@ -373,7 +372,7 @@ def build_model_builder(ctrl):
 
 
 def build_design_plan(ctrl):
-    html.H2("Design plan", classes="cg-pane-heading")
+    html.H2(DESIGN_PLAN_TITLE, classes="cg-pane-heading")
     with html.Div(classes="cg-panel-body"):
         with html.Div(v_if="channels.length"):
             html.Div("{{ plan_summary }}", classes="cg-plan-summary")
@@ -431,38 +430,105 @@ def build_design_plan(ctrl):
                     disabled=("settings_dirty && node !== issue.node",),
                     click="node = issue.node; settings_dialog = true",
                 )
-        with html.Div(v_if="jobs.length", classes="cg-job-list"):
-            html.H3("Jobs", classes="cg-tree-heading")
-            html.P("Active jobs and recent attempts, newest first within each group.", classes="cg-hint")
-            with html.Div(v_for="job in jobs", key="job.id", classes="cg-job"):
-                html.Strong("{{ job.channel }} · r{{ job.revision }}")
-                html.Div("{{ job.boundary }} · {{ job.status }} · {{ job.id.slice(0, 8) }}")
-                html.Div("{{ job.stage }}")
-                v3.VProgressLinear(
-                    v_if="['queued', 'running', 'cancelling'].includes(job.status)",
-                    model_value=("job.progress",),
-                    color="primary",
-                    height=5,
-                )
-                html.P("{{ job.error }}", v_if="job.error", classes="text-error")
-                _view_job_result_button(ctrl)
-                v3.VBtn(
-                    "{{ job.status === 'cancelling' ? 'Stopping…' : 'Cancel' }}",
-                    size="small",
-                    variant="outlined",
-                    v_if="['queued', 'running', 'cancelling'].includes(job.status)",
-                    disabled=("job.status === 'cancelling'",),
-                    title=("('Cancel job ' + job.id + ' for ' + job.channel)",),
-                    click=(ctrl.cancel_job, "[job.id]"),
-                )
-            with html.Details(v_if="older_jobs.length", classes="cg-channels"):
-                html.Summary("Earlier attempts ({{ older_jobs.length }})")
-                with html.Div(v_for="job in older_jobs", key="job.id", classes="cg-job"):
-                    html.Strong("{{ job.channel }} · r{{ job.revision }}")
-                    html.Div("{{ job.boundary }} · {{ job.status }} · {{ job.id.slice(0, 8) }}")
-                    html.P("{{ job.error }}", v_if="job.error", classes="text-error")
-                    _view_job_result_button(ctrl)
         html.P("Open a project to see its requested steps.", v_if="!channels.length", classes="cg-hint")
+
+
+def build_activity_bar():
+    with html.Div(
+        v_if="channels.length || active_jobs.length || jobs.length || runs.length",
+        classes="cg-activity",
+        raw_attrs=[
+            ":data-state=\"active_jobs.length === 1 ? active_jobs[0].status : active_jobs.length ? 'multiple' : 'idle'\""
+        ],
+    ):
+        with html.Div(classes="cg-activity-text", role="status"):
+            html.Strong(
+                "{{ active_jobs.length > 1 ? active_jobs.length + ' active runs' : "
+                "active_jobs[0]?.caption || 'No active runs' }}"
+            )
+            html.Span(
+                "{{ [active_jobs[0].channel, active_jobs[0].stage || "
+                "(active_jobs[0].status === 'queued' ? 'Waiting for a worker' : active_jobs[0].boundary)].join(' · ') }}",
+                v_if="active_jobs.length === 1",
+                classes="cg-activity-detail",
+            )
+        with html.Div(
+            v_if="active_jobs.length === 1 && active_jobs[0].status === 'running'", classes="cg-activity-progress"
+        ):
+            v3.VProgressLinear(
+                model_value=("active_jobs[0].progress ?? 0",),
+                indeterminate=("active_jobs[0].progress === null",),
+                color="primary",
+                rounded=True,
+                height=6,
+                raw_attrs=['aria-label="Run progress"'],
+            )
+            html.Span("{{ active_jobs[0].progress_label || 'Working…' }}")
+        v3.VBtn(RUNS_LABEL, size="small", variant="outlined", prepend_icon="mdi-history", click="runs_dialog = true")
+
+
+def build_runs_dialog(ctrl):
+    with v3.VDialog(
+        v_model=("runs_dialog",),
+        max_width=560,
+        scrollable=True,
+        raw_attrs=['aria-labelledby="coilgen-runs-title"'],
+    ):
+        with v3.VCard(classes="cg-jobs-dialog"):
+            with html.Div(classes="cg-dialog-head"):
+                html.H2(RUNS_LABEL, id="coilgen-runs-title")
+                v3.VBtn("Close", variant="outlined", size="small", click="runs_dialog = false")
+            with v3.VCardText(classes="cg-dialog-body"):
+                html.H3("Active in this workspace", classes="cg-tree-heading", v_if="active_jobs.length")
+                _job_rows("active_jobs", ctrl, active=True)
+                v3.VCheckbox(
+                    v_if="channels.length",
+                    v_model=("workspace_history",),
+                    label="Show finished runs from other projects",
+                    density="compact",
+                    hide_details=True,
+                )
+                finished = "jobs.filter(j => !['queued', 'running', 'cancelling'].includes(j.status))"
+                html.H3("Recent runs", classes="cg-tree-heading", v_if=f"{finished}.length")
+                _job_rows(finished, ctrl)
+                with html.Details(v_if="older_jobs.length", classes="cg-channels"):
+                    html.Summary("Earlier runs ({{ older_jobs.length }})")
+                    _job_rows("older_jobs", ctrl)
+                html.P("No finished runs in this view.", v_if=f"!{finished}.length", classes="cg-hint")
+
+
+def _job_rows(expression, ctrl, *, active=False):
+    with html.Div(v_for=f"job in {expression}", key="job.id", classes="cg-job"):
+        with html.Div(classes="cg-job-heading"):
+            html.Strong("{{ job.channel }} · r{{ job.revision }}")
+            html.Span(
+                "{{ job.caption }}",
+                classes="cg-job-state",
+                raw_attrs=[':data-state="job.status"'],
+            )
+        html.Div(
+            "{{ job.boundary }} · {{ job.id.slice(0, 8) }}{{ job.embedded ? ' · Archived run' : '' }}",
+            classes="cg-hint mb-1",
+        )
+        if active:
+            html.Div("{{ job.stage }}", v_if="job.stage")
+            html.Div(
+                "{{ job.status === 'queued' ? 'Waiting for a worker' : "
+                "job.status === 'cancelling' ? 'Waiting for the worker to stop' : job.progress_label || 'Working…' }}",
+                classes="cg-hint mb-1",
+            )
+            v3.VBtn(
+                "{{ job.status === 'cancelling' ? 'Stopping…' : 'Cancel run' }}",
+                size="small",
+                variant="outlined",
+                color="error",
+                disabled=("job.status === 'cancelling'",),
+                title=("'Cancel run ' + job.id + ' for ' + job.channel",),
+                click=(ctrl.cancel_job, "[job.id]"),
+            )
+        else:
+            html.P("{{ job.error }}", v_if="job.error", classes="text-error")
+            _view_job_result_button(ctrl)
 
 
 def _view_job_result_button(ctrl):

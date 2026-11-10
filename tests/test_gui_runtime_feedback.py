@@ -10,7 +10,6 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtGui import QFont, QFontDatabase
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QMainWindow, QVBoxLayout
 
 from coilgen.application import ProjectAssembly, ProjectDocument
@@ -163,30 +162,24 @@ def test_real_widgets_render_operation_scope_and_keep_passive_editor_drafts(widg
     footer = editor.findChild(ComputationIndicator, "window_computation_indicator")
     assert footer is not None and footer.isVisible()
     assert footer.runtime_label.isVisible() and "Worker observed alive" in footer.runtime_label.text()
-    assert "Optimize stream function" in panel.activity_label.text()
-    assert "CVXPY quadratic solve" in panel.activity_label.text()
-    assert not panel.runtime_label.isHidden() and "Last progress" in panel.runtime_label.text()
+    assert "Optimize stream function" in indicator.details_label.text()
+    assert "CVXPY quadratic solve" in indicator.details_label.text()
+    assert not indicator.runtime_label.isHidden() and "Last progress" in indicator.runtime_label.text()
     assert not any(row.text(1) == "Completed" for row in panel.stage_items.values())
     if kind == "counted":
         assert panel.channel_items[channel.id].text(1) == "Computing"
-        assert panel.progress_bar.maximum() == 100 and panel.progress_bar.value() == 30
-        assert panel.progress_bar.format() == "Operation 30%"
         assert indicator.label.text() == footer.label.text() == "Operation 30%"
         assert indicator.progress.value() == 30
     else:
-        assert panel.progress_bar.maximum() == indicator.progress.maximum() == footer.progress.maximum() == 0
-        assert "%" not in indicator.label.text() and "%" not in panel.progress_bar.format()
+        assert indicator.progress.maximum() == footer.progress.maximum() == 0
+        assert "%" not in indicator.label.text()
         if kind == "cancel_pending":
-            assert "Cancellation requested" in panel.runtime_label.text()
+            assert "Cancellation requested" in indicator.runtime_label.text()
             assert panel.stage_items[(channel.id, "sheet")].text(1) == "Stopping"
         else:
-            assert "no measurable work total" in panel.activity_label.text()
-    assert panel.runtime_label.geometry().bottom() < panel.height()
+            assert "no work total" in indicator.details_label.text()
     assert root.grab().save(str(tmp_path / f"feedback_{kind}.png"))
-    requested = []
-    panel.job_requested.connect(requested.append)
-    QTest.mouseClick(panel.job_button, Qt.MouseButton.LeftButton)
-    assert requested == ["shim-worker"] and draft.text() == "retained conductor spacing draft"
+    assert draft.text() == "retained conductor spacing draft"
     monitor.set_activity((state,), unavailable="Cannot refresh worker status")
     assert indicator.runtime_label.isHidden() and footer.runtime_label.isHidden()
     snapshot = build_design_progress("evaluated", state, unavailable="Cannot refresh worker status")

@@ -10,6 +10,24 @@ from numbers import Real
 from ..target import _solid_harmonic_parameters
 
 
+TARGET_NORMALIZATION_MODES = (
+    (("auto", ""), "Automatic by design context"),
+    (("off", "none", "disabled"), "Absolute field expression"),
+    (("linear_fit", "fit", "gradient_fit", "linear"), "Fit a gradient amplitude"),
+    (("scale", "multiplier"), "Multiply the field expression"),
+    (("legacy", "legacy_extrema", "extrema", "max_min"), "Legacy extrema scaling"),
+)
+
+
+def target_normalization_choices(saved):
+    """One choice per behavior, retaining the original spelling of the saved mode."""
+    key = str(saved).strip().lower().replace("-", "_")
+    choices = tuple((saved if key in names else names[0], label) for names, label in TARGET_NORMALIZATION_MODES)
+    if saved not in {value for value, _label in choices}:
+        return ((saved, str(saved)), *choices)
+    return choices
+
+
 @dataclass(frozen=True, slots=True)
 class SolidHarmonicTarget:
     """One Bz mode in the normalized real solid-Ylm convention.

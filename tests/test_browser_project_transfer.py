@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 import shutil
 import subprocess
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import unquote, urlsplit
@@ -52,6 +53,34 @@ def test_invalid_native_upload_preserves_active_design_and_reports_error(tmp_pat
     assert browser.session.assembly is prior
     assert not server.state.project_open_result["ok"]
     assert server.state.project_open_result["message"] and server.state.message_color == "error"
+
+
+def test_download_is_published_when_windows_holds_the_empty_staging_folder(tmp_path, monkeypatch):
+    server, browser = create_app(tmp_path, server_name="test-publish-locked-staging")
+    browser.session.new_project()
+    original = TemporaryDirectory._rmtree
+    locked_folders = []
+
+    def cleanup(path, ignore_errors=False, **kwargs):
+        if Path(path).parent == browser.exports:
+            assert not list(Path(path).iterdir())
+            locked_folders.append(path)
+            if not ignore_errors:
+                raise PermissionError("Windows is holding the empty download staging folder")
+        else:
+            original(path, ignore_errors=ignore_errors, **kwargs)
+
+    monkeypatch.setattr(TemporaryDirectory, "_rmtree", staticmethod(cleanup))
+    try:
+        browser.save_project()
+        assert locked_folders
+        saved = browser.session.project_path
+        assert server.state.project_download == f"downloads/{saved.name}"
+        assert (browser.exports / saved.name).read_bytes() == saved.read_bytes()
+        assert server.state.message_color == "success"
+    finally:
+        browser.plotter.close()
+        browser.session.close()
 
 
 def test_download_paths_preserve_literal_filename_characters(tmp_path):

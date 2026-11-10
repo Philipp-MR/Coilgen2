@@ -39,10 +39,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..application.field_analysis import FieldDataset, analyze_harmonics, metric_map, source_catalog
-from ..application.field_sampling import sample_slices
+from ..application.field_analysis import FieldDataset, analyze_harmonics, metric_map, owned_roi_bounds
+from ..application.field_presentation import field_provenance, paired_color_limits
+from ..application.field_sampling import SliceInputCache, sample_slices
 from ..application.shielding import shielding_sources, shielding_surface_fields
 from ..attribution import AUTHOR_CREDIT, SOFTWARE_NAME, software_attribution
+from ..field_components import field_component_values
 from ..persistence import atomic_text_writer, json_value
 from ..progress import DesignCancelled
 from .coil_statistics import build_coil_statistics, mass_estimates
@@ -77,10 +79,12 @@ class AnalysisState:
     slice_values: tuple
     error_map: object = None
     harmonics: object = None
+    paired_peak: float = 0.0
 
 
 class _Signals(QObject):
     progress = Signal(object, str)
+    partial = Signal(object)
     finished = Signal(object, str)
 
 
@@ -108,6 +112,12 @@ class _AnalysisTask(QRunnable):
 
             deliver_task_signal(self.signals, "progress", percent, message)
             self._last_update, self._last_percent, self._last_message = now, percent, message
+
+    def publish(self, result):
+        from .design_tasks import deliver_task_signal
+
+        self.check()
+        deliver_task_signal(self.signals, "partial", result)
 
     def run(self):
         from .design_tasks import deliver_task_signal
@@ -336,30 +346,6 @@ def owned_roi_polylines(geometry):
     return tuple(result)
 
 
-def owned_roi_bounds(geometry):
-    """Exact world AABB of an authored primitive, independent of sample density."""
-    if geometry is None:
-        return None
-    from ..application.gradient_studies import RigidTransform
-    from ..target_regions import TargetRegion
-
-    region = TargetRegion.from_dict(geometry["region"])
-    if region.shape == "enclosing_mesh":
-        return None
-    rotation, center = region.rotation_matrix, np.asarray(region.center_m)
-    for key in ("registration", "sample_transform"):
-        transform = RigidTransform(**geometry[key])
-        pose = np.asarray(transform.rotation)
-        rotation, center = pose @ rotation, center @ pose.T + transform.translation_m
-    if region.shape in {"sphere", "ellipsoid"}:
-        half = np.linalg.norm(rotation * region.half_extents_m, axis=1)
-    elif region.shape == "box":
-        half = np.abs(rotation) @ region.half_extents_m
-    else:
-        half = region.radius_m * np.linalg.norm(rotation[:, :2], axis=1) + region.length_m / 2 * np.abs(rotation[:, 2])
-    return np.stack((center - half, center + half))
-
-
 class FieldAnalysisDialog(QDialog):
     """One immutable verified run; new input snapshots cannot relabel old results."""
 
@@ -387,6 +373,8 @@ class FieldAnalysisDialog(QDialog):
         self._generation, self._pending, self._close_pending, self._closed = 0, False, False, False
         self._auto_start, self._catalog_ready, self._grid_requested = auto_start, False, False
         self._last_source_key = None
+        self._slice_cache = SliceInputCache()
+        self._showing_partial = False
         self._plot_factory, self._cloud_factory = plot_factory or _FigurePanel, cloud_factory or _PointCloudView
         self._initial_source = self._source_alias(initial_source)
         self._requested_view = initial_view
@@ -419,17 +407,17 @@ class FieldAnalysisDialog(QDialog):
         self.source, self.current_policy, self.component, self.metric_selector = (QComboBox() for _ in range(4))
         self.source.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.source.setMinimumContentsLength(16)
-        self.current_policy.addItem("Stored evaluation", "recorded")
-        self.current_policy.addItem("Stream-function current", "stream")
+        self.current_policy.addItem("Recorded evaluation", "recorded")
+        self.current_policy.addItem("Original contour current", "stream")
         for name in ["Bx", "By", "Bz", "Bparallel", "magnitude"]:
             self.component.addItem("|B|" if name == "magnitude" else name, name)
         self.component.setCurrentIndex(2)
         for title, value in [
             ("Field", "field"),
             ("Target", "target"),
-            ("Signed residual", "signed_residual"),
+            ("Signed component residual", "signed_residual"),
             ("Absolute component error", "absolute_error"),
-            ("Vector error norm", "vector_error"),
+            ("Vector residual magnitude |ΔB|", "vector_error"),
         ]:
             self.metric_selector.addItem(title, value)
         self.units, self.sampling, self.normalization = (QComboBox() for _ in range(3))
@@ -442,7 +430,10 @@ class FieldAnalysisDialog(QDialog):
         self.current_policy.setToolTip(
             "Use the saved evaluation or the original stream-function current; no current refit."
         )
-        self.metric_selector.setToolTip("Signed residual = selected field component − target component.")
+        self.metric_selector.setToolTip(
+            "Signed residual uses field − target for the selected component. "
+            "Vector residual magnitude uses the Euclidean norm of ΔB across all three components."
+        )
         self.component.setToolTip("Bparallel projects onto the recorded B0 direction. |B| is the vector magnitude.")
         self.normalization.setToolTip(
             "One target scale from all native samples is shared by every slice; no pointwise division."
@@ -502,7 +493,7 @@ class FieldAnalysisDialog(QDialog):
         self.progress.setRange(0, 100)
         self.progress.hide()
         layout.addWidget(self.progress)
-        self.refresh = QPushButton("Evaluate maps")
+        self.refresh = QPushButton("Evaluate slices")
         self.refresh.clicked.connect(self.refresh_analysis)
         self.cancel = QPushButton("Cancel calculation")
         self.cancel.clicked.connect(self._cancel)
@@ -542,6 +533,8 @@ class FieldAnalysisDialog(QDialog):
             )
         for widget in [self.center, self.slice_span, self.offsets, self.harmonic_center, self.harmonic_radius]:
             widget.textEdited.connect(self._changed)
+        for widget in [self.harmonic_center, self.harmonic_radius]:
+            widget.textChanged.connect(self._control_summaries)
         for widget in [self.units, self.sampling, self.normalization, self.plane]:
             widget.currentIndexChanged.connect(self._control_summaries)
         for widget in [self.count, self.resolution, self.order]:
@@ -639,7 +632,9 @@ class FieldAnalysisDialog(QDialog):
         self.slice_controls.set_summary(
             f"{self.plane.currentText()} · {self.count.value()} slices · {self.resolution.value()} pixels / axis"
         )
-        self.harmonic_controls.set_summary(f"Maximum degree {self.order.value()} · center and radius in metres")
+        self.harmonic_controls.set_summary(
+            f"Degree {self.order.value()} · center ({self.harmonic_center.text()}) m · R {self.harmonic_radius.text()} m"
+        )
 
     def _view_changed(self, *_):
         if self._VIEW_TABS[self._requested_view] != self.tabs.currentIndex():
@@ -649,8 +644,9 @@ class FieldAnalysisDialog(QDialog):
         coil = self._requested_view == "coil"
         shielding = self._requested_view == "shielding"
         field = not (coil or shielding)
-        for widget in [self.field_controls, self.display_controls, self.scope, self.refresh]:
+        for widget in [self.field_controls, self.display_controls, self.scope]:
             widget.setVisible(field)
+        self.refresh.setVisible(self._requested_view == "slices")
         self.status.setVisible(not shielding)
         self.export_data.setVisible(not shielding)
         if shielding:
@@ -780,10 +776,21 @@ class FieldAnalysisDialog(QDialog):
         note = QLabel("Other coordinates vary; this is a sample trend, rather than a line scan.")
         note.setWordWrap(True)
         row.addWidget(note, 1)
+        self.residual_slices = QPushButton("Residual slices")
+        self.residual_slices.setToolTip(
+            "Evaluate field − target on physical slices using the selected source and current."
+        )
+        self.residual_slices.setEnabled(False)
+        self.residual_slices.clicked.connect(self._show_residual_slices)
+        row.addWidget(self.residual_slices)
         layout.addLayout(row)
         self.error_plot = self._plot(page)
         layout.addWidget(self.error_plot, 1)
         self.tabs.addTab(page, "Errors")
+
+    def _show_residual_slices(self):
+        self.metric_selector.setCurrentIndex(self.metric_selector.findData("signed_residual"))
+        self.tabs.setCurrentIndex(self._VIEW_TABS["slices"])
 
     def _build_harmonics_tab(self):
         page = QWidget()
@@ -821,8 +828,10 @@ class FieldAnalysisDialog(QDialog):
         layout.addWidget(self.harmonic_note)
         self.harmonic_plot = self._plot(page)
         layout.addWidget(self.harmonic_plot, 2)
-        self.coefficients = QTableWidget(0, 4)
-        self.coefficients.setHorizontalHeaderLabels(["Degree l", "Order m", "Real harmonic", "Coefficient [µT]"])
+        self.coefficients = QTableWidget(0, 5)
+        self.coefficients.setHorizontalHeaderLabels(
+            ["Degree l", "Order m", "Real harmonic", "Basis coefficient [µT]", "Sample RMS contribution [µT]"]
+        )
         self._style_table(self.coefficients)
         self.coefficient_table = _ControlSection("Coefficient table", self.coefficients)
         self.coefficients.setMaximumHeight(180)
@@ -1066,14 +1075,8 @@ class FieldAnalysisDialog(QDialog):
         ):
 
             def operation(task):
-                from ..application.evidence import load_saved_request
-
                 task.report(None, "Read verified field source arrays")
-                has_request = any(
-                    item.get("name") == "request.json" for item in self.record.metadata.get("artifacts", ())
-                )
-                request = load_saved_request(self.record) if has_request else None
-                sources = source_catalog(self.record, request=request, progress=task.report, cancel_check=task.check)
+                sources = self._slice_cache.catalog(self.record, progress=task.report, cancel_check=task.check)
                 task.report(100, "Available field sources loaded")
                 return ("catalog", sources)
 
@@ -1089,7 +1092,9 @@ class FieldAnalysisDialog(QDialog):
         self.current_policy.blockSignals(True)
         self.current_policy.setItemText(
             0,
-            "Original saved current" if dataset.provenance.get("current_policy") == "original" else "Stored evaluation",
+            "Original saved current"
+            if dataset.provenance.get("current_policy") == "original"
+            else "Recorded evaluation",
         )
         self.current_policy.setCurrentIndex(0)
         self.current_policy.setEnabled(key + "_at_stream_current" in self.datasets)
@@ -1105,7 +1110,7 @@ class FieldAnalysisDialog(QDialog):
         if dataset.target_T is None:
             self.metric_selector.setCurrentIndex(0)
             self.normalization.setCurrentIndex(0)
-        self.scope.setText(dataset.label + " · " + dataset.scope)
+        self.residual_slices.setEnabled(dataset.target_T is not None)
         self.source.setToolTip(dataset.label)
         previous = self.datasets.get(self._last_source_key)
         if previous is None or previous.target_geometry != dataset.target_geometry:
@@ -1146,6 +1151,7 @@ class FieldAnalysisDialog(QDialog):
                     else max(float(np.linalg.norm(span / 2)), 1e-6)
                 )
                 self.harmonic_radius.setText(f"{reference:.10g}")
+            self._control_summaries()
         self._changed()
 
     def _plane_changed(self, *_):
@@ -1224,6 +1230,8 @@ class FieldAnalysisDialog(QDialog):
         )
 
         def operation(task):
+            if reused is not None:
+                self._slice_cache.request(self.record, cancel_check=task.check)
             task.report(0, "Calculate native-sample metrics")
             mapped = metric_map(
                 dataset,
@@ -1261,6 +1269,26 @@ class FieldAnalysisDialog(QDialog):
                 if sample_grid
                 else "Native sample metrics ready",
             )
+            values = []
+
+            def capture_slices(collection):
+                for piece in collection.slices[len(values) :] if collection is not None else ():
+                    task.check()
+                    values.append(self._slice_values(dataset, mapped, piece, selection))
+                return AnalysisState(
+                    selection,
+                    dataset,
+                    mapped,
+                    collection,
+                    tuple(values),
+                    error,
+                    paired_peak=self._paired_peak(dataset, mapped, collection, selection),
+                )
+
+            def show_partial(collection):
+                if len(collection.slices) < len(selection.offsets_m):
+                    task.publish(capture_slices(collection))
+
             slices = (
                 reused
                 if reused is not None
@@ -1276,19 +1304,13 @@ class FieldAnalysisDialog(QDialog):
                         None if percent is None else 10 + 0.8 * percent, message
                     ),
                     cancel_check=task.check,
+                    cache=self._slice_cache,
+                    on_slice=show_partial,
                 )
                 if sample_grid
                 else None
             )
-            values = []
-            for index, piece in enumerate(slices.slices if slices is not None else ()):
-                task.report(None, f"Calculate scalar slice map {index + 1}/{len(slices.slices)}")
-                values.append(self._slice_values(dataset, mapped, piece, selection))
-                task.report(
-                    90 + 10 * (index + 1) / len(slices.slices),
-                    f"Scalar slice map {index + 1}/{len(slices.slices)} complete",
-                )
-            values = tuple(values)
+            captured = capture_slices(slices)
             task.report(100, "Field views ready")
 
             def harmonic_controls(item):
@@ -1306,7 +1328,7 @@ class FieldAnalysisDialog(QDialog):
                 if previous is not None and harmonic_controls(previous.selection) == harmonic_controls(selection)
                 else None
             )
-            return ("analysis", AnalysisState(selection, dataset, mapped, slices, values, error, harmonics))
+            return ("analysis", replace(captured, harmonics=harmonics))
 
         self._start(operation)
 
@@ -1338,6 +1360,31 @@ class FieldAnalysisDialog(QDialog):
                 values[mask] *= 100 / mapped.normalization_scale_T
         values.setflags(write=False)
         return values
+
+    @staticmethod
+    def _paired_peak(dataset, mapped, slices, selection):
+        if selection.metric not in {"field", "target"} or dataset.target_T is None:
+            return 0.0
+        is_field = selection.metric == "field"
+        vectors = [dataset.target_T if is_field else dataset.field_T]
+        for piece in slices.slices if slices is not None else ():
+            if is_field:
+                if piece.target_T is not None:
+                    vectors.append(piece.target_T[piece.available_mask & piece.target_valid_mask])
+            else:
+                vectors.append(piece.field_T[piece.available_mask])
+        component = "BdotB0" if selection.component == "Bparallel" else selection.component
+        b0 = dataset.provenance.get("b0_direction", (0, 0, 1))
+        projections = (
+            np.hypot.reduce(values, axis=1)
+            if component == "magnitude"
+            else field_component_values(values, component, b0_direction=b0)
+            for values in vectors
+        )
+        peak = max(float(np.max(np.abs(values), initial=0.0)) for values in projections)
+        if mapped.normalization_scale_T is not None:
+            peak = peak / mapped.normalization_scale_T * 100
+        return peak
 
     def fit_harmonics(self):
         if self.worker is not None or not self._current():
@@ -1373,12 +1420,16 @@ class FieldAnalysisDialog(QDialog):
         self.worker = _AnalysisTask(operation, self._generation)
         worker = self.worker
         worker.signals.progress.connect(self._progress)
+        worker.signals.partial.connect(lambda state: self._publish_slice_preview(worker, state))
         worker.signals.finished.connect(lambda result, error: self._finished(worker, result, error))
         self.progress.setRange(0, 0)
         self.progress.show()
         self.cancel.show()
         self.refresh.setEnabled(False)
         self.fit.setEnabled(False)
+        if self._requested_view not in {"coil", "shielding"}:
+            self.export_plot.setEnabled(False)
+            self.export_data.setEnabled(False)
         self.busyChanged.emit(True)
         QThreadPool.globalInstance().start(worker)
 
@@ -1391,6 +1442,21 @@ class FieldAnalysisDialog(QDialog):
         self.progressChanged.emit(f"Computing field analysis{percentage} · {message}")
         self.progressDetails.emit({"percent": percent, "progress_indeterminate": percent is None, "message": message})
 
+    def _publish_slice_preview(self, worker, state):
+        if (
+            worker is not self.worker
+            or worker.generation != self._generation
+            or worker.cancel.is_set()
+            or self.tabs.currentIndex() != self._VIEW_TABS["slices"]
+        ):
+            return
+        try:
+            self._draw_slices(state, partial=True)
+        except (RuntimeError, TypeError, ValueError) as exc:
+            self.status.setText(f"Slice preview rendering failed: {exc}")
+        else:
+            self._showing_partial = True
+
     def _finished(self, worker, result, error):
         if worker is not self.worker:
             return
@@ -1402,6 +1468,10 @@ class FieldAnalysisDialog(QDialog):
             self._finish_close()
             return
         stale = worker.generation != self._generation
+        if self._showing_partial:
+            self._showing_partial = False
+            if error or stale:
+                self._draw_slices()
         interior_source, self._shield_worker_source = self._shield_worker_source, None
         if error and not stale:
             self.status.setText(
@@ -1447,7 +1517,8 @@ class FieldAnalysisDialog(QDialog):
         self.source.blockSignals(True)
         for dataset in datasets:
             if not dataset.key.endswith("_at_stream_current"):
-                self.source.addItem(dataset.label, dataset.key)
+                label = dataset.label.removesuffix(" · recorded current").removesuffix(" · original current")
+                self.source.addItem(label, dataset.key)
         initial = (
             self._initial_source.removesuffix("_at_stream_current") if isinstance(self._initial_source, str) else None
         )
@@ -1493,6 +1564,14 @@ class FieldAnalysisDialog(QDialog):
             and state.selection.component != "magnitude"
         )
 
+    def _display_limits(self, state):
+        factor, _ = self._display(state)
+        peaks = (
+            float(np.max(np.abs(values[np.isfinite(values)]), initial=0.0))
+            for values in (state.mapped.values, *state.slice_values)
+        )
+        return paired_color_limits((max(peaks) * factor,), (state.paired_peak * factor,), signed=self._signed(state))
+
     @staticmethod
     def _set_table(table, rows):
         table.setRowCount(len(rows))
@@ -1515,14 +1594,23 @@ class FieldAnalysisDialog(QDialog):
         state = self.state
         factor, unit = self._display(state)
         values = np.asarray(state.mapped.values) * factor
-        finite = [np.abs(values[np.isfinite(values)])]
-        finite += [np.abs(piece[np.isfinite(piece)]) * factor for piece in state.slice_values]
-        maximum = max((float(piece.max()) for piece in finite if len(piece)), default=1.0) or 1.0
-        limits = (-maximum, maximum) if self._signed(state) else (0, maximum)
+        limits = self._display_limits(state)
         self._color_limits = limits
+        provenance = field_provenance(
+            state.dataset.key,
+            read_run_metadata(self.record),
+            len(state.dataset.points_m),
+            evidence=state.dataset.provenance,
+        )
+        definition = {
+            "signed_residual": "Field − target for the selected component",
+            "vector_error": "‖Bfield − Btarget‖ across all three components",
+        }.get(state.selection.metric, "")
+        if state.selection.metric in {"field", "target"} and state.dataset.target_T is not None:
+            definition = "Field and target share the same color scale"
         self.scope.setText(
-            f"{state.dataset.label} · {state.dataset.scope.replace('_', ' ')}\nSource current policy: {state.dataset.provenance.get('current_policy', 'saved')} · no current refit · "
-            f"{len(state.dataset.points_m):,} native samples · {state.mapped.sampling_convention}"
+            f"{provenance}\n{state.mapped.label} [{unit}] · {state.mapped.sampling_convention}"
+            + (f" · {definition}" if definition else "")
             + (" · 3D display capped at 50,000 points; statistics use all samples" if len(values) > 50_000 else "")
             + (
                 f"\nSaved sampling includes {state.dataset.provenance['suppression_sample_count']} suppression points. Equal statistics include them; weighted fits use positive weights."
@@ -1537,6 +1625,8 @@ class FieldAnalysisDialog(QDialog):
         for key, value in state.mapped.summary.items():
             if key in {"rms", "peak", "std", "mean", "p95"}:
                 summary.append((f"{key.upper()} [{unit}]", value * factor))
+            elif key == "relative_error_rms":
+                summary.append(("Relative RMS error [%]", None if value is None else value * 100))
             elif key.endswith("_T") and value is not None:
                 summary.append((key.removesuffix("_T").replace("_", " ") + " [µT]", value * 1e6))
             else:
@@ -1569,23 +1659,25 @@ class FieldAnalysisDialog(QDialog):
             + ("\n" + "; ".join(graphics_errors) + ". Numerical exports remain available." if graphics_errors else "")
         )
 
-    def _draw_slices(self):
+    def _draw_slices(self, state=None, *, partial=False):
         if self.slice_plot.figure is None:
             return
-        state = self.state
-        factor, unit = self._display(state)
+        state = self.state if state is None else state
         figure = self.slice_plot.figure
         figure.clear()
         figure.set_layout_engine("compressed")
-        if state.slices is None:
+        if state is None or state.slices is None:
             self.slice_note.setText(
-                "Physical slice sampling starts when Slices is opened or Evaluate maps is selected. Native-sample metrics are already available."
+                "Open Slices or select Evaluate slices to sample the saved field. Native-sample metrics are available separately."
             )
             self.slice_plot.draw()
             return
+        factor, unit = self._display(state)
+        limits = self._display_limits(state)
         count = len(state.slice_values)
-        columns = min(3, count)
-        rows = (count + columns - 1) // columns
+        total = len(state.selection.offsets_m) if partial else count
+        columns = min(3, total)
+        rows = (total + columns - 1) // columns
         axes = figure.subplots(rows, columns, squeeze=False)
         horizontal, vertical = {"xy": (0, 1), "xz": (0, 2), "yz": (1, 2)}[state.selection.plane]
         from matplotlib import colormaps
@@ -1604,8 +1696,8 @@ class FieldAnalysisDialog(QDialog):
                 np.ma.masked_invalid(values * factor),
                 shading="auto",
                 cmap=cmap,
-                vmin=self._color_limits[0],
-                vmax=self._color_limits[1],
+                vmin=limits[0],
+                vmax=limits[1],
                 rasterized=True,
             )
             for outline in piece.outlines_m:
@@ -1647,7 +1739,12 @@ class FieldAnalysisDialog(QDialog):
             "unavailable": "unavailable",
         }
         self.slice_note.setText(
-            f"Field: {descriptions.get(state.slices.representation, state.slices.representation.replace('_', ' '))} · "
+            (
+                f"Preview {count}/{total} slices · {state.dataset.label} · scale updates as slices finish.\n"
+                if partial
+                else ""
+            )
+            + f"Field: {descriptions.get(state.slices.representation, state.slices.representation.replace('_', ' '))} · "
             f"target: {descriptions.get(state.slices.target_representation, state.slices.target_representation.replace('_', ' '))} · "
             f"ROI: {descriptions.get(state.slices.roi_representation, state.slices.roi_representation.replace('_', ' '))}. "
             "Grey pixels have no supported value; one color scale is shared by every slice."
@@ -1721,6 +1818,8 @@ class FieldAnalysisDialog(QDialog):
         if not state.harmonics:
             self.coefficients.setRowCount(0)
             self.coefficient_table.set_summary("Fit harmonics to populate")
+            self.harmonic_note.setText("Fit a scalar component on one common basis for field, target and residual.")
+            self.harmonic_note.setToolTip("")
             if figure is not None:
                 figure.text(0.1, 0.5, "Use Fit field / target / residual to inspect the common harmonic basis.")
                 self.harmonic_plot.draw()
@@ -1734,38 +1833,51 @@ class FieldAnalysisDialog(QDialog):
             if figure is not None:
                 self.harmonic_plot.draw()
             return
+        ranked = result["coefficient_rows"][source]
         rows = [
-            (term.degree, term.order, term.display_label, coefficient * 1e6)
-            for term, coefficient in zip(fit.terms, fit.coefficients, strict=True)
+            (row["degree"], row["order"], row["term_label"], row["coefficient"] * 1e6, row["contribution_rms"] * 1e6)
+            for row in ranked
         ]
         self._set_table(self.coefficients, rows)
-        self.coefficient_table.set_summary(f"{len(rows)} real harmonic terms · coefficients in µT")
+        self.coefficient_table.set_summary(f"{len(rows)} terms · signed coefficients and sample RMS [µT]")
         condition = result.get("condition_number", result.get("condition"))
         diagnostics = result.get("diagnostics", ())
-        details = (
-            f"Rank {fit.rank}/{len(fit.terms)} · {fit.sample_count} samples · "
-            f"condition {condition if condition is not None else 'unavailable'} · fit residual RMS {fit.residual_rms * 1e6:.5g} µT\n"
-            + str(result.get("sourcefree_caveat", "Source-free validity is not established by this fit."))
-            + ("\n" + str(diagnostics) if diagnostics else "")
-        )
-        self.harmonic_note.setToolTip(details)
         condition_text = (
             f"{condition:.4g}" if isinstance(condition, (float, np.floating)) else str(condition or "unavailable")
         )
+        relative = f" ({100 * fit.residual_rms / fit.field_rms:.3g}% of {source} RMS)" if fit.field_rms > 0 else ""
+        center = ", ".join(f"{1e3 * value:.6g}" for value in fit.center)
+        fit_quality = (
+            f"Rank {fit.rank}/{len(fit.terms)} · {fit.sample_count:,} samples · condition {condition_text} · "
+            f"fit residual RMS {fit.residual_rms * 1e6:.5g} µT{relative}"
+        )
+        reference = (
+            f"{result['component']} expansion · normalized real basis · center ({center}) mm · "
+            f"reference radius {fit.radius * 1e3:.6g} mm"
+        )
+        caveat = str(result.get("sourcefree_caveat", "Source-free validity is not established by this fit."))
+        self.harmonic_note.setToolTip("\n".join((fit_quality, reference, caveat, *diagnostics)))
         self.harmonic_note.setText(
-            f"Rank {fit.rank}/{len(fit.terms)} · {fit.sample_count} samples · condition {condition_text} · fit residual RMS {fit.residual_rms * 1e6:.5g} µT\n"
-            "The numerical fit does not verify source-free validity or engineering acceptance."
-            + ("\n" + str(diagnostics) if diagnostics else "")
+            "\n".join(
+                (
+                    fit_quality,
+                    reference,
+                    "Term contributions are RMS on the selected samples. The fit does not establish source-free validity.",
+                    *diagnostics,
+                )
+            )
         )
         if figure is not None:
             axis = figure.subplots()
-            ids = np.arange(len(fit.terms))
-            axis.bar(ids, fit.coefficients * 1e6, color="#23698c")
+            shown = ranked[:12]
+            ids = np.arange(len(shown))
+            axis.bar(ids, [row["contribution_rms"] * 1e6 for row in shown], color="#23698c")
             axis.set_xticks(ids)
-            axis.set_xticklabels([f"{term.degree},{term.order}" for term in fit.terms], rotation=90, fontsize=7)
+            axis.set_xticklabels([f"{row['degree']},{row['order']}" for row in shown])
             axis.set_xlabel("Real solid harmonic (degree, order)")
-            axis.set_ylabel(f"{source.capitalize()} coefficient\n[µT]")
-            axis.axhline(0, color="black", linewidth=0.7)
+            axis.set_ylabel(f"{source.capitalize()} sample RMS contribution [µT]")
+            if len(shown) < len(ranked):
+                axis.set_title(f"Largest {len(shown)} of {len(ranked)} terms by sample RMS")
             self.harmonic_plot.draw()
 
     def export_to(self, path, *, state=None, progress=None, cancel_check=None):
@@ -1913,7 +2025,7 @@ class FieldAnalysisDialog(QDialog):
     def _choose_plot(self):
         if self._requested_view == "shielding" and self._shield_plot_key is not None:
             plot = self.shield_plot
-        elif not self._current() or self._requested_view in {"coil", "shielding"}:
+        elif self.worker is not None or not self._current() or self._requested_view in {"coil", "shielding"}:
             return
         else:
             plot = [self.cloud, self.slice_plot, self.error_plot, self.harmonic_plot][self.tabs.currentIndex()]

@@ -137,7 +137,7 @@ def result_metadata_digest(value: dict) -> str:
     return sha256(encoded).hexdigest()
 
 
-def verified_result(directory: Path, digest: str) -> dict | None:
+def verified_result(directory: Path, digest: str, *, cancel_check=None) -> dict | None:
     """Reuse complete evidence with matching request, metadata and artifact hashes.
 
     Historical results without ``metadata_sha256`` remain readable for
@@ -154,15 +154,17 @@ def verified_result(directory: Path, digest: str) -> dict | None:
             if (
                 not path.is_relative_to(directory.resolve())
                 or not item.get("sha256")
-                or file_digest(path) != item["sha256"]
+                or file_digest(path, cancel_check=cancel_check) != item["sha256"]
             ):
                 return None
         return value
+    except InterruptedError:
+        raise
     except (OSError, KeyError, TypeError, ValueError, AttributeError):
         return None
 
 
-def verify_input_files(manifest: dict, relocated_root: str | Path | None = None) -> None:
+def verify_input_files(manifest: dict, relocated_root: str | Path | None = None, *, cancel_check=None) -> None:
     """Verify execution inputs, or exact hash-addressed copies in a saved run.
 
     Execution calls omit ``relocated_root`` and retain their original path
@@ -180,7 +182,7 @@ def verify_input_files(manifest: dict, relocated_root: str | Path | None = None)
                 if not portable.resolve().is_relative_to(root):
                     raise RuntimeError(f"Relocated input {key} leaves its saved run directory.")
                 path = portable
-        if not path.is_file() or file_digest(path) != item["sha256"]:
+        if not path.is_file() or file_digest(path, cancel_check=cancel_check) != item["sha256"]:
             raise RuntimeError(f"Input {key} changed during execution: {path}. Rerun with stable input files.")
 
 

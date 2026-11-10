@@ -400,7 +400,17 @@ def build_settings_sequence(window, page, form, layout):
         for key in ("wire_width", "wire_height"):
             controls[key].valueChanged.connect(profile.refresh_summary)
             controls[key].lineEdit().textEdited.connect(profile.refresh_summary)
-        sequence.add("Nominal dimensions", ("wire_width", "wire_height"), "conductor-profile")
+        dimensions = sequence.add(
+            "Nominal dimensions",
+            ("wire_width", "wire_height"),
+            "conductor-profile",
+            summary=lambda: (
+                "Set by the Round wire diameter"
+                if controls["cross_sectional_points"].mode_combo.currentData() == "round"
+                else sequence.labelled(("wire_width", "wire_height"))
+            ),
+        )
+        controls["cross_sectional_points"].changed.connect(dimensions.refresh_summary)
         sequence.add(
             "Insulation",
             ("insulation",),

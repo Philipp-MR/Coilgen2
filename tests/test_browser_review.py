@@ -1,6 +1,7 @@
 """Browser regressions for source selection, engineering verdicts and editable state."""
 
 import asyncio
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -8,8 +9,61 @@ import pytest
 pytest.importorskip("trame")
 
 from coilgen.application.diagnostics import run_verdicts
+from coilgen.application.cad import PRINT_FORMER_SCOPE, GeometryOption
 from coilgen.application.service import RunRecord
 from coilgen.web.app import create_app
+
+
+def test_browser_former_export_preselects_only_former_and_requires_draft_ack(tmp_path, monkeypatch):
+    server, browser = create_app(tmp_path, server_name="test-browser-print-former")
+    state = server.state
+    former = "fabrication/part001_grooved_support_DRAFT_fabrication.stl"
+    conductor = "fabrication/part001_body0001_fabrication.stl"
+    vertices, faces = np.eye(3), np.array([[0, 1, 2]])
+    record = RunRecord(
+        tmp_path,
+        {
+            "fabrication": {"support_bodies": [{"body_id": "part001_grooved_support", "support_body_ok": True}]},
+            "artifacts": [{"name": former}],
+        },
+        {"vertices_m": vertices, "faces": faces, "stream_function_A": np.zeros(3)},
+    )
+    options = tuple(
+        GeometryOption(name, "part001", "stl", scope, "passed", "m", ((0, 0, 0), (1, 1, 1)), True, "digest")
+        for name, scope in ((former, PRINT_FORMER_SCOPE), (conductor, "fabrication_review_geometry"))
+    )
+    monkeypatch.setattr(browser.session, "load_run", lambda job_id: record)
+    monkeypatch.setattr(browser.session, "export_options", lambda record: options)
+    export = Mock(return_value=None)
+    monkeypatch.setattr(browser.session, "export", export)
+    plot = Mock(return_value={"review_grooved_support_0_vertices_m": vertices, "review_grooved_support_0_faces": faces})
+    monkeypatch.setattr("coilgen.web.app.saved_print_former_arrays", plot)
+    try:
+        template = state.trame__template_main
+        assert "results_metrics_expanded = false; dataset = 'print_former'" in template
+        assert 'aria-controls="coilgen-result-metrics"' in template
+        assert 'v-if="export_options.filter(option => option.former).length > 1"' in template
+        state.selected_run = "with-former"
+        browser._open_run("with-former")
+        assert state.summary["print_former_status"] == "Print former · geometry checks passed"
+        plot.assert_not_called()
+        state.dataset = "print_former"
+        browser._render()
+        browser._render()
+        plot.assert_called_once_with(record)
+        assert "saved fabrication STL" in state.scene_caption
+        assert state.export_selected == [conductor]
+        browser.open_print_former()
+        assert state.center_section == "export_former" and state.former_export_selected == [former]
+        browser.export_geometry()
+        export.assert_not_called()
+        assert "DRAFT confirmation" in state.message
+        state.former_draft_ack = True
+        browser.export_geometry()
+        export.assert_called_once_with(record, [former], unit="mm", allow_draft=True, include_project=True)
+        assert state.export_selected == [conductor] and not state.draft_ack
+    finally:
+        browser.session.close()
 
 
 def test_shielding_plot_uses_saved_channel_and_clears_on_switch(tmp_path, monkeypatch):
@@ -70,7 +124,7 @@ def test_view_completed_batch_job_verifies_that_channel_without_changing_editor(
         browser._open_run(state.selected_run)  # Vue's selected-run callback
     assert state.workspace_history and len(state.runs) == 3
     assert session.active_channel_id == editing and state.settings_dirty
-    assert state.plan_summary == "15/15 steps recorded · 3/3 channels verified"
+    assert state.plan_summary == "15/15 steps recorded · 3/3 channels with verified results"
     assert state.run_context == f"Viewing channel {session.channels[-1].name} · editing {session.project.name}"
     browser.view_job_result("missing")
     assert state.selected_run == "batch-2" and state.message_color == "warning"
@@ -89,6 +143,9 @@ def test_browser_legend_and_camera_use_the_rendered_data(tmp_path, monkeypatch):
         "target_points_m": np.array([[0, 0, 0], [0, 0, 0.01]]),
         "target_field_T": np.zeros((2, 3)),
         "routed_field_T": np.array([[0, 0, -2e-6], [0, 0, 5e-6]]),
+        "validation_points_m": np.array([[0, 0.01, 0], [0, 0.02, 0]]),
+        "validation_field_T": np.array([[0, 0, 2e-6], [0, 0, 3e-6]]),
+        "validation_target_T": np.array([[0, 0, -8e-6], [0, 0, 6e-6]]),
     }
     record = RunRecord(tmp_path, {"config": {"b_0_direction": [0, 0, 1]}}, arrays)
     monkeypatch.setattr(browser.session, "load_run", lambda _key: record)
@@ -101,6 +158,16 @@ def test_browser_legend_and_camera_use_the_rendered_data(tmp_path, monkeypatch):
     browser._render()
     assert (state.field_legend["low"], state.field_legend["high"]) == ("2", "5")
     assert state.field_legend["label"] == "|B − target| [µT]"
+    assert "includes transverse components" in state.field_source_header
+    state.dataset, state.component = "validation", "Bz"
+    browser._render()
+    assert state.field_has_pair and "Independent grid · 2 samples" in state.field_source_header
+    assert (state.field_legend["low"], state.field_legend["high"]) == ("-8", "8")
+    state.field_show_target = True
+    browser._render()
+    assert state.field_legend["label"] == "Target Bz [µT]"
+    assert (state.field_legend["low"], state.field_legend["high"]) == ("-8", "8")
+    assert "Target Bz [µT] -8 … 6" in state.scene_caption
     state.dataset = "support"
     browser._render()
     assert state.field_legend is None
@@ -268,6 +335,91 @@ def test_empty_results_explains_only_the_latest_matching_attempt(tmp_path):
     assert len(state.jobs) == 3 and "failed-here" in {job["id"] for job in state.older_jobs}
     session.apply_settings({"levels": 9})
     assert state.attempt_notice is None
+
+
+def test_activity_keeps_background_jobs_visible_without_inventing_progress(tmp_path):
+    server, browser = create_app(tmp_path, server_name="test-web-background-activity")
+    session, state = browser.session, server.state
+    try:
+        browser.load_template("cylinder")
+        job = {
+            "id": "background",
+            "project_id": "other-project-in-this-workspace",
+            "pipeline_stage": "prepared",
+            "status": "queued",
+            "progress": 0.2,
+        }
+        session.states[job["id"]] = job
+        session.job_ids.append(job["id"])
+        browser._refresh_jobs()
+        assert not state.jobs and not state.current_job_active
+        assert state.active_jobs[0]["progress"] is None
+
+        job.update(status="running", progress_kind="allocated_work", progress_indeterminate=True)
+        browser._refresh_jobs()
+        assert state.active_jobs[0]["progress"] is None
+        assert not state.active_jobs[0]["progress_label"]
+
+        job.update(progress_indeterminate=False)
+        browser._refresh_jobs()
+        assert state.active_jobs[0]["progress_label"] == "Allocated work 20%"
+        job.update(phase_progress=0.5)
+        browser._refresh_jobs()
+        assert state.active_jobs[0]["progress"] == 50
+        assert state.active_jobs[0]["progress_label"] == "Operation 50%"
+
+        job.update(status="cancelling")
+        browser._refresh_jobs()
+        assert state.active_jobs[0]["progress"] is None
+        job.update(status="cancelled")
+        browser._refresh_jobs()
+        assert not state.active_jobs
+    finally:
+        browser.plotter.close()
+        session.close()
+
+
+def test_single_runs_entry_reports_strict_fabrication_without_repeating_it_in_design_plan(tmp_path):
+    from coilgen.application.session import PIPELINE_STAGES
+
+    server, browser = create_app(tmp_path, server_name="test-web-finalizing-fabrication")
+    session, state = browser.session, server.state
+    try:
+        browser.load_template("cylinder")
+        assert state.trame__template_main.count("runs_dialog = true") == 1
+        project = session.project
+        job = {
+            "id": "fabrication-run",
+            "project_id": project.id,
+            "project_revision": project.revision,
+            "project_fingerprint": project.fingerprint,
+            "pipeline_stage": "evaluated",
+            "completed_stages": list(dict(PIPELINE_STAGES)),
+            "status": "running",
+            "fabricate": True,
+            "progress_operation": "Strict fabrication review",
+            "stage": "Build grooved support",
+        }
+        session.states[job["id"]] = job
+        session.job_ids.append(job["id"])
+        browser._refresh_jobs()
+        assert state.active_jobs[0]["caption"] == "Finalizing fabrication"
+        assert state.active_jobs[0]["stage"] == "Build grooved support"
+        assert state.plan_channels[0]["activity"] == ""
+        assert all(step["status"] == "Completed" for step in state.plan_channels[0]["steps"])
+
+        job.update(progress_operation="Publish result", stage="Write archive")
+        browser._refresh_jobs()
+        assert state.active_jobs[0]["caption"] == "Computing"
+        assert state.active_jobs[0]["stage"] == "Publish result · Write archive"
+
+        job.update(status="completed", embedded=True)
+        browser._refresh_jobs()
+        assert not state.active_jobs
+        assert state.jobs[0]["caption"] == "Completed" and state.jobs[0]["embedded"]
+    finally:
+        browser.plotter.close()
+        session.close()
 
 
 def test_batch_click_cannot_repeat_an_active_enabled_channel(tmp_path, monkeypatch):

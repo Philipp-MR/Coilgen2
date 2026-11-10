@@ -11,15 +11,21 @@ import pytest
 
 from coilgen.application import DesignService, ProjectDocument
 from coilgen.application.cad import (
+    PRINT_FORMER_SCOPE,
     default_export_selection,
     draft_export_notice,
     export_catalog,
     export_geometry,
     geometry_catalog,
     geometry_option_label,
+    has_saved_print_former,
     is_draft_artifact,
     path_catalog,
+    print_former_status,
+    saved_print_former_arrays,
 )
+from coilgen.application.evidence import resolve_dataset
+from coilgen.application.scene_spec import scene_layers
 from coilgen.attribution import software_attribution
 from coilgen.config import CoilGenConfig
 from coilgen.geometry import read_stl
@@ -226,6 +232,52 @@ def test_draft_solid_export_requires_explicit_acknowledgement(tmp_path):
     assert row["draft"] is True and row["inspection_only"] is True
     assert package.manifest["construction_released"] is False
     assert "missing_return" in draft_export_notice(["missing_return"])
+
+
+def test_saved_former_checks_remain_distinct_from_a_draft_coil_review(tmp_path):
+    record = _run(tmp_path, ready=False)
+    body_id = "part001_grooved_support"
+    former = save_mesh_as_stl(_solid(), record.directory / "fabrication" / f"{body_id}_DRAFT_fabrication.stl")
+
+    def add(metadata):
+        metadata["fabrication"]["support_bodies"] = [
+            {"body_id": body_id, "support_body_ok": True, "manufacturing_ok": True}
+        ]
+        metadata["artifacts"].append(
+            {"name": f"fabrication/{former.name}", "kind": "stl", "sha256": file_digest(former)}
+        )
+
+    record = _replace_artifacts(record, add)
+    assert has_saved_print_former(record.metadata_view)
+    assert print_former_status(record.metadata_view) == "Print former · geometry checks passed"
+    (option,) = (option for option in export_catalog(record) if option.scope == PRINT_FORMER_SCOPE)
+    assert option.check_status == "passed" and option.inspection_only
+    assert geometry_option_label(option).startswith("DRAFT · Print former")
+    arrays = saved_print_former_arrays(record)
+    assert resolve_dataset(arrays, "print_former").available
+    layers, reason = scene_layers(arrays, "print_former")
+    assert not reason and len(layers) == 1 and layers[0].extra["reviewed"]
+    saved = read_stl(former)
+    np.testing.assert_array_equal(layers[0].points[layers[0].faces], saved.vertices[saved.faces])
+    assert len(layers[0].points) < len(saved.vertices)
+    with pytest.raises(ValueError, match="Confirm the DRAFT export"):
+        export_geometry(record, tmp_path / "refused", [option.name])
+    package = export_geometry(record, tmp_path / "former", [option.name], allow_draft=True)
+    (row,) = package.manifest["geometry"]
+    assert row["scope"] == PRINT_FORMER_SCOPE and row["geometry_checks"] == "passed" and row["draft"]
+    assert package.manifest["construction_released"] is False
+
+
+def test_former_plot_uses_pipeline_triangles_and_excludes_the_smooth_preview():
+    mesh = _solid()
+    arrays = {"former_preview_vertices_m": mesh.vertices, "former_preview_faces": mesh.faces}
+    assert not resolve_dataset(arrays, "print_former").available
+    arrays.update(grooved_support_0_vertices_m=mesh.vertices, grooved_support_0_faces=mesh.faces)
+    layers, reason = scene_layers(arrays, "print_former")
+    assert not reason and len(layers) == 1 and layers[0].name == "grooved_support_0"
+    assert layers[0].extra["reviewed"] is False
+    np.testing.assert_array_equal(layers[0].points, mesh.vertices)
+    np.testing.assert_array_equal(layers[0].faces, mesh.faces)
 
 
 def test_existing_destination_is_never_overwritten(tmp_path):

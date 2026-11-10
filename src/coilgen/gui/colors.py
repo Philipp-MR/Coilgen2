@@ -3,13 +3,7 @@
 from PySide6.QtGui import QBrush, QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
-
-_ACCENTS = {
-    "info": ("#075aaa", "#87bcff"),
-    "success": ("#08766c", "#76d1bb"),
-    "warning": ("#8b5900", "#f3ca77"),
-    "error": ("#b32e28", "#ffaaa4"),
-}
+from ..application.workbench_presentation import STATUS_COLORS
 
 
 def _luminance(color):
@@ -27,9 +21,9 @@ def tone_color(tone, palette):
     """Choose a foreground that remains readable on Window and Base backgrounds."""
     window = palette.color(QPalette.ColorRole.Window)
     base = palette.color(QPalette.ColorRole.Base)
-    if tone not in _ACCENTS:
+    if tone not in STATUS_COLORS:
         return palette.color(QPalette.ColorRole.WindowText)
-    light, dark = _ACCENTS[tone]
+    light, dark = STATUS_COLORS[tone]
     color = QColor(light if _luminance(window) > 0.3 else dark)
     if min(_contrast(color, window), _contrast(color, base)) >= 4.5:
         return color
@@ -53,5 +47,5 @@ def apply_tone(label, tone):
     foreground = tone_color(tone, base)
     palette.setColor(QPalette.ColorRole.WindowText, foreground)
     palette.setColor(QPalette.ColorRole.Text, foreground)
-    label.setProperty("semanticTone", tone if tone in _ACCENTS else "neutral")
+    label.setProperty("semanticTone", tone if tone in STATUS_COLORS else "neutral")
     label.setPalette(palette)

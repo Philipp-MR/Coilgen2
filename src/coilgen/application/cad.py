@@ -48,6 +48,8 @@ _STEP_POINT = re.compile(r"CARTESIAN_POINT\s*\(\s*'(?:[^']|'')*'\s*,\s*\(([^()]*
 _SOLID_STEP = re.compile(r"\b(?:FACETED_BREP|MANIFOLD_SOLID_BREP)\s*\(", re.IGNORECASE)
 # Mounted conductor centerline (the swept profile's reference path).
 _PATH_SUFFIXES = ("_fabrication_centroid.csv", "_fabrication_centroid.step")
+PRINT_FORMER_SCOPE = "print_former_geometry"
+PRINT_FORMER_EXPORT_HINT = "Enable Strict fabrication review and compute the full design to save a former STL."
 
 
 def is_draft_artifact(name: str) -> bool:
@@ -66,7 +68,44 @@ GEOMETRY_FORMAT_LABELS = {
 def geometry_option_label(option) -> str:
     """One label for an export choice, shared by every client."""
     kind = GEOMETRY_FORMAT_LABELS.get(option.format, option.format.upper())
-    return ("DRAFT · " if is_draft_artifact(option.name) else "") + f"{option.body_id} · {kind}"
+    former = "Print former · " if option.scope == PRINT_FORMER_SCOPE else ""
+    return ("DRAFT · " if is_draft_artifact(option.name) else "") + former + f"{option.body_id} · {kind}"
+
+
+def print_former_status(metadata) -> str:
+    """Describe the saved former geometry checks independently of coil acceptance."""
+    reviewed = (metadata.get("fabrication") or {}).get("support_bodies") or ()
+    pipeline = (metadata.get("pipeline_sweeps") or {}).get("grooved_supports") or ()
+    bodies = reviewed or pipeline
+    if not bodies:
+        enabled = (metadata.get("config") or {}).get("support_body_mode", "off") != "off"
+        return "Print former · no geometry saved" if enabled else ""
+    checks = [body.get("support_body_ok", body.get("manufacturing_ok")) for body in bodies]
+    status = (
+        "failed"
+        if any(check is False for check in checks)
+        else "passed"
+        if all(check is True for check in checks)
+        else "unverified"
+    )
+    return f"Print former · geometry checks {status}"
+
+
+def _saved_print_formers(metadata):
+    names = {
+        name
+        for body in (metadata.get("fabrication") or {}).get("support_bodies") or ()
+        if (body_id := body.get("body_id"))
+        for name in (f"{body_id}_fabrication.stl", f"{body_id}_DRAFT_fabrication.stl")
+    }
+    for artifact in metadata.get("artifacts") or ():
+        if isinstance(name := artifact.get("name"), str) and PurePosixPath(name).name in names:
+            yield artifact
+
+
+def has_saved_print_former(metadata) -> bool:
+    """Cheap presence test. The export catalog still verifies the selected artifact."""
+    return next(_saved_print_formers(metadata), None) is not None
 
 
 def default_export_selection(options) -> tuple[str, ...]:
@@ -157,6 +196,20 @@ def _stl_geometry(data: bytes) -> Mesh:
     return _read_binary_stl(data, face_count) if len(data) == 84 + face_count * 50 else _read_ascii_stl(data)
 
 
+def saved_print_former_arrays(record: RunRecord) -> dict:
+    """Read the exact saved STL triangles for plotting, verifying their bytes."""
+    arrays = {}
+    for index, artifact in enumerate(_saved_print_formers(record.metadata_view)):
+        mesh = _stl_geometry(_artifact_bytes(record, artifact["name"], artifact.get("sha256")))
+        prefix = f"review_grooved_support_{index}"
+        # STL repeats vertices for every triangle. Exact indexing keeps the
+        # browser payload smaller without changing any saved triangle.
+        vertices, inverse = np.unique(mesh.vertices, axis=0, return_inverse=True)
+        arrays[f"{prefix}_vertices_m"] = vertices
+        arrays[f"{prefix}_faces"] = inverse.reshape(-1)[mesh.faces]
+    return arrays
+
+
 def _step_geometry(data: bytes, *, solid: bool = True):
     text = data.decode("ascii")
     if solid and (not _SOLID_STEP.search(text) or not re.search(r"\bCLOSED_SHELL\s*\(", text, re.IGNORECASE)):
@@ -199,7 +252,7 @@ def _body_sources(metadata: dict) -> dict[str, tuple[str, dict]]:
         if isinstance(body, dict) and isinstance(body.get("body_id"), str):
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", body["body_id"]):
                 raise ValueError("Saved support body identifiers must be portable names.")
-            bodies[body["body_id"]] = ("fabrication_review_geometry", body)
+            bodies[body["body_id"]] = (PRINT_FORMER_SCOPE, body)
     for body in (metadata.get("pipeline_sweeps") or {}).get("bodies", []):
         if isinstance(body, dict) and isinstance(body.get("body_id"), str):
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", body["body_id"]):
@@ -288,7 +341,8 @@ def _geometry_catalog(record: RunRecord, kinds=("solid",)) -> tuple[GeometryOpti
             unit, _, bounds = _step_geometry(data)
             format_ = "step"
         inspection_only = (
-            check_status != "passed"
+            scope == PRINT_FORMER_SCOPE
+            or check_status != "passed"
             or report.get("ready") is not True
             or summary.get("sheet_accepted") is False
             or summary.get("accepted") is not True

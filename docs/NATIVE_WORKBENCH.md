@@ -25,12 +25,11 @@ to locate the same run.
 1. Start **Start CoilGen2 GUI.cmd** and choose **Browse examples… → Gradients →
    Cylindrical Y gradient (Gy)**. This example requests a 20 mT/m Y gradient
    on a cylindrical support. Its winding and full evaluation are already set.
-2. Click **Compute full design** at the top of the main window. The Design plan
-   shows progress. To try a different design, use **File → Load template**.
+2. Click **Compute full design** at the top of the main window. The activity
+   bar shows the worker's progress. To try a different design, use **File → Load template**.
    For a coil system, the top button runs the editing channel. **Compute enabled
    channels** in the Design plan submits each included channel's requested study.
-3. In **Jobs**, select the completed job and click **View results**. If you
-   closed Jobs, reopen it through **View → Open evidence window → Jobs**.
+3. Click **Runs** in the status bar, select the completed job and click **View results**.
    Click **Run design choices** beside the plot to see the submitted inputs.
    Open **Engineering checks** to see what passed, failed or lacks evidence.
 4. Choose **File → Save project** to keep the model and its available runs
@@ -53,12 +52,11 @@ evidence explicitly labeled. **Cached** means a verified checkpoint can be reuse
 steps beyond a channel's requested boundary are **Not requested**. Completion
 describes computation, while engineering failures remain separate review findings.
 
-For systems, the panel shows completed-step and channel counts, individual worker
-percentages and excluded channels. It does not average percentages from unequal
-independent studies. Double-click a channel header, or press Enter, to select its
+For systems, the panel shows completed-step and channel counts and excluded
+channels. Double-click a channel header, or press Enter, to select its
 editor; **Follow run** explicitly attaches the plot to the indicated worker.
-**Compute enabled channels** submits each included channel's own study. **Jobs**
-and **Recompute plan** open detailed evidence. Close the dock to give the plot more
+**Compute enabled channels** submits each included channel's own study. **Recompute plan**
+opens the checkpoint plan. Close the dock to give the plot more
 space; **View → Design plan** restores it, and starting a computation opens it.
 Its visibility is saved with the project view. The lower-left computing indicator
 continues to cover other background operations as well.
@@ -69,9 +67,9 @@ want. Starting a run brings the Design plan to the front.
 
 The persistent activity strip also shows worker names, current operations and
 individual percentages when the plan is closed or the plot shows an earlier run.
-**Tasks…** opens a live list of every active or queued worker and local operation,
-including field analysis, exports, model/system support previews and loading saved
-stage data. Owned CoilGen editor and evidence windows mirror the same activity,
+**Runs** opens the run list even when the workbench is idle. **Tasks…** appears
+during local operations such as field analysis, exports or loading saved data.
+Owned CoilGen editor and evidence windows mirror the same activity,
 so a maximized analysis or settings window does not hide system computation.
 Work without a measurable total shows a busy state. Synchronous project/result
 loading, project saving and Python input exports paint their operation before
@@ -286,7 +284,7 @@ Choose a structural option and click **Apply & preview** to open the settings
 for that support, target family, region shape or sampling mode. **Import and
 apply** commits the selected file after the file and units have been confirmed.
 
-**Choose support** shows the complete primitive gallery. **Choose field** opens
+**Choose support** shows the complete primitive gallery. Choosing a different support reveals its dimensions in the same window. Set them before applying the change. **Choose field** opens
 linear gradients, analytic expressions, spherical harmonics and an existing
 imported map as graphical tiles. Field regions and volume/boundary sampling
 have their own graphical choices. Amplitude, dimensions, placement and mesh
@@ -301,7 +299,7 @@ stream function optimization, contours, routing/sweeping or full evaluation.
 The selected stage's inspector shows the requested operations and names the
 button to start them. Applying an output changes the study boundary in one undoable revision; computation still requires the explicit **Compute** action.
 
-**View → Open evidence window** opens **Jobs**, **Results** and **History** in
+**View → Open evidence window** opens **Runs**, **Results** and **History** in
 separate reusable windows without shrinking the plot. **Detailed evidence** opens
 checks, wire fields, comparisons and diagnostics. **Design status** and **Brief**
 open pipeline evidence and physical assumptions on demand. Closing windows
@@ -336,10 +334,10 @@ fabrication review datasets as they become available. **Viewing** identifies
 the submitted revision. Stage completion and final verification are tracked separately.
 Automatic completion display follows only the exact current submitted revision.
 Finishing an older revision leaves the selected view intact and makes its result
-available through Jobs and Results. Stopped live snapshots retain their stopped status.
+available through Runs and Results. Stopped live snapshots retain their stopped status.
 Choose any available plot to inspect it until the next feature arrives. Turn off
 **Follow run** to hold that selection while the menu keeps updating. Turn it
-back on to display the latest available feature immediately. Jobs stays an
+back on to display the latest available feature immediately. Runs stays an
 on-demand window, so submitting a computation keeps the graphics visible.
 The lower-left status bar displays the current operation's measured percentage,
 or **Computing…** with a busy bar when that operation has no known work total.
@@ -525,7 +523,7 @@ CoilGen keeps its surface-coil optimization and realization operations explicit:
 4. Choose a computation boundary: prepare, optimize the stream function, generate contours, route/realize, or
    evaluate. Use the blue Compute button at the upper right, or Ctrl+Enter.
    Compute submits a detached input snapshot to a bounded worker.
-   The Jobs panel's execution strip and table report activity, execution state,
+   The Runs window reports activity, execution state,
    reported progress, elapsed time and cancellation. Completion does not move you
    away from pending edits; View results verifies the saved evidence and opens Results.
    Repeated clicks for the same active revision select its existing job.
@@ -534,7 +532,7 @@ CoilGen keeps its surface-coil optimization and realization operations explicit:
    settings takes you to the affected model section. Valid defaults and unused
    optional inputs do not create new requirements; numerical feasibility and
    manufacturing acceptance remain results of computation.
-   The Jobs table identifies **This session**, **Earlier session** and **Other
+   The Runs table identifies **This session**, **Earlier session** and **Other
    session** beside each design, with its absolute local submission date/time.
    This session means a job submitted from this workbench window, including a
    newly resumed study. Existing jobs retain their earlier-session label even
@@ -813,10 +811,11 @@ midpoint after the selected point; move it to make a convex corner. **Remove**
 deletes a point while keeping at least three. **Fit view** includes the origin
 and uses the same physical scale on both axes.
 
-Presets build a polygon from the current conductor width and height:
-**Round wire** (diameter = width), **U-shape** (half circle of diameter = width
-on a rectangle, total height = height, arc away from the support) and
-**Omega holder**. **Points** sets the number of points around a full circle for
+Choose **Round wire** and enter **Diameter [mm]**. **Apply** stores the round
+profile and both nominal dimensions together. **U-shape** and **Omega holder**
+use the current nominal dimensions. The U-shape is a half circle of diameter
+equal to the width on a rectangle, with its arc away from the support and its
+total height equal to the nominal height. **Points** sets the number of points around a full circle for
 Round wire and U-shape (the U-shape half circle uses half as many); fewer points
 give smaller STL files. **Keep circle area** enlarges the round polygon so its
 area and resistance match the round wire. **Import table…** loads `u, n`

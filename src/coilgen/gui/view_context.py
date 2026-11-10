@@ -60,6 +60,7 @@ _DATASETS = {
     "evaluated_winding": "Evaluated winding paths",
     "fabrication": "Pipeline conductor",
     "swept": "Pipeline swept conductor",
+    "print_former": "Grooved print former",
     "target": "Target field",
     "sheet": "Stream function field",
     "validation": "Independent stream function field validation",
@@ -202,7 +203,7 @@ def _dataset_scope(arrays, metadata, key, original, capability=None):
             "Solved stream function coefficients [A]",
             "Saved stream function solution." + (" " + capability.explanation if not capability.available else ""),
         )
-    if key in PATH_PREFIXES or key == "swept":
+    if key in PATH_PREFIXES or key in {"swept", "print_former"}:
         return (
             capability.available,
             "Geometry [m]",

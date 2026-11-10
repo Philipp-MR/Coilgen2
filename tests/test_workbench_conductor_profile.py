@@ -11,6 +11,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QLineEdit
 
 from coilgen.application import ProjectDocument
+from coilgen.application.conductor_profiles import round_wire_profile
 from coilgen.application.presets import preset_config
 from coilgen.gui.conductor_preview import ConductorPreview
 
@@ -142,6 +143,25 @@ def test_rectangle_dimensions_do_not_overwrite_custom_polygon(windows):
     np.testing.assert_array_equal(window.project.config.cross_sectional_points, ((0.0, 0.0),))
     assert window.project.config.conductor_cross_section_width == 0.0075
     assert window._draft_controls["wire_width"].accessibleName() == "Conductor width"
+
+
+def test_round_wire_applies_profile_and_nominal_dimensions_together(windows):
+    window = _window(windows, PROFILE)
+    original = window.project
+    editor = _editor(window)
+    editor.mode_combo.setCurrentIndex(editor.mode_combo.findData("round"))
+    editor.diameter_spin.setValue(1.2)
+    assert window.project is original and window._draft_dirty
+    assert window.apply_settings()
+    config = window.project.config
+    assert config.conductor_cross_section_width == pytest.approx(0.0012)
+    assert config.conductor_cross_section_height == pytest.approx(0.0012)
+    np.testing.assert_allclose(config.cross_sectional_points, round_wire_profile(0.0012), atol=1e-18)
+    assert _editor(window).mode_combo.currentData() == "round"
+    assert _editor(window).round_diameter_m() == pytest.approx(0.0012)
+    assert window.undo_stack.count() == 1
+    window.undo_stack.undo()
+    assert window.project.config == original.config
 
 
 def test_invalid_geometry_highlights_profile_even_when_other_fields_changed(windows):

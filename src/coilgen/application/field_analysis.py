@@ -244,6 +244,30 @@ def _source_geometry(record, spec, row):
     return {"region": geometry, "registration": identity, "sample_transform": identity}
 
 
+def owned_roi_bounds(geometry):
+    """Exact world AABB of an authored primitive, independent of sample density."""
+    if geometry is None:
+        return None
+    from ..target_regions import TargetRegion
+    from .gradient_studies import RigidTransform
+
+    region = TargetRegion.from_dict(geometry["region"])
+    if region.shape == "enclosing_mesh":
+        return None
+    rotation, center = region.rotation_matrix, np.asarray(region.center_m)
+    for key in ("registration", "sample_transform"):
+        transform = RigidTransform(**geometry[key])
+        pose = np.asarray(transform.rotation)
+        rotation, center = pose @ rotation, center @ pose.T + transform.translation_m
+    if region.shape in {"sphere", "ellipsoid"}:
+        half = np.linalg.norm(rotation * region.half_extents_m, axis=1)
+    elif region.shape == "box":
+        half = np.abs(rotation) @ region.half_extents_m
+    else:
+        half = region.radius_m * np.linalg.norm(rotation[:, :2], axis=1) + region.length_m / 2 * np.abs(rotation[:, 2])
+    return np.stack((center - half, center + half))
+
+
 def source_catalog(record, *, request=None, progress=None, cancel_check=None) -> tuple[FieldDataset, ...]:
     """Resolve fields and their own saved desired vectors from a verified RunRecord.
 

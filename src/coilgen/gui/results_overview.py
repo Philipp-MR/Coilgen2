@@ -8,12 +8,14 @@ from __future__ import annotations
 
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QFontMetrics, QPalette
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
+from ..application.cad import PRINT_FORMER_EXPORT_HINT, has_saved_print_former, print_former_status
 from ..application.routing_analysis import routing_analysis_available
 from .colors import apply_tone, tone_color
 from .coil_statistics import build_coil_statistics
 from .icons import icon
+from .run_metadata import read_run_metadata
 from .result_summary import (
     FieldResultSummary,
     coil_metric_cards,
@@ -101,7 +103,20 @@ class ResultsOverviewPanel(QFrame):
         self.routing_button.setMinimumHeight(28)
         self.routing_button.clicked.connect(lambda _checked=False: self.action_requested.emit("routing"))
         header.addWidget(self.routing_button)
+        self.metrics_button = QPushButton("Hide metrics", self)
+        self.metrics_button.setObjectName("results_overview_toggle_metrics")
+        self.metrics_button.setMinimumHeight(28)
+        self.metrics_button.setToolTip("Collapse or expand the recorded field and coil metrics.")
+        self.metrics_button.setCheckable(True)
+        self.metrics_button.setChecked(True)
+        self.metrics_button.toggled.connect(self._show_metrics)
+        header.addWidget(self.metrics_button)
         layout.addLayout(header)
+        self.metric_details = QWidget(self)
+        metrics = QVBoxLayout(self.metric_details)
+        metrics.setContentsMargins(0, 0, 0, 0)
+        metrics.setSpacing(4)
+        layout.addWidget(self.metric_details)
         # Headline: the current that produces the requested field, and the
         # field-shape error that remains at that current.
         self.drive_cards = QFrame(self)
@@ -135,7 +150,7 @@ class ResultsOverviewPanel(QFrame):
             card_layout.addWidget(value)
             drive_row.addWidget(card, 1)
             self.drive_labels[key], self.drive_values[key] = caption, value
-        layout.addWidget(self.drive_cards)
+        metrics.addWidget(self.drive_cards)
         self.field_cards = QFrame(self)
         cards = QHBoxLayout(self.field_cards)
         cards.setContentsMargins(0, 0, 0, 0)
@@ -168,14 +183,14 @@ class ResultsOverviewPanel(QFrame):
             card_layout.addWidget(value)
             cards.addWidget(card, 1)
             self.metric_labels[key], self.metric_values[key] = caption, value
-        layout.addWidget(self.field_cards)
+        metrics.addWidget(self.field_cards)
         self.context = QLabel(self)
         self.context.setTextFormat(Qt.TextFormat.PlainText)
         self.context.setWordWrap(True)
         self.context.setMinimumWidth(0)
         self.context.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.context.setAccessibleName("Field source, current and sampling scope")
-        layout.addWidget(self.context)
+        metrics.addWidget(self.context)
         properties = QHBoxLayout()
         properties.setSpacing(7)
         self.coil_metric_labels, self.coil_metric_values = {}, {}
@@ -204,14 +219,19 @@ class ResultsOverviewPanel(QFrame):
             card_layout.addWidget(value)
             properties.addWidget(card, 1)
             self.coil_metric_labels[key], self.coil_metric_values[key] = caption, value
-        layout.addLayout(properties)
+        metrics.addLayout(properties)
         self.coil_scope = QLabel(self)
         self.coil_scope.setTextFormat(Qt.TextFormat.PlainText)
         self.coil_scope.setWordWrap(True)
         self.coil_scope.setMinimumWidth(0)
         self.coil_scope.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.coil_scope.setAccessibleName("Saved electrical, conductor material and volume scope")
-        layout.addWidget(self.coil_scope)
+        metrics.addWidget(self.coil_scope)
+        self.former_scope = QLabel(self)
+        self.former_scope.setObjectName("results_overview_former_status")
+        self.former_scope.setTextFormat(Qt.TextFormat.PlainText)
+        self.former_scope.setWordWrap(True)
+        self.former_scope.setMinimumWidth(0)
         actions = QHBoxLayout()
         actions.setSpacing(5)
         self.buttons = {}
@@ -228,8 +248,27 @@ class ResultsOverviewPanel(QFrame):
             actions.addWidget(button, 1)
             self.buttons[key] = button
         layout.addLayout(actions)
+        self.former_button = QPushButton(icon("export-conductor"), "Export print former…", self)
+        self.former_button.setObjectName("results_overview_export_former")
+        self.former_button.setMinimumHeight(32)
+        self.former_button.setToolTip("Export the selected run's saved former STL for inspection.")
+        self.former_button.clicked.connect(lambda _checked=False: self.action_requested.emit("export_former"))
+        self.former_plot_button = QPushButton(icon("mesh"), "Show print former", self)
+        self.former_plot_button.setObjectName("results_overview_show_former")
+        self.former_plot_button.setMinimumHeight(32)
+        self.former_plot_button.setToolTip("Show the selected run's saved grooved former geometry.")
+        self.former_plot_button.clicked.connect(lambda _checked=False: self.action_requested.emit("show_former"))
+        former_actions = QHBoxLayout()
+        former_actions.addWidget(self.former_scope, 1)
+        former_actions.addWidget(self.former_plot_button)
+        former_actions.addWidget(self.former_button)
+        layout.addLayout(former_actions)
         self._style_panel()
         self.hide()
+
+    def _show_metrics(self, expanded):
+        self.metrics_button.setText("Hide metrics" if expanded else "Show metrics")
+        self.metric_details.setVisible(expanded)
 
     def _style_panel(self):
         parent = self.parentWidget()
@@ -290,15 +329,24 @@ class ResultsOverviewPanel(QFrame):
         self.coil_scope.setText(scope)
         self.coil_scope.setToolTip(tooltip)
 
-    def set_record(self, record, *, source_error="", stale=False):
-        key = (id(record), str(source_error), bool(stale))
+    def set_record(self, record, *, source_error="", stale=False, former_plot_available=False):
+        key = (id(record), str(source_error), bool(stale), bool(former_plot_available))
         if key == self._cache_key:
             return
         self._cache_key, self.record = key, record
         self.summary = summary = summarize_field_result(record, source_error=source_error, stale=stale)
         self.coil_report = build_coil_statistics(record)
         routing_available = routing_analysis_available(record)
-        visible = record is not None and (summary.visible or self.has_coil_statistics or routing_available)
+        metadata = read_run_metadata(record)
+        former_status = print_former_status(metadata)
+        former_available = has_saved_print_former(metadata)
+        visible = record is not None and (
+            summary.visible
+            or self.has_coil_statistics
+            or routing_available
+            or bool(former_status)
+            or former_plot_available
+        )
         self.setVisible(visible)
         if not visible:
             return
@@ -312,6 +360,14 @@ class ResultsOverviewPanel(QFrame):
         self.context.setToolTip(summary.tooltip)
         self.setToolTip(summary.tooltip)
         self._set_coil_statistics()
+        self.former_scope.setVisible(bool(former_status or former_available or former_plot_available))
+        self.former_scope.setText(
+            (former_status or "Print former") + (f". {PRINT_FORMER_EXPORT_HINT}" if not former_available else "")
+        )
+        self.former_button.setVisible(former_available)
+        self.former_button.setEnabled(former_available and not source_error)
+        self.former_plot_button.setVisible(former_plot_available)
+        self.former_plot_button.setEnabled(former_plot_available and not source_error)
         drive = drive_metric_cards(summary)
         self.drive_cards.setVisible(summary.visible and any(not card["unavailable"] for card in drive))
         for card in drive:

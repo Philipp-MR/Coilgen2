@@ -110,6 +110,21 @@ def round_wire_profile(
     return _snap_round_off(((radius * np.cos(angle), radius * np.sin(angle)) for angle in angles), radius)
 
 
+def round_wire_options(points, diameter_m):
+    """Recognize a saved round preset by exact geometry, preserving custom polygons."""
+    try:
+        points = canonical_profile_points(points)
+    except ValueError:
+        return None
+    segments = len(points)
+    if not MIN_CIRCLE_SEGMENTS <= segments <= MAX_CIRCLE_SEGMENTS or not np.isfinite(diameter_m) or diameter_m <= 0:
+        return None
+    for equal_area in (False, True):
+        if points == round_wire_profile(diameter_m, segments, equal_area=equal_area):
+            return segments, equal_area
+    return None
+
+
 def _snap_round_off(points, scale) -> tuple[tuple[float, float], ...]:
     """Replace trigonometric round-off such as cos(pi/2) = 6e-17 by exact zeros."""
     tolerance = 1e-12 * scale

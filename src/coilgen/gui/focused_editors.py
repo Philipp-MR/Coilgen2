@@ -433,6 +433,13 @@ class FocusedFormSection(QWidget):
         self.summary_label.setText(text)
         self.summary_label.setToolTip(text)
 
+    def track_control(self, control):
+        """Include a new dependent field in this decision's cancellation snapshot."""
+        self.controls = (*self.controls, control)
+        self._observe(control)
+        if self._entry:
+            self._entry[control] = _draft_value(control)
+
     def open(self, *_args):
         # Moving to another decision hides this dialog while retaining its
         # draft. Reopening it must retain the same cancellation baseline.

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QMenu, QProgressBar, QSizePolicy, QToolButton, QWidget
 
+from ..application.workbench_presentation import FINALIZING_FABRICATION, is_finalizing_fabrication
 from .colors import apply_tone
 from .runtime_feedback import RuntimeFeedback, fraction_percent as _percent, runtime_feedback, work_detail
 
@@ -57,7 +58,7 @@ class StageProgress:
     def tooltip(self):
         text = f"{self.description}. {_STATUS_TEXT[self.status]}."
         if self.inferred:
-            text += " Next requested stage without recorded completion; the worker activity is shown below."
+            text += " Next requested stage without recorded completion. See the activity bar for the worker operation."
         if self.viewed:
             text += " Currently shown in the plot."
         if self.status == "complete":
@@ -177,7 +178,9 @@ class ComputationIndicator(QWidget):
                 if indeterminate:
                     percent = None
                 text = (
-                    f"Operation {percent}%"
+                    FINALIZING_FABRICATION
+                    if is_finalizing_fabrication(active[0])
+                    else f"Operation {percent}%"
                     if runtime.phase_percent is not None
                     else f"Computing ({percent}%)"
                     if percent is not None
@@ -306,6 +309,7 @@ class ComputationIndicator(QWidget):
         self.details_label.setAccessibleDescription(summary)
         self.details_label.setVisible(bool(summary))
         self._set_task_rows(task_rows)
+        self.tasks_button.setVisible(bool(working))
         self.label.setText(text)
         self.setToolTip("\n".join(details))
         self.label.setToolTip(self.toolTip())
@@ -327,7 +331,6 @@ class ComputationIndicator(QWidget):
         for action in actions[len(rows) :]:
             self.tasks_menu.removeAction(action)
             action.deleteLater()
-        self.tasks_button.setVisible(bool(rows))
 
 
 def build_design_progress(

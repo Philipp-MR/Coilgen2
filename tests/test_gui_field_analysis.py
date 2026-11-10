@@ -158,6 +158,71 @@ def test_maps_use_one_percent_normalization_and_preserve_unsupported_pixels(appl
     dialog.reject()
 
 
+def test_paired_field_and_target_limits_keep_displayed_source_and_units(application, record, dataset, monkeypatch):
+    monkeypatch.setattr(gui, "sample_slices", fake_slices)
+    dataset = replace(
+        dataset,
+        key="routed",
+        label="Evaluated routed winding · recorded current",
+        provenance={
+            "current_A": 0.8293318,
+            "current_refitted": False,
+        },
+    )
+    dialog = dialog_with_data(record, dataset)
+    dialog.metric_selector.setCurrentIndex(dialog.metric_selector.findData("field"))
+    dialog.refresh_analysis()
+    wait_worker(application, dialog)
+    field_limits = dialog._color_limits
+    assert field_limits[0] == -field_limits[1]
+    assert "0.829332 A" in dialog.scope.text() and "150 samples" in dialog.scope.text()
+    assert "recorded current" not in dialog.source.currentText()
+    assert "share the same color scale" in dialog.scope.text()
+    dialog.metric_selector.setCurrentIndex(dialog.metric_selector.findData("target"))
+    dialog.refresh_analysis()
+    wait_worker(application, dialog)
+    assert dialog._color_limits == pytest.approx(field_limits)
+    dialog.metric_selector.setCurrentIndex(dialog.metric_selector.findData("vector_error"))
+    dialog.refresh_analysis()
+    wait_worker(application, dialog)
+    assert dialog._color_limits[0] == 0 and "across all three components" in dialog.scope.text()
+    dialog.reject()
+
+
+def test_residual_slices_publish_a_partial_view_without_exporting_partial_state(
+    application, record, dataset, monkeypatch
+):
+    import time
+
+    finish = Event()
+
+    def sampler(record, source, **kwargs):
+        result = fake_slices(record, source, **kwargs)
+        kwargs["on_slice"](replace(result, slices=result.slices[:1]))
+        assert finish.wait(8)
+        return result
+
+    monkeypatch.setattr(gui, "sample_slices", sampler)
+    dialog = dialog_with_data(record, dataset)
+    dialog.focus_view("errors")
+    dialog.residual_slices.click()
+    assert dialog.tabs.currentIndex() == 1
+    dialog.refresh_analysis()
+    try:
+        deadline = time.monotonic() + 5
+        while not dialog._showing_partial and time.monotonic() < deadline:
+            application.processEvents()
+            time.sleep(0.005)
+        assert "Preview 1/2 slices" in dialog.slice_note.text()
+        assert dialog.state is None and not dialog.export_plot.isEnabled() and not dialog.export_data.isEnabled()
+    finally:
+        finish.set()
+    wait_worker(application, dialog)
+    assert len(dialog.state.slices.slices) == 2 and "Preview" not in dialog.slice_note.text()
+    assert dialog.export_plot.isEnabled() and dialog.export_data.isEnabled()
+    dialog.reject()
+
+
 @pytest.mark.parametrize("count", (1, 3, 4))
 def test_wide_slice_canvas_keeps_maps_centered_and_shares_one_physical_scale(
     application, record, dataset, monkeypatch, count
@@ -248,7 +313,9 @@ def test_harmonics_exports_and_plot_tables_remain_run_bound(application, record,
     wait_worker(application, dialog)
     assert dialog.state.harmonics["rank"] == 9
     assert dialog.coefficients.rowCount() == 9
-    assert "Rank 9/9" in dialog.harmonic_note.text()
+    assert "Rank 9/9" in dialog.harmonic_note.text() and "reference radius" in dialog.harmonic_note.text()
+    assert dialog.coefficients.horizontalHeaderItem(4).text() == "Sample RMS contribution [µT]"
+    assert "sample RMS contribution" in dialog.harmonic_plot.figure.axes[0].get_ylabel()
     dialog.harmonic_source.setCurrentIndex(2)
     residual_fit = dialog.state.harmonics["fits"]["residual"]
     assert np.max(np.abs(residual_fit.residual_values)) < 1e-18
@@ -959,7 +1026,7 @@ def test_fresh_coil_entry_starts_no_catalog_or_physical_slice_work(application, 
     def unexpected(*_args, **_kwargs):
         pytest.fail("Opening saved coil statistics must not evaluate field sources or slice grids.")
 
-    monkeypatch.setattr(gui, "source_catalog", unexpected)
+    monkeypatch.setattr(gui.SliceInputCache, "catalog", unexpected)
     monkeypatch.setattr(gui, "sample_slices", unexpected)
     record = RunRecord(tmp_path, {"summary": {"resistance_ohm": 0.4}}, {})
     dialog = gui.FieldAnalysisDialog(record, initial_view="coil", plot_factory=FakePlot, cloud_factory=FakeCloud)
@@ -999,7 +1066,7 @@ def test_native_metrics_entry_defers_physical_slice_sampling_until_requested(
 
 def test_later_field_entry_loads_catalog_once_from_a_fresh_coil_window(application, record, dataset, monkeypatch):
     catalogs = []
-    monkeypatch.setattr(gui, "source_catalog", lambda *_args, **_kwargs: catalogs.append(True) or (dataset,))
+    monkeypatch.setattr(gui.SliceInputCache, "catalog", lambda *_args, **_kwargs: catalogs.append(True) or (dataset,))
     monkeypatch.setattr(gui, "sample_slices", lambda *_args, **_kwargs: pytest.fail("Native metrics need no slices."))
     dialog = gui.FieldAnalysisDialog(record, initial_view="coil", plot_factory=FakePlot, cloud_factory=FakeCloud)
     dialog.focus_view("metrics")
@@ -1086,7 +1153,7 @@ def test_native_tab_click_from_fresh_coil_page_loads_field_catalog_and_requested
     from PySide6.QtTest import QTest
 
     catalogs, slices = [], []
-    monkeypatch.setattr(gui, "source_catalog", lambda *_args, **_kwargs: catalogs.append(True) or (dataset,))
+    monkeypatch.setattr(gui.SliceInputCache, "catalog", lambda *_args, **_kwargs: catalogs.append(True) or (dataset,))
 
     def sampler(*args, **kwargs):
         slices.append(True)

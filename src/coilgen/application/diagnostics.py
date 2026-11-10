@@ -117,6 +117,7 @@ def preview_diagnostics(config, mesh, target=None, *, message="") -> dict:
         "normalization_requested": config.target_gradient_normalization,
         "normalization_method": diagnostics.get("target_gradient_normalization_method"),
         "normalization_scale": diagnostics.get("target_gradient_normalization_scale"),
+        "normalization_fallback": diagnostics.get("target_gradient_normalization_fallback", False),
         "roi_center_policy": "imported world coordinates"
         if imported
         else "support vertex centroid"

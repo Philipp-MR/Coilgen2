@@ -127,8 +127,9 @@ def save_bundle(document, path, *, progress=None):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
-    finally:
+    except BaseException:
         temporary.unlink(missing_ok=True)
+        raise
     return path
 
 

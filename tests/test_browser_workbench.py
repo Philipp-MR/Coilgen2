@@ -57,6 +57,15 @@ def test_rendered_workbench_has_labeled_panel_navigation_and_selectors(tmp_path)
     try:
         Elements().feed(server.state.trame__template_main)
         assert any(attrs.get(":data-panel") == "workspace_panel" for _, attrs in elements)
+        # Flush the actual choice, not whichever nested value happened to be
+        # visible before Vue's implicit v-model setter ran.
+        assert any(
+            tag == "vselect"
+            and attrs.get(":modelvalue") == "settings_values[field.key]"
+            and attrs.get("@update:modelvalue")
+            == "settings_values = {...settings_values, [field.key]: $event}; flushState('settings_values')"
+            for tag, attrs in elements
+        )
         landmarks = {
             attrs["aria-label"] for tag, attrs in elements if tag in {"main", "aside"} and "aria-label" in attrs
         }
@@ -113,6 +122,64 @@ def test_gallery_selection_previews_without_loading_and_commits_the_clicked_opti
     assert session.assembly is current and state.settings_dirty
 
 
+def test_browser_edit_absolute_field_and_offset_roi_without_advanced_settings(tmp_path):
+    from coilgen.target import define_target_field
+
+    server, browser = create_app(tmp_path, server_name="test-web-world-roi")
+    state, session = server.state, browser.session
+    try:
+        browser.new_project()
+        state.node = "target"
+        browser._refresh_settings()
+        original = session.project
+        assert state.target_amplitude_label == "Gradient amplitude [T/m]"
+        state.settings_values = {**state.settings_values, "target_gradient_normalization": "scale"}
+        assert browser._check_edits() and state.target_amplitude_label == "Amplitude multiplier"
+        browser._refresh_settings()
+        # Saving the displayed defaults keeps the original legacy grid.
+        browser.apply_settings()
+        assert session.project is original
+        state.settings_values = {
+            **state.settings_values,
+            "field_shape_function": "0.020*(x-0.020)*(z-0.025)",
+            "target_gradient_normalization": "off",
+            "target_region_radius_mm": "25",
+            "target_region_center_x_mm": "20",
+            "target_region_center_y_mm": "-10",
+            "target_region_center_z_mm": "25",
+        }
+        browser.apply_settings()
+        config = session.project.config
+        region = config.target_region_geometry
+        assert session.project.revision == original.revision + 1
+        assert region["shape"] == "sphere" and region["radius_m"] == pytest.approx(0.025)
+        np.testing.assert_allclose(region["center_m"], [0.02, -0.01, 0.025])
+        assert state.target_scaling_mode == "none"
+        target = define_target_field([], None, None, config)
+        x, _, z = target.coords.T
+        np.testing.assert_allclose(target.b[:, 2], 0.02 * (x - 0.02) * (z - 0.025))
+        state.dataset = "preview_target"
+        browser._render()
+        assert "center [20, -10, 25] mm" in state.scene_caption
+        assert "target samples" in state.scene_caption
+        assert "Absolute field" in state.scene_caption
+
+        session.apply_config({"target_gradient_normalization": "none"})
+        browser._refresh_settings()
+        normalization = next(item for item in state.settings_fields if item["key"] == "target_gradient_normalization")
+        absolute = [option for option in normalization["choices"] if option["title"] == "Absolute field expression"]
+        assert absolute == [{"title": "Absolute field expression", "value": "none"}]
+        saved = session.project
+        browser.apply_settings()
+        assert session.project is saved
+
+        session.apply_config({"field_shape_function": "1e-4", "target_gradient_normalization": "linear_fit"})
+        browser._render()
+        assert "Applied field scale ×0.02 (fallback · review Target scaling)" in state.scene_caption
+    finally:
+        browser.session.close()
+
+
 def test_geometry_form_edits_the_selected_support(tmp_path):
     server, browser = create_app(tmp_path, user="tester", server_name="test-geometry-sources")
     state = server.state
@@ -155,6 +222,70 @@ def test_geometry_form_edits_the_selected_support(tmp_path):
     browser.session.apply_config({"coil_mesh_file": "create circular mesh"})
     assert set(state.settings_values) == {"coil_mesh_file"}
     assert "circular_mesh_parameter_list" in state.geometry_help
+
+
+def test_support_and_former_dimensions_follow_the_draft_selection(tmp_path):
+    server, browser = create_app(tmp_path, server_name="test-browser-conditional-dimensions")
+    state, session = server.state, browser.session
+    try:
+        browser.new_project()
+        original = session.project
+        cylinder = dict(state.settings_values)
+        frustum = "create conical frustum mesh"
+        state.settings_values = {**cylinder, "coil_mesh_file": frustum}
+        assert browser._check_edits() and session.project is original
+        assert "conical_top_radius_mm" in state.settings_values and "cylinder_radius_mm" not in state.settings_values
+        default_top_radius = state.settings_values["conical_top_radius_mm"]
+        state.settings_values = {**state.settings_values, "conical_top_radius_mm": "101"}
+        browser._refresh_settings()  # The settings dialog's discard handler.
+        assert state.settings_values == cylinder and not browser._check_edits()
+        state.settings_values = {**cylinder, "coil_mesh_file": frustum}
+        assert browser._check_edits() and state.settings_values["conical_top_radius_mm"] == default_top_radius
+        state.settings_values = {
+            **state.settings_values,
+            "conical_bottom_radius_mm": "95",
+            "conical_top_radius_mm": "60",
+            "conical_length_mm": "160",
+            "conical_length_divisions": "2.5",
+        }
+        browser.apply_settings()
+        assert session.project is original
+        state.settings_values = {**state.settings_values, "conical_length_divisions": "12"}
+        state.settings_values = {**state.settings_values, "coil_mesh_file": cylinder["coil_mesh_file"]}
+        assert not browser._check_edits() and state.settings_values == cylinder
+        state.settings_values = {**state.settings_values, "coil_mesh_file": frustum}
+        assert browser._check_edits() and state.settings_values["conical_top_radius_mm"] == "60"
+        browser.apply_settings()
+        geometry = session.project
+        assert geometry.revision == original.revision + 1
+        assert geometry.config.conical_frustum_mesh_parameter_list[:3] == pytest.approx((0.160, 0.095, 0.060))
+        assert geometry.config.cylinder_mesh_parameter_list == original.config.cylinder_mesh_parameter_list
+
+        state.node = "print"
+        browser._refresh_settings()
+        assert set(state.settings_values) == {"support_body_mode"}
+        state.settings_values = {"support_body_mode": "outside"}
+        assert browser._check_edits() and session.project is geometry
+        state.settings_values = {
+            **state.settings_values,
+            "support_body_thickness_mm": "3.5",
+            "support_body_groove_clearance_mm": "0.25",
+        }
+        state.settings_values = {**state.settings_values, "support_body_mode": "off"}
+        assert not browser._check_edits() and state.settings_values == {"support_body_mode": "off"}
+        state.settings_values = {"support_body_mode": "outside"}
+        assert browser._check_edits() and state.settings_values["support_body_thickness_mm"] == "3.5"
+        browser.apply_settings()
+        assert session.project.revision == geometry.revision + 1
+        assert session.project.config.support_body_mode == "outside"
+        assert session.project.config.support_body_thickness == pytest.approx(0.0035)
+        assert session.project.config.support_body_groove_clearance == pytest.approx(0.00025)
+        browser.undo()
+        assert session.project is geometry
+        browser.undo()
+        assert session.project is original
+    finally:
+        browser.session.close()
 
 
 def test_stl_scale_only_applies_to_stl_inputs(tmp_path):
@@ -379,6 +510,32 @@ def test_browser_u_shape_point_count_and_profile_table(tmp_path):
     state.profile_upload = {"name": "profile.stl", "content": list(b"0 0")}
     browser.apply_settings()
     assert browser.session.project.config.cross_sectional_points == points
+
+
+def test_browser_applies_custom_round_wire_diameter_in_one_revision(tmp_path):
+    from coilgen.application.conductor_profiles import round_wire_profile
+
+    server, browser = create_app(tmp_path, user="tester", server_name="test-round-wire-diameter")
+    state = server.state
+    state.template = "cylinder"
+    browser.load_template()
+    state.node = "conductor"
+    browser._refresh_settings()
+    original = browser.session.project
+    state.profile_preset = "round"
+    state.profile_diameter_mm = ""
+    browser.apply_settings()
+    assert browser.session.project is original
+    state.profile_diameter_mm = "1.2"
+    browser.apply_settings()
+    applied = browser.session.project
+    assert applied.revision == original.revision + 1
+    assert applied.config.conductor_cross_section_width == pytest.approx(0.0012)
+    assert applied.config.conductor_cross_section_height == pytest.approx(0.0012)
+    np.testing.assert_allclose(applied.config.cross_sectional_points, round_wire_profile(0.0012), atol=1e-18)
+    assert state.applied_profile == "Round wire · 1.2 mm diameter"
+    browser.undo()
+    assert browser.session.project is original
 
 
 def test_model_tree_shows_each_section_readiness_and_filters_dialog_findings(tmp_path):

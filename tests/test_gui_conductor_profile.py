@@ -276,13 +276,11 @@ def test_point_count_and_equal_area_drive_round_and_u_shape_presets(editor):
     editor.set_rectangle_dimensions(2, 3)
     editor.segments_spin.setValue(8)
     signals = QSignalSpy(editor.changed)
-    editor.round_button.click()
-    assert editor.mode_combo.currentData() == "polygon"
-    assert editor.table.rowCount() == 8
+    editor.mode_combo.setCurrentIndex(editor.mode_combo.findData("round"))
+    assert len(editor.profile()) == 8
     assert signals.count() == 1
     plain = editor.profile()
     editor.equal_area_check.setChecked(True)
-    editor.round_button.click()
     from coilgen.application.conductor_profiles import validate_conductor_profile
 
     assert validate_conductor_profile(editor.profile()).area_m2 == pytest.approx(3.141592653589793e-6)

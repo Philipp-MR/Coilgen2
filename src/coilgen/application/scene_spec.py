@@ -13,7 +13,17 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from ..field_components import field_component_values, normalized_b0_direction
-from .evidence import FIELD_KEYS, PATH_PREFIXES, WIRE_FIELDS, path_array_names, resolve_dataset
+from .evidence import (
+    FIELD_KEYS,
+    PATH_PREFIXES,
+    WIRE_FIELDS,
+    field_points_name,
+    paired_field_name,
+    path_array_names,
+    print_former_array_names,
+    resolve_dataset,
+)
+from .field_presentation import paired_color_limits
 
 B0_INDICATOR_COLOR = "#c2410c"
 SUPPORT_COLOR = "#79949d"
@@ -35,6 +45,7 @@ DATASET_GROUPS = (
             ("Evaluated winding field paths", "evaluated_winding"),
             ("Pipeline conductor centerlines", "fabrication"),
             ("Pipeline swept conductor", "swept"),
+            ("Grooved print former", "print_former"),
         ),
     ),
     (
@@ -84,6 +95,7 @@ PREFERRED_RUN_PLOTS = (
     "winding_validation_residual",
     "routed_residual",
     "contour_residual",
+    "print_former",
 )
 
 
@@ -209,7 +221,7 @@ def _support_layer(arrays, opacity=0.15, scalars=None, label=""):
     )
 
 
-def scene_layers(arrays, key, *, component="Bz", b0_direction=(0.0, 0.0, 1.0), original=False):
+def scene_layers(arrays, key, *, component="Bz", b0_direction=(0.0, 0.0, 1.0), original=False, show_target=False):
     """Layers for one dataset key, or ``[]`` with the reason when unavailable.
 
     Returns ``(layers, reason)``. Field maps use the selected component;
@@ -260,6 +272,19 @@ def scene_layers(arrays, key, *, component="Bz", b0_direction=(0.0, 0.0, 1.0), o
         layers.append(
             SceneLayer(key, "lines", np.vstack(paths), lines=paths, color=WINDING_COLOR, extra={"count": len(paths)})
         )
+    elif key == "print_former":
+        for name in print_former_array_names(arrays):
+            stem = name.removesuffix("_vertices_m")
+            layers.append(
+                SceneLayer(
+                    stem,
+                    "surface",
+                    np.asarray(arrays[name], dtype=float),
+                    faces=np.asarray(arrays[f"{stem}_faces"], dtype=np.int64),
+                    color=GROOVED_SUPPORT_COLOR,
+                    extra={"role": "grooved_support", "reviewed": stem.startswith("review_")},
+                )
+            )
     elif key == "swept":
         grooved = [
             name.removesuffix("_vertices_m")
@@ -292,12 +317,8 @@ def scene_layers(arrays, key, *, component="Bz", b0_direction=(0.0, 0.0, 1.0), o
                 )
             )
     elif key in FIELD_KEYS:
-        points_name = "validation_points_m" if key == "validation" else "target_points_m"
-        if key == "fabricated" and "fabricated_points_m" in arrays:
-            points_name = "fabricated_points_m"
-        reference_name = "target_field_T"
-        if key.startswith("winding_validation"):
-            points_name, reference_name = "winding_validation_points_m", "winding_validation_target_T"
+        points_name = field_points_name(arrays, key)
+        reference_name = paired_field_name(arrays, key)
         field_name = FIELD_KEYS[key]
         if key in WIRE_FIELDS and original:
             field_name = field_name.replace("_field_T", "_field_at_stream_current_T")
@@ -309,9 +330,18 @@ def scene_layers(arrays, key, *, component="Bz", b0_direction=(0.0, 0.0, 1.0), o
         if scalars.ndim == 2:
             scalars = np.linalg.norm(scalars, axis=1)
         scalars = scalars * FIELD_DISPLAY_SCALE
+        limits = None
+        comparable = bool(reference_name and not residual and key not in {"target", "preview_target"})
+        if comparable:
+            desired = field_component_values(arrays[reference_name], component, b0_direction=b0_direction)
+            desired = desired * FIELD_DISPLAY_SCALE
+            limits = paired_color_limits(scalars, desired, signed=component != "Bmag")
+            if show_target:
+                scalars = desired
         if has_support:
             layers.append(_support_layer(arrays, opacity=0.24 if key == "preview_target" else 0.15))
-        label = "|B − target|" if residual and component == "Bmag" else f"{'Δ' if residual else ''}{component}"
+        prefix = "Δ" if residual else "Target " if comparable and show_target else ""
+        label = "|B − target|" if residual and component == "Bmag" else f"{prefix}{component}"
         layers.append(
             SceneLayer(
                 key,
@@ -320,6 +350,7 @@ def scene_layers(arrays, key, *, component="Bz", b0_direction=(0.0, 0.0, 1.0), o
                 scalars=scalars,
                 scalar_label=f"{label} [{FIELD_DISPLAY_UNIT}]",
                 symmetric=residual and component != "Bmag",
+                extra={"paired_target": comparable, "color_limits": limits},
             )
         )
     return layers, ""

@@ -27,11 +27,18 @@ import numpy as np
 
 from ..application.cad import (
     GEOMETRY_FORMAT_LABELS,
+    PRINT_FORMER_SCOPE,
     default_export_selection,
     draft_export_notice,
     geometry_option_label,
+    has_saved_print_former,
     is_draft_artifact,
+    print_former_status,
+    saved_print_former_arrays,
 )
+from ..application.conductor_profiles import round_wire_options
+from ..application.field_presentation import field_provenance
+from ..application.field_sampling import SliceInputCache
 from ..application.scene_spec import (
     B0_INDICATOR_COLOR,
     DATASET_GROUPS,
@@ -51,12 +58,28 @@ from ..application.session import (
     PIPELINE_STAGES,
     SETTINGS_NODES,
     WorkbenchSession,
+    target_scaling_mode,
+)
+from ..application.targets import target_normalization_choices
+from ..application.workbench_presentation import (
+    ACTION_COLORS,
+    COMPUTE_CAPTIONS,
+    DESIGN_PLAN_TITLE,
+    FINALIZING_FABRICATION,
+    MODEL_BUILDER_TITLE,
+    STATUS_COLORS,
+    is_finalizing_fabrication,
 )
 from ..attribution import AUTHOR_CREDIT, PROJECT_URL
 from ..application.support_parameters import SUPPORT_EDITORS
 from ..field_components import normalized_b0_direction
+from ..field_units import normalize_field_units
 from ..geometry import geometry_factory
+from ..gui.runtime_feedback import fraction_percent, runtime_feedback
 from ..persistence import atomic_text
+from ..target_regions import target_region_summary
+from .field_slices import BrowserFieldSlices
+from .harmonics import BrowserHarmonics
 from .input_policy import (
     PROJECT_UPLOAD_LIMIT,
     check_browser_inputs,
@@ -130,6 +153,7 @@ class BrowserWorkbench:
         self.camera_preset = "Isometric"
         self.axis_widget = self.b0_widget = None
         self.record = None
+        self.saved_former_arrays = None
         self.shielding_render_lock = asyncio.Lock()
         self.shielding_fields = {}
         self.shielding_cancel = Event()
@@ -154,6 +178,9 @@ class BrowserWorkbench:
             }
         )
         self._initial_state()
+        self.field_inputs = SliceInputCache()
+        self.field_slices = BrowserFieldSlices(self)
+        self.harmonics = BrowserHarmonics(self)
         session.subscribe(self._session_event)
         self._build_ui()
         self._refresh_jobs()
@@ -179,13 +206,17 @@ class BrowserWorkbench:
                 "node": "geometry",
                 "settings_fields": [],
                 "settings_values": {},
-                "applied_support": "",
+                "settings_support": "",
                 "geometry_help": "",
                 "target_help": "",
+                "target_scaling_mode": "none",
+                "target_amplitude_label": "Target amplitude",
                 "winding_help": "",
                 "settings_dirty": False,
                 "settings_dialog": False,
                 "profile_preset": None,
+                "profile_diameter_mm": None,
+                "applied_profile": "",
                 "readiness": None,
                 "profile_segments": 16,
                 "profile_equal_area": False,
@@ -197,10 +228,14 @@ class BrowserWorkbench:
                 "history_open": False,
                 "plan_summary": "",
                 "plan_channels": [],
-                "stages": [{"title": label, "value": key} for key, label in PIPELINE_STAGES],
+                "stages": [
+                    {"title": label, "value": key, "compute": COMPUTE_CAPTIONS[key]} for key, label in PIPELINE_STAGES
+                ],
                 "stage": "evaluated",
                 "jobs": [],
+                "active_jobs": [],
                 "older_jobs": [],
+                "runs_dialog": False,
                 "runs": [],
                 "selected_run": None,
                 "displayed_run": None,
@@ -211,6 +246,9 @@ class BrowserWorkbench:
                 "review_dialog": False,
                 "review_busy": False,
                 "field_plot": False,
+                "field_source_header": "",
+                "field_has_pair": False,
+                "field_show_target": False,
                 "shielding_sources": [],
                 "shielding_source": "",
                 "shielding_component": "magnitude",
@@ -233,12 +271,15 @@ class BrowserWorkbench:
                 "component": "Bz",
                 "scene_caption": "Load a template or open a project.",
                 "summary": None,
+                "results_metrics_expanded": True,
                 "metrics": [],
                 "export_options": [],
                 "export_selected": [],
+                "former_export_selected": [],
                 "export_selection_note": "",
                 "export_unit": "mm",
                 "draft_ack": False,
+                "former_draft_ack": False,
                 "draft_notice": "",
                 "draft_selected": False,
                 "download_url": "",
@@ -273,11 +314,14 @@ class BrowserWorkbench:
             lambda **_: self._check_edits()
         )
         state.change("active_channel")(lambda active_channel, **_: self._select_channel(active_channel))
-        state.change("dataset", "component", "see_through_support")(lambda **_: self._render())
+        state.change("dataset")(self._plot_changed)
+        state.change("component", "see_through_support", "field_show_target")(lambda **_: self._render())
         state.change("selected_run")(lambda selected_run, **_: self._open_run(selected_run))
         state.change("workspace_history")(lambda **_: self._refresh_jobs())
         state.change("stage")(lambda stage, **_: self._select_stage(stage))
-        state.change("export_selected", "draft_ack")(lambda **_: self._refresh_draft_state())
+        state.change("export_selected", "former_export_selected", "center_section")(
+            lambda **_: self._refresh_draft_state()
+        )
         state.change("center_section")(self._shielding_section_changed)
 
     def _notify(self, message, color="info"):
@@ -354,14 +398,57 @@ class BrowserWorkbench:
             self._render()
 
     def _refresh_settings(self):
-        from ..application.submitted_design import choice_title
-
         state, project = self.server.state, self.session.project
         state.settings_dirty = False
+        self._dependent_settings_draft = {}
         state.profile_preset, state.mesh_upload, state.mesh_scale = None, None, 0.001
         state.profile_upload = None
-        fields = self.session.settings_fields(state.node)
-        state.settings_fields = [
+        state.applied_profile = ""
+        if project is None:
+            state.settings_fields = []
+            state.settings_values = {}
+            state.settings_support, state.geometry_help = "", ""
+            return
+        values = self.session.settings_values(state.node)
+        if state.node == "conductor":
+            state.profile_diameter_mm = values["conductor_width_mm"]
+            config = project.config
+            diameter = config.conductor_cross_section_width
+            if diameter == config.conductor_cross_section_height:
+                options = round_wire_options(config.cross_sectional_points, diameter)
+                if options:
+                    state.profile_segments, state.profile_equal_area = options
+                    state.applied_profile = f"Round wire · {state.profile_diameter_mm:g} mm diameter"
+        if state.node == "target":
+            config = project.config
+            if project.study.get("requirements"):
+                state.target_help = "This study uses registered fields in named regions. Inspect or edit the requirements under Advanced."
+            elif str(config.target_field_definition_file).lower() not in {"none", ""}:
+                state.target_help = "An imported field map supplies the samples and desired field. See Advanced for the saved input reference."
+            else:
+                try:
+                    state.target_help = (
+                        f"Applied ROI · {target_region_summary(config)}. "
+                        "Select Model: support + target field in the plot to check the applied samples."
+                    )
+                except (TypeError, ValueError):
+                    state.target_help = "The saved ROI definition is invalid. Review the readiness message below."
+            self._refresh_target_scaling(config, values)
+        if state.node == "winding":
+            state.winding_help = (
+                "This winding uses independent closed turns. Inter-turn connectors and return lifts do not apply."
+                if project.config.contour_only_sweep_mode
+                else "Connected routing is disabled in this model."
+                if project.config.skip_postprocessing
+                else ""
+            )
+        self._install_settings_fields(self.session.settings_fields(state.node), values)
+
+    def _install_settings_fields(self, fields, values):
+        from ..application.submitted_design import choice_title
+
+        state = self.server.state
+        entries = [
             {
                 "key": item.key,
                 "label": item.label + (f" [{item.unit}]" if item.unit else ""),
@@ -371,30 +458,9 @@ class BrowserWorkbench:
             }
             for item in fields
         ]
-        if project is None:
-            state.settings_values = {}
-            state.applied_support, state.geometry_help = "", ""
-            return
-        values = self.session.settings_values(state.node)
-        if state.node == "target":
-            config = project.config
-            if project.study.get("requirements"):
-                state.target_help = "This study uses registered fields in named regions. Inspect or edit the requirements under Advanced."
-            elif str(config.target_field_definition_file).lower() not in {"none", ""}:
-                state.target_help = "An imported field map supplies the samples and desired field. See Advanced for the saved input reference."
-            else:
-                state.target_help = ""
-        if state.node == "winding":
-            state.winding_help = (
-                "This winding uses independent closed turns. Inter-turn connectors and return lifts do not apply."
-                if project.config.contour_only_sweep_mode
-                else "Connected routing is disabled in this model."
-                if project.config.skip_postprocessing
-                else ""
-            )
         if state.node == "geometry":
             source = str(values["coil_mesh_file"])
-            state.applied_support = source
+            state.settings_support = source
             editor = next((editor for editor in SUPPORT_EDITORS if editor.source == source), None)
             factory = geometry_factory(source)
             if editor is not None and len(fields) > 1:
@@ -409,15 +475,22 @@ class BrowserWorkbench:
                 state.geometry_help = "Imported mesh unit scale applies to this saved STL. Set the scale below before importing a replacement."
             else:
                 state.geometry_help = "Select a generated support or import an STL."
-        entries = state.settings_fields
         for entry in entries:
             if entry["kind"] != "choice":
                 continue
             key = entry["key"]
             choices = entry["choices"]
+            if key == "target_gradient_normalization":
+                entry["choices"] = [
+                    {"title": label, "value": value} for value, label in target_normalization_choices(values[key])
+                ]
+                continue
             if values[key] not in choices:
                 choices.insert(0, values[key])
             if key == "coil_mesh_file":
+                applied = self.session.project.config.coil_mesh_file
+                if applied not in choices:
+                    choices.insert(0, applied)
                 labels = {editor.source: editor.label for editor in SUPPORT_EDITORS}
                 entry["choices"] = [
                     {
@@ -440,12 +513,37 @@ class BrowserWorkbench:
         state.dirty("settings_fields")
         state.settings_values = _json_safe(values)
 
+    def _dependent_settings_options(self, values):
+        node = self.server.state.node
+        if node == "geometry":
+            return {"support_source": values.get("coil_mesh_file")}
+        if node == "print":
+            return {"former_mode": values.get("support_body_mode")}
+        return {}
+
+    def _refresh_dependent_settings(self):
+        state, project = self.server.state, self.session.project
+        if project is None or state.node not in {"geometry", "print"}:
+            return
+        edited = state.settings_values or {}
+        fields = self.session.settings_fields(state.node, **self._dependent_settings_options(edited))
+        if tuple(field.key for field in fields) == tuple(entry["key"] for entry in state.settings_fields) and (
+            state.node != "geometry" or edited.get("coil_mesh_file") == state.settings_support
+        ):
+            return
+        self._dependent_settings_draft.update(edited)
+        values = {
+            item.key: self._dependent_settings_draft.get(item.key, item.get(project.config, project.study))
+            for item in fields
+        }
+        self._install_settings_fields(fields, values)
+
     def _settings_fields_changed(self):
         state = self.server.state
         if self.session.project is None:
             return False
-        saved = self.session.settings_values(state.node)
         edited = state.settings_values or {}
+        saved = self.session.settings_values(state.node, **self._dependent_settings_options(edited))
 
         # Numeric fields arrive as strings after browser entry, even when unchanged.
         def differs(key, value):
@@ -461,10 +559,25 @@ class BrowserWorkbench:
 
     def _check_edits(self):
         state = self.server.state
+        self._refresh_dependent_settings()
+        if state.node == "target" and self.session.project is not None:
+            self._refresh_target_scaling(self.session.project.config, state.settings_values or {})
         state.settings_dirty = self._settings_fields_changed() or bool(
             state.profile_preset or state.mesh_upload or state.profile_upload
         )
         return state.settings_dirty
+
+    def _refresh_target_scaling(self, config, values):
+        state = self.server.state
+        state.target_scaling_mode = mode = target_scaling_mode(config, values)
+        try:
+            unit = normalize_field_units(values.get("target_field_units", config.target_field_units))
+        except ValueError:
+            state.target_amplitude_label = "Target amplitude"
+        else:
+            state.target_amplitude_label = (
+                "Amplitude multiplier" if mode == "scale" else f"Gradient amplitude [{unit}/m]"
+            )
 
     def _ready_to_submit(self):
         if self._check_edits():
@@ -581,15 +694,17 @@ class BrowserWorkbench:
             return
         self.server.state.project_download = ""
         saved = self._guard(self.session.save_project, format=file_format, selected_run=self.record)
-        if saved and self._guard(self._publish_project, saved):
-            self.server.state.project_download = f"downloads/{quote(saved.name)}"
+        if saved:
             self.server.state.saved_projects = list(self._workspace_files())
             self.server.state.workspace_file = saved.name
-            self._notify(f"Saved {saved.name}. Use Download project to keep a portable copy.", "success")
+            if self._guard(self._publish_project, saved):
+                self.server.state.project_download = f"downloads/{quote(saved.name)}"
+                self._notify(f"Saved {saved.name}. Use Download project to keep a portable copy.", "success")
 
     def _publish_project(self, saved):
         target = self.exports / saved.name
-        with tempfile.TemporaryDirectory(dir=self.exports) as staging:
+        # A Windows scanner can hold the staging directory after atomic publication.
+        with tempfile.TemporaryDirectory(dir=self.exports, ignore_cleanup_errors=True) as staging:
             staged = Path(staging) / saved.name
             shutil.copyfile(saved, staged)
             return staged.replace(target)
@@ -646,6 +761,7 @@ class BrowserWorkbench:
     @_bind("apply_settings")
     def apply_settings(self):
         state = self.server.state
+        self._refresh_dependent_settings()
         pending = [bool(item) for item in (state.mesh_upload, state.profile_preset, state.profile_upload)]
         if any(pending) and (self._settings_fields_changed() or sum(pending) > 1):
             self._notify(
@@ -665,13 +781,16 @@ class BrowserWorkbench:
                 self._notify(str(exc), "error")
                 return
             title = {"u_shape": "U-shape", "round": "round wire"}.get(state.profile_preset, state.profile_preset)
-            self._guard(
+            updated = self._guard(
                 self.session.apply_profile_preset,
                 state.profile_preset,
                 segments=segments,
                 equal_area=bool(state.profile_equal_area),
+                diameter_mm=(state.profile_diameter_mm or "") if state.profile_preset == "round" else None,
                 success=f"Applied the {title} conductor profile.",
             )
+            if updated is not None:
+                self._refresh_settings()
             return
         values = dict(state.settings_values or {})
         try:
@@ -744,7 +863,6 @@ class BrowserWorkbench:
         state = self._guard(self.session.compute, self.server.state.stage)
         if state:
             self.follow_job_id = state["id"]
-            self._notify(f"Queued revision {state.get('project_revision')} · {state.get('pipeline_stage')}.", "info")
 
     @_bind("compute_channels")
     def compute_channels(self):
@@ -761,14 +879,10 @@ class BrowserWorkbench:
         if states:
             channel_job = states.get(self.session.active_channel_id)
             self.follow_job_id = channel_job["id"] if channel_job else None
-            self._notify(f"Queued {len(states)} channel studies.", "info")
 
     @_bind("cancel_job")
     def cancel_job(self, job_id):
-        job = self._guard(self.session.cancel_job, job_id)
-        if job and job.get("status") in {"cancelled", "cancelling"}:
-            message = "Cancelled" if job["status"] == "cancelled" else "Stopping"
-            self._notify(f"{message} job {job_id[:8]}.", "info")
+        self._guard(self.session.cancel_job, job_id)
 
     # -- jobs and runs -------------------------------------------------
     def _refresh_jobs(self, *, select_matching=False, restore_saved=False):
@@ -782,24 +896,53 @@ class BrowserWorkbench:
         def label(job):
             return f"{job.get('name') or job.get('project_id') or 'Saved design'} · r{job.get('project_revision')} · {job.get('pipeline_stage')} · {job['id'][:8]}"
 
-        submissions = [
-            {
+        def job_row(job):
+            status = job.get("status", "")
+            percent = None
+            progress_label = ""
+            runtime = runtime_feedback(job) if status == "running" else None
+            finalizing = is_finalizing_fabrication(job)
+            if runtime and not job.get("progress_indeterminate"):
+                if runtime.phase_percent is not None:
+                    percent = runtime.phase_percent
+                    progress_label = f"Operation {percent}%"
+                elif (percent := fraction_percent(job.get("progress"))) is not None:
+                    progress_label = f"{'Allocated work' if runtime.allocated else 'Progress'} {percent}%"
+            stage = runtime.operation if runtime else ""
+            if finalizing:
+                operation = job["progress_operation"].strip()
+                stage = stage.removeprefix(operation).removeprefix(" · ")
+            return {
                 "id": job["id"],
-                "status": job.get("status"),
-                "stage": job.get("stage", ""),
-                "progress": 100 * min(1.0, max(0.0, float(job.get("progress") or 0.0))),
+                "status": status,
+                "caption": (
+                    FINALIZING_FABRICATION
+                    if finalizing
+                    else {"running": "Computing", "cancelling": "Stopping"}.get(status, str(status).capitalize())
+                ),
+                "stage": stage,
+                "progress": percent,
+                "progress_label": progress_label,
                 "boundary": dict(PIPELINE_STAGES).get(job.get("pipeline_stage"), "Stage unrecorded"),
                 "revision": job.get("project_revision"),
                 "channel": job.get("name") or job.get("project_id") or "Saved design",
+                "embedded": bool(job.get("embedded")),
                 "error": (job.get("error") or "")[:400],
             }
-            for job in job_states
-            if (show_all or job.get("project_id") in project_ids)
-            and (not job.get("embedded") or job.get("status") != "completed")
+
+        active_states = [job for job in job_states if job.get("status") in ACTIVE_STATUSES]
+        state.active_jobs = [job_row(job) for job in active_states]
+        active_here = [
+            row
+            for job, row in zip(active_states, state.active_jobs)
+            if show_all or job.get("project_id") in project_ids
         ]
-        active_jobs = [job for job in submissions if job["status"] in ACTIVE_STATUSES]
-        finished = [job for job in submissions if job["status"] not in ACTIVE_STATUSES]
-        state.jobs, state.older_jobs = active_jobs + finished[:3], finished[3:]
+        finished = [
+            job_row(job)
+            for job in job_states
+            if job.get("status") not in ACTIVE_STATUSES and (show_all or job.get("project_id") in project_ids)
+        ]
+        state.jobs, state.older_jobs = active_here + finished[:3], finished[3:]
         fingerprint = self.editing_fingerprint
 
         def identity(job):
@@ -808,19 +951,19 @@ class BrowserWorkbench:
             )
 
         current = (project.id, project.revision, fingerprint, state.stage) if project else None
-        active = {identity(job) for job in job_states if job.get("status") in ACTIVE_STATUSES}
+        active = {identity(job) for job in active_states}
         state.current_job_active = current in active
         # Imported archives have no submission ordering in this workspace.
         last = next((job for job in job_states if not job.get("embedded") and identity(job) == current), {})
         stopped = {
-            "failed": "Read the worker error in Design plan, then choose Compute to retry.",
+            "failed": "Read the worker error in Runs, then choose Compute to retry.",
             "cancelled": "Choose Compute to start another run when ready.",
-            "interrupted": "Check Design plan, then choose Compute to retry.",
+            "interrupted": "Check Runs, then choose Compute to retry.",
         }
         status = last.get("status")
         state.attempt_notice = (
             {
-                "title": f"Job {last['id'][:8]} {status} for {project.name} r{project.revision}.",
+                "title": f"Run {last['id'][:8]} {status} for {project.name} r{project.revision}.",
                 "action": f"This attempt produced no completed result. {stopped[status]}",
                 "color": "error" if status == "failed" else "warning",
             }
@@ -899,20 +1042,18 @@ class BrowserWorkbench:
             verification_errors=self.plan_errors,
             requested_stage=state.stage,
         )
-        state.plan_summary = (
-            f"{plan.completed_count}/{plan.requested_count} steps recorded · "
-            f"{plan.completed_channels}/{plan.enabled_channels} channels verified"
-        )
+        state.plan_summary = plan.summary
         state.plan_channels = [
             {
                 "id": channel.channel_id,
                 "name": channel.name,
                 "enabled": channel.enabled,
                 "activity": (
-                    "Execution finished · choose View result for this channel in Jobs to verify the saved result."
+                    "Execution finished · choose View result in Runs to verify the saved result."
                     if channel.verification == "pending"
                     else channel.activity
-                    if channel.verification == "failed" or channel.status not in {"idle", "completed"}
+                    if channel.verification == "failed"
+                    or channel.status in {"failed", "cancelled", "interrupted", "stale"}
                     else ""
                 ),
                 "error": channel.verification == "failed" or channel.status in {"failed", "interrupted"},
@@ -940,17 +1081,23 @@ class BrowserWorkbench:
             state.workspace_history = True
             self._refresh_jobs()
         self.follow_job_id = None
+        state.runs_dialog = False
+        if self.session.project is None:
+            state.history_open = True
         state.workspace_panel, state.center_section = "center", "results"
         if state.displayed_run == job_id and state.result_plot:
             state.dataset = state.result_plot
         state.selected_run = job_id
 
     def _clear_result(self):
+        self.field_slices.clear()
+        self.harmonics.set_record(None)
         self.record = None
+        self.saved_former_arrays = None
         self.shielding_cancel.set()
         self.shielding_fields = {}
         state = self.server.state
-        if state.center_section in {"checks", "metrics", "export", "shielding"}:
+        if state.center_section in {"checks", "metrics", "export", "export_former", "shielding"}:
             state.center_section = "results"
         state.update(
             {
@@ -965,7 +1112,9 @@ class BrowserWorkbench:
                 "metrics": [],
                 "export_options": [],
                 "export_selected": [],
+                "former_export_selected": [],
                 "draft_ack": False,
+                "former_draft_ack": False,
                 "draft_notice": "",
                 "draft_selected": False,
                 "download_url": "",
@@ -1001,10 +1150,13 @@ class BrowserWorkbench:
             self._render()
             return
         self.record = record
+        self.field_slices.clear()
+        self.harmonics.set_record(record)
+        self.saved_former_arrays = None
         self.shielding_cancel.set()
         self.shielding_fields = {}
         state = self.server.state
-        if state.center_section == "shielding":
+        if state.center_section in {"shielding", "export_former"}:
             state.center_section = "results"
         sources = shielding_sources(record)
         state.shielding_sources = [{"value": key, "title": SHIELDING_SOURCES[key]} for key in sources]
@@ -1028,6 +1180,7 @@ class BrowserWorkbench:
         summary["contour_fit_caption"] = contour_fit_caption(meta)
         summary["reviewed_wire_metric"] = reviewed_wire_metric(meta)
         summary["overview"] = result_overview(record)
+        summary["print_former_status"] = print_former_status(meta)
         summary["constraints"] = [
             f"{'Failed' if check.get('passed') is False else 'Unverified'} · {check.get('name', 'Unnamed constraint')}"
             for check in meta.get("constraints") or ()
@@ -1089,10 +1242,12 @@ class BrowserWorkbench:
                 "format": option.format,
                 "status": ("Inspection · " if option.inspection_only else "") + option.check_status,
                 "draft": is_draft_artifact(option.name),
+                "former": option.scope == PRINT_FORMER_SCOPE,
             }
             for option in options
         ]
         state.export_selected = list(default_export_selection(options))
+        state.former_export_selected = [option["value"] for option in state.export_options if option["former"]]
         fabrication_issues = [
             item["title"]
             for group in summary["problems"]
@@ -1100,12 +1255,15 @@ class BrowserWorkbench:
             for item in group["items"]
         ]
         state.draft_notice = draft_export_notice(list(dict.fromkeys(fabrication_issues)))
-        state.draft_ack = False
+        state.draft_ack = state.former_draft_ack = False
         arrays = record.select_arrays(copy=False)
-        if state.dataset in {"support", "preview_target"} or not resolve_dataset(arrays, state.dataset).available:
+        keep_former = state.dataset == "print_former" and has_saved_print_former(meta)
+        if not keep_former and (
+            state.dataset in {"support", "preview_target"} or not resolve_dataset(arrays, state.dataset).available
+        ):
             state.dataset = next(
                 (key for key in PREFERRED_RUN_PLOTS if resolve_dataset(arrays, key).available),
-                "saved_unavailable",
+                "print_former" if has_saved_print_former(meta) else "saved_unavailable",
             )
         state.result_plot = state.dataset
         self._render()
@@ -1233,7 +1391,8 @@ class BrowserWorkbench:
 
     def _refresh_draft_state(self):
         state = self.server.state
-        selected = set(state.export_selected or ())
+        names = state.former_export_selected if state.center_section == "export_former" else state.export_selected
+        selected = set(names or ())
         state.draft_selected = any(is_draft_artifact(name) for name in selected)
         kinds = [option.get("format") for option in state.export_options or () if option["value"] in selected]
         state.export_selection_note = (
@@ -1245,21 +1404,39 @@ class BrowserWorkbench:
             else "Choose files and formats below to enable export."
         )
 
+    def open_print_former(self):
+        state = self.server.state
+        if self.record is None or state.selected_run != state.displayed_run:
+            return
+        state.former_export_selected = [option["value"] for option in state.export_options if option["former"]]
+        if not state.former_export_selected:
+            return
+        state.former_draft_ack = False
+        state.download_url, state.download_label = "", ""
+        state.center_section = "export_former"
+        self._refresh_draft_state()
+
     @_bind("export_geometry")
     def export_geometry(self):
         state = self.server.state
-        if self.record is None or not state.export_selected:
+        former = state.center_section == "export_former"
+        names = state.former_export_selected if former else state.export_selected
+        draft_ack = state.former_draft_ack if former else state.draft_ack
+        if self.record is None or state.selected_run != state.displayed_run or not names:
             self._notify("Select a completed run and at least one file.", "warning")
             return
-        if state.draft_selected and not state.draft_ack:
+        if former and not set(names) <= {option["value"] for option in state.export_options if option["former"]}:
+            self._notify("Select only saved print former STL files.", "warning")
+            return
+        if any(is_draft_artifact(name) for name in names) and not draft_ack:
             self._notify(state.draft_notice + " Tick the DRAFT confirmation to export.", "warning")
             return
         package = self._guard(
             self.session.export,
             self.record,
-            list(state.export_selected),
+            list(names),
             unit=state.export_unit,
-            allow_draft=bool(state.draft_ack),
+            allow_draft=bool(draft_ack),
             include_project=bool(state.include_project),
         )
         if package is None:
@@ -1333,18 +1510,37 @@ class BrowserWorkbench:
                 self.view.push_camera(camera=self.plotter.camera)
 
     @_bind("show_dataset")
+    def _plot_changed(self, **_):
+        state = self.server.state
+        if state.field_show_target:
+            state.field_show_target = False
+        else:
+            self._render()
+
     def _render(self):
         state, plotter, pv = self.server.state, self.plotter, self.pv
         project = self.session.project
         plotter.clear()
-        arrays, reason = {}, ""
+        arrays, preview, reason = {}, {}, ""
         current_model = state.dataset in {"support", "preview_target"}
         state.field_plot = state.dataset in FIELD_KEYS
         state.field_legend = None
+        state.field_source_header = ""
+        state.field_has_pair = False
         saved_arrays = self.record.select_arrays(copy=False) if self.record is not None else {}
+        pending_former = (
+            self.record is not None
+            and self.saved_former_arrays is None
+            and has_saved_print_former(self.record.metadata_view)
+        )
+        if pending_former and state.dataset == "print_former":
+            self.saved_former_arrays = self._guard(saved_print_former_arrays, self.record) or {}
+            pending_former = False
+        if self.saved_former_arrays:
+            saved_arrays = {**saved_arrays, **self.saved_former_arrays}
         if current_model and project is not None:
             try:
-                mesh, target, message, _diagnostics = model_preview(
+                mesh, target, message, preview = model_preview(
                     project.config, project.project_root, requirements=project.study.get("requirements")
                 )
                 if mesh is not None:
@@ -1361,7 +1557,9 @@ class BrowserWorkbench:
                 "props": {
                     "disabled": project is None
                     if key in {"support", "preview_target"}
-                    else not resolve_dataset(saved_arrays, key).available,
+                    else not (
+                        (key == "print_former" and pending_former) or resolve_dataset(saved_arrays, key).available
+                    ),
                     "subtitle": group.title(),
                 },
             }
@@ -1397,8 +1595,27 @@ class BrowserWorkbench:
             layers, missing = [], "This run has no recorded B0 direction. Select Bx, By, Bz or Bmag."
         else:
             layers, missing = (
-                scene_layers(arrays, state.dataset, component=state.component, b0_direction=b0) if arrays else ([], "")
+                scene_layers(
+                    arrays,
+                    state.dataset,
+                    component=state.component,
+                    b0_direction=b0,
+                    show_target=state.field_show_target,
+                )
+                if arrays
+                else ([], "")
             )
+        if state.field_plot and layers:
+            field = layers[-1]
+            metadata = self.record.metadata_view if self.record is not None and not current_model else {}
+            state.field_source_header = field_provenance(state.dataset, metadata, len(field.points))
+            state.field_has_pair = field.extra.get("paired_target", False)
+            if state.dataset.endswith("_residual"):
+                state.field_source_header += (
+                    " · Vector difference includes transverse components"
+                    if state.component == "Bmag"
+                    else " · Signed residual (field minus target)"
+                )
         if not current_model and layers:
             state.result_plot = state.dataset
         state.outer_winding_support = bool(
@@ -1408,6 +1625,20 @@ class BrowserWorkbench:
             and any(layer.name == "support" for layer in layers)
         )
         caption = "Coordinates [m] · " + DATASET_LABELS.get(state.dataset, state.dataset)
+        if state.dataset == "print_former" and layers:
+            caption += " · saved fabrication STL" if layers[0].extra["reviewed"] else " · saved pipeline geometry"
+        if state.dataset == "preview_target" and project is not None and "target_points_m" in arrays:
+            if not project.study.get("requirements"):
+                caption += " · " + target_region_summary(project.config)
+            caption += f" · {len(arrays['target_points_m']):,} target samples"
+            target_info = preview.get("target", {})
+            scale = target_info.get("normalization_scale")
+            if target_info.get("normalization_method") == "none":
+                caption += " · Absolute field"
+            elif isinstance(scale, (float, int)) and np.isfinite(scale):
+                caption += f" · Applied field scale ×{scale:.5g}"
+                if target_info.get("normalization_fallback"):
+                    caption += " (fallback · review Target scaling)"
         for layer in layers:
             if layer.kind == "surface":
                 faces = np.column_stack((np.full(len(layer.faces), 3), layer.faces)).ravel()
@@ -1423,7 +1654,7 @@ class BrowserWorkbench:
                 options.update(
                     scalars=np.asarray(layer.scalars, dtype=float),
                     cmap=DENSITY_CMAP if layer.name == "current_density" else FIELD_CMAP,
-                    clim=(-limit, limit) if limit else None,
+                    clim=layer.extra.get("color_limits") or ((-limit, limit) if limit else None),
                     show_scalar_bar=False,
                 )
                 finite = layer.scalars[np.isfinite(layer.scalars)]
@@ -1468,7 +1699,7 @@ class BrowserWorkbench:
                 missing
                 or reason
                 or (
-                    "Choose a completed run in Results."
+                    "Choose a completed run in Runs."
                     if state.runs
                     else "Choose a template or open a project to preview the support."
                 )
@@ -1498,9 +1729,11 @@ class BrowserWorkbench:
         from trame.widgets import html, vuetify3 as v3
         from .center_panel import build_center_panel
         from .workbench_shell import (
+            build_activity_bar,
             build_design_plan,
             build_file_dialog,
             build_model_builder,
+            build_runs_dialog,
             build_toolbar,
             build_welcome,
         )
@@ -1519,6 +1752,7 @@ class BrowserWorkbench:
         ctrl.toggle_channel = self.toggle_channel
         ctrl.compute, ctrl.compute_channels, ctrl.cancel_job = self.compute, self.compute_channels, self.cancel_job
         ctrl.export_geometry = self.export_geometry
+        ctrl.open_print_former = self.open_print_former
         ctrl.view_job_result = self.view_job_result
         ctrl.review_submitted_design = self.review_submitted_design
         ctrl.show_shielding = self.show_shielding
@@ -1531,7 +1765,12 @@ class BrowserWorkbench:
                     "themes": {
                         "coilgen": {
                             "dark": False,
-                            "colors": {"primary": "#075fac", "surface": "#ffffff", "background": "#f4f4f4"},
+                            "colors": {
+                                "surface": "#ffffff",
+                                "background": "#f4f4f4",
+                                **ACTION_COLORS,
+                                **{tone: colors[0] for tone, colors in STATUS_COLORS.items()},
+                            },
                         }
                     },
                 }
@@ -1552,9 +1791,9 @@ class BrowserWorkbench:
                         aria_label="Workbench panels",
                     ):
                         for value, label in (
-                            ("model", "Model Builder"),
+                            ("model", MODEL_BUILDER_TITLE),
                             ("center", "Plot and results"),
-                            ("plan", "Design plan"),
+                            ("plan", DESIGN_PLAN_TITLE),
                         ):
                             html.Button(
                                 label,
@@ -1564,7 +1803,7 @@ class BrowserWorkbench:
                                 click=f"workspace_panel = '{value}'",
                             )
                     with html.Aside(
-                        classes="cg-model", __properties=[("aria_label", "aria-label")], aria_label="Model Builder"
+                        classes="cg-model", __properties=[("aria_label", "aria-label")], aria_label=MODEL_BUILDER_TITLE
                     ):
                         build_model_builder(ctrl)
                     with html.Main(
@@ -1572,13 +1811,14 @@ class BrowserWorkbench:
                     ):
                         build_center_panel(self)
                     with html.Aside(
-                        classes="cg-plan", __properties=[("aria_label", "aria-label")], aria_label="Design plan"
+                        classes="cg-plan", __properties=[("aria_label", "aria-label")], aria_label=DESIGN_PLAN_TITLE
                     ):
                         build_design_plan(ctrl)
+                build_activity_bar()
                 with html.Footer(classes="cg-footer"):
                     html.Div(
                         "{{ settings_dirty ? 'Pending edits · open Model settings to apply or discard' : "
-                        "current_job_active ? 'Computing · see Design plan' : "
+                        "readiness?.state === 'blocking' ? readiness.title : "
                         "channels.length ? editing_label : 'No project open' }}",
                         role="status",
                     )
@@ -1586,6 +1826,7 @@ class BrowserWorkbench:
                         html.Span("{{ author }} · ")
                         html.A("Project source", href=("project_url",), target="_blank", rel="noopener")
                 build_file_dialog(ctrl)
+                build_runs_dialog(ctrl)
             with v3.VDialog(
                 v_model=("settings_dialog",),
                 max_width=660,
@@ -1593,17 +1834,22 @@ class BrowserWorkbench:
                 __properties=[("aria_label", "aria-label")],
                 aria_label="Model settings",
             ):
-                with v3.VCard():
-                    v3.VCardTitle("Model settings")
-                    with v3.VCardText():
+                with v3.VCard(classes="cg-settings-dialog"):
+                    with html.Header(classes="cg-settings-head"):
+                        with html.Div():
+                            html.P("Model settings", classes="cg-settings-kicker")
+                            html.H2("{{ nodes.find(item => item.value === node)?.title || 'Settings' }}")
                         v3.VSelect(
                             v_model=("node",),
                             items=("nodes",),
                             label="Settings section",
                             density="compact",
-                            classes="mt-3",
+                            variant="outlined",
+                            hide_details=True,
+                            classes="cg-settings-section",
                             disabled=("settings_dirty",),
                         )
+                    with v3.VCardText(classes="cg-settings-body"):
                         html.Div(
                             "{{ target_help }}", v_if="node === 'target' && target_help", classes="text-caption mb-2"
                         )
@@ -1613,7 +1859,12 @@ class BrowserWorkbench:
                         with html.Div(
                             v_for="field in settings_fields",
                             key="field.key",
-                            v_show="(node !== 'geometry' || field.key === 'coil_mesh_file' || settings_values.coil_mesh_file === applied_support) && "
+                            v_show="(node !== 'geometry' || field.key === 'coil_mesh_file' || settings_values.coil_mesh_file === settings_support) && "
+                            "(node !== 'print' || field.key === 'support_body_mode' || settings_values.support_body_mode !== 'off') && "
+                            "(field.key !== 'target_amplitude_native' || target_scaling_mode !== 'none') && "
+                            "(field.key !== 'target_gradient_axis' || target_scaling_mode === 'linear_fit') && "
+                            "((profile_preset !== 'round' && !applied_profile) || "
+                            "!['conductor_width_mm', 'conductor_height_mm'].includes(field.key)) && "
                             "(field.key !== 'contour_smoothing_mesh_gain' || settings_values.contour_treatment === 'mesh_coupled') && "
                             "(field.key !== 'contour_smoothing_factor' || settings_values.contour_treatment === 'legacy') && "
                             "(field.key !== 'contour_smoothing_local_fallback' || "
@@ -1625,7 +1876,9 @@ class BrowserWorkbench:
                             v3.VTextField(
                                 v_if="['number', 'integer', 'text', 'vector'].includes(field.kind)",
                                 v_model="settings_values[field.key]",
-                                label=("field.label",),
+                                label=(
+                                    "field.key === 'target_amplitude_native' ? target_amplitude_label : field.label",
+                                ),
                                 type=("['number', 'integer'].includes(field.kind) ? 'number' : 'text'",),
                                 hint=("field.help",),
                                 disabled=(
@@ -1637,7 +1890,7 @@ class BrowserWorkbench:
                             )
                             v3.VSelect(
                                 v_if="field.kind === 'choice'",
-                                v_model="settings_values[field.key]",
+                                model_value=("settings_values[field.key]",),
                                 items=("field.choices",),
                                 label=("field.label",),
                                 hint=("field.help",),
@@ -1646,7 +1899,10 @@ class BrowserWorkbench:
                                 ),
                                 persistent_hint=("!!field.help",),
                                 density="compact",
-                                update_modelValue="flushState('settings_values')",
+                                update_modelValue=(
+                                    "settings_values = {...settings_values, [field.key]: $event}; "
+                                    "flushState('settings_values')"
+                                ),
                             )
                             v3.VCheckbox(
                                 v_if="field.kind === 'bool'",
@@ -1663,6 +1919,11 @@ class BrowserWorkbench:
                             )
                         with html.Div(v_if="node === 'conductor'", classes="mb-2"):
                             html.Div("Cross-section preset", classes="text-caption")
+                            html.P(
+                                "Applied profile · {{ applied_profile }}",
+                                v_if="applied_profile",
+                                classes="text-caption",
+                            )
                             for value, title in (
                                 ("rectangle", "Rectangle"),
                                 ("round", "Round wire"),
@@ -1679,6 +1940,18 @@ class BrowserWorkbench:
                                 )
                             with html.Div(classes="d-flex flex-wrap ga-2 mt-2"):
                                 v3.VTextField(
+                                    v_if="profile_preset === 'round'",
+                                    v_model=("profile_diameter_mm",),
+                                    label="Diameter [mm]",
+                                    type="number",
+                                    density="compact",
+                                    style="max-width:10rem",
+                                    hint="Sets the round wire profile and its nominal dimensions.",
+                                    persistent_hint=True,
+                                    update_modelValue="flushState('profile_diameter_mm')",
+                                )
+                                v3.VTextField(
+                                    v_if="['round', 'u_shape'].includes(profile_preset)",
                                     v_model=("profile_segments",),
                                     label="Circle points",
                                     type="number",
@@ -1686,15 +1959,14 @@ class BrowserWorkbench:
                                     style="max-width:10rem",
                                     hint="Round wire and U-shape (half circle uses half). Fewer points: smaller STL.",
                                     persistent_hint=True,
-                                    disabled=("settings_dirty && !profile_preset",),
                                 )
                                 v3.VCheckbox(
+                                    v_if="profile_preset === 'round'",
                                     v_model=("profile_equal_area",),
                                     label="Keep circle area",
                                     density="compact",
                                     hint="Enlarge the round polygon so area and resistance match the round wire.",
                                     persistent_hint=True,
-                                    disabled=("settings_dirty && !profile_preset",),
                                 )
                             with html.Details(classes="mt-2"):
                                 html.Summary("Import a cross-section table", style="cursor:pointer;font-weight:600")
@@ -1712,7 +1984,7 @@ class BrowserWorkbench:
                                 )
                         with html.Div(v_if="node === 'geometry'", classes="mb-2"):
                             html.Div(
-                                "{{ settings_values.coil_mesh_file === applied_support ? geometry_help : 'Apply the support selection to show its dimensions.' }}",
+                                "{{ settings_values.coil_mesh_file === settings_support ? geometry_help : '' }}",
                                 classes="text-caption mb-2",
                             )
                             with html.Details():
@@ -1732,18 +2004,6 @@ class BrowserWorkbench:
                                     density="compact",
                                     disabled=("settings_dirty || !channels.length",),
                                 )
-                        html.Div(
-                            "Pending edits · apply or discard before continuing.",
-                            v_if="settings_dirty",
-                            classes="text-caption text-warning",
-                        )
-                        with html.Div(classes="d-flex flex-wrap ga-1 mt-2"):
-                            v3.VBtn(
-                                "Advanced…",
-                                variant="text",
-                                click=ctrl.open_advanced,
-                                disabled=("!channels.length || settings_dirty",),
-                            )
                         with html.Div(v_if="preflight.length", classes="mt-3"):
                             html.Div("Readiness of this section", classes="text-caption")
                             html.Div(
@@ -1775,17 +2035,39 @@ class BrowserWorkbench:
                                     disabled=("settings_dirty",),
                                     click="node = item.value",
                                 )
-                    with v3.VCardActions(classes="flex-wrap"):
-                        v3.VBtn(
-                            "Apply",
-                            color="primary",
-                            variant="flat",
-                            click=ctrl.apply_settings,
-                            disabled=("!settings_dirty",),
+                    with html.Footer(classes="cg-settings-foot"):
+                        html.P(
+                            "{{ settings_dirty ? 'Pending edits. Apply to keep them or discard to reset this section.' : '' }}",
+                            classes="cg-settings-pending",
+                            role="status",
                         )
-                        v3.VBtn("Discard edits", variant="text", click=ctrl.discard_edits, v_if="settings_dirty")
-                        v3.VSpacer()
-                        v3.VBtn("Cancel", click="settings_dialog = false")
+                        with v3.VCardActions(classes="cg-settings-actions"):
+                            v3.VBtn(
+                                "Advanced…",
+                                variant="text",
+                                click=ctrl.open_advanced,
+                                disabled=("!channels.length || settings_dirty",),
+                            )
+                            with html.Div(classes="cg-settings-commit"):
+                                v3.VBtn(
+                                    "Discard edits",
+                                    variant="text",
+                                    click=ctrl.discard_edits,
+                                    v_if="settings_dirty",
+                                )
+                                v3.VBtn(
+                                    "{{ settings_dirty ? 'Cancel' : 'Close' }}",
+                                    variant="outlined",
+                                    title=("settings_dirty ? 'Close and discard pending edits' : 'Close settings'",),
+                                    click="settings_dialog = false",
+                                )
+                                v3.VBtn(
+                                    "Apply",
+                                    color="primary",
+                                    variant="flat",
+                                    click=ctrl.apply_settings,
+                                    disabled=("!settings_dirty",),
+                                )
 
             # A native select updates immediately in the client. Cover the previous
             # wire and checks until the selected archive and its scene are ready.

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 import time
 
+import numpy as np
 import pytest
 import test_workbench_usability as usability
 
@@ -17,6 +18,47 @@ from PySide6.QtWidgets import QFileDialog
 
 application = usability.application
 windows = usability.windows
+
+
+def test_former_export_opens_a_run_bound_draft_gated_panel(windows, tmp_path, monkeypatch):
+    window = windows()
+    body_id = "part001_grooved_support"
+    name = f"fabrication/{body_id}_DRAFT_fabrication.stl"
+    record = SimpleNamespace(
+        directory=tmp_path / "former-run",
+        metadata={
+            "name": "Former result",
+            "fabrication": {"ready": False, "support_bodies": [{"body_id": body_id, "support_body_ok": True}]},
+            "artifacts": [{"name": name}],
+        },
+        arrays={"grooved_support_0_vertices_m": np.eye(3), "grooved_support_0_faces": np.array([[0, 1, 2]])},
+    )
+    former = cad.GeometryOption(
+        name, body_id, "stl", cad.PRINT_FORMER_SCOPE, "passed", "m", ((0, 0, 0), (1, 1, 1)), True, "digest"
+    )
+    monkeypatch.setattr(cad, "export_catalog", lambda record: (former,))
+    export = Mock()
+    monkeypatch.setattr(window, "_geometry_export_dialog", export)
+    window.runs["former"] = record
+    window.show_run("former")
+    assert "checks passed" in window.results_overview.former_scope.text()
+    assert window.results_overview.metrics_button.isChecked()
+    window.results_overview.former_plot_button.click()
+    assert window.viewport.state["dataset"] == "print_former"
+    assert window.results_overview.metric_details.isHidden()
+    assert window.results_overview.metrics_button.text() == "Show metrics"
+    window.results_overview.metrics_button.click()
+    assert not window.results_overview.metric_details.isHidden()
+    window.results_overview.former_button.click()
+    panel = window.print_former_export_window.content.widget()
+    assert panel.selected_names() == (name,)
+    assert panel.table.isHidden()
+    assert not panel.export_button.isEnabled()
+    panel._request_export()
+    export.assert_not_called()
+    panel.draft_ack.setChecked(True)
+    panel.export_button.click()
+    export.assert_called_once_with((name,), "mm", False, source_id="former", source_panel=panel)
 
 
 def test_export_page_updates_when_selected_saved_run_changes(windows, tmp_path, monkeypatch):

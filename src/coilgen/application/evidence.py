@@ -26,6 +26,34 @@ FIELD_KEYS = {
     "winding_validation_residual": "winding_validation_field_T",
 }
 WIRE_FIELDS = ("contour_field", "contour_residual", "routed_field", "routed_residual")
+
+
+def field_points_name(arrays, key):
+    if key == "validation":
+        return "validation_points_m"
+    if key.startswith("winding_validation"):
+        return "winding_validation_points_m"
+    if key == "fabricated" and "fabricated_points_m" in arrays:
+        return "fabricated_points_m"
+    return "target_points_m"
+
+
+def paired_field_name(arrays, key):
+    """Return a valid desired field on the exact same saved sample grid."""
+    points = field_points_name(arrays, key)
+    if key == "validation":
+        target = "validation_target_T"
+    elif key.startswith("winding_validation"):
+        target = "winding_validation_target_T"
+    else:
+        target = "target_field_T"
+        if points != "target_points_m" and not np.array_equal(arrays.get(points), arrays.get("target_points_m")):
+            return None
+    if points in arrays and not _vectors(arrays, target)[0] and len(arrays[target]) == len(arrays[points]):
+        return target
+    return None
+
+
 PATH_PREFIXES = {
     "contours": "contour_",
     "routes": "route_",
@@ -45,6 +73,7 @@ REQUIRED_STEPS = {
     "routes": "routed",
     "fabrication": "routed",
     "swept": "routed",
+    "print_former": "routed",
     "validation": "evaluated",
     "contour_field": "evaluated",
     "contour_residual": "evaluated",
@@ -111,6 +140,15 @@ def path_array_names(arrays, dataset):
     return sorted(name for name in arrays if pattern.fullmatch(name))
 
 
+def surface_array_names(arrays, prefix):
+    return sorted(name for name in arrays if name.startswith(prefix) and name.endswith("_vertices_m"))
+
+
+def print_former_array_names(arrays):
+    """Prefer exact saved reviewed STL meshes over pipeline former triangles."""
+    return surface_array_names(arrays, "review_grooved_support_") or surface_array_names(arrays, "grooved_support_")
+
+
 def resolve_dataset(arrays, key, *, original=False):
     """Validate the exact geometry/map/current pair, including legitimate zeros.
 
@@ -124,22 +162,17 @@ def resolve_dataset(arrays, key, *, original=False):
         if reason:
             return DatasetCapability(False, reason, required, invalid)
     if key in FIELD_KEYS:
-        points = "validation_points_m" if key == "validation" else "target_points_m"
-        if key == "fabricated" and "fabricated_points_m" in arrays:
-            points = "fabricated_points_m"
-        reference = "target_field_T"
-        if key.startswith("winding_validation"):
-            points, reference = "winding_validation_points_m", "winding_validation_target_T"
+        points = field_points_name(arrays, key)
         field = FIELD_KEYS[key]
         if key in WIRE_FIELDS and original:
             field = field.replace("_field_T", "_field_at_stream_current_T")
-        for name in (points, field, *((reference,) if key.endswith("_residual") else ())):
+        for name in (points, field):
             reason, invalid = _vectors(arrays, name)
             if reason:
                 break
         if not reason:
             count = len(arrays[points])
-            if len(arrays[field]) != count or key.endswith("_residual") and len(arrays[reference]) != count:
+            if len(arrays[field]) != count or key.endswith("_residual") and paired_field_name(arrays, key) is None:
                 reason, invalid = "Field coordinates, values and residual target have incompatible dimensions.", True
     elif key == "surface_current_density":
         for name in ("sheet_current_density_points_m", "sheet_current_density_A_per_m"):
@@ -178,10 +211,10 @@ def resolve_dataset(arrays, key, *, original=False):
             reason, invalid = _vectors(arrays, name, minimum=2)
             if reason:
                 break
-    elif key == "swept":
-        names = sorted(name for name in arrays if name.startswith("swept_") and name.endswith("_vertices_m"))
+    elif key in {"swept", "print_former"}:
+        names = print_former_array_names(arrays) if key == "print_former" else surface_array_names(arrays, "swept_")
         if not names:
-            reason = "No saved conductor solids."
+            reason = "No saved grooved print former." if key == "print_former" else "No saved conductor solids."
         for name in names:
             reason, invalid = _surface(arrays, name, name.removesuffix("_vertices_m") + "_faces")
             if reason:
@@ -289,7 +322,7 @@ class SourceHealth:
         return report
 
 
-def verified_run_metadata(directory):
+def verified_run_metadata(directory, *, cancel_check=None):
     """Verify saved metadata, artifacts and relocated inputs without loading NPZ.
 
     Use the established storage contract, including compatibility with legacy
@@ -303,7 +336,7 @@ def verified_run_metadata(directory):
     if not isinstance(result, dict):
         raise ValueError("Malformed run result.")
     digest = result.get("request_sha256")
-    checked = verified_result(directory, digest) if isinstance(digest, str) else None
+    checked = verified_result(directory, digest, cancel_check=cancel_check) if isinstance(digest, str) else None
     if checked is None:
         raise ValueError("Run is incomplete or its artifact integrity check failed.")
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
@@ -311,7 +344,7 @@ def verified_run_metadata(directory):
         raise ValueError("Malformed run manifest.")
     if manifest.get("request_sha256") != digest:
         raise ValueError("Run request and manifest identity disagree.")
-    verify_input_files(manifest, relocated_root=directory)
+    verify_input_files(manifest, relocated_root=directory, cancel_check=cancel_check)
     report = VerificationReport(
         directory, "verified", metadata_checked="metadata_sha256" in checked, request_sha256=digest
     )
@@ -327,15 +360,18 @@ def _assert_same_metadata(record, metadata):
         raise EvidenceIntegrityError("Saved run metadata changed after it was selected. Reload the run.")
 
 
-def _checked_snapshot_metadata(record):
+def _checked_snapshot_metadata(record, *, cancel_check=None):
     """Check a selected identity without decompressing unrelated scientific maps."""
+    from ..progress import DesignCancelled
     from .service import RunRecord
 
     if not isinstance(record, RunRecord):
         raise TypeError("Saved evidence operations require a RunRecord.")
     try:
-        metadata, manifest, report = verified_run_metadata(record.directory)
+        metadata, manifest, report = verified_run_metadata(record.directory, cancel_check=cancel_check)
         _assert_same_metadata(record, metadata)
+    except (DesignCancelled, InterruptedError):
+        raise
     except (OSError, ValueError, TypeError, KeyError, RuntimeError, EOFError, BadZipFile) as exc:
         if isinstance(exc, EvidenceIntegrityError):
             raise
@@ -408,9 +444,14 @@ def read_verified_artifact(record, name: str) -> bytes:
 
 def load_saved_request(record) -> dict:
     """Read verified original settings; never infer from currently applied inputs."""
+    metadata, manifest, _report = _checked_snapshot_metadata(record)
+    return _original_request(record, metadata, manifest)
+
+
+def _original_request(record, metadata, manifest):
+    """Read the original request against already checked result and manifest metadata."""
     from ..research.requests import ResearchRequest
 
-    metadata, manifest, _report = _checked_snapshot_metadata(record)
     if not any(item.get("name") == "request.json" for item in metadata.get("artifacts", ())):
         raise ValueError("This run has no verified original request.json; its saved settings cannot be inferred.")
     raw = _artifact_bytes(record, "request.json")

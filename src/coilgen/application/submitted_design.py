@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from ..target_regions import target_region_summary
 from .session import PIPELINE_STAGES
 from .support_parameters import SUPPORT_EDITORS
+from .targets import TARGET_NORMALIZATION_MODES
 
 
 CONTOUR_METHODS = {
@@ -24,13 +25,7 @@ _CHOICES = {
         "mr_rf": "MRI RF",
         "free": "General field design",
     },
-    "target_gradient_normalization": {
-        "none": "No gradient normalization",
-        "off": "No gradient normalization",
-        "auto": "Automatic",
-        "linear_fit": "Linear fit",
-        "legacy": "Legacy normalization",
-    },
+    "target_gradient_normalization": {value: label for names, label in TARGET_NORMALIZATION_MODES for value in names},
     "sf_opt_method": {
         "constrained_quadratic": "Constrained quadratic solve",
         "tikhonov": "Tikhonov fit",
@@ -78,7 +73,8 @@ _CHOICES = {
 def choice_title(key, value):
     """Use the same physical labels in the form and submitted summary."""
     if isinstance(value, str):
-        return _CHOICES.get(key, {}).get(value, value)
+        lookup = value.strip().lower().replace("-", "_") if key == "target_gradient_normalization" else value
+        return _CHOICES.get(key, {}).get(lookup, value)
     return value
 
 

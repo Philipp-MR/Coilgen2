@@ -284,4 +284,4 @@ def test_config_validation_and_front_end_fields():
 
 def test_export_catalog_identifies_reviewed_support_bodies():
     metadata = {"fabrication": {"paths": [], "support_bodies": [{"body_id": "part001_grooved_support"}]}}
-    assert _body_sources(metadata)["part001_grooved_support"][0] == "fabrication_review_geometry"
+    assert _body_sources(metadata)["part001_grooved_support"][0] == "print_former_geometry"

@@ -13,7 +13,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtGui import QFont, QFontDatabase, QPalette
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QProgressBar
 
 from coilgen.application import ProjectAssembly, ProjectDocument
 from coilgen.application.presets import preset_config
@@ -113,7 +113,7 @@ def test_completed_current_and_reusable_rows_remain_visually_distinct(panel):
     assert current.font(0).bold()
     assert cached.text(1) == "Cached" and not cached.font(0).bold()
     assert "rechecks it before reuse" in cached.toolTip(0)
-    assert panel.progress_bar.maximum() == 100 and panel.progress_bar.value() == 45
+    assert panel.findChild(QProgressBar) is None
 
 
 def test_multichannel_reports_real_worker_without_averaging_and_excludes_disabled_channel(panel):
@@ -136,9 +136,8 @@ def test_multichannel_reports_real_worker_without_averaging_and_excludes_disable
     assert "0/10 steps recorded" in panel.summary_label.text()
     assert "1 running" in panel.summary_label.text() and "1 queued" in panel.summary_label.text()
     assert "%" not in panel.summary_label.text()
-    assert "Worker: Gy" in panel.activity_label.text()
     assert panel.worker_channel.channel_id == gy.id
-    assert panel.progress_bar.value() == 67
+    assert panel.channel_items[gy.id].text(1) == "Computing"
     assert not panel.follow_button.isChecked() and panel.follow_button.isEnabled()
 
 
@@ -152,7 +151,6 @@ def test_running_worker_takes_activity_priority_over_selected_queued_channel(pan
     )
     panel.set_plan(plan)
     assert panel.worker_channel.channel_id == gy.id
-    assert panel.progress_bar.value() == 35
     assert panel.channel_items[gx.id].text(1) == "Queued"
 
 
@@ -187,7 +185,6 @@ def test_explicit_actions_and_follow_requests_are_not_emitted_by_refresh(panel, 
     events = []
     panel.action_requested.connect(lambda value: events.append(("action", value)))
     panel.compute_channels_requested.connect(lambda: events.append(("compute", None)))
-    panel.job_requested.connect(lambda value: events.append(("job", value)))
     panel.follow_requested.connect(lambda value: events.append(("follow", value)))
     panel.set_plan(plan)
     panel.set_state("evaluated", {"status": "running"}, following=False)
@@ -197,11 +194,9 @@ def test_explicit_actions_and_follow_requests_are_not_emitted_by_refresh(panel, 
     assert events == []
     _show(panel, app)
     QTest.mouseClick(panel.action_buttons["plan"], Qt.MouseButton.LeftButton)
-    QTest.mouseClick(panel.action_buttons["jobs"], Qt.MouseButton.LeftButton)
-    QTest.mouseClick(panel.job_button, Qt.MouseButton.LeftButton)
     QTest.mouseClick(panel.compute_channels_button, Qt.MouseButton.LeftButton)
     QTest.mouseClick(panel.follow_button, Qt.MouseButton.LeftButton)
-    assert events == [("action", "plan"), ("action", "jobs"), ("job", "job-gx"), ("compute", None), ("follow", True)]
+    assert events == [("action", "plan"), ("compute", None), ("follow", True)]
 
 
 def test_runtime_unavailable_hides_current_percentage_and_keeps_disabled_follow(panel):
@@ -214,10 +209,9 @@ def test_runtime_unavailable_hides_current_percentage_and_keeps_disabled_follow(
     )
     panel.set_plan(plan)
     panel.set_following(True, job_id="job-gx")
-    assert panel.progress_bar.isHidden() and panel.progress_bar.maximum() == 100
     assert not panel.follow_button.isHidden() and not panel.follow_button.isEnabled()
     assert "unavailable" in panel.follow_button.toolTip()
-    assert "Runtime unavailable" in panel.activity_label.text()
+    assert panel.channel_items[gx.id].text(1) == "Unavailable"
     assert panel.stage_items[(gx.id, "prepared")].text(1) == "Completed"
     assert panel.stage_items[(gx.id, "sheet")].text(1) == "Pending"
     assert not panel.compute_channels_button.isEnabled()
@@ -226,10 +220,9 @@ def test_runtime_unavailable_hides_current_percentage_and_keeps_disabled_follow(
     recovered = build_design_plan(assembly, states=(_state(gx, status="running", progress=0.82),))
     panel.set_plan(recovered)
     panel.set_following(True, job_id="job-gx")
-    assert not panel.progress_bar.isHidden() and panel.progress_bar.value() == 82
     assert panel.follow_button.isEnabled() and panel.follow_button.isChecked()
     assert panel.compute_channels_button.isEnabled()
-    assert "Runtime unavailable" not in panel.activity_label.text()
+    assert panel.channel_items[gx.id].text(1) == "Computing"
     assert events == []
 
 
@@ -239,10 +232,8 @@ def test_verifying_results_remain_distinct_from_finished_computation(panel):
     plan = build_design_plan(assembly, states=(_state(gx, status="completed", progress=1),))
     panel.set_plan(plan)
     assert panel.channel_items[gx.id].text(1) == "Verifying"
-    assert panel.progress_bar.maximum() == 0
-    assert not panel.progress_bar.isHidden()
     assert not any(row.text(1) == "Completed" for row in panel.stage_items.values())
-    assert "verifying saved evidence" in panel.activity_label.text()
+    assert "verifying saved evidence" in panel.channel_items[gx.id].toolTip(0)
 
 
 def test_short_study_stale_failure_and_cancelled_states_use_explicit_text(panel):
@@ -275,23 +266,20 @@ def test_short_study_stale_failure_and_cancelled_states_use_explicit_text(panel)
         row = panel.stage_items[(gx.id, "sheet")]
         assert row.text(1) == expected
         assert row.foreground(0).color() == tone_color(tone, panel.tree.palette())
-        assert panel.progress_bar.isHidden()
 
 
 def test_known_work_and_indeterminate_activity_do_not_guess_completion(panel):
     assembly = _assembly("Gx")
     gx = assembly.channels[0]
-    for progress, maximum in ((None, 0), (0.43, 100)):
-        panel.set_plan(build_design_plan(assembly, states=(_state(gx, status="running", progress=progress),)))
-        assert panel.progress_bar.maximum() == maximum
-        assert not panel.progress_bar.isHidden()
+    for progress, indeterminate in ((None, True), (0.43, False), (0.43, True)):
+        panel.set_plan(
+            build_design_plan(
+                assembly,
+                states=(_state(gx, status="running", progress=progress, progress_indeterminate=indeterminate),),
+            )
+        )
+        assert panel.channel_items[gx.id].text(1) == "Computing"
         assert not any(row.text(1) == "Completed" for row in panel.stage_items.values())
-    assert panel.progress_bar.value() == 43
-    panel.set_plan(
-        build_design_plan(assembly, states=(_state(gx, status="running", progress=0.43, progress_indeterminate=True),))
-    )
-    assert panel.progress_bar.maximum() == 0
-    assert panel.progress_bar.format() == "Working"
 
 
 @pytest.mark.parametrize("width", (280, 320))
@@ -306,7 +294,6 @@ def test_narrow_native_font_layout_and_long_names_fit_without_horizontal_overflo
     for button in (
         *panel.action_buttons.values(),
         panel.follow_button,
-        panel.job_button,
         panel.compute_channels_button,
     ):
         assert button.geometry().right() < width
@@ -321,9 +308,7 @@ def test_legacy_snapshot_is_retained_but_does_not_override_multichannel_rows(pan
     panel.set_state("sheet", completed=("prepared",), following=False)
     assert panel.snapshot.stages[0].status == "complete"
     assert panel.snapshot.stages[2].status == "skipped"
-    assert panel.progress_bar.value() == 62
-    assert "Worker: Gy" in panel.activity_label.text()
+    assert panel.worker_channel.channel_id == gy.id
     panel.set_plan(None)
     assert panel.tree.topLevelItemCount() == 0
-    assert panel.activity_label.text() == ""
-    assert panel.progress_bar.isHidden() and panel.worker_channel is None
+    assert panel.follow_button.isHidden() and panel.worker_channel is None

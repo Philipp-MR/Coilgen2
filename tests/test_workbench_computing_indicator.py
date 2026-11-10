@@ -70,6 +70,32 @@ def test_running_indicator_stays_in_lower_left_when_windows_and_status_messages_
     assert indicator.message.text() == ""
 
 
+def test_runs_opens_from_status_bar_after_strict_fabrication(windows):
+    window = windows()
+    stages = ("prepared", "sheet", "contours", "routed", "evaluated")
+    state = publish(
+        window,
+        pipeline_stage="evaluated",
+        fabricate=True,
+        completed_stages=stages,
+        progress_operation="Strict fabrication review",
+        stage="Checking conductor clearance",
+    )
+    assert window.computation_indicator.label.text() == "Finalizing fabrication"
+    assert window.computation_indicator.tasks_button.isHidden()
+    state["progress_operation"] = "Finalizing verified runtime and result metadata"
+    window.poll_jobs()
+    assert window.computation_indicator.label.text().startswith("Computing")
+
+    state.update(status="completed", progress=1)
+    window.poll_jobs()
+    assert window.computation_indicator.isHidden()
+    assert window.runs_button.text() == "Runs"
+    window.runs_button.click()
+    assert window.evidence.currentWidget() is window.jobs_table
+    assert window.evidence.window_for(window.jobs_table).windowTitle() == "Runs — CoilGen2"
+
+
 def test_historical_selection_paused_follow_and_new_channel_do_not_hide_running_worker(windows, monkeypatch):
     window = windows()
     state = publish(window)

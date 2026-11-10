@@ -292,7 +292,7 @@ def test_target_scaling_opening_reapplies_policy_visibility_after_legacy_reveal(
     legacy = window.settings.widget().findChild(QCheckBox, "advanced_target_controls")
     # This compatibility control is hidden in the card UI, but still governs
     # field rows. Opening details must respect the more specific active policy.
-    policy.setCurrentText("off")
+    policy.setCurrentIndex(policy.findData("off"))
     assert not scaling.form.isRowVisible(axis.parentWidget())
     scaling.open()
     application.processEvents()

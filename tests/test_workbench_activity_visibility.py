@@ -259,7 +259,8 @@ def test_open_project_paints_activity_before_deserialization_and_clears_on_inval
     assert not window._foreground_work and window.computation_indicator.isHidden()
 
 
-@pytest.mark.parametrize("status, expected", (("running", "Computing 42%"), ("queued", "Queued")))
+# Channel rows show the state only; the worker percentage is in the activity bar.
+@pytest.mark.parametrize("status, expected", (("running", "Computing"), ("queued", "Queued")))
 def test_disabled_channel_retains_already_submitted_job_status(windows, status, expected):
     window = windows()
     state = _state(window, status=status)

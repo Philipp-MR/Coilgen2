@@ -1,6 +1,6 @@
 """Persistent channel-by-channel computation plan beside the scientific view.
 
-Rows report recorded evidence and actual worker activity. Selecting a design
+Rows report recorded evidence and milestones. Selecting a design
 step never starts computation or changes the plotted dataset.
 """
 
@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QProgressBar,
     QPushButton,
     QSizePolicy,
     QToolButton,
@@ -23,7 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .colors import apply_tone, tone_color
+from .colors import tone_color
 from .design_plan import STAGE_STATUS_LABELS
 from .design_progress import build_design_progress
 from .icons import icon
@@ -56,7 +55,6 @@ class DesignPlanPanel(QWidget):
 
     follow_requested = Signal(bool)
     channel_requested = Signal(str)
-    job_requested = Signal(str)
     compute_channels_requested = Signal()
     action_requested = Signal(str)
 
@@ -69,7 +67,6 @@ class DesignPlanPanel(QWidget):
         self.snapshot = None
         self.channel_items = {}
         self.stage_items = {}
-        self._worker_job_id = None
         self.worker_channel = None
         self._following = True
         self._following_job_id = None
@@ -115,21 +112,6 @@ class DesignPlanPanel(QWidget):
         self.tree.itemActivated.connect(self._item_activated)
         layout.addWidget(self.tree, 1)
 
-        self.activity_label = self._label("", "design_progress_activity")
-        self.activity_label.setAccessibleName("Current worker activity")
-        layout.addWidget(self.activity_label)
-        self.progress_bar = QProgressBar(self)
-        self.progress_bar.setObjectName("design_progress_percent")
-        self.progress_bar.setMaximumHeight(18)
-        self.progress_bar.setAccessibleName("Active worker reported progress")
-        self.progress_bar.setToolTip(
-            "This worker's reported work progress, not a combined system percentage or engineering acceptance."
-        )
-        layout.addWidget(self.progress_bar)
-        self.runtime_label = self._label("", "design_progress_runtime")
-        self.runtime_label.setAccessibleName("Worker elapsed time and observed liveness")
-        self.runtime_label.hide()
-        layout.addWidget(self.runtime_label)
         runtime_row = QHBoxLayout()
         self.follow_button = QToolButton(self)
         self.follow_button.setObjectName("design_progress_follow")
@@ -140,11 +122,6 @@ class DesignPlanPanel(QWidget):
         self.follow_button.setAccessibleName("Follow completed previews in the plot")
         self.follow_button.toggled.connect(self.follow_requested)
         runtime_row.addWidget(self.follow_button)
-        self.job_button = QToolButton(self)
-        self.job_button.setText("Inspect worker")
-        self.job_button.setAccessibleName("Inspect the reported worker")
-        self.job_button.clicked.connect(self._inspect_worker)
-        runtime_row.addWidget(self.job_button)
         runtime_row.addStretch(1)
         layout.addLayout(runtime_row)
         self.compute_channels_button = QPushButton("Compute enabled channels", self)
@@ -157,20 +134,15 @@ class DesignPlanPanel(QWidget):
         layout.addWidget(self.compute_channels_button)
         actions_row = QHBoxLayout()
         self.action_buttons = {}
-        for action, text, tooltip in (
-            ("plan", "Recompute plan…", "Inspect the study and checkpoint reuse plan before computing."),
-            ("jobs", "Jobs…", "Inspect all worker jobs, including other channels and earlier revisions."),
-        ):
-            button = QToolButton(self)
-            button.setText(text)
-            button.setToolTip(tooltip)
-            button.clicked.connect(lambda _checked=False, key=action: self.action_requested.emit(key))
-            self.action_buttons[action] = button
-            actions_row.addWidget(button)
+        button = QToolButton(self)
+        button.setText("Recompute plan…")
+        button.setToolTip("Inspect the study and checkpoint reuse plan before computing.")
+        button.clicked.connect(lambda: self.action_requested.emit("plan"))
+        self.action_buttons["plan"] = button
+        actions_row.addWidget(button)
         actions_row.addStretch(1)
         layout.addLayout(actions_row)
         self.set_state("evaluated")
-        self.activity_label.clear()
         self.compute_channels_button.hide()
         self.editing_label.hide()
 
@@ -232,15 +204,9 @@ class DesignPlanPanel(QWidget):
             )
         )
         self.action_buttons["plan"].setEnabled(bool(channels))
-        self._render_activity()
+        self._update_follow()
         if plan is None:
-            self.activity_label.clear()
-            self.runtime_label.clear()
-            self.runtime_label.hide()
-            self.progress_bar.hide()
             self.follow_button.hide()
-            self.job_button.hide()
-            self.worker_channel = None
 
     def _update_channel(self, item, channel):
         item.setText(0, channel.name)
@@ -254,14 +220,7 @@ class DesignPlanPanel(QWidget):
         reporting_job = display_status in {*_ACTIVE, "failed", "verifying", "unavailable"}
         excluded = not channel.enabled and not reporting_job
         label = "Excluded" if excluded else _CHANNEL_LABELS.get(display_status, display_status.capitalize())
-        if (
-            channel.status == "running"
-            and channel.percent is not None
-            and not channel.busy
-            and not channel.runtime.allocated
-        ):
-            label += f" {channel.percent}%"
-        elif channel.enabled and channel.status in {"completed", "complete"} and channel.review_needed:
+        if channel.enabled and channel.status in {"completed", "complete"} and channel.review_needed:
             label = "Review checks"
         item.setText(1, label)
         font = item.font(0)
@@ -333,15 +292,15 @@ class DesignPlanPanel(QWidget):
         self.snapshot = build_design_progress(requested_stage, state, **options)
         self._following = bool(options.get("following", True))
         self._follow_unavailable = self.snapshot.status == "unavailable"
-        self._render_activity()
+        self._update_follow()
 
     def set_following(self, following, job_id=None):
         """Reflect the plot's actual followed job without emitting user actions."""
         self._following = bool(following)
         self._following_job_id = job_id
-        self._render_activity()
+        self._update_follow()
 
-    def _render_activity(self):
+    def _update_follow(self):
         channels = self.plan.channels if self.plan is not None else ()
         worker = next(
             (channel for channel in channels if channel.selected and channel.status in {"running", "cancelling"}), None
@@ -353,69 +312,17 @@ class DesignPlanPanel(QWidget):
         worker = worker or next((channel for channel in channels if channel.status == "queued"), None)
         worker = worker or next((channel for channel in channels if channel.selected), None)
         self.worker_channel = worker
-        if self.plan is not None and worker is not None:
-            status, percent, busy = worker.status, worker.percent, worker.busy
-            activity, tooltip = worker.activity, worker.tooltip
-            runtime = worker.runtime
-            self._worker_job_id = worker.job_id
-            if status in _ACTIVE:
-                activity = f"Worker: {worker.name} · revision {worker.revision}\n{activity}"
-            visible = status in {"running", "cancelling", "queued", "verifying"} or worker.verification == "pending"
-            unavailable = self._follow_unavailable or status == "unavailable"
-            follow_available = status in _ACTIVE and not unavailable
-            follow_visible = follow_available or unavailable and worker.job_id is not None
-            tone = (
-                "error"
-                if status == "failed"
-                else "warning"
-                if status in {"stale", "unavailable", "cancelling"}
-                else "info"
-                if status in {"running", "queued"}
-                else "neutral"
-            )
+        if worker is not None:
+            unavailable = self._follow_unavailable or worker.status == "unavailable"
+            follow_available = worker.status in _ACTIVE and not unavailable
+            follow_visible = follow_available or (unavailable and worker.job_id is not None)
         else:
             snapshot = self.snapshot
             if snapshot is None:
                 return
-            status, percent, busy = snapshot.status, snapshot.percent, snapshot.busy
-            activity, tooltip = snapshot.activity, snapshot.tooltip
-            runtime = snapshot.runtime
-            visible = status in {"running", "cancelling", "queued"} or busy
             follow_available = snapshot.follow_available
             follow_visible = follow_available or self._follow_unavailable
-            tone = snapshot.tone
             unavailable = self._follow_unavailable
-            self._worker_job_id = None
-        self.activity_label.setText(activity)
-        self.activity_label.setToolTip(tooltip)
-        self.activity_label.setAccessibleDescription(tooltip)
-        apply_tone(self.activity_label, tone)
-        self.runtime_label.setText(runtime.line)
-        self.runtime_label.setToolTip(runtime.line + ("\n" + runtime.tooltip if runtime.tooltip else ""))
-        self.runtime_label.setAccessibleDescription(self.runtime_label.toolTip())
-        self.runtime_label.setVisible(bool(runtime.line))
-        self.progress_bar.setVisible(visible)
-        self.progress_bar.setRange(0, 0 if busy and status != "queued" else 100)
-        displayed_percent = runtime.phase_percent if runtime.phase_percent is not None else percent
-        self.progress_bar.setValue(displayed_percent if displayed_percent is not None else 0)
-        self.progress_bar.setFormat(
-            "Queued"
-            if status == "queued"
-            else "Cancelling"
-            if status == "cancelling"
-            else "Working"
-            if busy
-            else f"Operation {displayed_percent}%"
-            if runtime.phase_percent is not None
-            else f"Allocated work {percent}%"
-            if percent is not None and runtime.allocated
-            else f"{percent}%"
-            if percent is not None
-            else "Unreported"
-        )
-        self.progress_bar.setToolTip(tooltip)
-        self.job_button.setVisible(self._worker_job_id is not None)
-        self.job_button.setToolTip(f"Inspect worker {self._worker_job_id}" if self._worker_job_id else "")
         self.follow_button.setVisible(follow_visible)
         self.follow_button.setEnabled(follow_available)
         self.follow_button.setToolTip(
@@ -426,17 +333,14 @@ class DesignPlanPanel(QWidget):
         )
         with QSignalBlocker(self.follow_button):
             self.follow_button.setChecked(
-                self._following and (self._following_job_id is None or self._following_job_id == self._worker_job_id)
+                self._following
+                and (self._following_job_id is None or (worker is not None and self._following_job_id == worker.job_id))
             )
 
     def _item_activated(self, item, _column):
         identity = item.data(0, _IDENTITY_ROLE)
         if identity and identity[0] == "channel":
             self.channel_requested.emit(identity[1])
-
-    def _inspect_worker(self):
-        if self._worker_job_id is not None:
-            self.job_requested.emit(self._worker_job_id)
 
     def changeEvent(self, event):
         super().changeEvent(event)

@@ -295,7 +295,7 @@ def _channel_plan(
         inferred = marking and key == active and not explicit_active
         tooltip = f"{description}. {_STAGE_TEXT[stage_status]}."
         if inferred:
-            tooltip += " Next unrecorded requested boundary; the worker operation below identifies actual activity."
+            tooltip += " Next unrecorded requested boundary. The activity bar shows the current worker operation."
         stages.append(StagePlan(key, label, description, icon_name, stage_status, tooltip, inferred=inferred))
     count = len(recorded)
     if not state and count == len(allowed) and verification == "verified":
@@ -447,7 +447,9 @@ def build_design_plan(
     # A terminal error may retain all recorded stages. Categorize execution
     # separately from evidence rather than allowing a negative pending count.
     waiting = max(0, waiting)
-    summary = f"{completed}/{requested} steps recorded · {complete_channels}/{len(enabled)} channels computed"
+    summary = (
+        f"{completed}/{requested} steps recorded · {complete_channels}/{len(enabled)} channels with verified results"
+    )
     if running or queued:
         summary += f" · {running} running · {queued} queued"
     disabled = len(plans) - len(enabled)

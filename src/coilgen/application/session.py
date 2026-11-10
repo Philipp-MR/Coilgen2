@@ -11,18 +11,21 @@ importing Qt, so the browser server and tests can drive it directly.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
 
 from ..field_components import TARGET_COMPONENTS, normalized_b0_direction
+from ..target import _target_gradient_normalization_method
+from ..target_regions import TargetRegion
 from .assembly import ProjectAssembly
 from .execution import plan_execution
 from .preflight import check_preflight
 from .project import ProjectDocument
 from .service import DesignService
 from .support_parameters import SUPPORT_EDITORS
+from .targets import TARGET_NORMALIZATION_MODES
 
 PIPELINE_STAGES = (
     ("prepared", "Prepare model"),
@@ -154,6 +157,76 @@ def _vector(name):
         return {name: numbers}
 
     return (lambda config, study: ", ".join(str(float(v)).removesuffix(".0") for v in getattr(config, name)), parse)
+
+
+_TARGET_CENTER_FIELDS = tuple(f"target_region_center_{axis}_mm" for axis in "xyz")
+_TARGET_RADIUS_FIELD = "target_region_radius_mm"
+_TARGET_REGION_FIELDS = frozenset((*_TARGET_CENTER_FIELDS, _TARGET_RADIUS_FIELD))
+
+
+def target_scaling_mode(config, values):
+    """Resolve the draft scaling choice using the same policy as target evaluation."""
+    candidate = replace(
+        config,
+        target_gradient_normalization=values.get("target_gradient_normalization", config.target_gradient_normalization),
+        design_context=values.get("design_context", config.design_context),
+    )
+    source = "file" if str(config.target_field_definition_file).strip().lower() not in {"none", ""} else "expression"
+    return _target_gradient_normalization_method(candidate, source=source)
+
+
+def _target_region(config):
+    if config.target_region_geometry is None:
+        return None
+    return TargetRegion.from_dict(config.target_region_geometry)
+
+
+def _target_region_values(config, region):
+    center = region.center_m if region else (0.0, 0.0, 0.0)
+    radius = region.radius_m if region and region.radius_m is not None else config.target_region_radius
+    return {
+        **{key: value * 1000 for key, value in zip(_TARGET_CENTER_FIELDS, center)},
+        _TARGET_RADIUS_FIELD: radius * 1000,
+    }
+
+
+def _target_region_edits(config, values):
+    """Commit radius and world placement together while preserving the legacy grid until needed."""
+    if not values:
+        return {}
+    region = _target_region(config)
+    initial = _target_region_values(config, region)
+    try:
+        edits = {key: float(value) for key, value in values.items()}
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Enter finite ROI radius and world center coordinates.") from exc
+    edits = {key: value for key, value in edits.items() if value != initial[key]}
+    if not edits:
+        return {}
+    if not all(math.isfinite(value) for value in edits.values()):
+        raise ValueError("Enter finite ROI radius and world center coordinates.")
+    radius = edits.get(_TARGET_RADIUS_FIELD)
+    changes = {"target_region_radius": radius / 1000} if radius is not None else {}
+    moved = any(key in edits for key in _TARGET_CENTER_FIELDS)
+    if moved or (region is not None and radius is not None):
+        definition = region.to_dict() if region else {"shape": "sphere", "radius_m": config.target_region_radius}
+        if moved:
+            original_center = region.center_m if region else (0.0, 0.0, 0.0)
+            definition["center_m"] = [
+                edits[key] / 1000 if key in edits else previous
+                for key, previous in zip(_TARGET_CENTER_FIELDS, original_center)
+            ]
+        if radius is not None:
+            definition["radius_m"] = radius / 1000
+        changes.update(target_region_geometry=definition, set_roi_into_mesh_center=False)
+    return changes
+
+
+def _target_region_parameter(key):
+    return (
+        lambda config, study: _target_region_values(config, _target_region(config))[key],
+        lambda value, config, study: _target_region_edits(config, {key: value}),
+    )
 
 
 def _contour_treatment(config, study):
@@ -301,6 +374,7 @@ SETTINGS = (
         "Target expression (x, y, z in metres)",
         "text",
         _plain("field_shape_function", str),
+        help="The expression uses world coordinates. For an absolute Bz target in tesla, choose Absolute field expression.",
     ),
     _field(
         "target",
@@ -319,12 +393,24 @@ SETTINGS = (
         unit="mT/m",
     ),
     _field(
+        "target", "target_amplitude_native", "Target amplitude", "number", _plain("target_gradient_strength", float)
+    ),
+    _field(
         "target",
         "target_gradient_normalization",
-        "Normalization",
+        "Target scaling",
         "choice",
         _plain("target_gradient_normalization"),
-        choices=("auto", "off", "none", "linear_fit", "legacy"),
+        choices=tuple(names[0] for names, _label in TARGET_NORMALIZATION_MODES),
+        help="Absolute field expression uses the entered values directly. Automatic fits a slope for MRI gradient expressions and uses a multiplier in other contexts.",
+    ),
+    _field(
+        "target",
+        "target_field_units",
+        "Field expression units",
+        "choice",
+        _plain("target_field_units"),
+        choices=("T", "Hz"),
     ),
     _field(
         "target",
@@ -336,9 +422,35 @@ SETTINGS = (
         help="Use magnitude (|G|) for combined targets such as x+y. Current and error always use the full expression.",
     ),
     _field(
-        "target", "target_region_radius_mm", "ROI radius", "number", _scaled("target_region_radius", 1000.0), unit="mm"
+        "target",
+        _TARGET_RADIUS_FIELD,
+        "ROI radius",
+        "number",
+        _target_region_parameter(_TARGET_RADIUS_FIELD),
+        unit="mm",
     ),
-    _field("target", "target_region_resolution", "ROI resolution", "integer", _plain("target_region_resolution", int)),
+    *(
+        _field(
+            "target",
+            key,
+            f"ROI world center {axis}",
+            "number",
+            _target_region_parameter(key),
+            unit="mm",
+            help="Moves the sampling region in world coordinates. The field expression keeps the same coordinates."
+            if axis == "X"
+            else "",
+        )
+        for key, axis in zip(_TARGET_CENTER_FIELDS, "XYZ")
+    ),
+    _field(
+        "target",
+        "target_region_resolution",
+        "ROI resolution",
+        "integer",
+        _plain("target_region_resolution", int),
+        help="For an explicit volume, this is the number of bins per local axis. The target plot reports the actual sample count.",
+    ),
     _field(
         "target",
         "design_context",
@@ -774,16 +886,18 @@ class WorkbenchSession:
         self._set_assembly(self.assembly.update_channel(self.active_channel_id, project=project))
 
     # -- settings ------------------------------------------------------
-    def settings_fields(self, node: str | None = None):
-        """Form fields applicable to the current source; STL scaling only applies to raw STL input."""
+    def settings_fields(self, node: str | None = None, *, support_source=None, former_mode=None):
+        """Return fields applicable to the selected support and former, including drafts."""
         if self.project is None:
             return ()
         config = self.project.config
-        source = str(config.coil_mesh_file)
-        inactive = set()
+        source = str(config.coil_mesh_file if support_source is None else support_source)
+        # Preserve the existing mT/m setter for scripted form callers. The
+        # interactive amplitude field uses the expression's native units.
+        inactive = {"target_gradient_strength"}
         if config.skip_postprocessing or config.contour_only_sweep_mode:
             inactive.update(("interconnection_axis", "return_path_lift", "normal_shift_mm"))
-        if str(getattr(config, "support_body_mode", "off")) == "off":
+        if (config.support_body_mode if former_mode is None else former_mode) == "off":
             inactive.update(
                 (
                     "support_body_thickness_mm",
@@ -798,20 +912,29 @@ class WorkbenchSession:
                     "target_field_component",
                     "target_gradient_normalization",
                     "target_gradient_axis",
-                    "target_gradient_strength",
-                    "target_region_radius_mm",
+                    "target_field_units",
+                    "target_amplitude_native",
+                    *_TARGET_REGION_FIELDS,
                     "target_region_resolution",
                 )
             )
         elif str(config.target_field_definition_file).lower() not in {"none", ""}:
-            inactive.update(("field_shape_function", "target_region_radius_mm", "target_region_resolution"))
-        elif config.target_region_geometry is not None or str(config.target_mesh_file).lower() not in {"none", ""}:
-            inactive.add("target_region_radius_mm")
-        if config.design_context != "mr_gradient" and str(config.target_gradient_normalization).lower() in {
-            "off",
-            "none",
-        }:
-            inactive.update(("target_gradient_strength", "target_gradient_axis"))
+            inactive.update(("field_shape_function", *_TARGET_REGION_FIELDS, "target_region_resolution"))
+        else:
+            try:
+                region = _target_region(config)
+            except (TypeError, ValueError):
+                inactive.update(_TARGET_REGION_FIELDS)
+            else:
+                if region is not None:
+                    if region.radius_m is None:
+                        inactive.add(_TARGET_RADIUS_FIELD)
+                    if region.shape == "enclosing_mesh":
+                        inactive.update(_TARGET_CENTER_FIELDS)
+                elif str(config.target_mesh_file).lower() not in {"none", ""}:
+                    inactive.update(_TARGET_REGION_FIELDS)
+                elif config.set_roi_into_mesh_center:
+                    inactive.update(_TARGET_CENTER_FIELDS)
         return tuple(
             item
             for item in SETTINGS
@@ -821,20 +944,27 @@ class WorkbenchSession:
             and (item.key != "imported_mesh_length_scale_to_m" or source.lower().endswith(".stl"))
         )
 
-    def settings_values(self, node: str | None = None) -> dict:
+    def settings_values(self, node: str | None = None, *, support_source=None, former_mode=None) -> dict:
         project = self._require_project()
         config = project.config
-        return {item.key: item.get(config, project.study) for item in self.settings_fields(node)}
+        return {
+            item.key: item.get(config, project.study)
+            for item in self.settings_fields(node, support_source=support_source, former_mode=former_mode)
+        }
 
     def apply_settings(self, values: dict):
         """Apply form values; raises ValueError (nothing changed) when invalid."""
         project = self._require_project()
         config = project.config
         geometry = {key: value for key, value in values.items() if key in _SUPPORT_FIELDS}
+        target_region = {key: value for key, value in values.items() if key in _TARGET_REGION_FIELDS}
         source = values.get("coil_mesh_file", config.coil_mesh_file)
         config_changes, study_changes = _support_edits(config, geometry, source), {}
+        config_changes.update(_target_region_edits(config, target_region))
         for key, value in values.items():
-            if key in geometry:
+            if key in geometry or key in target_region:
+                continue
+            if key == "target_amplitude_native" and target_scaling_mode(config, values) == "none":
                 continue
             item = SETTINGS_BY_KEY[key]
             changes = item.set(value, config, project.study)
@@ -858,11 +988,14 @@ class WorkbenchSession:
         """Advanced settings: any CoilGenConfig field, validated by the engine."""
         return self.apply_inputs(changes)
 
-    def apply_profile_preset(self, kind: str, *, segments: int = 16, equal_area: bool = False):
+    def apply_profile_preset(
+        self, kind: str, *, segments: int = 16, equal_area: bool = False, diameter_mm: float | str | None = None
+    ):
         """Replace the cross-section with a preset built from conductor width/height.
 
         ``segments`` (points around a full circle) applies to the round wire
         and the U-shape half circle; ``equal_area`` keeps the round wire area.
+        An explicit round diameter updates both nominal dimensions in the same revision.
         """
         from .conductor_profiles import omega_holder_profile, round_wire_profile, u_shape_profile
 
@@ -873,7 +1006,18 @@ class WorkbenchSession:
             # The default rectangle sentinel follows conductor width and height.
             changes = {"cross_sectional_points": type(project.config)().cross_sectional_points}
         elif kind == "round":
+            if diameter_mm is not None:
+                try:
+                    if isinstance(diameter_mm, bool):
+                        raise ValueError
+                    millimetres = float(diameter_mm)
+                    if millimetres != width * 1e3:
+                        width = millimetres * 1e-3
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise ValueError("Enter a positive round wire diameter in mm.") from exc
             changes = {"cross_sectional_points": round_wire_profile(width, segments, equal_area=equal_area)}
+            if diameter_mm is not None:
+                changes.update(conductor_cross_section_width=width, conductor_cross_section_height=width)
         elif kind == "u_shape":
             changes = {"cross_sectional_points": u_shape_profile(width, height, segments)}
         elif kind == "omega":
@@ -883,7 +1027,7 @@ class WorkbenchSession:
             }
         else:
             raise ValueError(f"Unknown conductor profile preset {kind!r}.")
-        self._replace_project(project.update_config(changes))
+        return self.apply_config(changes)
 
     def import_profile_table(self, path, *, length_scale_to_m: float = 1e-3):
         """Replace the cross-section with a two-column (u, n) table, millimetres by default."""

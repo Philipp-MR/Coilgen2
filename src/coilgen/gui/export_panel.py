@@ -26,6 +26,7 @@ from ..application.cad import (
     draft_export_notice,
     geometry_option_label,
     is_draft_artifact,
+    print_former_status,
 )
 from ..persistence import publish_exclusive
 from .colors import apply_tone, item_foreground
@@ -163,6 +164,7 @@ class GeometryExportPanel(QWidget):
         assembly=None,
         pending=False,
         state=None,
+        former_only=False,
     ):
         super().__init__(parent)
         self._has_record = record is not None
@@ -173,6 +175,7 @@ class GeometryExportPanel(QWidget):
         self._exporting = False
         self._review_allowed = False
         self.options = tuple(options)
+        self._single_former = former_only and len(self.options) == 1
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.scope = QLabel()
@@ -191,7 +194,11 @@ class GeometryExportPanel(QWidget):
         else:
             self.scope.setText(
                 f"Saved run: {metadata.get('name', record.directory.name)} · revision {revision}. "
-                "Exports use this run's exact solid geometry. Geometry availability, field acceptance and construction release are separate."
+                + (
+                    "Former geometry is exported for inspection. Coil acceptance and construction release are separate."
+                    if former_only
+                    else "Exports use this run's exact solid geometry. Geometry availability, field acceptance and construction release are separate."
+                )
             )
         self.status = QLabel(diagnostic)
         self.status.setObjectName("geometry_export_status")
@@ -305,7 +312,14 @@ class GeometryExportPanel(QWidget):
                 if any(option.inspection_only for option in self.options)
                 else "success",
             )
-        self.problems_button.setVisible(review.get("ready") is False or bool(review.get("failure_reasons")))
+        if former_only:
+            self.status.setText(print_former_status(metadata))
+            apply_tone(
+                self.status, "error" if any(option.check_status == "failed" for option in self.options) else "neutral"
+            )
+        self.problems_button.setVisible(
+            not former_only and (review.get("ready") is False or bool(review.get("failure_reasons")))
+        )
         self.review_button.setVisible(record is not None and not self.options and review.get("ready") is not False)
         self.review_scope.setVisible(not self.review_button.isHidden())
         if self._diagnostic:
@@ -337,6 +351,8 @@ class GeometryExportPanel(QWidget):
         layout.addWidget(self.unit_note)
         for control in (self.units, self.include_project, self.table, self.bounds, self.unit_note):
             control.setVisible(bool(self.options))
+        if self._single_former:
+            self.table.hide()
         release = QLabel(
             "Construction release: " + ("Released" if summary.get("construction_released") is True else "Not released")
         )
@@ -350,7 +366,7 @@ class GeometryExportPanel(QWidget):
                 name.setIcon(icon("conductor-sweep"))
                 name.setData(Qt.ItemDataRole.UserRole, option.name)
                 name.setFlags(name.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                selected = (
+                selected = self._single_former or (
                     option.name in self.state.names if self.state.names is not None else option.name in default_names
                 )
                 name.setCheckState(Qt.CheckState.Checked if selected else Qt.CheckState.Unchecked)
@@ -451,6 +467,8 @@ class GeometryExportPanel(QWidget):
         self.export_button.setText(
             "Exporting saved geometry…"
             if self._exporting
+            else "Export former STL…"
+            if self._single_former
             else f"Export {len(names)} selected solid files…"
             if names
             else "Select a solid to export"
@@ -475,9 +493,10 @@ class GeometryExportPanel(QWidget):
             )
 
     def _request_export(self):
-        names = self.selected_names()
-        if self._has_record and names and not self._exporting and not self._diagnostic:
-            self.export_requested.emit(names, self.units.currentData(), self.include_project.isChecked())
+        if self.export_button.isEnabled():
+            self.export_requested.emit(
+                self.selected_names(), self.units.currentData(), self.include_project.isChecked()
+            )
 
     def set_exporting(self, exporting):
         self._exporting = bool(exporting)

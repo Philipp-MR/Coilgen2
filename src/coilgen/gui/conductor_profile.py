@@ -37,10 +37,12 @@ from ..application.conductor_profiles import (
     omega_holder_profile,
     parse_profile_table,
     read_profile_table,
+    round_wire_options,
     round_wire_profile,
     u_shape_profile,
     validate_conductor_profile,
 )
+from .controls import ScientificSpinBox
 from .icons import icon
 
 
@@ -60,6 +62,7 @@ class ConductorProfileEditor(QWidget):
         self._loading = False
         self._polygon_initialized = False
         self._loaded_error = ""
+        self._round_source = None
         self._width_mm = self._height_mm = 2.0
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -67,9 +70,22 @@ class ConductorProfileEditor(QWidget):
         mode_row.addWidget(QLabel("Cross-section", self))
         self.mode_combo = QComboBox(self)
         self.mode_combo.setObjectName("conductor_profile_mode")
+        self.mode_combo.setAccessibleName("Cross-section")
         self.mode_combo.addItem(icon("conductor-profile"), "Rectangle from width / height", "rectangle")
         self.mode_combo.addItem(icon("mesh"), "Polygon from straight segments", "polygon")
+        self.mode_combo.addItem(icon("conductor-profile"), "Round wire", "round")
         mode_row.addWidget(self.mode_combo, 1)
+        self.diameter_spin = ScientificSpinBox(self)
+        self.diameter_spin.setObjectName("conductor_profile_diameter")
+        self.diameter_spin.setAccessibleName("Diameter [mm]")
+        self.diameter_spin.setDecimals(12)
+        self.diameter_spin.setRange(0.000001, 10000)
+        self.diameter_spin.setSuffix(" mm")
+        self.diameter_spin.setKeyboardTracking(False)
+        self._diameter_label = QLabel("Diameter [mm]", self)
+        self._diameter_label.setBuddy(self.diameter_spin)
+        mode_row.addWidget(self._diameter_label)
+        mode_row.addWidget(self.diameter_spin)
         self.segments_spin = QSpinBox(self)
         self.segments_spin.setObjectName("conductor_profile_circle_points")
         self.segments_spin.setRange(MIN_CIRCLE_SEGMENTS, MAX_CIRCLE_SEGMENTS)
@@ -77,7 +93,7 @@ class ConductorProfileEditor(QWidget):
         self.segments_spin.setPrefix("Points ")
         self.segments_spin.setToolTip(
             "Points around a full circle for the Round wire and U-shape presets (the U-shape half circle uses "
-            "half as many segments). Fewer points give smaller swept STL files. Applies when a preset is clicked."
+            "half as many segments). Fewer points give smaller swept STL files."
         )
         self.equal_area_check = QCheckBox("Keep circle area", self)
         self.equal_area_check.setObjectName("conductor_profile_equal_area")
@@ -135,9 +151,6 @@ class ConductorProfileEditor(QWidget):
         )
         self.fit_button = QPushButton("Fit view", self)
         self.fit_button.setIcon(icon("fit-view"))
-        self.round_button = QPushButton("Round wire", self)
-        self.round_button.setObjectName("conductor_profile_round")
-        self.round_button.setToolTip("Round (litz) wire polygon centred on the origin; diameter = conductor width.")
         self.u_shape_button = QPushButton("U-shape", self)
         self.u_shape_button.setObjectName("conductor_profile_u_shape")
         self.u_shape_button.setToolTip(
@@ -164,7 +177,6 @@ class ConductorProfileEditor(QWidget):
         shape_options.addWidget(self.fit_button)
         layout.addLayout(shape_options)
         bottom.addWidget(self.rectangle_button)
-        bottom.addWidget(self.round_button)
         bottom.addWidget(self.u_shape_button)
         bottom.addWidget(self.omega_button)
         bottom.addStretch(1)
@@ -182,10 +194,13 @@ class ConductorProfileEditor(QWidget):
         self.table.itemChanged.connect(self._table_changed)
         self.table.itemSelectionChanged.connect(self._selection_changed)
         self.mode_combo.currentIndexChanged.connect(self._mode_changed)
+        self.diameter_spin.valueChanged.connect(self._round_changed)
+        self.diameter_spin.lineEdit().textEdited.connect(self._round_changed)
+        self.segments_spin.valueChanged.connect(self._round_changed)
+        self.equal_area_check.toggled.connect(self._round_changed)
         self.add_button.clicked.connect(self.insert_point)
         self.remove_button.clicked.connect(self.remove_point)
         self.rectangle_button.clicked.connect(self.start_rectangle)
-        self.round_button.clicked.connect(lambda: self.start_preset("round"))
         self.u_shape_button.clicked.connect(lambda: self.start_preset("u_shape"))
         self.omega_button.clicked.connect(lambda: self.start_preset("omega"))
         self.import_button.clicked.connect(self.choose_table_file)
@@ -195,11 +210,14 @@ class ConductorProfileEditor(QWidget):
         self.preview.point_moved.connect(self._move_point)
         self.set_profile(((0.0, 0.0),))
 
-    def set_profile(self, profile_metres, width_mm=2.0, height_mm=2.0):
+    def set_profile(self, profile_metres, width_mm=2.0, height_mm=2.0, *, round_diameter_m=None):
         """Load an applied model without generating a draft change signal."""
         self._loading = True
         try:
             self._width_mm, self._height_mm = width_mm, height_mm
+            if width_mm is not None:
+                self.diameter_spin.setValue(float(width_mm))
+            self._round_source = None
             rectangle = is_rectangular_profile(profile_metres)
             self._polygon_initialized = not rectangle
             self._loaded_error = ""
@@ -218,7 +236,14 @@ class ConductorProfileEditor(QWidget):
                 except (ValueError, TypeError):
                     points = ()
             self._set_points(points)
-            self.mode_combo.setCurrentIndex(0 if rectangle else 1)
+            options = round_wire_options(points, round_diameter_m) if round_diameter_m is not None else None
+            if options:
+                segments, equal_area = options
+                self.segments_spin.setValue(segments)
+                self.equal_area_check.setChecked(equal_area)
+                self._round_source = round_diameter_m, self.diameter_spin.text()
+            mode = "rectangle" if rectangle else "round" if options else "polygon"
+            self.mode_combo.setCurrentIndex(self.mode_combo.findData(mode))
             self._update_state()
             self.preview.fit_view()
         finally:
@@ -232,12 +257,25 @@ class ConductorProfileEditor(QWidget):
 
     def set_rectangle_dimensions(self, width_mm, height_mm):
         self._width_mm, self._height_mm = width_mm, height_mm
+        if self.mode_combo.currentData() != "round" and width_mm is not None:
+            self.diameter_spin.setValue(float(width_mm))
         if self.mode_combo.currentData() == "rectangle":
             self._update_state()
+
+    def round_diameter_m(self):
+        if self.mode_combo.currentData() != "round":
+            return None
+        if not self.diameter_spin.hasAcceptableInput():
+            raise ValueError("Enter a positive round wire diameter in mm.")
+        if self._round_source and self.diameter_spin.text() == self._round_source[1]:
+            return self._round_source[0]
+        return self.diameter_spin.valueFromText(self.diameter_spin.text()) * 1e-3
 
     def draft_value(self):
         """Stable raw draft identity, including invalid or incomplete input."""
         mode = self.mode_combo.currentData()
+        if mode == "round":
+            return mode, self.diameter_spin.text(), self.segments_spin.value(), self.equal_area_check.isChecked()
         rows = tuple(
             tuple(self.table.item(row, col).text() for col in range(2)) for row in range(self.table.rowCount())
         )
@@ -252,13 +290,32 @@ class ConductorProfileEditor(QWidget):
             )
             for r in range(self.table.rowCount())
         )
-        return self.mode_combo.currentIndex(), cells, self._polygon_initialized, self._loaded_error
+        return (
+            self.mode_combo.currentIndex(),
+            cells,
+            self._polygon_initialized,
+            self._loaded_error,
+            self.diameter_spin.value(),
+            self.diameter_spin.text(),
+            self.segments_spin.value(),
+            self.equal_area_check.isChecked(),
+        )
 
     def restore_draft(self, state):
-        mode, cells, self._polygon_initialized, self._loaded_error = state
+        mode, cells, self._polygon_initialized, self._loaded_error, diameter, text, segments, equal_area = state
         self._close_cell_editor()
-        with QSignalBlocker(self.table), QSignalBlocker(self.mode_combo):
+        with (
+            QSignalBlocker(self.table),
+            QSignalBlocker(self.mode_combo),
+            QSignalBlocker(self.diameter_spin),
+            QSignalBlocker(self.segments_spin),
+            QSignalBlocker(self.equal_area_check),
+        ):
             self.mode_combo.setCurrentIndex(mode)
+            self.diameter_spin.setValue(diameter)
+            self.diameter_spin.restore_draft_text(text)
+            self.segments_spin.setValue(segments)
+            self.equal_area_check.setChecked(equal_area)
             self.table.setRowCount(len(cells))
             for row, pair in enumerate(cells):
                 for column, (text, source) in enumerate(pair):
@@ -279,10 +336,15 @@ class ConductorProfileEditor(QWidget):
             return "Profile incomplete"
         if self.mode_combo.currentData() == "rectangle":
             return f"Rectangle {float(self._width_mm):g} × {float(self._height_mm):g} mm"
+        if self.mode_combo.currentData() == "round":
+            return f"Round wire · {self.round_diameter_m() * 1e3:g} mm diameter"
         summary = validate_conductor_profile(self.profile())
         return f"Polygon · {len(summary.points_m)} points · {summary.area_m2 * 1e6:g} mm²"
 
     def focus_error(self):
+        if self.mode_combo.currentData() == "round":
+            self.diameter_spin.setFocus()
+            return
         for row in range(self.table.rowCount()):
             for col in range(2):
                 try:
@@ -296,6 +358,12 @@ class ConductorProfileEditor(QWidget):
 
     def profile(self):
         """Return the rectangle sentinel or validated, ordered SI vertices."""
+        if self.mode_combo.currentData() == "round":
+            points = round_wire_profile(
+                self.round_diameter_m(), self.segments_spin.value(), equal_area=self.equal_area_check.isChecked()
+            )
+            validate_conductor_profile(points)
+            return points
         if self.mode_combo.currentData() == "rectangle":
             try:
                 width, height = float(self._width_mm) * 1e-3, float(self._height_mm) * 1e-3
@@ -371,6 +439,11 @@ class ConductorProfileEditor(QWidget):
         self.preview.fit_view()
         self._emit_changed()
 
+    def _round_changed(self, *_args):
+        if not self._loading and self.mode_combo.currentData() == "round":
+            self._update_state()
+            self._emit_changed()
+
     def start_rectangle(self):
         if not self._rectangle_points():
             self.status_label.setText("Complete positive width and height before starting a rectangle.")
@@ -389,16 +462,16 @@ class ConductorProfileEditor(QWidget):
     def start_preset(self, kind):
         """Replace the polygon with a round wire, U-shape or omega holder.
 
-        The wire diameter is the current conductor width (the U-shape total
-        height is the conductor height). Round and U-shape use the circle
-        point count; all shapes are centred on the origin.
+        Round wire retains its diameter as an editable draft. The other
+        presets use the current nominal dimensions and yield editable points.
         """
+        if kind == "round":
+            self.mode_combo.setCurrentIndex(self.mode_combo.findData("round"))
+            return
         segments = self.segments_spin.value()
         try:
             width, height = float(self._width_mm) * 1e-3, float(self._height_mm) * 1e-3
-            if kind == "round":
-                points = round_wire_profile(width, segments, equal_area=self.equal_area_check.isChecked())
-            elif kind == "u_shape":
+            if kind == "u_shape":
                 points = u_shape_profile(width, height, segments)
             else:
                 points = omega_holder_profile(width)
@@ -531,27 +604,32 @@ class ConductorProfileEditor(QWidget):
             self.changed.emit()
 
     def _update_state(self):
-        polygon = self.mode_combo.currentData() == "polygon"
+        mode = self.mode_combo.currentData()
+        polygon, round_wire = mode == "polygon", mode == "round"
+        self._diameter_label.setVisible(round_wire)
+        self.diameter_spin.setVisible(round_wire)
+        self.equal_area_check.setVisible(round_wire)
         self._table_panel.setVisible(polygon)
-        self.rectangle_button.setText("Reset to rectangle" if polygon else "Edit as polygon")
+        self.rectangle_button.setText("Reset to rectangle" if polygon else "Edit rectangle as polygon")
         self.table.setEnabled(polygon)
         self.add_button.setEnabled(polygon)
         self.instructions.setText(
             "Edit coordinates, drag numbered points, or paste a u, n table (mm). The last point closes to the first."
             if polygon
+            else "Diameter sets the round wire profile and its nominal dimensions."
+            if round_wire
             else "The rectangle uses width and height from Conductor settings. Choose polygon to edit its segments."
         )
         self._selection_changed()
         error = self.validation_message()
         try:
-            points = (
-                tuple(
-                    tuple(self._coordinate_metres(row, col) * 1e3 for col in range(2))
-                    for row in range(self.table.rowCount())
+            if polygon:
+                points_m = tuple(
+                    tuple(self._coordinate_metres(row, col) for col in range(2)) for row in range(self.table.rowCount())
                 )
-                if polygon
-                else tuple(tuple(value * 1e3 for value in point) for point in self._rectangle_points())
-            )
+            else:
+                points_m = self.profile() if round_wire else self._rectangle_points()
+            points = tuple(tuple(value * 1e3 for value in point) for point in points_m)
         except (ValueError, TypeError, OverflowError):
             points = ()
         if points:
@@ -567,11 +645,11 @@ class ConductorProfileEditor(QWidget):
                 validate_conductor_profile(
                     self.profile(), width_m=float(self._width_mm) * 1e-3, height_m=float(self._height_mm) * 1e-3
                 )
-                if not polygon
+                if mode == "rectangle"
                 else validate_conductor_profile(self.profile())
             )
             self.status_label.setText(
-                (f"{len(summary.points_m)} points" if polygon else "Rectangle")
+                (f"{len(summary.points_m)} points" if mode != "rectangle" else "Rectangle")
                 + f" · area {summary.area_m2 * 1e6:g} mm² · "
                 f"extent {summary.width_m * 1e3:g} × {summary.height_m * 1e3:g} mm"
             )

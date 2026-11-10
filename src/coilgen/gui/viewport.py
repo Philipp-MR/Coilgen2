@@ -47,6 +47,7 @@ from ..application.scene_spec import (
     SUPPORT_COLOR,
     WINDING_COLOR,
     model_preview,
+    scene_layers,
 )
 from ..application.submitted_design import contour_fit_caption
 from ..persistence import json_value
@@ -207,6 +208,7 @@ class ScientificViewport(QWidget):
 
         self.pv = pv
         self._arrays = {}
+        self._print_former_loader = None
         self._metadata = {}
         self._stage_arrays = {}
         self._stage_metadata = {}
@@ -708,6 +710,8 @@ class ScientificViewport(QWidget):
         self._capabilities = {}
         for original in (False, True):
             catalog = dataset_capabilities(arrays, original=original)
+            if self._print_former_loader is not None and not self._live_stage_preview:
+                catalog["print_former"] = DatasetCapability(True)
             catalog.update(previews)
             self._capabilities[original] = catalog
 
@@ -1244,6 +1248,9 @@ class ScientificViewport(QWidget):
             self._start_preview(request)
         self.activity_changed.emit()
 
+    def set_print_former_loader(self, loader):
+        self._print_former_loader = loader
+
     def display_run(self, arrays, metadata=None, *, follow_latest=False):
         keep_view = follow_latest and self._live_stage_preview and bool(self._actors)
         self._stage_arrays, self._stage_metadata = {}, {}
@@ -1270,7 +1277,7 @@ class ScientificViewport(QWidget):
             self.error.emit(self._source_notice)
         with QSignalBlocker(self.dataset), QSignalBlocker(self.roi_layer):
             self.dataset.setCurrentIndex(self.dataset.findData(preferred))
-            if not keep_view and (preferred in PATH_PREFIXES or preferred == "swept"):
+            if not keep_view and (preferred in PATH_PREFIXES or preferred in {"swept", "print_former"}):
                 self.roi_layer.setChecked(False)
         self._render()
 
@@ -1361,6 +1368,7 @@ class ScientificViewport(QWidget):
         """Return to the current model without retaining another project's run."""
         self._clear_inspection_task()
         self._arrays = {}
+        self._print_former_loader = None
         self._metadata = {}
         self._stage_arrays, self._stage_metadata = {}, {}
         self._live_stage_preview = False
@@ -1905,6 +1913,14 @@ class ScientificViewport(QWidget):
     def _render(self, *_args):
         if self._closed:
             return
+        key = self.dataset.currentData()
+        if key == "print_former" and self._print_former_loader is not None and not self._live_stage_preview:
+            load, self._print_former_loader = self._print_former_loader, None
+            try:
+                self._arrays.update(load())
+            except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+                self.error.emit(f"Saved former STL could not be plotted: {exc}")
+            self._rebuild_capabilities()
         self._refresh_availability()
         self._sync_system_mesh_controls()
         camera = self.plotter.camera_position
@@ -1917,7 +1933,6 @@ class ScientificViewport(QWidget):
         self._dataset_mesh = None
         self._dataset_actor_key = None
         self.probe.setText("Probe: —")
-        key = self.dataset.currentData()
         available = self._capability(key, comparison=False).available
         hidden_support = key == "support" and available and not self._active_support_visible()
         self.hidden_geometry.setVisible(hidden_support)
@@ -1937,7 +1952,7 @@ class ScientificViewport(QWidget):
         # The current only selects field maps. Keep it reachable on a path view
         # if changing policy unlocks a map unavailable at the current setting.
         original = self.wire_current.currentIndex() == 1
-        geometry = key in PATH_PREFIXES or key == "swept"
+        geometry = key in PATH_PREFIXES or key in {"swept", "print_former"}
         show_current = has_wire_maps and (
             not geometry
             or any(
@@ -1981,7 +1996,16 @@ class ScientificViewport(QWidget):
                 if self._source_support_available
                 else None
             )
-            if support is not None and self._active_support_visible() and key not in {"stream_function", "support"}:
+            if (
+                support is not None
+                and self._active_support_visible()
+                and key
+                not in {
+                    "stream_function",
+                    "support",
+                    "print_former",
+                }
+            ):
                 self._add(
                     support,
                     "geometry",
@@ -1995,7 +2019,7 @@ class ScientificViewport(QWidget):
                     if key == "preview_target"
                     else 0.15,
                 )
-            if self.support_layer.isChecked():
+            if self.support_layer.isChecked() and key != "print_former":
                 colors = ("#4b869f", "#c48a53", "#82985d", "#947aaa", "#579c90")
                 for index, (id_, channel) in enumerate(self._system_channels.items()):
                     if id_ == self._displayed_support_channel() or not self._system_visibility.get(id_, True):
@@ -2020,7 +2044,7 @@ class ScientificViewport(QWidget):
                     target_is_primary = "fabricated_points_m" not in arrays or np.array_equal(
                         arrays["fabricated_points_m"], arrays.get("target_points_m")
                     )
-            if self.roi_layer.isChecked() and points_available and not target_is_primary:
+            if self.roi_layer.isChecked() and points_available and not target_is_primary and key != "print_former":
                 if live and self._capability("target", comparison=False).available:
                     points = self._field_mesh(arrays, "target")
                     self._add(
@@ -2077,6 +2101,20 @@ class ScientificViewport(QWidget):
                     "render_points_as_spheres": True,
                 }
                 caption += " · " + self._field_caption(key)
+            elif key == "print_former":
+                layers, reason = scene_layers(arrays, key)
+                for layer in layers:
+                    self._add(
+                        self._mesh(layer.points, layer.faces),
+                        "geometry",
+                        color=layer.color,
+                        show_edges=self.edges.isChecked(),
+                    )
+                if layers:
+                    source = "fabrication STL" if layers[0].extra["reviewed"] else "pipeline geometry"
+                    caption += f" · Grooved print former · saved {source} · {len(layers)} bodies"
+                else:
+                    caption += f" · {reason}"
             elif key == "swept":
                 grooved_count = 0
                 for name in sorted(arrays):
@@ -2188,6 +2226,7 @@ class ScientificViewport(QWidget):
                 "review_conductor",
                 "review_electrical",
                 "swept",
+                "print_former",
                 "support",
                 "stream_function",
             }:

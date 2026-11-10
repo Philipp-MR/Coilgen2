@@ -747,7 +747,10 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
     artifacts.extend(stage_artifacts)
     if request.fabricate:
         with progress_scope(
-            *work_ranges["fabrication"], "Conditioning and checking the fabrication assembly", overall=True
+            *work_ranges["fabrication"],
+            "Conditioning and checking the fabrication assembly",
+            overall=True,
+            operation="Strict fabrication review",
         ):
             fabrication = compile_fabrication(
                 result,

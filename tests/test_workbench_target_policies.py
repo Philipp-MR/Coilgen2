@@ -39,8 +39,15 @@ def test_absolute_field_disables_unused_gradient_controls_without_mutating_value
     )
     assert not window._draft_controls["target_gradient_strength"].isEnabled()
     assert not window._draft_controls["target_gradient_axis"].isEnabled()
+    normalization = window._draft_controls["target_gradient_normalization"]
+    assert normalization.currentText() == "Absolute field expression"
+    assert normalization.currentData() == policy
+    assert (
+        sum(normalization.itemText(index) == "Absolute field expression" for index in range(normalization.count())) == 1
+    )
     window._draft_controls["target_region_resolution"].setValue(19)
     assert window.apply_settings()
+    assert window.project.config.target_gradient_normalization == policy
     assert window.project.config.target_gradient_strength == strength
     field = define_target_field([], None, None, window.project.config)
     np.testing.assert_array_equal(field.b[:, 2], np.full(len(field.coords), 1e-4))
@@ -365,6 +372,8 @@ def test_gy_summary_is_hidden_when_draft_no_longer_matches_the_linear_tesla_cont
     if key == "field_shape_function":
         control.selectAll()
         QTest.keyClicks(control, value)
+    elif key == "target_gradient_normalization":
+        control.setCurrentIndex(control.findData(value))
     else:
         control.setCurrentText(value)
     assert label.isHidden()

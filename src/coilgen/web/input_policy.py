@@ -290,8 +290,20 @@ def _numeric_payload_size(data):
 
 def load_browser_assembly(path, *, workspace=None):
     path = Path(path)
-    if path.stat().st_size > PROJECT_UPLOAD_LIMIT:
-        raise ValueError("Project exceeds the 512 MiB browser file limit.")
+    size = path.stat().st_size
+    if size > PROJECT_UPLOAD_LIMIT:
+        # A project saved by the workbench has already been written locally.
+        # It still needs the full compact bundle and expanded-payload checks.
+        workspace_bundle = (
+            workspace is not None
+            and path.parent == Path(workspace).resolve() / "projects"
+            and path.resolve() == path
+            and is_bundle(path)
+        )
+        if not workspace_bundle:
+            raise ValueError("Project exceeds the 512 MiB browser import limit.")
+        if size > _EXPANDED_LIMIT:
+            raise ValueError("Saved project exceeds the browser workspace size limit.")
     if is_bundle(path):
         # A saved study can evaluate an analytic recipe during its native construction.
         # Inspect only the bounded manifest first; the native loader verifies all blobs and hashes.

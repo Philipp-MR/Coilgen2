@@ -8,11 +8,14 @@ or independent acceptance test. Samples on the coil surface or wire stay masked.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from io import BytesIO
 import json
 from numbers import Real
+from pathlib import Path
+from threading import RLock
 from typing import Mapping
 
 import numpy as np
@@ -85,6 +88,165 @@ class SliceCollection:
 def _cancel(check):
     if check is not None and check():
         raise DesignCancelled("Field sampling cancelled by the user.")
+
+
+def _file_stamps(paths, check):
+    stamps = []
+    for path in paths:
+        _cancel(check)
+        try:
+            resolved = path.resolve()
+            info = resolved.stat()
+            stamp = (resolved, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        except FileNotFoundError:
+            stamp = None
+        stamps.append(stamp)
+    return tuple(stamps)
+
+
+@dataclass(slots=True)
+class _SliceInputEntry:
+    record: object
+    paths: tuple = ()
+    stamps: tuple = ()
+    manifest: Mapping | None = None
+    owned_request: dict | None = None
+    catalog: tuple | None = None
+    dataset: object = None
+    gap: float | None = None
+    prepared: dict = field(default_factory=dict)
+    lock: object = field(default_factory=RLock)
+
+    def current(self, check):
+        return _file_stamps(self.paths, check) == self.stamps
+
+    def require_current(self, check):
+        from .evidence import EvidenceIntegrityError
+
+        _cancel(check)
+        try:
+            current = self.current(check)
+        except InterruptedError:
+            raise
+        except OSError as exc:
+            raise EvidenceIntegrityError(f"Saved evidence cannot be rechecked: {exc}") from exc
+        if not current:
+            raise EvidenceIntegrityError("Saved evidence changed during field analysis. Reload the run.")
+
+    def reuse(self, dataset, gap, key, create, check):
+        with self.lock:
+            if self.dataset is not dataset or self.gap != gap:
+                self.dataset, self.gap = dataset, gap
+                self.prepared.clear()
+            if key in self.prepared:
+                return self.prepared[key]
+        value = create()
+        self.require_current(check)
+        with self.lock:
+            if self.dataset is dataset and self.gap == gap:
+                self.prepared[key] = value
+        return value
+
+
+class SliceInputCache:
+    """Reuse one inspector's verified run and bounded source preparation.
+
+    An immutable selected record is the cache identity. Observable changes to
+    its archive or owned inputs force the existing checksum verification before
+    reuse. A changed or cancelled request cannot publish stale cached evidence.
+    """
+
+    def __init__(self):
+        self._entry = None
+        self._lock = RLock()
+
+    @staticmethod
+    def _load(record, check):
+        from .evidence import EvidenceIntegrityError, _artifact_bytes, _checked_snapshot_metadata, _original_request
+
+        artifacts = record.metadata_view.get("artifacts", ())
+        if not artifacts:
+            return _SliceInputEntry(record)  # In-memory or legacy display snapshot.
+        directory = record.directory
+        names = tuple(item["name"] for item in artifacts)
+        paths = tuple(dict.fromkeys(directory / name for name in ("result.json", "manifest.json", *names)))
+        if any(not path.resolve().is_relative_to(directory) for path in paths):
+            raise EvidenceIntegrityError("Saved artifact path leaves its run directory.")
+        base_stamps = _file_stamps(paths, check)
+        manifest = json.loads(
+            _artifact_bytes(record, "manifest.json")
+            if "manifest.json" in names
+            else (directory / "manifest.json").read_text(encoding="utf-8")
+        )
+        inputs = []
+        for item in manifest.get("input_files", {}).values():
+            digest = item["sha256"]
+            if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+                raise EvidenceIntegrityError("A saved field input has an invalid content hash.")
+            portable = directory / "portable_inputs" / digest
+            inputs.append(portable)
+            if not (portable.exists() or portable.is_symlink()):
+                inputs.append(Path(item["path"]))
+        paths += tuple(dict.fromkeys(inputs))
+        stamps = _file_stamps(paths, check)
+        metadata, verified_manifest, _report = _checked_snapshot_metadata(record, cancel_check=check)
+        if stamps[: len(base_stamps)] != base_stamps or verified_manifest != manifest:
+            raise EvidenceIntegrityError("Saved run identity changed during field analysis. Reload the run.")
+        owned = _original_request(record, metadata, verified_manifest) if "request.json" in names else None
+        entry = _SliceInputEntry(record, paths, stamps, _freeze(verified_manifest), owned)
+        entry.require_current(check)
+        return entry
+
+    def _entry_for(self, record, check):
+        from .evidence import EvidenceIntegrityError
+
+        _cancel(check)
+        try:
+            with self._lock:
+                entry = self._entry
+            if entry is not None and entry.record is record and entry.current(check):
+                return entry
+            entry = self._load(record, check)
+        except (DesignCancelled, InterruptedError, EvidenceIntegrityError):
+            raise
+        except (OSError, ValueError, TypeError, AttributeError, KeyError, RuntimeError) as exc:
+            raise EvidenceIntegrityError(str(exc) or type(exc).__name__) from exc
+        with self._lock:
+            self._entry = entry
+        return entry
+
+    def request(self, record, supplied=None, *, cancel_check=None):
+        """Return a detached original request, preserving legacy supplied-input behavior."""
+        return _slice_request(self._entry_for(record, cancel_check), supplied)
+
+    def catalog(self, record, *, progress=None, cancel_check=None):
+        """Return the run's retained saved-sample datasets."""
+        return _slice_catalog(self._entry_for(record, cancel_check), progress, cancel_check)
+
+
+def _slice_request(entry, supplied):
+    owned = entry.owned_request
+    if (
+        owned is not None
+        and supplied is not None
+        and json.dumps(owned, sort_keys=True) != json.dumps(supplied, sort_keys=True)
+    ):
+        raise ValueError("Slice settings must come from the unchanged selected run's original request.")
+    return deepcopy(owned) if owned is not None else supplied
+
+
+def _slice_catalog(entry, progress, check):
+    from .field_analysis import source_catalog
+
+    if entry.catalog is None:
+        catalog = source_catalog(
+            entry.record, request=_slice_request(entry, None), progress=progress, cancel_check=check
+        )
+        entry.require_current(check)
+        with entry.lock:
+            if entry.catalog is None:
+                entry.catalog = catalog
+    return entry.catalog
 
 
 def _numbers(value, count, name, *, positive=False):
@@ -187,7 +349,7 @@ def _ordered_names(record, prefix):
     return sorted(names, key=lambda name: tuple(int(value) for value in re.findall(r"\d+", name)))
 
 
-def _wire_source(record, dataset, row, scenario):
+def _wire_source(record, dataset, row, scenario, *, checked=False):
     """Select exactly the represented paths; never substitute fabricated for contour geometry."""
     metadata = record.metadata
     paths = []
@@ -208,11 +370,12 @@ def _wire_source(record, dataset, row, scenario):
             paths.append((points, current))
     elif dataset.key.startswith("contour"):
         # Multiplicities live in the typed checkpoint, not the display arrays.
-        from .evidence import read_verified_artifact
+        from .evidence import _artifact_bytes, read_verified_artifact
         from ..pipeline_stages import PipelineCheckpoint
 
+        read_checkpoint = _artifact_bytes if checked else read_verified_artifact
         checkpoint = PipelineCheckpoint.load(
-            BytesIO(read_verified_artifact(record, "pipeline_checkpoint.cgstage")), max_bytes=MAX_SOURCE_BYTES
+            BytesIO(read_checkpoint(record, "pipeline_checkpoint.cgstage")), max_bytes=MAX_SOURCE_BYTES
         )
         current = dataset.provenance.get("current_A")
         if current is None:
@@ -321,6 +484,9 @@ def _physical(points, kind, source, config, check, progress=None):
     if progress is not None:
         progress(None)
     valid = _sheet_mask(points, source[0], check) if kind == "sheet" else _wire_mask(points, source, check)
+    # Sensitivity writes a temporary matrix to the part. Keep the prepared
+    # basis shareable if a cancelled task overlaps its replacement.
+    part = replace(source[0]) if kind == "sheet" else None
     indices = np.flatnonzero(valid)
     count = len(source[1]) if kind == "sheet" else 1
     chunk_size = max(1, min(256, MAX_OPERATOR_BYTES // max(3 * count * 8, 1)))
@@ -337,7 +503,7 @@ def _physical(points, kind, source, config, check, progress=None):
 
         with progress_context(kernel_progress, cancel_check=check):
             if kind == "sheet":
-                part, sf = source
+                sf = source[1]
                 target = TargetField(
                     samples,
                     np.zeros_like(samples),
@@ -643,7 +809,7 @@ def _mesh_section(vertices, faces, plane_axis, offset, check=None):
     return tuple(segments)
 
 
-def _owned_enclosure(record, geometry):
+def _owned_enclosure(record, geometry, manifest=None):
     """Load the exact historical boundary, including relocated hash-addressed inputs."""
     from pathlib import Path
     import struct
@@ -652,7 +818,8 @@ def _owned_enclosure(record, geometry):
     from ..geometry import read_mesh_npz, normalize_mesh, _read_ascii_stl, _read_binary_stl
     from ..target_regions import validate_target_region_mesh
 
-    _metadata, manifest, _report = _checked_snapshot_metadata(record)
+    if manifest is None:
+        _metadata, manifest, _report = _checked_snapshot_metadata(record)
     item = manifest.get("input_files", {}).get("target_mesh_file")
     if item is None:
         raise ValueError("The original enclosing boundary is not recorded as an owned input.")
@@ -707,6 +874,8 @@ def sample_slices(
     interpolation_max_gap_m=None,
     progress=None,
     cancel_check=None,
+    on_slice=None,
+    cache=None,
 ):
     """Return rectangular slices from the selected immutable scientific snapshot.
 
@@ -717,6 +886,8 @@ def sample_slices(
     Percentages count planned slice work, including field blocks and completed
     geometry/target phases. Opaque reconstruction and triangulation report
     ``None`` instead of claiming a percentage of unknown work.
+    ``on_slice`` receives an immutable cumulative collection after each slice.
+    An optional SliceInputCache retains verified preparation for the same run.
     """
     from .field_analysis import FieldDataset, source_catalog
     from .evidence import EvidenceIntegrityError
@@ -741,14 +912,31 @@ def sample_slices(
 
     report(0, "Prepare saved-field slice analysis")
     report(None, "Read verified saved slice request")
-    request = _request(record, request)
+    entry = cache._entry_for(record, cancel_check) if cache is not None else None
+    owned_inputs = entry is not None and (entry.owned_request is not None or request is None)
+    request = _slice_request(entry, request) if entry is not None else _request(record, request)
     if isinstance(dataset, str):
-        dataset = next((item for item in source_catalog(record, request=request) if item.key == dataset), None)
+
+        def catalog_progress(_percent, message):
+            report(None, message)
+
+        sources = (
+            _slice_catalog(entry, catalog_progress, cancel_check)
+            if owned_inputs
+            else source_catalog(record, request=request, progress=catalog_progress, cancel_check=cancel_check)
+        )
+        dataset = next((item for item in sources if item.key == dataset), None)
     if not isinstance(dataset, FieldDataset):
         raise ValueError("Select an available saved FieldDataset.")
+
+    def cached(key, create):
+        if owned_inputs and (interpolation_max_gap_m is None or isinstance(interpolation_max_gap_m, Real)):
+            return entry.reuse(dataset, interpolation_max_gap_m, key, create, cancel_check)
+        return create()
+
     row, scenario = _scenario(dataset, request)
     config_values = dict((request or {}).get("config") or record.metadata.get("config", {}))
-    from dataclasses import fields, replace
+    from dataclasses import fields
 
     config = CoilGenConfig(
         **{key: value for key, value in config_values.items() if key in {item.name for item in fields(CoilGenConfig)}}
@@ -762,49 +950,62 @@ def sample_slices(
     )
     kind = dataset.provenance.get("physical_representation", "samples")
     source, fallback_reason, mask_source = None, "", None
-    report(None, "Verify saved desired-field recipe")
-    target_function = _target_evaluator(record, dataset, request, row, scenario)
-    _check_target_recipe(record, dataset, target_function, row)
+
+    def checked_target():
+        report(None, "Verify saved desired-field recipe")
+        function = _target_evaluator(record, dataset, request, row, scenario)
+        _check_target_recipe(record, dataset, function, row)
+        return function
+
+    target_function = cached("target", checked_target)
+
+    def saved_source():
+        report(None, "Reconstruct saved physical source and unchanged currents")
+        return (
+            _sheet_source(record, config, scenario)
+            if kind == "sheet"
+            else _wire_source(record, dataset, row, scenario, checked=entry is not None and entry.manifest is not None)
+        )
+
     if dataset.key == "target" and target_function is not None and representation != "interpolation":
         kind, source, chosen = "target", target_function, "owned_analytic_target"
     elif representation != "interpolation" and kind in {"sheet", "wire"}:
         try:
             _cancel(cancel_check)
-            report(None, "Reconstruct saved physical source and unchanged currents")
-            source = (
-                _sheet_source(record, config, scenario)
-                if kind == "sheet"
-                else _wire_source(record, dataset, row, scenario)
-            )
+            source = cached("physical", saved_source)
             mask_source = (kind, source)
             source_count = len(source[1]) if kind == "sheet" else sum(len(path) - 1 for path, _ in source)
             if source_count * len(offsets) * resolution**2 > MAX_PHYSICAL_INTERACTIONS:
                 raise ValueError(
                     "Physical reevaluation exceeds the bounded interaction budget; reduce slice count/resolution."
                 )
+
             # Reproduce a few original map values before associating new physical
             # evaluations with this particular saved representation/current.
-            check_indices = np.unique(
-                np.linspace(0, len(dataset.points_m) - 1, min(24, len(dataset.points_m)), dtype=int)
-            )
-            report(None, "Reproduce original saved field samples")
-            check_field, valid = _physical(
-                dataset.points_m[check_indices],
-                kind,
-                source,
-                config,
-                cancel_check,
-                lambda fraction: report(None, "Verify saved physical field"),
-            )
-            scale = max(float(np.max(np.abs(dataset.field_T[check_indices]))), 1e-15)
-            if not np.any(valid):
-                raise ValueError(
-                    "No nonsingular original samples are available to verify this physical representation."
+            def check_physical_field():
+                check_indices = np.unique(
+                    np.linspace(0, len(dataset.points_m) - 1, min(24, len(dataset.points_m)), dtype=int)
                 )
-            if not np.allclose(
-                check_field[valid], dataset.field_T[check_indices][valid], rtol=1e-8, atol=scale * 1e-8 + 1e-15
-            ):
-                raise ValueError("Saved geometry/current does not reproduce the selected map representation.")
+                report(None, "Reproduce original saved field samples")
+                check_field, valid = _physical(
+                    dataset.points_m[check_indices],
+                    kind,
+                    source,
+                    config,
+                    cancel_check,
+                    lambda fraction: report(None, "Verify saved physical field"),
+                )
+                scale = max(float(np.max(np.abs(dataset.field_T[check_indices]))), 1e-15)
+                if not np.any(valid):
+                    raise ValueError(
+                        "No nonsingular original samples are available to verify this physical representation."
+                    )
+                if not np.allclose(
+                    check_field[valid], dataset.field_T[check_indices][valid], rtol=1e-8, atol=scale * 1e-8 + 1e-15
+                ):
+                    raise ValueError("Saved geometry/current does not reproduce the selected map representation.")
+
+            cached("physical_replay", check_physical_field)
             chosen = "direct_sheet" if kind == "sheet" else "direct_wire"
         except EvidenceIntegrityError:
             raise
@@ -816,12 +1017,7 @@ def sample_slices(
         chosen = "display_interpolation"
     if representation == "interpolation" and kind in {"sheet", "wire"}:
         try:
-            saved_source = (
-                _sheet_source(record, config, scenario)
-                if kind == "sheet"
-                else _wire_source(record, dataset, row, scenario)
-            )
-            mask_source = (kind, saved_source)
+            mask_source = (kind, cached("physical", saved_source))
         except EvidenceIntegrityError:
             raise
         except (ValueError, KeyError, TypeError) as exc:
@@ -830,8 +1026,11 @@ def sample_slices(
         if representation == "direct":
             raise ValueError("This source has no saved physical reevaluation contract.")
         chosen = "display_interpolation"
-        interpolator = _Interpolator(
-            dataset.points_m, dataset.field_T, interpolation_max_gap_m, progress=report, cancel_check=cancel_check
+        interpolator = cached(
+            "field_interpolation",
+            lambda: _Interpolator(
+                dataset.points_m, dataset.field_T, interpolation_max_gap_m, progress=report, cancel_check=cancel_check
+            ),
         )
     else:
         interpolator = None
@@ -843,23 +1042,33 @@ def sample_slices(
     if region is not None and region.shape == "enclosing_mesh":
         try:
             report(None, "Read and verify owned target boundary")
-            enclosure = _owned_enclosure(record, geometry)
+            enclosure = cached(
+                "enclosure",
+                lambda: _owned_enclosure(record, geometry, entry.manifest if entry is not None else None),
+            )
         except EvidenceIntegrityError:
             raise
         except (ValueError, OSError) as exc:
             roi_reason, roi_representation = str(exc), "unavailable_owned_enclosure"
     # A convex sampling hull is a coverage overlay, never an authored target volume.
     hull = (
-        _Interpolator(
-            dataset.points_m, dataset.field_T, interpolation_max_gap_m, progress=report, cancel_check=cancel_check
+        interpolator
+        or cached(
+            "field_interpolation",
+            lambda: _Interpolator(
+                dataset.points_m, dataset.field_T, interpolation_max_gap_m, progress=report, cancel_check=cancel_check
+            ),
         )
         if geometry is None
         else None
     )
     target_interpolator = None
     if dataset.target_T is not None and target_function is None:
-        target_interpolator = _Interpolator(
-            dataset.points_m, dataset.target_T, interpolation_max_gap_m, progress=report, cancel_check=cancel_check
+        target_interpolator = cached(
+            "target_interpolation",
+            lambda: _Interpolator(
+                dataset.points_m, dataset.target_T, interpolation_max_gap_m, progress=report, cancel_check=cancel_check
+            ),
         )
     target_representation = (
         "owned_analytic"
@@ -868,11 +1077,69 @@ def sample_slices(
         if target_interpolator is not None
         else "unavailable"
     )
+    support = (
+        cached(
+            "support_context",
+            lambda: (
+                _support_points(record.array("vertices_m", copy=False), scenario),
+                record.array("faces", copy=False),
+            ),
+        )
+        if {"vertices_m", "faces"} <= set(record.array_names)
+        else None
+    )
     horizontal, vertical, normal = _PLANES[plane]
     u = np.linspace(centre[horizontal] - size[0] / 2, centre[horizontal] + size[0] / 2, resolution)
     v = np.linspace(centre[vertical] - size[1] / 2, centre[vertical] + size[1] / 2, resolution)
     uv = np.meshgrid(u, v, indexing="xy")
     slices = []
+
+    def collection():
+        provenance = {
+            "request_sha256": record.metadata.get("request_sha256"),
+            "source_scope": dataset.scope,
+            "source_key": dataset.key,
+            "analysis_current_refitted": False,
+            "saved_current_refitted": dataset.provenance.get("current_refitted"),
+            "current_policy": dataset.provenance.get("current_policy"),
+            "current_source": dataset.provenance.get("current_source", dataset.provenance.get("current_A")),
+            "source_provenance": dataset.provenance,
+            "representation": chosen,
+            "target_representation": target_representation,
+            "roi_representation": roi_representation,
+            "fallback_reason": fallback_reason,
+            "sampling": "fresh_regular_display_grid",
+            "independent_validation_claim": False,
+            "interpolation_extrapolation": False,
+            "interpolation_gap_limit_m": interpolator.max_gap_m if interpolator else None,
+            "roi_outline": "piecewise_linear_slice_of_owned_geometry"
+            if geometry
+            else "sampling_coverage_hull_with_gap_mask",
+            "roi_sampling": region.sampling if region is not None else "saved_point_cloud",
+            "target_domain_scope": "authored expression inside target boundary; original constraints sampled on surface"
+            if region is not None
+            and region.sampling == "surface"
+            and region.shape != "enclosing_mesh"
+            and target_function is not None
+            else "owned boundary samples only"
+            if region is not None and region.sampling == "surface"
+            else "owned target volume"
+            if region is not None
+            else "saved sampling hull",
+            "roi_unavailable_reason": roi_reason,
+            "component": dataset.provenance.get("component", "Bz"),
+        }
+        return SliceCollection(
+            dataset.key,
+            dataset.label,
+            plane,
+            tuple(slices),
+            chosen,
+            target_representation,
+            roi_representation,
+            provenance,
+        )
+
     report(0, f"Sampling {dataset.label} · {chosen}")
     for index, offset in enumerate(offsets):
         _cancel(cancel_check)
@@ -961,15 +1228,9 @@ def sample_slices(
             desired[~target_valid] = np.nan
         slice_progress(0.97, "Paired target samples complete")
         context = ()
-        if "vertices_m" in record.array_names and "faces" in record.array_names:
+        if support is not None:
             slice_progress(None, "Intersect coil support and slice plane")
-            context = _mesh_section(
-                _support_points(record.array("vertices_m", copy=False), scenario),
-                record.array("faces", copy=False),
-                normal,
-                offset,
-                cancel_check,
-            )
+            context = _mesh_section(*support, normal, offset, cancel_check)
         slices.append(
             FieldSlice(
                 float(offset),
@@ -988,40 +1249,11 @@ def sample_slices(
             )
         )
         slice_progress(1, "Field, target and geometry complete")
-    provenance = {
-        "request_sha256": record.metadata.get("request_sha256"),
-        "source_scope": dataset.scope,
-        "source_key": dataset.key,
-        "analysis_current_refitted": False,
-        "saved_current_refitted": dataset.provenance.get("current_refitted"),
-        "current_policy": dataset.provenance.get("current_policy"),
-        "current_source": dataset.provenance.get("current_source", dataset.provenance.get("current_A")),
-        "source_provenance": dataset.provenance,
-        "representation": chosen,
-        "target_representation": target_representation,
-        "roi_representation": roi_representation,
-        "fallback_reason": fallback_reason,
-        "sampling": "fresh_regular_display_grid",
-        "independent_validation_claim": False,
-        "interpolation_extrapolation": False,
-        "interpolation_gap_limit_m": interpolator.max_gap_m if interpolator else None,
-        "roi_outline": "piecewise_linear_slice_of_owned_geometry"
-        if geometry
-        else "sampling_coverage_hull_with_gap_mask",
-        "roi_sampling": region.sampling if region is not None else "saved_point_cloud",
-        "target_domain_scope": "authored expression inside target boundary; original constraints sampled on surface"
-        if region is not None
-        and region.sampling == "surface"
-        and region.shape != "enclosing_mesh"
-        and target_function is not None
-        else "owned boundary samples only"
-        if region is not None and region.sampling == "surface"
-        else "owned target volume"
-        if region is not None
-        else "saved sampling hull",
-        "roi_unavailable_reason": roi_reason,
-        "component": dataset.provenance.get("component", "Bz"),
-    }
-    return SliceCollection(
-        dataset.key, dataset.label, plane, tuple(slices), chosen, target_representation, roi_representation, provenance
-    )
+        if on_slice is not None:
+            if entry is not None:
+                entry.require_current(cancel_check)
+            on_slice(collection())
+    _cancel(cancel_check)
+    if entry is not None:
+        entry.require_current(cancel_check)
+    return collection()

@@ -2,6 +2,10 @@
 
 from trame.widgets import html, vtk as vtk_widgets, vuetify3 as v3
 
+from ..application.cad import PRINT_FORMER_EXPORT_HINT
+from .harmonics import build_harmonics_dialog
+from .field_slices import build_field_slices_dialog
+
 
 MODEL_PLOT = "['support','preview_target'].includes(dataset)"
 RESULT_VIEW = f"summary && !{MODEL_PLOT}"
@@ -23,39 +27,6 @@ def _run_dialog(section, title, *, max_width=760):
                 v3.VBtn("Close", click="center_section = 'results'", variant="outlined", size="small")
             body = v3.VCardText(classes="cg-dialog-body")
     return body
-
-
-def _history_dialog():
-    with _run_dialog("history", "Completed runs"):
-        v3.VCheckbox(
-            v_if="channels.length",
-            v_model=("workspace_history",),
-            label="Show runs from other projects and channels",
-            density="compact",
-            hide_details=True,
-        )
-        with html.Div(v_if="runs.length"):
-            html.Label("Completed run", **{"for": "coilgen-completed-run"})
-            with html.Select(
-                id="coilgen-completed-run",
-                v_model=("selected_run",),
-                change="center_section = 'results'",
-            ):
-                html.Option("Choose a completed run", disabled=True, value=("null",))
-                html.Option("{{ run.title }}", v_for="run in runs", key="run.value", value=("run.value",))
-        html.P(
-            "{{ current_job_active ? 'Your result will appear here when the job finishes.' : "
-            "'No completed runs in this selection.' }}",
-            v_else=True,
-        )
-        html.P("Viewing · {{ run_source }} · {{ run_context }}", v_if="summary", classes="cg-detail-note")
-        v3.VBtn(
-            "View selected run",
-            v_if=f"summary && {MODEL_PLOT}",
-            click="dataset = result_plot; center_section = 'results'",
-            size="small",
-            variant="outlined",
-        )
 
 
 def _checks_dialog():
@@ -184,18 +155,32 @@ def _shielding_dialog(ctrl):
         )
 
 
-def _export_dialog(ctrl):
-    with _run_dialog("export", "Export conductor geometry"):
+def _export_dialog(ctrl, *, former=False):
+    section, title = ("export_former", "Export print former") if former else ("export", "Export conductor geometry")
+    options = "export_options.filter(option => option.former)" if former else "export_options"
+    selected = "former_export_selected" if former else "export_selected"
+    draft_ack = "former_draft_ack" if former else "draft_ack"
+    multiple_files = {"v_if": f"{options}.length > 1"} if former else {}
+    with _run_dialog(section, title):
         html.P("{{ run_source }} · {{ run_context }}", classes="cg-detail-note", v_if="summary")
-        html.P("No conductor geometry is available for export in this selection.", v_if="!export_options.length")
+        if former:
+            html.P("{{ summary?.print_former_status }}")
+            html.P("Former geometry is exported for inspection. Coil acceptance and construction release are separate.")
+        html.P("No saved geometry is available for export in this selection.", v_if=f"!{options}.length")
         with html.Div(v_else=True):
             html.P("{{ export_selection_note }}", role="status")
-            with html.Details(key=("selected_run",)):
+            if former:
+                html.P(
+                    f"{{{{ {options}[0]?.title }}}}",
+                    v_if=f"{options}.length === 1",
+                    classes="cg-detail-note",
+                )
+            with html.Details(key=("selected_run",), **multiple_files):
                 html.Summary("Choose files and formats")
                 v3.VCheckbox(
-                    v_for="option in export_options",
+                    v_for=f"option in {options}",
                     key="option.value",
-                    v_model=("export_selected",),
+                    v_model=(selected,),
                     value=("option.value",),
                     label=("option.title + ' — ' + option.status",),
                     density="compact",
@@ -204,7 +189,7 @@ def _export_dialog(ctrl):
             v3.VSelect(
                 v_model=("export_unit",),
                 items=("['mm', 'm']",),
-                label="STL / CSV unit",
+                label="STL unit" if former else "STL / CSV unit",
                 density="compact",
                 hide_details=True,
             )
@@ -219,15 +204,17 @@ def _export_dialog(ctrl):
                     "{{ draft_notice }}", type="error", variant="tonal", density="compact", classes="text-caption"
                 )
                 v3.VCheckbox(
-                    v_model=("draft_ack",),
+                    v_model=(draft_ack,),
                     label="Export DRAFT geometry although recorded checks failed",
                     density="compact",
                 )
             v3.VBtn(
-                "Export selected",
+                f"{{{{ {options}.length === 1 ? 'Export former STL' : 'Export selected' }}}}"
+                if former
+                else "Export selected",
                 color="primary",
                 click=ctrl.export_geometry,
-                disabled=("!export_selected.length || (draft_selected && !draft_ack)",),
+                disabled=(f"!{selected}.length || (draft_selected && !{draft_ack})",),
             )
             html.A(
                 "{{ download_label }}",
@@ -288,17 +275,29 @@ def build_center_panel(workbench):
                     size="small",
                     variant="outlined",
                 )
-        with html.Div(v_if="attempt_notice", classes="cg-attempt", role="status"):
+        with html.Div(
+            v_if="attempt_notice", classes="cg-attempt", role="status", raw_attrs=[':data-tone="attempt_notice.color"']
+        ):
             html.Strong("{{ attempt_notice.title }} ")
             html.Span("{{ attempt_notice.action }}")
         with html.Div(v_if=RESULT_VIEW, classes="cg-overview"):
             with html.Div(classes="cg-board-heading"):
                 html.Strong("Results")
                 v3.VChip("{{ summary.label }}", color=("summary.color",), variant="outlined", size="small")
-            _metric_cards("drive")
-            _metric_cards("field")
-            _metric_cards("coil")
-            html.Div("{{ summary.overview.partial_note }}", v_if="summary.overview.partial_note", classes="cg-scope")
+                v3.VBtn(
+                    "{{ results_metrics_expanded ? 'Hide metrics' : 'Show metrics' }}",
+                    click="results_metrics_expanded = !results_metrics_expanded",
+                    size="small",
+                    variant="outlined",
+                    raw_attrs=[':aria-expanded="results_metrics_expanded"', 'aria-controls="coilgen-result-metrics"'],
+                )
+            with html.Div(id="coilgen-result-metrics", v_show="results_metrics_expanded"):
+                _metric_cards("drive")
+                _metric_cards("field")
+                _metric_cards("coil")
+                html.Div(
+                    "{{ summary.overview.partial_note }}", v_if="summary.overview.partial_note", classes="cg-scope"
+                )
             with html.Div(classes="cg-buttons"):
                 v3.VBtn(
                     "Field map",
@@ -309,6 +308,25 @@ def build_center_panel(workbench):
                     size="small",
                     variant="outlined",
                     title="Show the field and component used for the result cards",
+                )
+                v3.VBtn(
+                    "Residual slices",
+                    v_if="available_plots.some(group => group.items.some(plot => "
+                    "['sheet', 'validation', 'contour_field', 'routed_field', 'fabricated', 'winding_validation'].includes(plot.value)))",
+                    click=ctrl.open_field_slices,
+                    disabled=("selected_run !== displayed_run",),
+                    prepend_icon="mdi-layers-outline",
+                    size="small",
+                    variant="outlined",
+                )
+                v3.VBtn(
+                    "Harmonics",
+                    v_if="harmonics_available",
+                    click=ctrl.open_harmonics,
+                    disabled=("selected_run !== displayed_run",),
+                    prepend_icon="mdi-chart-bar",
+                    size="small",
+                    variant="outlined",
                 )
                 v3.VBtn(
                     "Shielding surface",
@@ -333,22 +351,45 @@ def build_center_panel(workbench):
                     size="small",
                     variant="outlined",
                 )
-        with html.Div(v_if=f"channels.length && {MODEL_PLOT}", classes="cg-model-guide"):
+            former_plot = "available_plots.some(group => group.items.some(plot => plot.value === 'print_former'))"
+            former_export = "export_options.some(option => option.former)"
+            with html.Div(
+                v_if=f"summary.print_former_status || {former_plot} || {former_export}", classes="cg-former-row"
+            ):
+                with html.Div(classes="cg-former-status"):
+                    html.Strong("{{ summary.print_former_status || 'Print former' }}")
+                    html.Div(PRINT_FORMER_EXPORT_HINT, v_if=f"!{former_export}", classes="cg-detail-note")
+                with html.Div(classes="cg-buttons"):
+                    v3.VBtn(
+                        "Show print former",
+                        v_if=former_plot,
+                        click="results_metrics_expanded = false; dataset = 'print_former'",
+                        disabled=("selected_run !== displayed_run",),
+                        prepend_icon="mdi-cube-outline",
+                        size="small",
+                        variant="outlined",
+                    )
+                    v3.VBtn(
+                        "Export print former…",
+                        v_if=former_export,
+                        click=ctrl.open_print_former,
+                        disabled=("selected_run !== displayed_run",),
+                        prepend_icon="mdi-download-outline",
+                        size="small",
+                        variant="outlined",
+                    )
+        with html.Div(
+            v_if=f"channels.length && {MODEL_PLOT} && (!current_job_active || settings_dirty)",
+            classes="cg-model-guide",
+        ):
             html.Strong("Model preview")
             html.Div(
                 "{{ settings_dirty ? 'Apply or discard pending edits in Model Builder.' : "
-                "current_job_active ? 'Computation is in progress. Follow this revision in Design plan.' : "
-                "'Review the inputs in Model Builder. Choose the computation stage in Design plan.' }}"
+                "readiness?.state === 'blocking' ? 'Open Model Builder to fix the required inputs.' : "
+                "'Review inputs in Model Builder, then use the blue compute button. Change the scope in Design plan.' }}"
             )
         with html.Div(v_if="!channels.length && !summary"):
-            html.P("Open a project to edit it or choose a completed run to review its saved results.")
-            v3.VBtn(
-                "Completed runs",
-                v_if="runs.length",
-                click="center_section = 'history'",
-                variant="outlined",
-                size="small",
-            )
+            html.P("Open a project to edit it or use Runs to review a saved result.")
         with html.Div(v_show="channels.length || summary", classes="cg-plot"):
             with html.Div(classes="cg-plot-bar", v_if="available_plots.length && dataset !== 'saved_unavailable'"):
                 html.Label("Plot", **{"for": "coilgen-plot"})
@@ -362,6 +403,15 @@ def build_center_panel(workbench):
                     with html.Select(id="coilgen-field-component", v_model=("component",)):
                         for component in ("Bz", "Bx", "By", "Bmag", "BdotB0"):
                             html.Option(component, value=component)
+                with html.Div(v_if="field_has_pair", classes="cg-buttons"):
+                    for label, target in (("Field", "false"), ("Paired target", "true")):
+                        v3.VBtn(
+                            label,
+                            size="small",
+                            variant="outlined",
+                            click=f"field_show_target = {target}",
+                            raw_attrs=[f':aria-pressed="field_show_target === {target}"'],
+                        )
             with html.Div(classes="cg-view-tools", v_if="dataset !== 'saved_unavailable'"):
                 with v3.VBtn(
                     size="small", variant="outlined", append_icon="mdi-chevron-down", prepend_icon="mdi-axis-arrow"
@@ -382,6 +432,7 @@ def build_center_panel(workbench):
                     html.Input(type="checkbox", v_model=("see_through_support",))
                     html.Span("See through support")
                 html.Span("{{ b0_text }}", classes="cg-b0", v_if="b0_text")
+            html.P("{{ field_source_header }}", v_if="field_source_header", classes="cg-detail-note")
             with html.Div(classes="cg-viewport", v_show="dataset !== 'saved_unavailable'"):
                 workbench.view = vtk_widgets.VtkLocalView(workbench.plotter.ren_win)
             workbench.server.controller.fit_browser_view = workbench.view.reset_camera
@@ -390,6 +441,7 @@ def build_center_panel(workbench):
                 html.Span("{{ field_legend.low }}")
                 html.Span(classes="cg-ramp", style=("{background:field_legend.gradient}",))
                 html.Span("{{ field_legend.high }}")
+                html.Span("Shared field and target scale", v_if="field_has_pair")
             html.Div("{{ scene_caption }}", classes="cg-scope")
             html.Div(
                 "{{ summary.contour_fit_caption }}",
@@ -397,8 +449,10 @@ def build_center_panel(workbench):
                 "['contours','routes','evaluated_winding','fabrication','swept','review_conductor','review_electrical'].includes(dataset)",
                 classes="cg-scope",
             )
-        _history_dialog()
         _checks_dialog()
+        build_field_slices_dialog(ctrl)
+        build_harmonics_dialog(ctrl)
         _stats_dialog()
         _shielding_dialog(ctrl)
         _export_dialog(ctrl)
+        _export_dialog(ctrl, former=True)

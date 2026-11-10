@@ -25,6 +25,7 @@ def test_print_former_is_listed_off_and_one_checkbox_turns_it_on(windows):
     assert item.text(1) == "Add" and "Click to add" in item.toolTip(1)
 
     window.select_node("print")
+    original = window.project
     controls = window._draft_controls
     enabled = controls["support_body_enabled"]
     assert not enabled.isChecked()
@@ -33,22 +34,26 @@ def test_print_former_is_listed_off_and_one_checkbox_turns_it_on(windows):
     enabled.setChecked(True)
     assert not controls["support_body_thickness_mm"].parentWidget().isHidden()
     assert controls["support_body_side"].currentText() == "inside"
+    controls["support_body_side"].setCurrentText("outside")
+    controls["support_body_thickness_mm"].setValue(2.5)
+    assert window.project is original
     assert window.apply_settings()
     config = window.project.config
-    assert config.support_body_mode == "inside" and config.support_body_thickness == pytest.approx(0.003)
+    assert window.project.revision == original.revision + 1
+    assert config.support_body_mode == "outside" and config.support_body_thickness == pytest.approx(0.0025)
     assert window.tree_items["print"].text(1) == "Ready"
 
     window.select_node("print")
-    window._draft_controls["support_body_side"].setCurrentText("outside")
-    window._draft_controls["support_body_thickness_mm"].setValue(2.5)
-    assert window.apply_settings()
-    assert window.project.config.support_body_mode == "outside"
-    assert window.project.config.support_body_thickness == pytest.approx(0.0025)
-    window.select_node("print")
+    window._draft_controls["support_body_thickness_mm"].setValue(4)
     window._draft_controls["support_body_enabled"].setChecked(False)
     assert window.apply_settings()
     assert window.project.config.support_body_mode == "off"
+    assert window.project.config.support_body_thickness == pytest.approx(0.0025)
     assert window.tree_items["print"].text(1) == "Add"
+    window.undo_stack.undo()
+    assert window.project.config == config
+    window.undo_stack.undo()
+    assert window.project.config == original.config
 
 
 def test_material_page_no_longer_hides_the_former_among_conductor_settings(windows):
