@@ -158,6 +158,14 @@ FIELDS = (
         choices=("auto", "off", "on"),
     ),
     ExpertField(
+        "force_cut_selection",
+        "Cut side per group (force_cut_selection)",
+        "Routing",
+        'Side of each winding group where the interconnection cut is placed, as in CoilGen\'s force_cut_selection. One entry per group in group order, e.g. ["high", "low", "auto"]. A single ["high"] or ["low"] applies to every group. "auto" (or an empty list []) lets routing choose. Forced sides stay binding during joint routing.',
+        "json",
+        json_shape="sequence",
+    ),
+    ExpertField(
         "joint_group_routing",
         "Joint group routing",
         "Routing",
@@ -251,7 +259,7 @@ FIELDS = (
         "conductor_mounting_mode",
         "Conductor placement",
         "Conductor and support",
-        "Centered straddles the support. Surface outer/inner offsets the physical profile to the corresponding side, changing clearance and its field centroid.",
+        "Centered straddles the support. surface_outer puts the whole conductor on the side the support's surface normals point to; surface_inner on the opposite side. Normals follow the support mesh's triangle orientation. The offset changes clearance and the field centroid.",
         "enum",
         choices=("centered", "surface_outer", "surface_inner"),
     ),

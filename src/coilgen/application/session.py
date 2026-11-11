@@ -488,7 +488,7 @@ SETTINGS = (
     _field(
         "conductor",
         "conductor_mounting_mode",
-        "Mounting reference",
+        "Conductor side of support",
         "choice",
         _plain("conductor_mounting_mode"),
         choices=("centered", "surface_outer", "surface_inner"),

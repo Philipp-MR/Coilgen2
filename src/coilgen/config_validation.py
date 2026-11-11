@@ -2089,6 +2089,20 @@ def _validate_routing_settings(config: CoilGenConfig, error, warning) -> None:
             "seam",
         },
     )
+    if isinstance(config.force_cut_selection, (str, bytes)):
+        error(
+            "force_cut_selection",
+            "Cut side selection must be a list with one entry per group, not a single string.",
+            'Example: ["high", "low"]; a single ["high"] applies to every group.',
+        )
+    else:
+        for index, side in enumerate(config.force_cut_selection):
+            if str(side).strip().lower() not in {"high", "low", "auto", "none"}:
+                error(
+                    "force_cut_selection",
+                    f"Unsupported cut side {side!r} for group {index + 1}.",
+                    "Allowed values: high, low, auto, none.",
+                )
     if float(config.inter_group_cut_alignment_distance_rel_tol) < 0.0:
         error(
             "inter_group_cut_alignment_distance_rel_tol",

@@ -539,3 +539,22 @@ def test_actual_native_widget_render_and_focused_search_keep_controls_reachable(
     assert dialog.grab().save(str(evidence / "advanced_native_json_900.png"))
     if font_id >= 0:
         QFontDatabase.removeApplicationFont(font_id)
+
+
+def test_cut_side_per_group_is_an_editable_routing_control(dialogs):
+    dialog, state = dialogs()
+    editor = dialog.fields["force_cut_selection"]
+    assert editor.spec.category == "Routing"
+    dialog.search.setText("force_cut_selection")
+    assert not editor.isHidden()
+    editor.control.setPlainText('["high", "low", "auto"]')
+    assert dialog.apply_changes()
+    assert tuple(state["document"].config.force_cut_selection) == ("high", "low", "auto")
+
+
+def test_unknown_cut_side_is_rejected_without_commit(dialogs):
+    dialog, state = dialogs()
+    dialog.fields["force_cut_selection"].control.setPlainText('["hgih"]')
+    assert not dialog.apply_changes()
+    assert not state["calls"]
+    assert "group 1" in dialog.fields["force_cut_selection"].error.text()

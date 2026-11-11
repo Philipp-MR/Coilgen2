@@ -44,9 +44,9 @@ _CHOICES = {
         "auto": "Automatic",
     },
     "conductor_mounting_mode": {
-        "surface_outer": "Outside support",
-        "surface_inner": "Inside support",
-        "centered": "Centered on path",
+        "surface_outer": "Outer side (along normal)",
+        "surface_inner": "Inner side (against normal)",
+        "centered": "Centered on support",
     },
     "conductor_path_reference": {"centroid": "Profile centroid", "profile_origin": "Profile origin (0, 0)"},
     "support_body_mode": {
@@ -245,7 +245,7 @@ def design_choice_groups(request):
             ("conductor_cross_section_width", "Conductor width", 1000, "mm"),
             ("conductor_cross_section_height", "Conductor height", 1000, "mm"),
             ("sweep_min_bend_radius", "Minimum bend radius", 1000, "mm"),
-            ("conductor_mounting_mode", "Mounting reference"),
+            ("conductor_mounting_mode", "Conductor side of support"),
         ],
     )
     if config.get("support_body_mode", "off") not in {"off", None}:

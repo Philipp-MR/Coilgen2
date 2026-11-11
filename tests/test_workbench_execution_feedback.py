@@ -244,3 +244,19 @@ def test_elapsed_uses_submission_to_now_for_active_jobs_and_freezes_terminal_tim
 @pytest.mark.parametrize("value", [None, float("nan"), float("inf"), "unknown", True])
 def test_missing_or_invalid_worker_progress_remains_unknown(value):
     assert CoilGenWorkbench._job_progress({"status": "running", "progress": value}) is None
+
+
+def test_cancel_is_reachable_beside_compute_and_in_the_jobs_panel(windows, monkeypatch):
+    window = windows()
+    monkeypatch.setattr(
+        window.jobs, "cancel", lambda id_: window.jobs.states[0].update(status="cancelled"), raising=False
+    )
+    assert not window.jobs_cancel_button.isEnabled()
+    assert not window.toolbar_cancel_widget.isVisible()
+    window.compute()
+    assert window.cancel_action.isEnabled()
+    assert window.jobs_cancel_button.isEnabled()
+    assert window.toolbar_cancel_widget.isVisible() and window.toolbar_cancel_button.isEnabled()
+    window.jobs_cancel_button.click()
+    assert not window.jobs_cancel_button.isEnabled()
+    assert not window.toolbar_cancel_widget.isVisible()

@@ -1243,6 +1243,13 @@ class CoilGenWorkbench(QMainWindow):
         )
         self.view_results_button.clicked.connect(self.view_results)
         feedback.addWidget(self.view_results_button)
+        self.jobs_cancel_button = QPushButton("Cancel job")
+        self.jobs_cancel_button.setIcon(icon("cancel"))
+        self.jobs_cancel_button.setObjectName("jobs_cancel_job")
+        self.jobs_cancel_button.setEnabled(False)
+        self.jobs_cancel_button.setToolTip("Cancel the selected queued or running job.")
+        self.jobs_cancel_button.clicked.connect(self.cancel_selected_job)
+        feedback.addWidget(self.jobs_cancel_button)
         layout.addLayout(feedback)
         self.jobs_filter_bar = QWidget()
         jobs_context_layout = QHBoxLayout(self.jobs_filter_bar)
@@ -1416,7 +1423,9 @@ class CoilGenWorkbench(QMainWindow):
         toolbar.addAction(self.resume_action)
         self.cancel_action = self._action("Cancel selected job", self.cancel_selected_job, icon_name="cancel")
         self.cancel_action.setEnabled(False)
-        toolbar.addAction(self.cancel_action)
+        # Shown as a labelled button beside Compute (added below) and in the
+        # Jobs panel; an icon-only entry beside the logo was hard to find.
+        self.addAction(self.cancel_action)
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
@@ -1447,7 +1456,17 @@ class CoilGenWorkbench(QMainWindow):
             "Compute through the selected boundary (Ctrl+Enter). Pending settings are validated first."
         )
         self.compute_button.clicked.connect(self.compute)
-        toolbar.addWidget(self.compute_button)
+        compute_widget = toolbar.addWidget(self.compute_button)
+        self.toolbar_cancel_button = QPushButton("Cancel")
+        self.toolbar_cancel_button.setIcon(icon("cancel"))
+        self.toolbar_cancel_button.setObjectName("toolbar_cancel_job")
+        self.toolbar_cancel_button.setMinimumHeight(38)
+        self.toolbar_cancel_button.setAutoDefault(False)
+        self.toolbar_cancel_button.setAccessibleName("Cancel selected job")
+        self.toolbar_cancel_button.setToolTip("Cancel the selected queued or running job.")
+        self.toolbar_cancel_button.clicked.connect(self.cancel_selected_job)
+        self.toolbar_cancel_widget = toolbar.addWidget(self.toolbar_cancel_button)
+        self.toolbar_cancel_widget.setVisible(False)
         self.compute_action = self._action("Compute selected stage", self.compute, "Ctrl+Return")
         self.addAction(self.compute_action)
         view_menu = self.view_menu = self.menuBar().addMenu("View")
@@ -1477,7 +1496,7 @@ class CoilGenWorkbench(QMainWindow):
         self.field_results_button.clicked.connect(
             lambda: self._results_action("metrics" if self.field_analysis_action.isEnabled() else "coil")
         )
-        toolbar.insertWidget(toolbar.actions()[-1], self.field_results_button)
+        toolbar.insertWidget(compute_widget, self.field_results_button)
         inspection_menu = getattr(self.viewport, "inspection_menu", None)
         if inspection_menu is not None:
             inspection_menu.addSeparator()
@@ -2500,12 +2519,15 @@ class CoilGenWorkbench(QMainWindow):
             self._combo(
                 form,
                 "conductor_mounting_mode",
-                "Mounting reference",
+                "Conductor side of support",
                 ["centered", "surface_outer", "surface_inner"],
                 config.conductor_mounting_mode,
             )
             self._draft_controls["conductor_mounting_mode"].setToolTip(
-                "Centered keeps the profile relative to the routed path. Outer/inner mounting offsets the conductor along the support normal. The saved fabrication centroid and field source must be reviewed."
+                "centered: the conductor straddles the support surface. surface_outer: the whole conductor sits on the "
+                "side the support's surface normals point to. surface_inner: on the opposite side. Normals follow the "
+                "support mesh's triangle orientation, so check them on imported meshes. Review the saved fabrication "
+                "centroid and field source."
             )
             self._combo(
                 form,
@@ -7912,6 +7934,10 @@ class CoilGenWorkbench(QMainWindow):
             # job state so an action can reappear when its operation is valid.
             self.cancel_action.setVisible(can_cancel)
             self.cancel_action.setEnabled(can_cancel)
+            if hasattr(self, "toolbar_cancel_widget"):
+                self.toolbar_cancel_widget.setVisible(can_cancel)
+                self.toolbar_cancel_button.setEnabled(can_cancel)
+            self.jobs_cancel_button.setEnabled(can_cancel)
             self.resume_action.setVisible(
                 self.project is not None and (self._selected_run is not None or bool(selected_state))
             )

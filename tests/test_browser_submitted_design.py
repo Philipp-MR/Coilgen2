@@ -51,7 +51,7 @@ def test_review_uses_original_request_after_edit_and_never_substitutes_on_error(
     assert values["Support surface"] == "Cylinder" and values["Design context"] == "MRI shim"
     assert (
         values["Stream-function method"] == "Constrained quadratic solve"
-        and values["Mounting reference"] == "Outside support"
+        and values["Conductor side of support"] == "Outer side (along normal)"
     )
     assert values["Smoothing scale"] == "Local mesh wavelength"
     assert values["Requested boundary"] == "Prepare model" and values["Fabrication review requested"] == "No"

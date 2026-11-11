@@ -50,7 +50,7 @@ def test_physical_placement_is_explicit_si_edit_with_exact_profile_and_undo(wind
     controls["conductor_mounting_mode"].setCurrentText("surface_inner")
     controls["normal_shift_mm"].setValue(5.7)
     controls["return_path_lift"].setChecked(False)
-    assert "Inside support" in section.summary_label.text()
+    assert "Inner side (against normal)" in section.summary_label.text()
     assert "return-path lift off" in section.summary_label.text()
     assert not section.form.isRowVisible(controls["normal_shift_mm"].parentWidget())
     assert window.project is project

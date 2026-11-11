@@ -55,11 +55,19 @@ GRAPHICAL_SETTINGS = {
     "conductor_mounting_mode": {
         "centered": (
             "conductor-profile",
-            "Path reference",
-            "Retain profile coordinates relative to the routed path, including a custom offset.",
+            "Centered on support",
+            "The conductor straddles the support surface: the profile keeps its coordinates relative to the routed path, including any custom offset.",
         ),
-        "surface_outer": ("surface-normal", "Outside support", "Mount outside the support along its normal."),
-        "surface_inner": ("surface-normal", "Inside support", "Mount on the opposite side of the support normal."),
+        "surface_outer": (
+            "surface-normal",
+            "Outer side (along normal)",
+            "The whole conductor sits on the side the support's surface normals point to. Normals follow the support mesh's triangle orientation, so check them on imported meshes.",
+        ),
+        "surface_inner": (
+            "surface-normal",
+            "Inner side (against normal)",
+            "The whole conductor sits on the side opposite to the support's surface normals. Normals follow the support mesh's triangle orientation, so check them on imported meshes.",
+        ),
     },
     "conductor_path_reference": {
         "centroid": (
