@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import math
-from numbers import Real
+
+# Shared with the browser; the progress bar label comes from run_progress.
+from ..application.run_progress import fraction_percent, parse_timestamp as _timestamp, run_progress  # noqa: F401
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,18 +16,6 @@ class RuntimeFeedback:
     tooltip: str = ""
     phase_percent: int | None = None
     allocated: bool = False
-
-
-def fraction_percent(value):
-    if isinstance(value, bool) or not isinstance(value, Real):
-        return None
-    try:
-        value = float(value)
-    except (OverflowError, ValueError):
-        return None
-    if not math.isfinite(value) or not 0 <= value <= 1:
-        return None
-    return min(99, round(value * 100)) if value < 1 else 100
 
 
 def work_detail(state):
@@ -46,16 +35,6 @@ def work_detail(state):
     ):
         detail += (" · " if detail else "") + f"{completed}/{total} work units"
     return detail
-
-
-def _timestamp(value):
-    if not isinstance(value, str) or not ("T" in value or " " in value):
-        return None
-    try:
-        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return stamp.replace(tzinfo=timezone.utc) if stamp.tzinfo is None else stamp
-    except (ValueError, OverflowError):
-        return None
 
 
 def _seconds(start, end):

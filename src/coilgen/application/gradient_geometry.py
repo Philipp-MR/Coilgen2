@@ -43,6 +43,163 @@ def _axis_rotation(axis):
     return rotation_matrix_by_vector(cross if np.linalg.norm(cross) > 1e-15 else np.array((1, 0, 0)), angle)
 
 
+GEOMETRY_SCHEMA_KEYS = frozenset({"schema", "primary", "shield", "suppression"})
+# Narrowest wall the editor accepts between two openings or an opening and an
+# end. It is also never less than one mesh cell, so every ligament keeps faces.
+MIN_LIGAMENT_M = 0.002
+# Grid nodes closer than this fraction of a cell to an opening edge move onto it.
+_SNAP_FRACTION = 0.35
+
+
+def _finite(value, name):
+    if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value):
+        raise ValueError(f"{name} must be a finite number.")
+    return float(value)
+
+
+@dataclass(frozen=True, slots=True)
+class CylinderOpening:
+    """A rectangular window in the cylinder wall, in the surface's own frame.
+
+    ``phi_center_rad`` is measured about the axis from the local x axis toward
+    local y (the surface's azimuth turns it with the surface). ``z_center_m``
+    is measured along the axis from the surface centre. The edges lie exactly
+    on mesh nodes, so the window does not follow a staircase.
+    """
+
+    phi_center_rad: float
+    phi_width_rad: float
+    z_center_m: float
+    z_height_m: float
+
+    def __post_init__(self):
+        center = _finite(self.phi_center_rad, "Opening angle")
+        object.__setattr__(self, "phi_center_rad", math.remainder(center, 2 * math.pi))
+        object.__setattr__(self, "z_center_m", _finite(self.z_center_m, "Opening axial position"))
+        for name, label in (("phi_width_rad", "Opening width"), ("z_height_m", "Opening height")):
+            value = _finite(getattr(self, name), label)
+            if value <= 0:
+                raise ValueError(f"{label} must be positive.")
+            object.__setattr__(self, name, value)
+
+    @classmethod
+    def coerce(cls, value):
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, dict):
+            return cls(**value)
+        if isinstance(value, (list, tuple)) and len(value) == 4:
+            return cls(*value)
+        raise ValueError("Each opening needs an angle, a width, an axial position and a height.")
+
+
+def _check_openings(surface):
+    """Openings stay inside the wall and keep a ligament of at least one cell."""
+    radius, length = surface.radius_m, surface.length_m
+    min_arc = max(MIN_LIGAMENT_M, 2 * math.pi * radius / surface.angular_divisions)
+    min_axial = max(MIN_LIGAMENT_M, length / surface.axial_divisions)
+    for index, opening in enumerate(surface.openings, 1):
+        if (2 * math.pi - opening.phi_width_rad) * radius < min_arc:
+            raise ValueError(
+                f"Opening {index} spans the full circumference. Keep at least {min_arc * 1e3:.3g} mm of wall."
+            )
+        bottom = opening.z_center_m - opening.z_height_m / 2 + length / 2
+        top = length / 2 - opening.z_center_m - opening.z_height_m / 2
+        if min(bottom, top) < min_axial:
+            raise ValueError(
+                f"Opening {index} reaches too close to an end of the {length * 1e3:.4g} mm cylinder. "
+                f"Keep at least {min_axial * 1e3:.3g} mm of wall to each end."
+            )
+    for first in range(len(surface.openings)):
+        for second in range(first + 1, len(surface.openings)):
+            a, b = surface.openings[first], surface.openings[second]
+            arc_gap = (
+                abs(math.remainder(a.phi_center_rad - b.phi_center_rad, 2 * math.pi))
+                - (a.phi_width_rad + b.phi_width_rad) / 2
+            ) * radius
+            axial_gap = abs(a.z_center_m - b.z_center_m) - (a.z_height_m + b.z_height_m) / 2
+            if arc_gap < min_arc and axial_gap < min_axial:
+                raise ValueError(
+                    f"Openings {first + 1} and {second + 1} overlap or leave too thin a wall between them. "
+                    f"Keep at least {min_arc * 1e3:.3g} mm around or {min_axial * 1e3:.3g} mm along the axis, "
+                    "or refine the mesh."
+                )
+
+
+def _merged_nodes(uniform, edges, cell, period=None):
+    """Uniform nodes plus the opening edges; nodes near an edge move onto it."""
+    edges = np.asarray(edges, dtype=float)
+    keep = []
+    for node in uniform:
+        distance = np.abs(edges - node)
+        if period is not None:
+            distance = np.minimum(distance, period - distance)
+        if not len(edges) or distance.min() > _SNAP_FRACTION * cell:
+            keep.append(node)
+    nodes = np.sort(np.concatenate((keep, edges)))
+    unique = [nodes[0]]
+    for node in nodes[1:]:
+        if node - unique[-1] > 1e-12 * cell:
+            unique.append(node)
+    if period is not None and len(unique) > 1 and unique[0] + period - unique[-1] <= 1e-12 * cell:
+        unique.pop()
+    return np.asarray(unique)
+
+
+def _opening_grid(surface):
+    """Native-cylinder vertex layout with extra rings and columns on opening edges."""
+    n, axial, radius, length = surface.angular_divisions, surface.axial_divisions, surface.radius_m, surface.length_m
+    period = 2 * math.pi
+    # The native builder places x = r sin(a), y = r cos(a): a = pi/2 - phi.
+    windows = [
+        (
+            (math.pi / 2 - opening.phi_center_rad) % period,
+            opening.phi_width_rad / 2,
+            opening.z_center_m,
+            opening.z_height_m / 2,
+        )
+        for opening in surface.openings
+    ]
+    angles = _merged_nodes(
+        np.arange(n) * period / n,
+        [(center + side * half) % period for center, half, _z, _h in windows for side in (-1, 1)],
+        period / n,
+        period,
+    )
+    levels = _merged_nodes(
+        np.linspace(-length / 2, length / 2, axial + 1),
+        [z + side * half for _a, _w, z, half in windows for side in (-1, 1)],
+        length / axial,
+    )
+    columns, rows = len(angles), len(levels) - 1
+    vertices = np.column_stack(
+        (
+            np.tile(radius * np.sin(angles), len(levels)),
+            np.tile(radius * np.cos(angles), len(levels)),
+            np.repeat(levels, columns),
+        )
+    )
+    faces = []
+    for row in range(rows):
+        z_mid = (levels[row] + levels[row + 1]) / 2
+        for col in range(columns):
+            following = (col + 1) % columns
+            a_mid = angles[col] + ((angles[following] - angles[col]) % period) / 2
+            if any(
+                abs(math.remainder(a_mid - center, period)) < half and abs(z_mid - z) < height
+                for center, half, z, height in windows
+            ):
+                continue
+            a, b = row * columns + col, row * columns + following
+            c, d = b + columns, a + columns
+            faces.extend(((b, a, c), (c, a, d)))
+    faces = np.asarray(faces, dtype=np.int64)
+    used = np.unique(faces)
+    remap = np.full(len(vertices), -1, dtype=np.int64)
+    remap[used] = np.arange(len(used))
+    return Mesh(vertices[used], remap[faces])
+
+
 @dataclass(frozen=True, slots=True)
 class CylinderSurface:
     radius_m: float
@@ -52,6 +209,7 @@ class CylinderSurface:
     center_m: tuple[float, float, float] = (0, 0, 0)
     axis: tuple[float, float, float] = (0, 0, 1)
     azimuth_rad: float = 0.0
+    openings: tuple[CylinderOpening, ...] = ()
 
     def __post_init__(self):
         for name in ("radius_m", "length_m"):
@@ -72,11 +230,22 @@ class CylinderSurface:
             or not math.isfinite(self.azimuth_rad)
         ):
             raise ValueError("Cylinder azimuth must be a finite angle in radians.")
+        if isinstance(self.openings, (str, bytes)) or not isinstance(self.openings, (list, tuple)):
+            raise ValueError("Cylinder openings must be a list.")
+        object.__setattr__(self, "openings", tuple(CylinderOpening.coerce(item) for item in self.openings))
+        _check_openings(self)
 
     def mesh(self, *, closed=False, role="primary") -> Mesh:
         """Preserve the native cylinder's rings while enforcing the stated span."""
         n, axial = self.angular_divisions, self.axial_divisions
-        mesh = build_cylinder_mesh(self.length_m * (axial + 1) / axial, self.radius_m, n, axial, 1, 0, 0, 0)
+        if self.openings:
+            if closed:
+                raise ValueError("A closed cylinder cannot have openings.")
+            mesh = _opening_grid(self)
+            if mesh.n_vertices > 100_000:
+                raise ValueError("A generated cylinder is limited to 100,000 vertices; refine explicitly in a study.")
+        else:
+            mesh = build_cylinder_mesh(self.length_m * (axial + 1) / axial, self.radius_m, n, axial, 1, 0, 0, 0)
         if closed:
             bottom, top = len(mesh.vertices), len(mesh.vertices) + 1
             vertices = np.vstack((mesh.vertices, (0, 0, -self.length_m / 2), (0, 0, self.length_m / 2)))
@@ -91,7 +260,13 @@ class CylinderSurface:
         return normalize_mesh(mesh)
 
     def to_dict(self):
-        return asdict(self)
+        # Surfaces without openings keep their original portable form.
+        value = asdict(self)
+        if not self.openings:
+            value.pop("openings")
+        else:
+            value["openings"] = [asdict(opening) for opening in self.openings]
+        return value
 
     @classmethod
     def from_dict(cls, value):
@@ -132,13 +307,25 @@ class CylindricalGeometry:
                 surface.length_m for surface in supports
             ):
                 raise ValueError("The closed suppression cylinder must strictly enclose all winding supports.")
+            if self.suppression.openings:
+                raise ValueError("The suppression cylinder cannot have openings.")
 
     def to_dict(self):
-        return {"schema": GEOMETRY_SCHEMA, **asdict(self)}
+        return {
+            "schema": GEOMETRY_SCHEMA,
+            **{
+                role: surface.to_dict() if surface is not None else None
+                for role, surface in (
+                    ("primary", self.primary),
+                    ("shield", self.shield),
+                    ("suppression", self.suppression),
+                )
+            },
+        }
 
     @classmethod
     def from_dict(cls, value):
-        if not isinstance(value, dict) or set(value) != {"schema", "primary", "shield", "suppression"}:
+        if not isinstance(value, dict) or set(value) != GEOMETRY_SCHEMA_KEYS:
             raise ValueError("Malformed cylindrical geometry specification.")
         if value["schema"] != GEOMETRY_SCHEMA:
             raise ValueError("Unsupported cylindrical geometry schema.")

@@ -49,6 +49,17 @@
 .cg-metrics span { font-size: 11px; }
 .cg-metrics strong { color: #18232e; font-size: clamp(14px,1.35vw,22px); line-height: 1.18; }
 .cg-metrics .cg-unavailable { font-size: 13px; font-weight: 600; }
+.cg-metrics-gradient { grid-template-columns: repeat(3,minmax(0,1fr)); margin-bottom: 5px; }
+/* Under a gradient row the field and coil rows keep two cards each; let them fill the row. */
+.cg-metrics-field, .cg-metrics-coil { grid-template-columns: repeat(auto-fit,minmax(120px,1fr)); }
+.cg-metrics-gradient > div { border-left: 3px solid #1474ad; }
+.cg-metrics > div[data-status="failed"] { border-left: 3px solid #b3261e; }
+.cg-metrics > div[data-status="failed"] strong { color: #b3261e; }
+.cg-metrics > div[data-status="passed"] { border-left: 3px solid #2e7d32; }
+.cg-failed-reasons {
+  font-size: 12px; line-height: 1.35; color: #b3261e; margin: 0 0 5px;
+  padding: 3px 7px; border-left: 3px solid #b3261e; background: #fdf1f0; overflow-wrap: anywhere;
+}
 .cg-scope { font-size: 11px; line-height: 1.35; white-space: pre-line; overflow-wrap: anywhere; margin: 4px 0; }
 .cg-overview > .cg-buttons { margin-top: 6px; }
 .cg-plot-bar { margin-bottom: 4px; border-left: 3px solid #1474ad; }
@@ -124,6 +135,11 @@
 .cg-settings-kicker { color: var(--cg-muted); font-size: 12px; font-weight: 600; }
 .cg-settings-section { flex: 0 1 240px; min-width: min(100%, 190px); }
 .cg-settings-dialog .cg-settings-body { padding: 14px 18px; }
+/* Multi-line field help: Vuetify's 12px line box lets two-line hints run into the next label. */
+.cg-settings-body .cg-setting-field + .cg-setting-field { margin-top: 6px; }
+.cg-settings-body .v-input__details { overflow: visible; min-height: 0; padding-bottom: 2px; }
+.cg-settings-body .v-messages { overflow: visible; min-height: 0; }
+.cg-settings-body .v-messages__message { line-height: 1.35; hyphens: auto; }
 .cg-settings-foot { border-top: 1px solid var(--cg-border); }
 .cg-settings-pending {
   color: var(--cg-warning, #8a4f00);

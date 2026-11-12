@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 import math
-from numbers import Real
+from numbers import Integral, Real
 
 from .run_metadata import read_run_metadata
 
@@ -551,3 +551,40 @@ def mass_estimates(report: CoilStatisticsReport, density_kg_per_m3=None) -> Coil
         else "No finite nominal conducting volumes recorded for the selected representation.",
         report.overview_scope,
     )
+
+
+# Prefixes for readable per-body values; the saved SI value is never changed.
+_DISPLAY_PREFIXES = {
+    "H": ((1e-9, "nH"), (1e-6, "µH"), (1e-3, "mH"), (1.0, "H")),
+    "Ω": ((1e-3, "mΩ"), (1.0, "Ω"), (1e3, "kΩ")),
+    "m": ((1e-6, "µm"), (1e-3, "mm"), (1.0, "m")),
+    "m²": ((1e-6, "mm²"), (1.0, "m²")),
+    "m³": ((1e-9, "mm³"), (1e-6, "cm³"), (1.0, "m³")),
+    "A": ((1e-3, "mA"), (1.0, "A")),
+    "W": ((1e-3, "mW"), (1.0, "W"), (1e3, "kW")),
+}
+
+
+def display_quantity(value, unit, digits=4):
+    """Return (text, unit) with a readable prefix and ``digits`` significant figures.
+
+    Lengths of a metre or more stay in metres (wire length), shorter ones use mm or µm.
+    Non-numeric values pass through unchanged.
+    """
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return str(value), unit
+    number = float(value)
+    if not math.isfinite(number):
+        return str(value), unit
+    scale, label = 1.0, unit
+    prefixes = _DISPLAY_PREFIXES.get(unit)
+    if prefixes and number != 0.0:
+        magnitude = abs(number)
+        for factor, name in prefixes:
+            if magnitude >= factor * 0.9995:
+                scale, label = factor, name
+        if magnitude < prefixes[0][0]:
+            scale, label = prefixes[0]
+    if isinstance(value, Integral) and scale == 1.0:
+        return str(int(value)), label
+    return f"{number / scale:.{digits}g}", label

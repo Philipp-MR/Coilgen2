@@ -314,3 +314,28 @@ def test_preflight_reports_existing_normalization_without_rescaling():
     assert summary["normalization_requested"] == "peak" and summary["normalization_scale"] == 12.0
     assert summary["Bz_rms_T"] == pytest.approx(np.sqrt((3e-6**2 + 3 * 5e-6**2) / 4))
     np.testing.assert_array_equal(target.b[:, 2], [3e-6, 5e-6])
+
+
+def test_triangle_quality_reports_the_ratio_that_failed_with_its_direction(problem_record):
+    """Regression: the edge ratio failed (30.1 > 25) but the altitude ratio (26.3 < 50) was shown."""
+    diagnostics = problem_record.metadata["fabrication"]["paths"][0]["diagnostics"]
+    diagnostics.update(
+        manufacturing_failure_reasons="poor_sweep_triangle_quality",
+        sweep_triangle_edge_ratio_max=30.07,
+        sweep_triangle_edge_ratio_limit=25.0,
+        sweep_triangle_altitude_aspect_ratio_max=26.34,
+        sweep_triangle_altitude_aspect_ratio_limit=50.0,
+    )
+    problem_record.metadata["fabrication"]["failure_reasons"] = ["part001_body0001:poor_sweep_triangle_quality"]
+    issue = next(issue for issue in run_problems(problem_record) if "poor_sweep_triangle_quality" in issue.key)
+    assert issue.value == pytest.approx(30.07) and issue.limit == pytest.approx(25.0)
+    assert issue.comparator == "≤" and issue.value > issue.limit
+    assert "longest-to-shortest edge ratio 30.1 against a maximum of 25" in issue.explanation
+    assert "altitude" not in issue.explanation.split("The value shown")[1]
+
+
+def test_minimum_and_maximum_checks_carry_their_direction(problem_record):
+    issues = {issue.key.split(":")[1]: issue for issue in run_problems(problem_record)}
+    assert issues["sweep_clearance_violation"].comparator == "≥"
+    assert issues["support_surface_penetration"].comparator == "≤"
+    assert issues["folded_sweep_quad"].comparator == ">"

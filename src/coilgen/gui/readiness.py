@@ -50,6 +50,7 @@ class ReadinessPanel(QWidget):
     """Nonmodal action list; warnings remain visible without blocking Compute."""
 
     issue_requested = Signal(object)
+    fix_requested = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -111,6 +112,13 @@ class ReadinessPanel(QWidget):
             text.setWordWrap(True)
             self._issue_labels.append(text)
             layout.addWidget(text, 1)
+            if getattr(issue, "fix", None):
+                fix = QPushButton(issue.fix_label or "Apply fix")
+                fix.setObjectName("apply_issue_fix")
+                fix.setAccessibleName(f"Apply fix: {issue.fix_label or issue.title}")
+                fix.setToolTip("Apply this change to the model. Undo reverts it.")
+                fix.clicked.connect(lambda _checked=False, item=issue: self.fix_requested.emit(item))
+                layout.addWidget(fix)
             button = QPushButton("Open settings")
             button.setIcon(icon("settings"))
             button.setIconSize(QSize(18, 18))

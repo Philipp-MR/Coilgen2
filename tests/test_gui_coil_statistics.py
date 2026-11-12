@@ -250,3 +250,23 @@ def test_explicit_drive_and_thermal_values_preserve_scope_and_negative_headroom(
     assert report.row("thermal:peak_temperature_K").unit == "K"
     assert report.row("thermal:temperature_margin_K").value == -2.0
     assert "no thermal qualification claim" in report.row("thermal:peak_temperature_K").scope
+
+
+@pytest.mark.parametrize(
+    "value, unit, expected",
+    (
+        (3.27165e-05, "H", ("32.72", "µH")),
+        (0.0602, "Ω", ("60.2", "mΩ")),
+        (17.398, "m", ("17.4", "m")),
+        (0.002, "m", ("2", "mm")),
+        (4e-06, "m²", ("4", "mm²")),
+        (1.2e-06, "m³", ("1.2", "cm³")),
+        (2330, "", ("2330", "")),
+        (0.0, "H", ("0", "H")),
+        ("closed_path_self", "", ("closed_path_self", "")),
+    ),
+)
+def test_display_quantity_uses_readable_prefixes_without_changing_values(value, unit, expected):
+    from coilgen.gui.coil_statistics import display_quantity
+
+    assert display_quantity(value, unit) == expected

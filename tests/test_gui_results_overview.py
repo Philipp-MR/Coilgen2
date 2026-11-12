@@ -447,6 +447,61 @@ def test_fabricated_field_keeps_original_per_body_currents_and_saved_sample_coun
     assert "no aggregate circuit current" in summary.tooltip
 
 
+@pytest.mark.parametrize("source", ("physics", "electrical"))
+def test_equal_body_currents_are_one_drive_current(source):
+    """Primary and shield in series carry one current; the card reports it instead of 'Per body'."""
+    metadata = _coil_metadata()
+    metadata["summary"]["current_a"] = None
+    shared = {"part001_body0001": 19.026, "part002_body0001": 19.026}
+    metadata["fabrication"]["electrical_metrics"]["bodies"] = [
+        {"body_id": body, "current_A": current} for body, current in shared.items()
+    ]
+    metadata["fabricated_physics"] = {
+        "current_source": "original_contour_current_no_refit",
+        "currents_A": shared if source == "physics" else {},
+        "checks": [
+            {
+                "name": "Fabricated path field error (original current)",
+                "verified": True,
+                "rms_error_T": 1e-6,
+                "sample_count": 257,
+                "component": "By",
+                "best_fit_current_scale": 1.1,
+                "best_fit_relative_rms_error": 0.0357,
+            }
+        ],
+    }
+    summary = summarize_field_result(_record(metadata, (*_record().array_names, "fabricated_field_T")))
+    assert summary.current_A == pytest.approx(19.026) and summary.current_display == ""
+    assert summary.current_label == "Original current"
+    assert summary.drive_current_A == pytest.approx(1.1 * 19.026)
+    assert "All 2 bodies carry the same recorded original current" in summary.tooltip
+
+
+def test_winding_validation_equal_body_currents_collapse_but_unequal_stay_per_body():
+    metadata = _metadata()
+    metadata["winding_validation"] = {
+        "available": True,
+        "verified": True,
+        "current_refitted": False,
+        "current_source": "original_contour_current_no_refit",
+        "component": "By",
+        "point_count": 95,
+        "rms_error_T": 4e-6,
+        "peak_error_T": 12e-6,
+        "target_rms_T": 20e-6,
+        "relative_field_error": 0.2,
+        "currents_A": {"body-a": 3.0, "body-b": 3.0},
+    }
+    names = (*_record().array_names, "winding_validation_points_m", "winding_validation_field_T")
+    summary = summarize_field_result(_record(metadata, names))
+    assert summary.source_key == "winding_validation"
+    assert summary.current_A == 3.0 and summary.current_display == ""
+    metadata["winding_validation"]["currents_A"] = {"body-a": 3.0, "body-b": None}
+    summary = summarize_field_result(_record(metadata, names))
+    assert summary.current_A is None and summary.current_display == "Per body"
+
+
 def test_explicit_recorded_mass_has_no_implicit_density_estimate(widgets):
     _, panel = widgets
     metadata = _coil_metadata()

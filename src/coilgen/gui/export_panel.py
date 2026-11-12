@@ -12,6 +12,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QHBoxLayout,
     QHeaderView,
     QLabel,
     QPushButton,
@@ -22,8 +23,13 @@ from PySide6.QtWidgets import (
 )
 
 from ..application.cad import (
+    EXPORT_PRESETS,
     default_export_selection,
     draft_export_notice,
+    export_draft_banner,
+    export_group,
+    export_preset_selection,
+    grouped_export_options,
     geometry_option_label,
     is_draft_artifact,
     print_former_status,
@@ -174,7 +180,7 @@ class GeometryExportPanel(QWidget):
         self._diagnostic = str(diagnostic)
         self._exporting = False
         self._review_allowed = False
-        self.options = tuple(options)
+        self.options = grouped_export_options(options)
         self._single_former = former_only and len(self.options) == 1
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -346,6 +352,25 @@ class GeometryExportPanel(QWidget):
         layout.addWidget(self.export_button)
         self.receipt = ExportReceiptPanel(self.state.receipt)
         layout.addWidget(self.receipt)
+        self.draft_banner = QLabel(export_draft_banner(self.options))
+        self.draft_banner.setObjectName("geometry_export_draft_banner")
+        self.draft_banner.setWordWrap(True)
+        apply_tone(self.draft_banner, "warning")
+        self.draft_banner.setVisible(bool(self.draft_banner.text()) and not self._single_former)
+        layout.addWidget(self.draft_banner)
+        self.preset_buttons = {}
+        presets = QHBoxLayout()
+        for key, title, _formats in EXPORT_PRESETS:
+            names = export_preset_selection(self.options, key)
+            if names and not former_only:
+                button = QPushButton(title)
+                button.setObjectName(f"geometry_export_preset_{key}")
+                button.setToolTip("Select every file of this format, primary and shield together.")
+                button.clicked.connect(lambda _checked=False, selection=names: self.select_names(selection))
+                presets.addWidget(button)
+                self.preset_buttons[key] = button
+        presets.addStretch()
+        layout.addLayout(presets)
         layout.addWidget(self.table)
         layout.addWidget(self.bounds)
         layout.addWidget(self.unit_note)
@@ -362,7 +387,7 @@ class GeometryExportPanel(QWidget):
             self.table.setRowCount(len(self.options))
             default_names = default_export_selection(self.options)
             for row, option in enumerate(self.options):
-                name = QTableWidgetItem(geometry_option_label(option))
+                name = QTableWidgetItem(geometry_option_label(option, with_role=False))
                 name.setIcon(icon("conductor-sweep"))
                 name.setData(Qt.ItemDataRole.UserRole, option.name)
                 name.setFlags(name.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -372,6 +397,7 @@ class GeometryExportPanel(QWidget):
                 name.setCheckState(Qt.CheckState.Checked if selected else Qt.CheckState.Unchecked)
                 name.setToolTip(option.name)
                 self.table.setItem(row, 0, name)
+                self.table.setVerticalHeaderItem(row, QTableWidgetItem(export_group(option)))
                 self.table.setItem(row, 1, QTableWidgetItem())
                 status = QTableWidgetItem(
                     ("Inspection · " if option.inspection_only else "") + option.check_status.capitalize()
@@ -440,6 +466,16 @@ class GeometryExportPanel(QWidget):
             for row in range(self.table.rowCount())
             if self.table.item(row, 0).checkState() == Qt.CheckState.Checked
         )
+
+    def select_names(self, names):
+        """Tick exactly ``names`` (a preset); DRAFT files still need the confirmation."""
+        names = set(names)
+        with QSignalBlocker(self.table):
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, 0)
+                checked = item.data(Qt.ItemDataRole.UserRole) in names
+                item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        self._selection_changed()
 
     def _selection_changed(self, *_args):
         with QSignalBlocker(self.table):

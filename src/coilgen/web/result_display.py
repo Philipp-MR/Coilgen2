@@ -3,13 +3,19 @@
 import numpy as np
 
 from ..application.diagnostics import recorded_stage, run_problems
-from ..gui.coil_statistics import build_coil_statistics
+from ..application.support_import import body_label, body_roles
+from ..gui.coil_statistics import build_coil_statistics, display_quantity
 from ..gui.result_summary import (
     DRIVE_TOOLTIP,
+    GRADIENT_TOOLTIP,
     coil_metric_cards,
     drive_metric_cards,
+    field_context_with_current,
     field_metric_cards,
+    gradient_context,
+    gradient_metric_cards,
     summarize_field_result,
+    without_gradient_duplicates,
 )
 
 
@@ -40,13 +46,25 @@ _METRICS = (
 )
 
 
-def _quantity(value, scale, unit):
+# Force and torque on a closed circuit in a uniform field vanish; round-off below this is shown as 0.
+_MECHANICAL_NOISE_FLOOR = {"force_n": 1e-9, "fabricated_force_n": 1e-9, "torque_nm": 1e-9, "fabricated_torque_nm": 1e-9}
+
+
+def _quantity(value, scale, unit, *, floor=0.0, digits=4):
     if value is None:
         return None
     array = np.asarray(value)
     if array.dtype.kind not in "iuf" or array.shape not in {(), (3,)} or not np.all(np.isfinite(array)):
         return None
-    numbers = [f"{number * scale:.6g}" for number in array.reshape(-1)]
+    values = array.reshape(-1).astype(float) * scale
+    if len(values) > 1:
+        # Components 1e9 times smaller than the largest are numerical round-off.
+        floor = max(floor * scale, 1e-9 * float(np.max(np.abs(values))))
+    values = np.where(np.abs(values) <= floor, 0.0, values) if floor > 0 else values
+    numbers = [
+        str(int(number)) if array.dtype.kind in "iu" else ("0" if number == 0 else f"{number:.{digits}g}")
+        for number in values
+    ]
     text = numbers[0] if len(numbers) == 1 else "(" + ", ".join(numbers) + ")"
     return text + (" " + unit if unit else "")
 
@@ -55,7 +73,7 @@ def result_metrics(metadata):
     summary = metadata.get("summary") or {}
     rows = []
     for key, label, scale, unit in _METRICS:
-        value = _quantity(summary.get(key), scale, unit)
+        value = _quantity(summary.get(key), scale, unit, floor=_MECHANICAL_NOISE_FLOOR.get(key, 0.0))
         if value is None and key in {"relative_field_error", "validated_relative_field_error"}:
             value = "Not run" if recorded_stage(metadata) == "prepared" else "Not recorded"
         if value is not None:
@@ -86,7 +104,12 @@ def result_overview(record):
     drive_cards = drive_metric_cards(field) if field.visible else []
     if not any(not card["unavailable"] for card in drive_cards):
         drive_cards = []
-    coil_cards = cards if coil.has_values else []
+    gradient_cards = gradient_metric_cards(record, field)
+    if gradient_cards:
+        # The gradient row already states the drive current and the shape error at that current.
+        drive_cards = []
+    field_cards = without_gradient_duplicates(field_cards, gradient_cards)
+    coil_cards = without_gradient_duplicates(cards, gradient_cards) if coil.has_values else []
     stage = recorded_stage(record.metadata_view)
     partial_note = ""
     boundaries = {
@@ -103,6 +126,9 @@ def result_overview(record):
         if not field_cards and not coil_cards:
             partial_note = boundaries[stage]
     return {
+        "gradient_cards": gradient_cards,
+        "gradient_context": gradient_context(gradient_cards),
+        "gradient_tooltip": GRADIENT_TOOLTIP,
         "drive_cards": drive_cards,
         "drive_context": "At the drive current: the requested field, with the remaining shape error."
         if drive_cards
@@ -115,7 +141,7 @@ def result_overview(record):
         if field.source_key in {"fabricated", "winding_validation", "validation", "sheet"}
         else "",
         "field_component": field.component if field.component in {"Bx", "By", "Bz", "BdotB0", "Bmag"} else "",
-        "field_context": field.context if field.visible else "",
+        "field_context": field_context_with_current(field, gradient_cards),
         "field_tooltip": field.tooltip,
         "coil_cards": coil_cards,
         "partial_note": partial_note,
@@ -125,7 +151,9 @@ def result_overview(record):
             {
                 "body": row.body_id,
                 "name": row.quantity,
-                "value": _quantity(row.value, 1, row.unit) if row.unit else str(row.value),
+                "value": " ".join(part for part in display_quantity(row.value, row.unit) if part)
+                if row.unit
+                else str(row.value),
                 "scope": row.scope,
             }
             for row in coil.rows
@@ -134,9 +162,10 @@ def result_overview(record):
     }
 
 
-def problem_groups(record):
+def problem_groups(record, issues=None):
     groups = {}
-    for issue in run_problems(record):
+    roles = body_roles(getattr(record, "metadata", None) or {})
+    for issue in run_problems(record) if issues is None else issues:
         if issue.key.startswith("constraint:"):
             scope = "Numerical and engineering constraints"
         elif issue.scope == "pipeline_sweep_geometry":
@@ -155,17 +184,25 @@ def problem_groups(record):
         unit, scale = ("mm", 1e3) if issue.unit == "m" else (issue.unit, 1)
         measured = _quantity(issue.value, scale, unit)
         limit = _quantity(issue.limit, scale, unit)
-        details = [status, issue.body_id]
+        details = [status, body_label(roles, issue.body_id)]
         if measured is not None:
             details.append("Measured " + measured)
         if limit is not None:
-            details.append("Limit " + limit)
+            details.append(
+                f"{issue.requirement} {limit}" if not issue.comparator else f"Needs {issue.comparator} {limit}"
+            )
         groups.setdefault(scope, []).append(
             {
                 "title": issue.title,
                 "status": status,
                 "details": " · ".join(x for x in details if x),
                 "explanation": issue.explanation,
+                # Recorded witness, so the browser can locate the check in the 3D view.
+                "locatable": bool(getattr(issue, "points_m", ())),
+                "points_m": [[float(value) for value in point] for point in getattr(issue, "points_m", ())],
+                "segments": [[int(index) for index in pair] for pair in getattr(issue, "segments", ())],
+                "dataset": getattr(issue, "dataset", "review_conductor"),
+                "where": getattr(issue, "location_description", ""),
             }
         )
     result = []

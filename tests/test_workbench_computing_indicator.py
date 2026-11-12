@@ -36,8 +36,12 @@ def publish(window, *, status="running", progress=0.45, **fields):
         "status": status,
         "progress": progress,
         "project_id": window.project.id if window.project else "closed-project",
+        "pipeline_stage": "evaluated",
+        "active_stage": "sheet",
         **fields,
     }
+    # The bar shows the current operation's own percentage.
+    state.setdefault("phase_progress", progress)
     window.jobs.states = [state]
     window._loaded_ids.add(state["id"])
     window.poll_jobs()
@@ -53,7 +57,7 @@ def test_running_indicator_stays_in_lower_left_when_windows_and_status_messages_
     window.evidence.close_all()
     window.statusBar().showMessage("Saved current project")
     application.processEvents()
-    assert indicator.isVisible() and indicator.label.text() == "Computing (45%)"
+    assert indicator.isVisible() and indicator.label.text() == "Stage 2/5 · Stream function"
     assert indicator.progress.value() == 45
     assert indicator.message.text() == "Saved current project"
     location = indicator.label.mapTo(window, QPoint(0, 0))
@@ -66,7 +70,7 @@ def test_running_indicator_stays_in_lower_left_when_windows_and_status_messages_
     assert indicator.label.width() >= indicator.label.sizeHint().width()
     assert indicator.label.mapTo(window.statusBar(), QPoint(0, 0)).x() <= 10
     window.statusBar().clearMessage()
-    assert indicator.label.text() == "Computing (45%)"
+    assert indicator.label.text() == "Stage 2/5 · Stream function"
     assert indicator.message.text() == ""
 
 
@@ -85,7 +89,7 @@ def test_runs_opens_from_status_bar_after_strict_fabrication(windows):
     assert window.computation_indicator.tasks_button.isHidden()
     state["progress_operation"] = "Finalizing verified runtime and result metadata"
     window.poll_jobs()
-    assert window.computation_indicator.label.text().startswith("Computing")
+    assert window.computation_indicator.label.text().startswith("Stage 2/5")
 
     state.update(status="completed", progress=1)
     window.poll_jobs()
@@ -103,11 +107,11 @@ def test_historical_selection_paused_follow_and_new_channel_do_not_hide_running_
     monkeypatch.setattr(window, "_selected_job_id", lambda: "historical")
     window._pause_live_follow()
     window._update_execution_feedback()
-    assert window.computation_indicator.label.text() == "Computing (45%)"
+    assert window.computation_indicator.label.text() == "Stage 2/5 · Stream function"
     window.add_channel("Another coil")
     window.poll_jobs()
     assert window.project.id != state["project_id"]
-    assert window.computation_indicator.label.text() == "Computing (45%)"
+    assert window.computation_indicator.label.text() == "Stage 2/5 · Stream function"
 
 
 def test_welcome_screen_still_tracks_worker_until_it_stops(windows):
@@ -117,7 +121,7 @@ def test_welcome_screen_still_tracks_worker_until_it_stops(windows):
     assert window.project is None
     window.jobs.states[0]["progress"] = 0.63
     window.poll_jobs()
-    assert window.computation_indicator.label.text() == "Computing (63%)"
+    assert window.computation_indicator.label.text() == "Stage 2/5 · Stream function"
     window.jobs.states[0]["status"] = "completed"
     window.poll_jobs()
     assert window.computation_indicator.isHidden()
@@ -179,7 +183,7 @@ def test_unreported_or_invalid_progress_keeps_activity_visible_without_invented_
     window = windows()
     publish(window, progress=progress)
     indicator = window.computation_indicator
-    assert not indicator.isHidden() and indicator.label.text() == "Computing…"
+    assert not indicator.isHidden() and indicator.label.text() == "Stage 2/5 · Stream function"
     assert indicator.progress.minimum() == indicator.progress.maximum() == 0
 
 
@@ -252,7 +256,7 @@ def test_opaque_worker_reports_unknown_activity_then_measured_operation_progress
     )
     indicator = window.computation_indicator
     # Allocated work is retained as evidence, but is not a measured operation percentage.
-    assert indicator.label.text() == "Computing…" and indicator.progress.maximum() == 0
+    assert indicator.label.text() == "Stage 2/5 · Stream function" and indicator.progress.maximum() == 0
     assert "45%" not in indicator.label.text() and "45%" not in indicator.details_label.text()
     assert "Sparse factorization" in indicator.details_label.text()
     assert "current operation has no measurable work total" in indicator.toolTip()
@@ -265,7 +269,7 @@ def test_opaque_worker_reports_unknown_activity_then_measured_operation_progress
         progress_completed=3,
         progress_total=10,
     )
-    assert indicator.label.text() == "Operation 30%" and indicator.progress.value() == 30
+    assert indicator.label.text() == "Stage 2/5 · Stream function" and indicator.progress.value() == 30
     assert "operation 30%" in indicator.toolTip() and "3/10 work units" in indicator.toolTip()
     assert "allocated work 46%" in indicator.tasks_menu.actions()[0].text()
 
@@ -323,7 +327,7 @@ def test_failed_runtime_refresh_does_not_present_stale_percent_as_current_activi
     assert "worker state unavailable" in window.computation_indicator.toolTip()
     monkeypatch.setattr(window.jobs, "list", original)
     window.poll_jobs()
-    assert window.computation_indicator.label.text() == "Computing (45%)"
+    assert window.computation_indicator.label.text() == "Stage 2/5 · Stream function"
 
 
 def test_local_export_stays_active_while_job_runtime_is_unavailable_and_recovers(windows, monkeypatch):
@@ -367,7 +371,7 @@ def test_concurrent_field_analysis_and_job_have_individual_percentages_without_a
     assert "Gradient study: running (53%)" in indicator.toolTip()
     assert "Field analysis (19%)" in indicator.toolTip()
     window._research_busy("Field analysis", False)
-    assert indicator.label.text() == "Computing (53%)"
+    assert indicator.label.text() == "Stage 2/5 · Stream function"
 
 
 def test_repeated_poll_processing_errors_are_reported_once_and_recover(windows, monkeypatch):
@@ -388,4 +392,4 @@ def test_repeated_poll_processing_errors_are_reported_once_and_recover(windows, 
     monkeypatch.setattr(window, "_fill_jobs", original)
     window.poll_jobs()
     assert window._last_runtime_error is None
-    assert window.computation_indicator.label.text() == "Computing (45%)"
+    assert window.computation_indicator.label.text() == "Stage 2/5 · Stream function"

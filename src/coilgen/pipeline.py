@@ -40,6 +40,7 @@ from .geometry import (
 )
 from .gradient_slice_maps import gradient_slice_map_result, gradient_slice_maps_enabled
 from .models import CoilGenResult, CoilPart, Mesh
+from .part_roles import ACTIVE_SHIELD, PRIMARY, normalize_part_role
 from .routing import (
     calculate_unconnected_contour_wire_distances,
     calculate_group_centers,
@@ -312,7 +313,9 @@ class CoilGenPipeline:
         roles = coil_mesh.metadata.get("part_roles")
         if isinstance(roles, (list, tuple)) and len(roles) == len(prepared_meshes):
             for mesh, role in zip(prepared_meshes, roles):
-                if role in ("primary", "active_shield"):
+                # "shield" (designs, SupportMesh) and "active_shield" name the same body.
+                role = normalize_part_role(role)
+                if role in (PRIMARY, ACTIVE_SHIELD):
                     mesh.metadata["role"] = role
         mesh_quality_diagnostics = _validate_prepared_mesh_quality(prepared_meshes, self.config)
         symmetry_mesh_diagnostics.update(mesh_quality_diagnostics)

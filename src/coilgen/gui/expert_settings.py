@@ -135,6 +135,14 @@ FIELDS = (
         choices=("single", "per_part"),
     ),
     ExpertField(
+        "layout_terminal_strategy",
+        "Terminal handling",
+        "Routing",
+        "How the coil's feed ends are connected: undefined (not decided), pads (terminal pads), wire_stubs, or waived (handled outside CoilGen). Recorded for review; CoilGen does not build pads or stubs.",
+        "enum",
+        choices=("undefined", "pads", "wire_stubs", "waived"),
+    ),
+    ExpertField(
         "inter_group_connection_path_method",
         "Connection path",
         "Routing",

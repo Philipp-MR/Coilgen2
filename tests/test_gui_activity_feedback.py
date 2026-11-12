@@ -76,7 +76,19 @@ def _footer(dialog):
 
 
 def _state(**changes):
-    return {"id": "gx", "name": "Gx", "status": "running", "progress": 0.45, "stage": "Field samples", **changes}
+    state = {
+        "id": "gx",
+        "name": "Gx",
+        "status": "running",
+        "progress": 0.45,
+        "stage": "Field samples",
+        "active_stage": "sheet",
+        "pipeline_stage": "evaluated",
+        **changes,
+    }
+    # The bar shows the current operation's own percentage.
+    state.setdefault("phase_progress", state["progress"])
+    return state
 
 
 def test_open_and_nested_modal_editors_receive_latest_activity(owned, app):
@@ -88,7 +100,8 @@ def test_open_and_nested_modal_editors_receive_latest_activity(owned, app):
     for dialog in (first, nested):
         footer = _footer(dialog)
         assert footer is not None and footer.isVisible()
-        assert footer.label.text() == main.label.text() == "Computing (45%)"
+        assert footer.label.text() == main.label.text() == "Stage 2/5 · Stream function"
+        assert "Operation 45%" in footer.toolTip()
         assert "Field samples" in footer.toolTip()
     assert len(monitor.indicators) == 2
     monitor.set_activity((_state(progress=0.63),))

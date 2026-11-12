@@ -23,10 +23,18 @@ class ProblemIssue:
     location_description: str = "No spatial witness was recorded."
     run_directory: str = ""
     scope: str = ""
+    # Requirement on the measured value relative to the limit: "≤" (a maximum), "≥" (a minimum),
+    # ">" (strictly above). Empty when the direction is not recorded.
+    comparator: str = ""
 
     @property
     def locatable(self):
         return bool(self.points_m)
+
+    @property
+    def requirement(self):
+        """Human wording of the limit, e.g. "needs ≥" or "maximum"."""
+        return {"≤": "Maximum", "≥": "Minimum", ">": "Must exceed"}.get(self.comparator, "Limit")
 
 
 def recorded_stage(metadata):
@@ -375,7 +383,8 @@ _BODY_REASONS = {
     ),
     "poor_sweep_triangle_quality": (
         "Conductor surface triangles are poorly shaped",
-        "The saved swept-surface triangle aspect-ratio check fails. No worst triangle coordinates were retained.",
+        "The saved swept-surface triangle check fails when either the edge-length ratio or the altitude aspect "
+        "ratio exceeds its limit. No worst triangle coordinates were retained.",
         "sweep_triangle_altitude_aspect_ratio_max",
         "sweep_triangle_altitude_aspect_ratio_limit",
         "",
@@ -391,6 +400,53 @@ _BODY_REASONS = {
         None,
     ),
 }
+
+# Direction of each body check: what the measured value must satisfy against its limit.
+_BODY_COMPARATORS = {
+    "insufficient_copper_gap": "≥",
+    "minimum_bend_radius_violation": "≥",
+    "route_clearance_violation": "≥",
+    "sweep_clearance_violation": "≥",
+    "sweep_self_intersection": "≥",
+    "folded_sweep_quad": ">",
+    "unresolved_frame_sampling": "≤",
+    "support_surface_penetration": "≤",
+    "poor_sweep_triangle_quality": "≤",
+    "curvature_envelope_violation": "≤",
+}
+
+# The triangle-quality check fails when either ratio exceeds its limit (manufacturing.py).
+_TRIANGLE_RATIOS = (
+    (
+        "sweep_triangle_edge_ratio_max",
+        "sweep_triangle_edge_ratio_limit",
+        "mesh_quality_max_triangle_edge_ratio",
+        "longest-to-shortest edge ratio",
+    ),
+    (
+        "sweep_triangle_altitude_aspect_ratio_max",
+        "sweep_triangle_altitude_aspect_ratio_limit",
+        "mesh_quality_max_altitude_aspect_ratio",
+        "altitude aspect ratio (longest edge² / twice the area)",
+    ),
+)
+
+
+def _triangle_quality_reading(diagnostics, config):
+    """Return (value, limit, sentence) for the ratio that actually failed, worst first."""
+    readings = []
+    for value_key, limit_key, config_key, name in _TRIANGLE_RATIOS:
+        value = _finite_number(diagnostics.get(value_key))
+        limit = _finite_number(diagnostics.get(limit_key, config.get(config_key)))
+        if value is not None and limit is not None and limit > 0:
+            readings.append((value / limit, value, limit, name))
+    if not readings:
+        return None, None, ""
+    failing = sorted((row for row in readings if row[1] > row[2]), reverse=True) or sorted(readings, reverse=True)
+    _, value, limit, name = failing[0]
+    sentences = [f"Worst {row[3]} {row[1]:.3g} against a maximum of {row[2]:.3g}." for row in failing]
+    return value, limit, " The value shown is the " + name + ". " + " ".join(sentences)
+
 
 _RECORD_REASON_TITLES = {
     "missing_fabrication_path": "No fabrication path was saved",
@@ -510,9 +566,15 @@ def _field_witness(record, name, scope=""):
     )
 
 
-def run_problems(record) -> tuple[ProblemIssue, ...]:
-    """Only recorded failures and verified spatial witnesses become problems."""
-    metadata = record.metadata
+def run_problems(record, *, locate: bool = True) -> tuple[ProblemIssue, ...]:
+    """Only recorded failures and verified spatial witnesses become problems.
+
+    ``locate=False`` lists the same issues without reading saved frame or field arrays, so no spatial
+    witness is attached and the immutable metadata view is borrowed instead of copied; use it where only
+    titles, values and limits are shown.
+    """
+    view = None if locate else getattr(record, "metadata_view", None)
+    metadata = view if view is not None else record.metadata
     fabrication = metadata.get("fabrication") or {}
     issues = []
     reasons_seen = set()
@@ -523,7 +585,7 @@ def run_problems(record) -> tuple[ProblemIssue, ...]:
     for scope, body in bodies:
         body_id = body.get("body_id", "")
         diagnostics = body.get("diagnostics") or {}
-        frames = _saved_frames(record, body_id) if scope == "fabrication_review" else None
+        frames = _saved_frames(record, body_id) if locate and scope == "fabrication_review" else None
         reasons = [reason for reason in str(diagnostics.get("manufacturing_failure_reasons", "")).split(";") if reason]
         if (
             not reasons
@@ -549,6 +611,9 @@ def run_problems(record) -> tuple[ProblemIssue, ...]:
                 if isinstance(limit_key, str)
                 else limit_key
             )
+            if reason == "poor_sweep_triangle_quality":
+                value, limit, sentence = _triangle_quality_reading(diagnostics, metadata.get("config", {}) or {})
+                explanation += sentence
             points, segments, description = (
                 _frame_witness(frames, diagnostics, witness)
                 if witness
@@ -579,6 +644,7 @@ def run_problems(record) -> tuple[ProblemIssue, ...]:
                     location_description=description,
                     dataset="swept" if scope == "pipeline_sweep_geometry" else "review_conductor",
                     scope=scope,
+                    comparator=_BODY_COMPARATORS.get(reason, "") if limit is not None else "",
                 )
             )
             reasons_seen.add(f"{body_id}:{reason}")
@@ -595,6 +661,7 @@ def run_problems(record) -> tuple[ProblemIssue, ...]:
                 limit=_finite_number(row.get("required_surface_gap_m")),
                 unit="m",
                 scope="fabrication_review",
+                comparator="≥",
             )
         )
     body_ids = {body.get("body_id") for body in fabrication.get("paths", [])}
@@ -625,7 +692,11 @@ def run_problems(record) -> tuple[ProblemIssue, ...]:
         ):
             continue
         name = row.get("name", "Constraint")
-        points, dataset, description = _field_witness(record, name, row.get("scope", ""))
+        points, dataset, description = (
+            _field_witness(record, name, row.get("scope", ""))
+            if locate
+            else ((), "review_conductor", "No spatial witness was recorded.")
+        )
         failed = row.get("passed") is False
         issues.append(
             ProblemIssue(

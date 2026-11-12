@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, replace
 from pathlib import Path
+import math
 import time
 from types import SimpleNamespace
 
@@ -10,8 +11,9 @@ import numpy as np
 from ..field_components import field_component_values
 from ..pipeline import CoilGenPipeline
 from ..pipeline_stages import PipelineCheckpoint, PipelineStage
+from ..part_roles import normalize_part_role
 from ..progress import DesignCancelled, ProgressReporter, progress_scope
-from ..reporting import write_design_report
+from ..reporting import result_summary_dict, write_design_report
 from ..scientific_arrays import scientific_arrays as _scientific_arrays
 from ..scientific_arrays import fabrication_frame_arrays, routing_evidence, shielding_contribution_arrays
 from ..application.stage_preview import (
@@ -95,6 +97,7 @@ def _pipeline_sweep_evidence(parts, config) -> dict:
                     "contour_index": contour_index,
                     "source_kind": "contour" if contour_index is not None else "wire_path",
                     "turn_multiplicity": multiplicity,
+                    "role": normalize_part_role((getattr(part.mesh, "metadata", None) or {}).get("role")),
                     "vertices_key": f"swept_{part_index}_{body_index}_vertices_m",
                     "faces_key": f"swept_{part_index}_{body_index}_faces",
                     "manufacturing_ok": recorded_bool(diagnostics.get("manufacturing_ok")),
@@ -174,6 +177,35 @@ def _wire_field_metrics(field, target, config) -> dict:
         "target_rms_T": scale * target_rms,
         "relative_rms_error": rms / target_rms if target_rms > 0 else None,
         "rms_convention": "vector_magnitude" if actual.shape[1] == 3 else "scalar",
+    }
+
+
+def _finite_or_none(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _gradient_headline_summary(report: dict) -> dict:
+    """Copy the layout gradient readouts that otherwise reach only ``design_report.md``.
+
+    The target gradient is recovered exactly from the layout fit
+    (efficiency × current), so the reviewed conductor's efficiency can later be
+    stated at its own drive current. Series values use one shared current
+    through every part: R is the sum of part resistances and L is 1ᵀL1, which
+    includes the signed mutual inductance between parts.
+    """
+    efficiency = _finite_or_none(report.get("layout_gradient_efficiency_mT_per_m_per_A"))
+    current = _finite_or_none(report.get("layout_needed_current_A"))
+    available = efficiency is not None and efficiency > 0 and current is not None and current != 0
+    return {
+        "layout_gradient_efficiency_mt_per_m_per_a": efficiency if available else None,
+        "layout_current_for_target_a": abs(current) if available else None,
+        "target_gradient_t_per_m": efficiency * abs(current) / 1000.0 if available else None,
+        "layout_series_resistance_ohm": _finite_or_none(report.get("coil_resistance_total_ohm")),
+        "layout_series_inductance_h": _finite_or_none(report.get("coil_inductance_same_current_H")),
     }
 
 
@@ -983,6 +1015,12 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
     physical_ok = bool(diagnostics.get("constrained_solver_contract_met", False))
     accepted = physical_ok and validation_passed is True and all(c["passed"] is True for c in constraints)
     values = diagnostics.get("research_physical_values", diagnostics)
+    try:
+        report_summary = result_summary_dict(result)
+    except (AttributeError, TypeError, ValueError):
+        # Partial results (for example from stubbed workers) still save; the
+        # report writer then derives what it can on its own.
+        report_summary = None
     summary = {
         "accepted": accepted,
         "sheet_accepted": sheet_accepted,
@@ -1026,6 +1064,8 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         "vertices": len(result.combined_mesh.vertices),
         "triangles": len(result.combined_mesh.faces),
         "solver": diagnostics.get("constrained_solver_name"),
+        "design_context": (report_summary or {}).get("design_context"),
+        **_gradient_headline_summary(report_summary or {}),
         "elapsed_seconds": time.perf_counter() - started,
     }
     array_file = directory / "scientific_result.npz"
@@ -1050,7 +1090,10 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
     ):
         atomic_json(directory / "solver_diagnostics.json", diagnostics)
         artifacts.append({"name": "solver_diagnostics.json", "kind": "diagnostics"})
-        write_design_report(result, directory / "design_report.md")
+        if report_summary is None:
+            write_design_report(result, directory / "design_report.md")
+        else:
+            write_design_report(result, directory / "design_report.md", summary=report_summary)
         artifacts.append({"name": "design_report.md", "kind": "report"})
     with progress_scope(
         save_start + 0.7 * save_span, save_start + 0.75 * save_span, "Rechecking immutable input files", overall=True

@@ -168,7 +168,9 @@ def test_real_widgets_render_operation_scope_and_keep_passive_editor_drafts(widg
     assert not any(row.text(1) == "Completed" for row in panel.stage_items.values())
     if kind == "counted":
         assert panel.channel_items[channel.id].text(1) == "Computing"
-        assert indicator.label.text() == footer.label.text() == "Operation 30%"
+        assert indicator.label.text() == footer.label.text()
+        assert indicator.label.text().startswith("Stage 2/5 · Stream function · 3:0")
+        assert "Operation 30%" in indicator.toolTip()
         assert indicator.progress.value() == 30
     else:
         assert indicator.progress.maximum() == footer.progress.maximum() == 0

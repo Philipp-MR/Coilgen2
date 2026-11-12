@@ -2012,14 +2012,19 @@ def write_design_report(
     title: str = "CoilGen Design Report",
     design: Any | None = None,
     validation_report: ConfigValidationReport | None = None,
+    summary: dict[str, Any] | None = None,
 ) -> Path:
-    """Write a user-readable Markdown report with units and diagnostics."""
+    """Write a user-readable Markdown report with units and diagnostics.
+
+    ``summary`` may pass an already computed ``result_summary_dict(result)``
+    so callers that also persist some of its values do not compute it twice.
+    """
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     validation_report = validation_report or validate_config(result.input_data)
     quality = result_quality_status(result)
-    summary = result_summary_dict(result)
+    summary = dict(summary) if summary is not None else result_summary_dict(result)
     design_context = result_design_context(result)
     lines: list[str] = [
         f"# {title}",

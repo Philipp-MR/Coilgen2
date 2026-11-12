@@ -10,11 +10,8 @@ from dataclasses import dataclass, replace
 import math
 from pathlib import Path
 
-import numpy as np
-
-from ..geometry import build_cylinder_mesh, combine_meshes, normalize_mesh
-from ..models import Mesh
 from .assembly import ProjectAssembly
+from .gradient_geometry import CylinderSurface, CylindricalGeometry
 from .presets import EXAMPLE_TITLES, preset_config, preset_description, preset_study
 from .project import ProjectDocument
 from .system_presets import SYSTEM_EXAMPLE_TITLES, system_assembly, system_description
@@ -188,35 +185,6 @@ def template_spec(id_: str) -> TemplateSpec:
     raise ValueError(f"Unknown design template {id_!r}; choose {', '.join(spec.id for spec in TEMPLATE_SPECS)}.")
 
 
-def _cylinder(length_m: float, radius_m: float, angular: int = 32, axial: int = 16) -> Mesh:
-    # Preserve the legacy builder while giving templates their stated SI span.
-    return normalize_mesh(build_cylinder_mesh(length_m * (axial + 1) / axial, radius_m, angular, axial, 1, 0, 0, 0))
-
-
-def _closed_suppression_cylinder() -> Mesh:
-    mesh = _cylinder(0.4, 0.15, angular=24, axial=12)
-    angular = 24
-    vertices = np.vstack((mesh.vertices, (0, 0, -0.2), (0, 0, 0.2)))
-    bottom, top = len(mesh.vertices), len(mesh.vertices) + 1
-    last_ring = len(mesh.vertices) - angular
-    end_faces = []
-    for index in range(angular):
-        next_index = (index + 1) % angular
-        end_faces.extend(((bottom, index, next_index), (top, last_ring + next_index, last_ring + index)))
-    return normalize_mesh(
-        Mesh(
-            vertices=vertices,
-            faces=np.vstack((mesh.faces, np.asarray(end_faces, dtype=np.int64))),
-            metadata={
-                "geometry_type": "closed_external_suppression_cylinder",
-                "units": "SI",
-                "radius_m": 0.15,
-                "length_m": 0.4,
-            },
-        )
-    )
-
-
 def _shielded_project(spec: TemplateSpec, root: Path) -> ProjectDocument:
     config = replace(
         preset_config("cylinder"),
@@ -230,16 +198,13 @@ def _shielded_project(spec: TemplateSpec, root: Path) -> ProjectDocument:
         suppression_surface_weighting="area",
         layout_manufacturing_intent="Primary and active-shield windings; inter-support feeds and external-field verification require engineering review.",
     )
-    support = combine_meshes([_cylinder(0.3, 0.08), _cylinder(0.3, 0.11)])
-    support.metadata.update(
-        {"geometry_type": "active_shielded_cylinder", "units": "SI", "part_roles": ["primary", "active_shield"]}
+    # The shared cylindrical geometry records its dimensions with the meshes, so
+    # both workbenches can edit radii, lengths and openings of this example.
+    geometry = CylindricalGeometry(
+        CylinderSurface(0.08, 0.3), CylinderSurface(0.11, 0.3), CylinderSurface(0.15, 0.4, 24, 12)
     )
-    return (
-        ProjectDocument.from_config(config, name=spec.title, project_root=root)
-        .with_mesh(support, field="coil_mesh_file")
-        .with_mesh(_closed_suppression_cylinder(), field="secondary_target_mesh_file")
-        .update_study(preset_study("biplanar"))
-    )
+    project = ProjectDocument.from_config(config, name=spec.title, project_root=root)
+    return geometry.apply(project).update_study(preset_study("biplanar"))
 
 
 def _shim_config(id_: str):
@@ -285,7 +250,7 @@ def template_assembly(id_: str, *, project_root=None) -> ProjectAssembly:
     spec = template_spec(id_)
     root = Path.cwd() if project_root is None else Path(project_root).expanduser().resolve()
     if id_ in SYSTEM_EXAMPLE_TITLES:
-        return system_assembly(id_, project_root=root)
+        return _first_revision(system_assembly(id_, project_root=root))
     if id_ == "shielded_gy":
         project = _shielded_project(spec, root)
     else:
@@ -318,4 +283,15 @@ def template_assembly(id_: str, *, project_root=None) -> ProjectAssembly:
                 config = replace(config, normal_shift_length=0.0055, sweep_corner_cluster_max_source_deviation_m=0.003)
             study = preset_study(kind)
         project = ProjectDocument.from_config(config, name=spec.title, project_root=root).update_study(study)
-    return ProjectAssembly.new(spec.title, (project,))
+    return _first_revision(ProjectAssembly.new(spec.title, (project,)))
+
+
+def _first_revision(assembly: ProjectAssembly) -> ProjectAssembly:
+    """Present a freshly built example as revision 1 of each channel.
+
+    Building a template chains several internal edits (inputs, owned meshes, study), each of which
+    would otherwise count as a user-visible revision. Each channel has a new project id, so
+    restarting the count cannot collide with any saved run.
+    """
+    channels = tuple(replace(channel, project=replace(channel.project, revision=1)) for channel in assembly.channels)
+    return replace(assembly, channels=channels)

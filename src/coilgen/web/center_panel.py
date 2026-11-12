@@ -3,7 +3,15 @@
 from trame.widgets import html, vtk as vtk_widgets, vuetify3 as v3
 
 from ..application.cad import PRINT_FORMER_EXPORT_HINT
+from ..application.scene_views import VIEW_PRESETS
 from .harmonics import build_harmonics_dialog
+from .view_panel import (
+    build_export_presets,
+    build_grouped_export_list,
+    build_locate_button,
+    build_unwrapped_dialog,
+    build_view_tools,
+)
 from .field_slices import build_field_slices_dialog
 
 
@@ -29,7 +37,7 @@ def _run_dialog(section, title, *, max_width=760):
     return body
 
 
-def _checks_dialog():
+def _checks_dialog(ctrl=None):
     with _run_dialog("checks", "Engineering checks"):
         with html.Div(v_if="summary"):
             html.P("{{ run_source }} · {{ run_context }}", classes="cg-detail-note")
@@ -42,6 +50,7 @@ def _checks_dialog():
                     with html.Li(v_for="(item, index) in group.items", key="index"):
                         html.Strong("{{ item.title }}", title=("item.explanation",))
                         html.Div("{{ item.details }}")
+                        build_locate_button(ctrl)
             with html.Div(v_if="summary.suppression", classes="mt-2"):
                 html.Strong("Suppression on {{ summary.suppression.sample_count }} design samples")
                 html.Div("{{ summary.suppression.component }} · {{ summary.suppression.weighting }} weighting")
@@ -175,17 +184,22 @@ def _export_dialog(ctrl, *, former=False):
                     v_if=f"{options}.length === 1",
                     classes="cg-detail-note",
                 )
+            if not former:
+                build_export_presets()
             with html.Details(key=("selected_run",), **multiple_files):
                 html.Summary("Choose files and formats")
-                v3.VCheckbox(
-                    v_for=f"option in {options}",
-                    key="option.value",
-                    v_model=(selected,),
-                    value=("option.value",),
-                    label=("option.title + ' — ' + option.status",),
-                    density="compact",
-                    hide_details=True,
-                )
+                if former:
+                    v3.VCheckbox(
+                        v_for=f"option in {options}",
+                        key="option.value",
+                        v_model=(selected,),
+                        value=("option.value",),
+                        label=("option.title + ' — ' + option.status",),
+                        density="compact",
+                        hide_details=True,
+                    )
+                else:
+                    build_grouped_export_list(selected)
             v3.VSelect(
                 v_model=("export_unit",),
                 items=("['mm', 'm']",),
@@ -226,11 +240,12 @@ def _export_dialog(ctrl, *, former=False):
 
 
 def _metric_cards(key):
-    with html.Div(v_if=f"summary.overview.{key}_cards.length", classes="cg-metrics"):
+    with html.Div(v_if=f"summary.overview.{key}_cards.length", classes=f"cg-metrics cg-metrics-{key}"):
         with html.Div(
             v_for=f"card in summary.overview.{key}_cards",
             key="card.key",
             title=(f"card.tooltip || summary.overview.{key}_tooltip",),
+            raw_attrs=[':data-status="card.status || null"'],
         ):
             html.Span("{{ card.name }}")
             html.Strong("{{ card.value }}", classes=("{'cg-unavailable':card.unavailable}",))
@@ -291,7 +306,15 @@ def build_center_panel(workbench):
                     variant="outlined",
                     raw_attrs=[':aria-expanded="results_metrics_expanded"', 'aria-controls="coilgen-result-metrics"'],
                 )
+            html.Div(
+                "Failed: {{ summary.failed_reasons }}",
+                v_if="summary.failed_reasons && summary.color === 'error'",
+                classes="cg-failed-reasons",
+                role="status",
+                title="Open Engineering checks for every failed item and its measured value.",
+            )
             with html.Div(id="coilgen-result-metrics", v_show="results_metrics_expanded"):
+                _metric_cards("gradient")
                 _metric_cards("drive")
                 _metric_cards("field")
                 _metric_cards("coil")
@@ -419,7 +442,7 @@ def build_center_panel(workbench):
                     html.Span("View direction")
                     with v3.VMenu(activator="parent"):
                         with v3.VList(density="compact"):
-                            for view in ("Isometric", "XY", "XZ", "YZ"):
+                            for view in VIEW_PRESETS:
                                 v3.VListItem(title=view, click=(workbench.set_camera_view, f"['{view}']"))
                 v3.VBtn(
                     "Fit view",
@@ -428,6 +451,7 @@ def build_center_panel(workbench):
                     size="small",
                     prepend_icon="mdi-fit-to-screen-outline",
                 )
+                build_view_tools(workbench.server.controller)
                 with html.Label(v_if="outer_winding_support", classes="cg-support-visibility"):
                     html.Input(type="checkbox", v_model=("see_through_support",))
                     html.Span("See through support")
@@ -449,10 +473,11 @@ def build_center_panel(workbench):
                 "['contours','routes','evaluated_winding','fabrication','swept','review_conductor','review_electrical'].includes(dataset)",
                 classes="cg-scope",
             )
-        _checks_dialog()
+        _checks_dialog(ctrl)
         build_field_slices_dialog(ctrl)
         build_harmonics_dialog(ctrl)
         _stats_dialog()
         _shielding_dialog(ctrl)
+        build_unwrapped_dialog(_run_dialog)
         _export_dialog(ctrl)
         _export_dialog(ctrl, former=True)

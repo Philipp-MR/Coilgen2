@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
-import re
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Slot
 
-from ..application.stage_preview import MANIFEST_NAME, load_stage_preview
+from ..application.live_preview import load_requested_preview, stage_preview_request
+from ..application.stage_preview import load_stage_preview
 
 
 class _Signals(QObject):
@@ -25,10 +25,9 @@ class _Load(QRunnable):
     def run(self):
         from .design_tasks import deliver_task_signal
 
-        directory, identity, _signature = self.request
         preview, error = None, None
         try:
-            preview = self.loader(directory, **identity)
+            preview = load_requested_preview(self.request, self.loader)
         except Exception as exc:
             # Optional display failures must still release the loader/coalesced
             # request, including resource and unexpected archive errors.
@@ -145,37 +144,7 @@ class LivePreviewController(QObject):
         self.stop()
 
     def _request(self, state):
-        job_id = state.get("id")
-        digest = state.get("request_sha256")
-        if (
-            not isinstance(job_id, str)
-            or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", job_id) is None
-            or not isinstance(digest, str)
-            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
-            or not isinstance(state.get("project_id"), str)
-            or not state["project_id"].strip()
-            or not isinstance(state.get("project_fingerprint"), str)
-            or not state["project_fingerprint"].strip()
-            or (
-                state.get("project_revision") is not None
-                and (type(state["project_revision"]) is not int or state["project_revision"] < 0)
-            )
-        ):
-            return None
-        directory = (self._root / job_id).resolve()
-        if not directory.is_relative_to(self._root):
-            return None
-        try:
-            stat = (directory / MANIFEST_NAME).stat()
-        except FileNotFoundError:
-            return None
-        identity = {
-            "expected_request_sha256": digest,
-            "expected_project_id": state["project_id"],
-            "expected_project_fingerprint": state["project_fingerprint"],
-            "expected_project_revision": state.get("project_revision"),
-        }
-        return directory, identity, (stat.st_mtime_ns, stat.st_size)
+        return stage_preview_request(self._root, state)
 
     def refresh(self, state):
         if self._closed or not self._state or state.get("id") != self.job_id:

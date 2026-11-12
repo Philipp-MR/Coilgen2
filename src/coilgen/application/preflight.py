@@ -7,7 +7,7 @@ operators or invoking a solver. Readiness is not engineering acceptance.
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.util import find_spec
 from pathlib import Path
 from zipfile import BadZipFile
@@ -25,6 +25,9 @@ class PreflightIssue:
     action: str
     severity: str = "error"
     title: str = "Invalid setting"
+    # Optional one-click fix (config changes) and its button label.
+    fix: dict | None = field(default=None, compare=False)
+    fix_label: str = field(default="", compare=False)
 
     @property
     def blocking(self):
@@ -591,6 +594,8 @@ def check_preflight(project, *, validator=None, pipeline_stage=None) -> Prefligh
                 else "Invalid setting"
                 if diagnostic.level == "error"
                 else "Modeling note",
+                fix=dict(diagnostic.fix) if getattr(diagnostic, "fix", None) else None,
+                fix_label=getattr(diagnostic, "fix_label", ""),
             )
         )
     physics = config.research_physics

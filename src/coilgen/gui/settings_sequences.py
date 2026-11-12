@@ -131,6 +131,13 @@ GRAPHICAL_SETTINGS = {
         ),
         "legacy": ("contours", "Legacy strength", "Use the saved dimensionless B-spline fit strength."),
     },
+    # Recorded for review only; CoilGen does not build pads or stubs.
+    "layout_terminal_strategy": {
+        "undefined": ("help", "Not decided", "No terminal choice yet. Review notes ask for one."),
+        "pads": ("terminals", "Terminal pads", "The coil ends get solder or connector pads."),
+        "wire_stubs": ("conductor-sweep", "Wire stubs", "The coil ends continue as wire stubs to the feed."),
+        "waived": ("export-conductor", "Handled outside CoilGen", "Terminals are designed later in CAD or by hand."),
+    },
 }
 
 
@@ -518,6 +525,7 @@ def build_settings_sequence(window, page, form, layout):
             "conductor-sweep",
             summary=lambda: "Generate solids" if controls["sweep"].isChecked() else "Centerlines only",
         )
+        sequence.add("Terminal handling", ("layout_terminal_strategy",), "terminals")
     elif page == "optimization":
 
         def strategy_summary():

@@ -25,6 +25,7 @@ from ..attribution import software_attribution
 from ..geometry import _read_ascii_stl, _read_binary_stl, read_stl
 from ..manufacturing import save_mesh_as_stl
 from ..models import Mesh
+from ..part_roles import body_display_name, normalize_part_role
 from ..persistence import atomic_json, file_digest
 from ..persistence import publish_exclusive as _publish_exclusive
 from ..progress import ProgressReporter, progress_scope
@@ -65,11 +66,64 @@ GEOMETRY_FORMAT_LABELS = {
 }
 
 
-def geometry_option_label(option) -> str:
-    """One label for an export choice, shared by every client."""
+def geometry_option_label(option, *, with_role: bool = True) -> str:
+    """One label for an export choice, shared by every client.
+
+    ``with_role=False`` is for lists already grouped under a role heading.
+    """
     kind = GEOMETRY_FORMAT_LABELS.get(option.format, option.format.upper())
     former = "Print former · " if option.scope == PRINT_FORMER_SCOPE else ""
-    return ("DRAFT · " if is_draft_artifact(option.name) else "") + former + f"{option.body_id} · {kind}"
+    body = body_display_name(option.body_id, getattr(option, "role", None) if with_role else None)
+    return ("DRAFT · " if is_draft_artifact(option.name) else "") + former + f"{body} · {kind}"
+
+
+# Export presets shared by every client: (key, button label, formats selected).
+EXPORT_PRESETS = (
+    ("step", "CAD · STEP solids", ("step",)),
+    ("stl", "3D print · STL solids", ("stl",)),
+    ("csv", "Centerlines · CSV", ("path_csv",)),
+)
+_EXPORT_GROUPS = ("Primary", "Active shield", "Other", "Conductors", "Print former")
+
+
+def export_group(option) -> str:
+    """Heading an export file is listed under: its body role, or "Print former"."""
+    from ..part_roles import part_role_label
+
+    if option.scope == PRINT_FORMER_SCOPE:
+        return "Print former"
+    return part_role_label(getattr(option, "role", None)) or "Conductors"
+
+
+def grouped_export_options(options) -> tuple:
+    """Options ordered by group (primary, shield, other, unassigned, former), file order kept within each."""
+    return tuple(sorted(options, key=lambda option: _EXPORT_GROUPS.index(export_group(option))))
+
+
+def export_option_groups(options) -> list[dict]:
+    """``[{"title": "Primary", "names": [...]}, ...]`` in display order, empty groups left out."""
+    groups = {}
+    for option in grouped_export_options(options):
+        groups.setdefault(export_group(option), []).append(option.name)
+    return [{"title": title, "names": names} for title, names in groups.items()]
+
+
+def export_preset_selection(options, preset) -> tuple[str, ...]:
+    """Every file of the preset's formats (drafts included; exporting them still needs the DRAFT tick)."""
+    formats = next((formats for key, _label, formats in EXPORT_PRESETS if key == preset), ())
+    return tuple(option.name for option in grouped_export_options(options) if option.format in formats)
+
+
+def export_draft_banner(options) -> str:
+    """One line for the whole list when any file is a DRAFT."""
+    options = tuple(options)
+    drafts = sum(is_draft_artifact(option.name) for option in options)
+    if not drafts:
+        return ""
+    return (
+        f"DRAFT: {drafts} of {len(options)} files failed recorded checks and are not construction-released. "
+        "They are marked DRAFT below."
+    )
 
 
 def print_former_status(metadata) -> str:
@@ -138,6 +192,7 @@ class GeometryOption:
     bounds_m: tuple[tuple[float, float, float], tuple[float, float, float]]
     inspection_only: bool
     source_sha256: str
+    role: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,7 +404,16 @@ def _geometry_catalog(record: RunRecord, kinds=("solid",)) -> tuple[GeometryOpti
         )
         options.append(
             GeometryOption(
-                name, body_id, format_, scope, check_status, unit, bounds, inspection_only, artifact["sha256"]
+                name,
+                body_id,
+                format_,
+                scope,
+                check_status,
+                unit,
+                bounds,
+                inspection_only,
+                artifact["sha256"],
+                normalize_part_role(body.get("role")),
             )
         )
     task.done()

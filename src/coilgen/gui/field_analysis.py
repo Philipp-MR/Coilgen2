@@ -47,9 +47,15 @@ from ..attribution import AUTHOR_CREDIT, SOFTWARE_NAME, software_attribution
 from ..field_components import field_component_values
 from ..persistence import atomic_text_writer, json_value
 from ..progress import DesignCancelled
-from .coil_statistics import build_coil_statistics, mass_estimates
+from .coil_statistics import build_coil_statistics, display_quantity, mass_estimates
 from .run_metadata import read_run_metadata
-from .shielding_plot import SHIELDING_COMPONENTS, SHIELDING_SOURCES, draw_shielding_surface
+from .shielding_plot import (
+    SHIELDING_COMPONENTS,
+    SHIELDING_SOURCES,
+    draw_shielding_surface,
+    record_openings,
+    shielding_limits,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -953,7 +959,15 @@ class FieldAnalysisDialog(QDialog):
                 self.shield_component.setCurrentIndex(self.shield_component.findData("magnitude"))
                 return
             title = f"{read_run_metadata(self.record).get('name', 'Saved run')} · {SHIELDING_SOURCES[source]}"
-            note = draw_shielding_surface(figure, data, component, title=title, net_detail=net_detail)
+            note = draw_shielding_surface(
+                figure,
+                data,
+                component,
+                title=title,
+                net_detail=net_detail,
+                limits=shielding_limits(read_run_metadata(self.record)),
+                openings_m=record_openings(self.record),
+            )
             self.shield_note.setText(note)
             self._shield_plot_key = key
             self.export_plot.setEnabled(True)
@@ -1016,14 +1030,8 @@ class FieldAnalysisDialog(QDialog):
                 group.setExpanded(True)
                 groups[category] = group
             quantity = f"{row.body_id} · {row.quantity}" if row.body_id else row.quantity
-            value = (
-                "Unavailable"
-                if row.value is None
-                else f"{row.value:.7g}"
-                if isinstance(row.value, (float, np.floating))
-                else str(row.value)
-            )
-            item = QTreeWidgetItem(group, [quantity, value, row.unit, row.scope, row.status])
+            value, unit = ("Unavailable", row.unit) if row.value is None else display_quantity(row.value, row.unit)
+            item = QTreeWidgetItem(group, [quantity, value, unit, row.scope, row.status])
             item.setData(0, Qt.ItemDataRole.UserRole, row.key)
             for column in range(5):
                 item.setToolTip(column, f"{quantity}\n{row.scope}\nSaved source: {row.source_key or '—'}\n{row.status}")

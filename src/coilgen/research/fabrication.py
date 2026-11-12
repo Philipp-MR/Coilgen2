@@ -27,6 +27,7 @@ from ..manufacturing import (
     save_mesh_as_stl,
 )
 from ..models import CoilPart, FabricationPath, Mesh, SupportBody, WirePath
+from ..part_roles import normalize_part_role
 from ..physics import biot_savart_wire_path
 from ..gradient_engineering import CircuitSpec
 from ..progress import ProgressReporter, progress_scope
@@ -77,6 +78,7 @@ class FabricationRecord:
     mesh: Mesh
     diagnostics: dict
     turn_multiplicity: int = 1
+    role: str | None = None
 
     @property
     def points_m(self):
@@ -437,6 +439,7 @@ class FabricationReport:
                     "point_count": len(record.points_m),
                     "length_m": record.path.length_m,
                     "turn_multiplicity": record.turn_multiplicity,
+                    "role": record.role,
                     "diagnostics": record.diagnostics,
                 }
                 for record in self.paths
@@ -550,6 +553,7 @@ def compile_fabrication(
                         body.mesh,
                         dict(body.diagnostics),
                         body.turn_multiplicity,
+                        normalize_part_role((getattr(part.mesh, "metadata", None) or {}).get("role")),
                     )
                 )
                 if not body.diagnostics.get("manufacturing_ok", False):

@@ -136,7 +136,8 @@ def test_browser_legend_and_camera_use_the_rendered_data(tmp_path, monkeypatch):
     browser.load_template("cylinder")
     browser.set_camera_view("XY")
     np.testing.assert_allclose(browser.plotter.camera.direction, (0, 0, -1))
-    np.testing.assert_allclose(browser.plotter.bounds, [-0.08, 0.08, -0.08, 0.08, -0.1, 0.1], atol=1e-7)
+    # The open-edge outline is a tube of radius 0.4 % of the outline's span (about 1.2 mm here).
+    np.testing.assert_allclose(browser.plotter.bounds, [-0.08, 0.08, -0.08, 0.08, -0.1, 0.1], atol=1.3e-3)
     # Compass markers must not move or expand the physical model bounds.
     assert all(widget.GetEnabled() for widget in browser.view.get_widgets())
     arrays = {
@@ -358,15 +359,19 @@ def test_activity_keeps_background_jobs_visible_without_inventing_progress(tmp_p
         job.update(status="running", progress_kind="allocated_work", progress_indeterminate=True)
         browser._refresh_jobs()
         assert state.active_jobs[0]["progress"] is None
-        assert not state.active_jobs[0]["progress_label"]
+        assert state.active_jobs[0]["progress_label"] == "Computing"
+        assert not state.active_jobs[0]["progress_detail"]
 
-        job.update(progress_indeterminate=False)
+        # The overall work estimate never drives the bar; it stays indeterminate.
+        job.update(progress_indeterminate=False, active_stage="prepared")
         browser._refresh_jobs()
-        assert state.active_jobs[0]["progress_label"] == "Allocated work 20%"
+        assert state.active_jobs[0]["progress"] is None
+        assert state.active_jobs[0]["progress_label"] == "Stage 1/1 · Prepare"
         job.update(phase_progress=0.5)
         browser._refresh_jobs()
         assert state.active_jobs[0]["progress"] == 50
-        assert state.active_jobs[0]["progress_label"] == "Operation 50%"
+        assert state.active_jobs[0]["progress_label"] == "Stage 1/1 · Prepare"
+        assert state.active_jobs[0]["progress_detail"] == "Operation 50%"
 
         job.update(status="cancelling")
         browser._refresh_jobs()

@@ -76,4 +76,4 @@ def test_support_preview_shows_the_former_wall_before_computing(mode):
     assert np.ptp(radii) == pytest.approx(config.support_body_thickness, rel=0.05)
     assert radii.min() < support.min() or radii.max() > support.max()
     layers, _ = scene_layers({"vertices_m": mesh.vertices, "faces": mesh.faces, **arrays}, "support")
-    assert [layer.name for layer in layers] == ["support", "former_preview"]
+    assert [layer.name for layer in layers] == ["support", "support_edges", "former_preview"]

@@ -942,7 +942,8 @@ def test_coil_statistics_remain_usable_without_any_field_arrays(application, tmp
     assert dialog.tabs.currentIndex() == 4 and dialog.export_data.isEnabled()
     assert not dialog.export_plot.isEnabled()
     items = _coil_items(dialog)
-    assert items["coil:resistance"].text(1) == "0.4"
+    assert items["coil:resistance"].text(1) == "400"
+    assert items["coil:resistance"].text(2) == "mΩ"
     assert items["coil:inductance"].text(1) == "Unavailable"
     assert items["coil:mass"].text(1) == "Unavailable"
     assert dialog.material_density.value() == 0
@@ -1032,7 +1033,7 @@ def test_fresh_coil_entry_starts_no_catalog_or_physical_slice_work(application, 
     dialog = gui.FieldAnalysisDialog(record, initial_view="coil", plot_factory=FakePlot, cloud_factory=FakeCloud)
     application.processEvents()
     assert dialog.worker is None and dialog.state is None and not dialog.debounce.isActive()
-    assert dialog.export_data.isEnabled() and _coil_items(dialog)["coil:resistance"].text(1) == "0.4"
+    assert dialog.export_data.isEnabled() and _coil_items(dialog)["coil:resistance"].text(1) == "400"
     dialog.reject()
 
 

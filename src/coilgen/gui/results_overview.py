@@ -8,21 +8,38 @@ from __future__ import annotations
 
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QFontMetrics, QPalette
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..application.cad import PRINT_FORMER_EXPORT_HINT, has_saved_print_former, print_former_status
+from ..application.diagnostics import run_problems
 from ..application.routing_analysis import routing_analysis_available
 from .colors import apply_tone, tone_color
 from .coil_statistics import build_coil_statistics
 from .icons import icon
 from .run_metadata import read_run_metadata
 from .result_summary import (
+    GRADIENT_SHOWN_ELSEWHERE,
     FieldResultSummary,
     coil_metric_cards,
     drive_metric_cards,
+    failed_check_text,
+    field_context_with_current,
     field_metric_cards,
+    gradient_context,
+    gradient_metric_cards,
     summarize_field_result,
 )
+
+_GRADIENT_KEYS = ("efficiency", "current", "resistance", "inductance", "error", "fringe")
 
 
 class _Heading(QLabel):
@@ -112,11 +129,62 @@ class ResultsOverviewPanel(QFrame):
         self.metrics_button.toggled.connect(self._show_metrics)
         header.addWidget(self.metrics_button)
         layout.addLayout(header)
+        # The few failed checks that matter most, so "Checks failed" says why without opening a dialog.
+        self.failed_reasons = QLabel(self)
+        self.failed_reasons.setObjectName("results_overview_failed_reasons")
+        self.failed_reasons.setTextFormat(Qt.TextFormat.PlainText)
+        self.failed_reasons.setWordWrap(True)
+        self.failed_reasons.setMinimumWidth(0)
+        self.failed_reasons.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.failed_reasons.setAccessibleName("Most important failed checks")
+        self.failed_reasons.setToolTip("Open Engineering checks for every failed item and its measured value.")
+        self.failed_reasons.hide()
+        layout.addWidget(self.failed_reasons)
         self.metric_details = QWidget(self)
         metrics = QVBoxLayout(self.metric_details)
         metrics.setContentsMargins(0, 0, 0, 0)
         metrics.setSpacing(4)
         layout.addWidget(self.metric_details)
+        # Gradient headline: efficiency, current for the target, series R and L,
+        # shape error and the shield's fringe field against its limit.
+        self.gradient_cards = QFrame(self)
+        gradient_grid = QGridLayout(self.gradient_cards)
+        gradient_grid.setContentsMargins(0, 0, 0, 0)
+        gradient_grid.setHorizontalSpacing(7)
+        gradient_grid.setVerticalSpacing(5)
+        self.gradient_frames, self.gradient_labels, self.gradient_values = {}, {}, {}
+        for index, key in enumerate(_GRADIENT_KEYS):
+            card = QFrame(self.gradient_cards)
+            card.setObjectName("gradient_result_" + key)
+            card.setFrameShape(QFrame.Shape.StyledPanel)
+            card.setMinimumWidth(0)
+            card.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(8, 4, 8, 4)
+            card_layout.setSpacing(0)
+            caption, value = QLabel(card), _Value(card)
+            value.setObjectName("gradient_value")
+            for widget in (caption, value):
+                widget.setTextFormat(Qt.TextFormat.PlainText)
+                widget.setMinimumWidth(0)
+            font = value.font()
+            font.setBold(True)
+            value.setFont(font)
+            card_layout.addWidget(caption)
+            card_layout.addWidget(value)
+            gradient_grid.addWidget(card, index // 3, index % 3)
+            gradient_grid.setColumnStretch(index % 3, 1)
+            self.gradient_frames[key], self.gradient_labels[key], self.gradient_values[key] = card, caption, value
+        self.gradient_cards.hide()
+        metrics.addWidget(self.gradient_cards)
+        self.gradient_scope = QLabel(self)
+        self.gradient_scope.setTextFormat(Qt.TextFormat.PlainText)
+        self.gradient_scope.setWordWrap(True)
+        self.gradient_scope.setMinimumWidth(0)
+        self.gradient_scope.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.gradient_scope.setAccessibleName("Gradient conductor, current and series scope")
+        self.gradient_scope.hide()
+        metrics.addWidget(self.gradient_scope)
         # Headline: the current that produces the requested field, and the
         # field-shape error that remains at that current.
         self.drive_cards = QFrame(self)
@@ -277,6 +345,9 @@ class ResultsOverviewPanel(QFrame):
         background = palette.color(QPalette.ColorRole.Base).name()
         foreground = palette.color(QPalette.ColorRole.WindowText).name()
         accent = tone_color("info", palette).name()
+        failed = tone_color("error", palette).name()
+        passed = tone_color("success", palette).name()
+        gradient = ", ".join("QFrame#gradient_result_" + key for key in _GRADIENT_KEYS)
         self.setStyleSheet(
             f"QFrame#results_overview_panel {{ border: 1px solid {outline}; border-radius: 7px; }}"
             f"QFrame#field_result_rms, QFrame#field_result_peak, QFrame#field_result_relative, "
@@ -285,7 +356,18 @@ class ResultsOverviewPanel(QFrame):
             f"QFrame#drive_result_shape, QFrame#drive_result_gain {{ background: {background}; border: 1px solid {outline}; "
             "border-radius: 5px; }"
             f"QFrame#field_result_rms, QFrame#drive_result_drive {{ border-left: 3px solid {accent}; }}"
-            f"QFrame#results_overview_panel QLabel {{ color: {foreground}; }}"
+            f"{gradient} {{ background: {background}; border: 1px solid {outline}; border-left: 3px solid {accent}; "
+            "border-radius: 5px; }"
+            # Status selectors repeat the card id so they outrank the plain card rule above.
+            + "".join(
+                f'QFrame#gradient_result_{key}[status="{status}"] {{ border-left: 3px solid {color}; }}'
+                for key in _GRADIENT_KEYS
+                for status, color in (("failed", failed), ("passed", passed))
+            )
+            + f"QFrame#results_overview_panel QLabel {{ color: {foreground}; }}"
+            f'QFrame#results_overview_panel QFrame[status="failed"] QLabel#gradient_value {{ color: {failed}; }}'
+            f"QFrame#results_overview_panel QLabel#results_overview_failed_reasons {{ color: {failed}; "
+            f"border-left: 3px solid {failed}; padding: 2px 6px; }}"
         )
         if self.summary.title:
             color = tone_color(self.summary.tone, palette).name()
@@ -368,8 +450,12 @@ class ResultsOverviewPanel(QFrame):
         self.former_button.setEnabled(former_available and not source_error)
         self.former_plot_button.setVisible(former_plot_available)
         self.former_plot_button.setEnabled(former_plot_available and not source_error)
+        gradient = gradient_metric_cards(record, summary)
+        self._set_gradient(gradient)
+        self._set_failed_reasons(record, metadata, summary)
         drive = drive_metric_cards(summary)
-        self.drive_cards.setVisible(summary.visible and any(not card["unavailable"] for card in drive))
+        # The gradient row already states the drive current and the shape error at that current.
+        self.drive_cards.setVisible(summary.visible and not gradient and any(not card["unavailable"] for card in drive))
         for card in drive:
             value = self.drive_values[card["key"]]
             value.set_value(card["value"], unavailable=card["unavailable"])
@@ -382,6 +468,11 @@ class ResultsOverviewPanel(QFrame):
             value.setToolTip(summary.tooltip)
         self.metric_labels["current"].setText(summary.current_label)
         self.metric_values["current"].setAccessibleName(summary.current_label)
+        # Leave out what the gradient row already states (current, shape error, series R and L).
+        for values in (self.metric_values, self.coil_metric_values):
+            for key, value in values.items():
+                value.parentWidget().setVisible(not (gradient and key in GRADIENT_SHOWN_ELSEWHERE))
+        self.context.setText(field_context_with_current(summary, gradient) or summary.context)
         for key, button in self.buttons.items():
             button.setEnabled(
                 not source_error
@@ -402,6 +493,38 @@ class ResultsOverviewPanel(QFrame):
             if not source_error
             else "Source verification failed; reopen and verify the run before inspecting geometry."
         )
+
+    def _set_gradient(self, cards):
+        shown = {card["key"]: card for card in cards}
+        self.gradient_cards.setVisible(bool(cards))
+        for key in _GRADIENT_KEYS:
+            frame, caption, value = self.gradient_frames[key], self.gradient_labels[key], self.gradient_values[key]
+            card = shown.get(key)
+            frame.setVisible(card is not None)
+            if card is None:
+                continue
+            caption.setText(card["name"])
+            value.set_value(card["value"], unavailable=card["unavailable"], point_size=15.0)
+            value.setAccessibleName(card["name"])
+            for widget in (frame, caption, value):
+                widget.setToolTip(card["tooltip"])
+            if frame.property("status") != card["status"]:
+                frame.setProperty("status", card["status"])
+                for widget in (frame, value):
+                    widget.style().unpolish(widget)
+                    widget.style().polish(widget)
+        self.gradient_scope.setVisible(bool(cards))
+        self.gradient_scope.setText(gradient_context(cards))
+
+    def _set_failed_reasons(self, record, metadata, summary):
+        text = ""
+        if summary.badge == "Checks failed" and getattr(record, "directory", None) is not None:
+            try:
+                text = failed_check_text(metadata, run_problems(record, locate=False))
+            except (AttributeError, KeyError, TypeError, ValueError):
+                text = ""
+        self.failed_reasons.setText("Failed: " + text if text else "")
+        self.failed_reasons.setVisible(bool(text))
 
     def set_analysis_available(self, available):
         """Apply the controller's cached finite field/target capability check."""

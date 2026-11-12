@@ -18,6 +18,7 @@ import json
 from io import BytesIO
 from pathlib import Path
 import shutil
+import struct
 import tempfile
 from threading import Event
 from urllib.parse import quote
@@ -50,7 +51,10 @@ from ..application.scene_spec import (
     model_preview,
     scene_layers,
 )
-from ..application.diagnostics import recorded_stage
+from ..application.diagnostics import recorded_stage, run_problems
+from ..application.support_import import ROLE_CHOICES
+from ..application import cylinder_pair as pair_settings
+from ..application.support_switch import IMPORTED_SUPPORT, support_switch_prompt
 from ..application.evidence import FIELD_KEYS, load_saved_request, resolve_dataset
 from ..application.project import _json_object
 from ..application.session import (
@@ -75,11 +79,12 @@ from ..application.support_parameters import SUPPORT_EDITORS
 from ..field_components import normalized_b0_direction
 from ..field_units import normalize_field_units
 from ..geometry import geometry_factory
-from ..gui.runtime_feedback import fraction_percent, runtime_feedback
+from ..gui.runtime_feedback import run_progress, runtime_feedback
 from ..persistence import atomic_text
 from ..target_regions import target_region_summary
 from .field_slices import BrowserFieldSlices
 from .harmonics import BrowserHarmonics
+from .live_preview import BrowserLivePreview
 from .input_policy import (
     PROJECT_UPLOAD_LIMIT,
     check_browser_inputs,
@@ -150,7 +155,7 @@ class BrowserWorkbench:
         self.pv = pv
         self.plotter = pv.Plotter(off_screen=True, window_size=(900, 700))
         self.plotter.set_background("#fafafa")
-        self.camera_preset = "Isometric"
+        self.camera_preset = "Oblique"
         self.axis_widget = self.b0_widget = None
         self.record = None
         self.saved_former_arrays = None
@@ -160,6 +165,7 @@ class BrowserWorkbench:
         self.verified_plan_records = {}
         self.plan_errors = {}
         self.follow_job_id = None
+        self.live_preview = BrowserLivePreview(self)
         self.editing_identity = None
         self.editing_fingerprint = None
         self.view = None
@@ -298,6 +304,12 @@ class BrowserWorkbench:
                 "project_open_result": None,
                 "mesh_upload": None,
                 "mesh_scale": 0.001,
+                "mesh_import": None,
+                "mesh_roles": [],
+                "mesh_role_choices": list(ROLE_CHOICES),
+                "support_switch": None,
+                "support_switch_dialog": False,
+                "support_switch_clear": True,
                 "can_undo": False,
                 "can_redo": False,
                 "preflight": [],
@@ -313,6 +325,7 @@ class BrowserWorkbench:
         state.change("settings_values", "profile_preset", "mesh_upload", "profile_upload")(
             lambda **_: self._check_edits()
         )
+        state.change("mesh_upload", "mesh_scale")(lambda **_: self._preview_mesh_import())
         state.change("active_channel")(lambda active_channel, **_: self._select_channel(active_channel))
         state.change("dataset")(self._plot_changed)
         state.change("component", "see_through_support", "field_show_target")(lambda **_: self._render())
@@ -323,6 +336,9 @@ class BrowserWorkbench:
             lambda **_: self._refresh_draft_state()
         )
         state.change("center_section")(self._shielding_section_changed)
+        from .view_tools import install
+
+        install(self)
 
     def _notify(self, message, color="info"):
         state = self.server.state
@@ -388,6 +404,8 @@ class BrowserWorkbench:
                     "section": labels.get(preflight_node(issue.node), "Settings"),
                     "blocking": issue.blocking,
                     "informational": issue.key == "skip_postprocessing" and project.values["contour_only_sweep_mode"],
+                    "fix_key": issue.key if issue.fix else "",
+                    "fix_label": issue.fix_label or "Apply fix",
                 }
                 for issue in report.issues
             ]
@@ -402,6 +420,7 @@ class BrowserWorkbench:
         state.settings_dirty = False
         self._dependent_settings_draft = {}
         state.profile_preset, state.mesh_upload, state.mesh_scale = None, None, 0.001
+        state.mesh_import, state.mesh_roles = None, []
         state.profile_upload = None
         state.applied_profile = ""
         if project is None:
@@ -463,7 +482,12 @@ class BrowserWorkbench:
             state.settings_support = source
             editor = next((editor for editor in SUPPORT_EDITORS if editor.source == source), None)
             factory = geometry_factory(source)
-            if editor is not None and len(fields) > 1:
+            if source == pair_settings.SHIELDED_PAIR_SOURCE:
+                state.geometry_help = (
+                    "A primary and an active-shield cylinder on one axis. Apply rebuilds both meshes and keeps "
+                    "your target settings. Set the suppression surface under Target field and B0."
+                )
+            elif editor is not None and len(fields) > 1:
                 state.geometry_help = editor.description
             elif factory is not None:
                 state.geometry_help = f"Edit {factory.parameter_attribute} in Advanced settings for this support."
@@ -488,10 +512,11 @@ class BrowserWorkbench:
             if values[key] not in choices:
                 choices.insert(0, values[key])
             if key == "coil_mesh_file":
-                applied = self.session.project.config.coil_mesh_file
+                applied = pair_settings.displayed_support_source(self.session.project)
                 if applied not in choices:
                     choices.insert(0, applied)
                 labels = {editor.source: editor.label for editor in SUPPORT_EDITORS}
+                labels[pair_settings.SHIELDED_PAIR_SOURCE] = pair_settings.SHIELDED_PAIR_LABEL
                 entry["choices"] = [
                     {
                         "title": labels.get(value) or ("Project-owned support" if Path(value).suffix else value),
@@ -509,6 +534,7 @@ class BrowserWorkbench:
                 entry["choices"] = [{"title": labels[value], "value": value} for value in choices]
             elif key != "coil_mesh_file" and any(choice_title(key, value) != value for value in choices):
                 entry["choices"] = [{"title": choice_title(key, value), "value": value} for value in choices]
+        pair_settings.mark_sections(entries)
         state.settings_fields = entries
         state.dirty("settings_fields")
         state.settings_values = _json_safe(values)
@@ -532,10 +558,8 @@ class BrowserWorkbench:
         ):
             return
         self._dependent_settings_draft.update(edited)
-        values = {
-            item.key: self._dependent_settings_draft.get(item.key, item.get(project.config, project.study))
-            for item in fields
-        }
+        saved = self.session.settings_values(state.node, **self._dependent_settings_options(edited))
+        values = {item.key: self._dependent_settings_draft.get(item.key, saved.get(item.key)) for item in fields}
         self._install_settings_fields(fields, values)
 
     def _settings_fields_changed(self):
@@ -709,24 +733,105 @@ class BrowserWorkbench:
             shutil.copyfile(saved, staged)
             return staged.replace(target)
 
-    @_bind("import_support_mesh")
-    def _import_mesh(self, upload):
-        scale = self.server.state.mesh_scale
+    def _mesh_scale(self):
         try:
-            scale = float(scale)
+            scale = float(self.server.state.mesh_scale)
             if not np.isfinite(scale) or scale <= 0:
                 raise ValueError
         except (TypeError, ValueError):
+            return None
+        return scale
+
+    def _pending_mesh_path(self, upload):
+        """Store a chosen STL once, so preview and Apply read the same bytes."""
+        name, content = _upload_bytes(upload)
+        if name is None or content is None:
+            raise ValueError("Choose a readable file to upload.")
+        key = (name, len(content), sha256(content).hexdigest())
+        cached = getattr(self, "_mesh_upload_cache", None)
+        if cached and cached[0] == key and cached[1].is_file():
+            return cached[1]
+        path = self._store_upload(upload)
+        self._mesh_upload_cache = (key, path)
+        return path
+
+    def _preview_mesh_import(self):
+        """Summarise the chosen STL at the chosen scale before anything is applied."""
+        from ..application.support_import import read_support_stl, support_import_summary
+
+        state = self.server.state
+        if not state.mesh_upload:
+            state.mesh_import, state.mesh_roles = None, []
+            return
+        scale = self._mesh_scale()
+        if scale is None:
+            state.mesh_import, state.mesh_roles = {"error": "Set a positive, finite STL scale (0.001 for mm)."}, []
+            return
+        try:
+            _, content = _upload_bytes(state.mesh_upload)
+            if not content:
+                # Nothing to read yet; never store an empty upload.
+                state.mesh_import, state.mesh_roles = None, []
+                return
+            summary = support_import_summary(read_support_stl(self._pending_mesh_path(state.mesh_upload), scale))
+        except (ValueError, OSError, struct.error) as exc:
+            state.mesh_import, state.mesh_roles = {"error": f"This STL cannot be read: {exc}"}, []
+            return
+        roles = list(state.mesh_roles or ())
+        state.mesh_import = summary
+        # Keep roles the user already picked while only the scale changes.
+        state.mesh_roles = roles if len(roles) == len(summary["roles"]) else list(summary["roles"])
+
+    @_bind("import_support_mesh")
+    def _import_mesh(self, upload):
+        state = self.server.state
+        scale = self._mesh_scale()
+        if scale is None:
             self._notify("Set a positive, finite STL scale before importing (0.001 for millimetres).", "error")
             return
-        path = self._guard(self._store_upload, upload)
+        path = self._guard(self._pending_mesh_path, upload)
         if path:
-            self._guard(
-                self.session.import_support_mesh,
-                path,
-                length_scale_to_m=scale,
-                success=f"Imported support mesh {path.name}.",
-            )
+            summary = state.mesh_import if isinstance(state.mesh_import, dict) else {}
+            roles = list(state.mesh_roles or ()) if summary.get("needs_roles") else None
+
+            def replace(_extra):
+                self._guard(
+                    self.session.import_support_mesh,
+                    path,
+                    length_scale_to_m=scale,
+                    part_roles=roles,
+                    success=f"Imported support mesh {path.name}.",
+                )
+                self._mesh_upload_cache = None
+
+            self._confirm_support_switch(IMPORTED_SUPPORT, replace)
+
+    def _confirm_support_switch(self, new_source, action):
+        """Run ``action(extra_changes)`` now, or after the user confirms replacing bodies."""
+        state = self.server.state
+        prompt = support_switch_prompt(self.session.project, new_source)
+        if prompt is None:
+            action({})
+            return
+        self._pending_support_switch = (new_source, action)
+        state.support_switch = prompt.to_state()
+        state.support_switch_clear = True
+        state.support_switch_dialog = True
+
+    def confirm_support_switch(self):
+        state = self.server.state
+        pending = getattr(self, "_pending_support_switch", None)
+        self._pending_support_switch = None
+        state.support_switch_dialog = False
+        if pending is None:
+            return
+        new_source, action = pending
+        prompt = support_switch_prompt(self.session.project, new_source)
+        action(prompt.clear_changes if prompt is not None and state.support_switch_clear else {})
+
+    def cancel_support_switch(self):
+        self._pending_support_switch = None
+        self.server.state.support_switch_dialog = False
 
     def _import_profile_table(self, upload):
         path = self._guard(self._store_upload, upload, (".csv", ".tsv", ".txt"), "a CSV, TSV or TXT point table")
@@ -757,6 +862,11 @@ class BrowserWorkbench:
     @_bind("redo")
     def redo(self):
         self._guard(self.session.redo)
+
+    def apply_fix(self, key):
+        """Apply a tip's one-click fix as one undoable revision."""
+        if self._guard(self.session.apply_fix, key, success="Fix applied. Undo reverts it.") is not None:
+            self._refresh_settings()
 
     @_bind("apply_settings")
     def apply_settings(self):
@@ -794,12 +904,26 @@ class BrowserWorkbench:
             return
         values = dict(state.settings_values or {})
         try:
-            check_browser_inputs(values, current_project=self.session.project)
+            # The shielded pair is a form choice that Apply turns into owned meshes.
+            checked = {
+                key: value
+                for key, value in values.items()
+                if key not in pair_settings.PAIR_KEYS
+                and (key != "coil_mesh_file" or value != pair_settings.SHIELDED_PAIR_SOURCE)
+            }
+            check_browser_inputs(checked, current_project=self.session.project)
         except (TypeError, ValueError) as exc:
             self._notify(str(exc), "error")
             return
-        if self._guard(self.session.apply_settings, values, success="Settings applied.") is not None:
-            self._refresh_settings()
+
+        def apply(extra):
+            if self._guard(self.session.apply_settings, values, extra, success="Settings applied.") is not None:
+                self._refresh_settings()
+
+        if "coil_mesh_file" in values:
+            self._confirm_support_switch(values["coil_mesh_file"], apply)
+        else:
+            apply({})
 
     @_bind("advanced_settings")
     def open_advanced(self):
@@ -902,12 +1026,11 @@ class BrowserWorkbench:
             progress_label = ""
             runtime = runtime_feedback(job) if status == "running" else None
             finalizing = is_finalizing_fabrication(job)
-            if runtime and not job.get("progress_indeterminate"):
-                if runtime.phase_percent is not None:
-                    percent = runtime.phase_percent
-                    progress_label = f"Operation {percent}%"
-                elif (percent := fraction_percent(job.get("progress"))) is not None:
-                    progress_label = f"{'Allocated work' if runtime.allocated else 'Progress'} {percent}%"
+            progress_detail = ""
+            if runtime:
+                # Stage and elapsed time lead; the bar only shows the operation's own percentage.
+                progress = run_progress(job)
+                percent, progress_label, progress_detail = progress.percent, progress.label, progress.detail
             stage = runtime.operation if runtime else ""
             if finalizing:
                 operation = job["progress_operation"].strip()
@@ -923,6 +1046,7 @@ class BrowserWorkbench:
                 "stage": stage,
                 "progress": percent,
                 "progress_label": progress_label,
+                "progress_detail": progress_detail,
                 "boundary": dict(PIPELINE_STAGES).get(job.get("pipeline_stage"), "Stage unrecorded"),
                 "revision": job.get("project_revision"),
                 "channel": job.get("name") or job.get("project_id") or "Saved design",
@@ -1097,8 +1221,9 @@ class BrowserWorkbench:
         self.shielding_cancel.set()
         self.shielding_fields = {}
         state = self.server.state
-        if state.center_section in {"checks", "metrics", "export", "export_former", "shielding"}:
+        if state.center_section in {"checks", "metrics", "export", "export_former", "shielding", "unwrapped"}:
             state.center_section = "results"
+        self.highlight = None
         state.update(
             {
                 "selected_run": None,
@@ -1136,6 +1261,7 @@ class BrowserWorkbench:
         from ..application.submitted_design import contour_fit_caption
         from ..gui.shielding_plot import SHIELDING_SOURCES
         from .result_display import problem_groups, result_metrics, result_overview, reviewed_wire_metric
+        from ..gui.result_summary import failed_check_text
 
         if not job_id:
             self._clear_result()
@@ -1187,7 +1313,9 @@ class BrowserWorkbench:
             if check.get("passed") is not True
         ]
         summary["suppression"] = (meta.get("fabricated_physics") or {}).get("sampled_suppression")
-        summary["problems"] = problem_groups(record)
+        issues = run_problems(record)
+        summary["problems"] = problem_groups(record, issues)
+        summary["failed_reasons"] = failed_check_text(meta, issues)
         summary["check_rows"] = [
             {"name": name, "value": summary["verdicts"][key]}
             for key, name in (
@@ -1234,11 +1362,15 @@ class BrowserWorkbench:
             {key: value for key, value in summary.items() if key not in {"metrics", "failure_reasons", "constraints"}}
         )
         state.metrics = result_metrics(meta)
-        options = self._guard(self.session.export_options, record) or ()
+        from ..application.cad import grouped_export_options
+        from .view_tools import export_view_state
+
+        options = grouped_export_options(self._guard(self.session.export_options, record) or ())
+        state.update(export_view_state(options))
         state.export_options = [
             {
                 "value": option.name,
-                "title": geometry_option_label(option),
+                "title": geometry_option_label(option, with_role=False),
                 "format": option.format,
                 "status": ("Inspection · " if option.inspection_only else "") + option.check_status,
                 "draft": is_draft_artifact(option.name),
@@ -1308,7 +1440,7 @@ class BrowserWorkbench:
         from matplotlib.figure import Figure
 
         from ..application.shielding import shielding_surface_fields
-        from ..gui.shielding_plot import SHIELDING_SOURCES, draw_shielding_surface
+        from ..gui.shielding_plot import SHIELDING_SOURCES, draw_shielding_surface, record_openings, shielding_limits
 
         fields = cache.get(source)
         if fields is None:
@@ -1319,7 +1451,15 @@ class BrowserWorkbench:
         figure = Figure(figsize=(11, 6), dpi=115, layout="constrained")
         canvas = FigureCanvasAgg(figure)
         title = f"{record.metadata_view.get('name', 'Saved run')} · {SHIELDING_SOURCES[source]}"
-        note = draw_shielding_surface(figure, fields, component, title=title, net_detail=net_detail)
+        note = draw_shielding_surface(
+            figure,
+            fields,
+            component,
+            title=title,
+            net_detail=net_detail,
+            limits=shielding_limits(record.metadata_view),
+            openings_m=record_openings(record),
+        )
         buffer = BytesIO()
         canvas.print_png(buffer)
         image = base64.b64encode(buffer.getvalue()).decode("ascii")
@@ -1497,15 +1637,10 @@ class BrowserWorkbench:
         return active
 
     def set_camera_view(self, direction, *, push=True):
-        preset = {
-            "Isometric": self.plotter.view_isometric,
-            "XY": self.plotter.view_xy,
-            "XZ": self.plotter.view_xz,
-            "YZ": self.plotter.view_yz,
-        }.get(direction)
-        if preset is not None:
-            self.camera_preset = direction
-            preset()
+        from ..application.scene_views import apply_view_preset, view_preset_name
+
+        if apply_view_preset(self.plotter, direction, bounds=getattr(self, "fit_bounds", None)):
+            self.camera_preset = view_preset_name(direction)
             if push and self.view is not None:
                 self.view.push_camera(camera=self.plotter.camera)
 
@@ -1528,6 +1663,9 @@ class BrowserWorkbench:
         state.field_source_header = ""
         state.field_has_pair = False
         saved_arrays = self.record.select_arrays(copy=False) if self.record is not None else {}
+        live = self.live_preview.current(self.follow_job_id) if self.record is None else None
+        if live is not None:
+            saved_arrays = dict(live.arrays)
         pending_former = (
             self.record is not None
             and self.saved_former_arrays is None
@@ -1545,6 +1683,7 @@ class BrowserWorkbench:
                 )
                 if mesh is not None:
                     arrays = {"vertices_m": mesh.vertices, "faces": mesh.faces, **target}
+                    self.preview_roles = (getattr(mesh, "metadata", None) or {}).get("part_roles")
                 reason = message
             except Exception as exc:
                 reason = f"Model preview unavailable: {type(exc).__name__}: {exc}"
@@ -1577,10 +1716,15 @@ class BrowserWorkbench:
         else:
             b0 = project.config.b_0_direction if project is not None else None
             source = f"Editing model · {project.name} · r{project.revision}" if project else ""
+        if live is not None and not current_model:
+            source = "Live preview"
         try:
             b0 = normalized_b0_direction(b0) if b0 is not None else None
         except (TypeError, ValueError):
             b0 = None
+        from .view_tools import body_arrays, extra_layers
+
+        arrays = body_arrays(self, arrays, current_model=current_model)
         state.b0_text = (
             "B0 ∥ (" + ", ".join(f"{v:.3g}" for v in b0) + ")"
             if b0 is not None
@@ -1616,7 +1760,7 @@ class BrowserWorkbench:
                     if state.component == "Bmag"
                     else " · Signed residual (field minus target)"
                 )
-        if not current_model and layers:
+        if not current_model and layers and live is None:
             state.result_plot = state.dataset
         state.outer_winding_support = bool(
             state.dataset == "review_conductor"
@@ -1625,6 +1769,8 @@ class BrowserWorkbench:
             and any(layer.name == "support" for layer in layers)
         )
         caption = "Coordinates [m] · " + DATASET_LABELS.get(state.dataset, state.dataset)
+        if live is not None and not current_model:
+            caption = DATASET_LABELS.get(state.dataset, state.dataset) + " · not final"
         if state.dataset == "print_former" and layers:
             caption += " · saved fabrication STL" if layers[0].extra["reviewed"] else " · saved pipeline geometry"
         if state.dataset == "preview_target" and project is not None and "target_points_m" in arrays:
@@ -1639,6 +1785,7 @@ class BrowserWorkbench:
                 caption += f" · Applied field scale ×{scale:.5g}"
                 if target_info.get("normalization_fallback"):
                     caption += " (fallback · review Target scaling)"
+        layers = layers + extra_layers(self, arrays, state.dataset)
         for layer in layers:
             if layer.kind == "surface":
                 faces = np.column_stack((np.full(len(layer.faces), 3), layer.faces)).ravel()
@@ -1646,6 +1793,11 @@ class BrowserWorkbench:
             elif layer.kind == "lines":
                 paths = [pv.lines_from_points(path) for path in layer.lines]
                 mesh = paths[0] if len(paths) == 1 else pv.merge(paths, merge_points=False)
+                if layer.extra.get("role") == "open_edges":
+                    # Wide WebGL lines can fan out across closed loops in the browser;
+                    # a thin tube is real geometry and draws the same everywhere.
+                    span = float(np.linalg.norm(np.ptp(layer.points, axis=0))) or 1.0
+                    mesh = mesh.tube(radius=0.004 * span, n_sides=8)
             else:
                 mesh = pv.PolyData(layer.points)
             options = {"opacity": layer.opacity}
@@ -1668,8 +1820,9 @@ class BrowserWorkbench:
                 options.update(opacity=1.0, color="#d2dcdf", ambient=0.62, diffuse=0.38)
             if layer.kind == "points":
                 options.update(point_size=8 if state.field_plot else 6, render_points_as_spheres=False)
+                options["point_size"] = layer.extra.get("point_size", options["point_size"])
             elif layer.kind == "lines":
-                options["line_width"] = 2
+                options["line_width"] = layer.extra.get("line_width", 2)
             actor = plotter.add_mesh(mesh, name=layer.name, **options)
             if "scalars" in options:
                 # Read the same VTK lookup table and limits that color this actor.
@@ -1722,6 +1875,7 @@ class BrowserWorkbench:
             if self.session.active():
                 with self.server.state:
                     self.session.poll()
+                await self.live_preview.poll()
 
     # -- layout --------------------------------------------------------
     def _build_ui(self):
@@ -1747,6 +1901,11 @@ class BrowserWorkbench:
         ctrl.open_uploaded_project = self.open_uploaded_project
         ctrl.undo, ctrl.redo = self.undo, self.redo
         ctrl.apply_settings = self.apply_settings
+        ctrl.apply_fix = self.apply_fix
+        ctrl.confirm_support_switch, ctrl.cancel_support_switch = (
+            self.confirm_support_switch,
+            self.cancel_support_switch,
+        )
         ctrl.open_advanced, ctrl.apply_advanced = self.open_advanced, self.apply_advanced
         ctrl.duplicate_channel, ctrl.remove_channel = self.duplicate_channel, self.remove_channel
         ctrl.toggle_channel = self.toggle_channel
@@ -1859,6 +2018,7 @@ class BrowserWorkbench:
                         with html.Div(
                             v_for="field in settings_fields",
                             key="field.key",
+                            classes="cg-setting-field",
                             v_show="(node !== 'geometry' || field.key === 'coil_mesh_file' || settings_values.coil_mesh_file === settings_support) && "
                             "(node !== 'print' || field.key === 'support_body_mode' || settings_values.support_body_mode !== 'off') && "
                             "(field.key !== 'target_amplitude_native' || target_scaling_mode !== 'none') && "
@@ -1873,6 +2033,11 @@ class BrowserWorkbench:
                             "(!['contour_displacement_mm', 'contour_smoothing_preserve_min_turn_distance'].includes(field.key) || ['mesh_coupled', 'legacy'].includes(settings_values.contour_treatment)) && "
                             "(field.key !== 'contour_segment_mm' || settings_values.contour_treatment !== 'off')",
                         ):
+                            html.Div(
+                                "{{ field.section }}",
+                                v_if="field.section",
+                                classes="cg-settings-subhead text-subtitle-2 font-weight-bold mt-3 mb-1",
+                            )
                             v3.VTextField(
                                 v_if="['number', 'integer', 'text', 'vector'].includes(field.kind)",
                                 v_model="settings_values[field.key]",
@@ -2000,10 +2165,52 @@ class BrowserWorkbench:
                                 v3.VFileInput(
                                     v_model=("mesh_upload",),
                                     label="Import support STL",
+                                    # Show the whole file name, not "shielded_p…dow_mm.stl".
+                                    truncate_length=80,
                                     accept=".stl",
                                     density="compact",
                                     disabled=("settings_dirty || !channels.length",),
                                 )
+                                # What was read, before Apply: bodies, size, openings and units.
+                                with html.Div(v_if="mesh_import", classes="cg-mesh-import mt-1", role="status"):
+                                    html.Div(
+                                        "{{ mesh_import.error }}",
+                                        v_if="mesh_import.error",
+                                        classes="text-caption text-error",
+                                    )
+                                    html.Div(
+                                        "{{ mesh_import.text }}",
+                                        v_if="!mesh_import.error",
+                                        classes="text-caption font-weight-bold cg-mesh-import-summary",
+                                    )
+                                    html.Div(
+                                        "{{ warning }}",
+                                        v_for="warning in (mesh_import.warnings || [])",
+                                        key="warning",
+                                        classes="text-caption text-warning",
+                                    )
+                                    with html.Div(v_if="mesh_import.needs_roles", classes="mt-1"):
+                                        html.Div(
+                                            "Role of each body. The inner radius group starts as the primary.",
+                                            classes="text-caption",
+                                        )
+                                        with html.Div(
+                                            v_for="(body, index) in mesh_import.bodies",
+                                            key="index",
+                                            classes="cg-mesh-body",
+                                        ):
+                                            v3.VSelect(
+                                                model_value=("mesh_roles[index]",),
+                                                items=("mesh_role_choices",),
+                                                label=("body.name",),
+                                                hint=("body.text",),
+                                                persistent_hint=True,
+                                                density="compact",
+                                                update_modelValue=(
+                                                    "mesh_roles = mesh_roles.map((r, j) => j === index ? $event : r); "
+                                                    "flushState('mesh_roles')"
+                                                ),
+                                            )
                         with html.Div(v_if="preflight.length", classes="mt-3"):
                             html.Div("Readiness of this section", classes="text-caption")
                             html.Div(
@@ -2020,6 +2227,18 @@ class BrowserWorkbench:
                             ):
                                 html.Div("{{ issue.title }}")
                                 html.Div("→ {{ issue.action }}", v_if="issue.action && !issue.informational")
+                                v3.VBtn(
+                                    "{{ issue.fix_label }}",
+                                    v_if="issue.fix_key",
+                                    size="x-small",
+                                    variant="tonal",
+                                    classes="mt-1 cg-apply-fix",
+                                    disabled=("settings_dirty",),
+                                    title=(
+                                        "settings_dirty ? 'Apply or discard pending edits first' : 'Apply this fix'",
+                                    ),
+                                    click=(ctrl.apply_fix, "[issue.fix_key]"),
+                                )
                             with html.Div(
                                 v_if="nodes.some(n => n.value !== node && ['blocking', 'warning'].includes(n.state))",
                                 classes="d-flex flex-wrap align-center ga-1 text-caption",
@@ -2069,6 +2288,34 @@ class BrowserWorkbench:
                                     disabled=("!settings_dirty",),
                                 )
 
+            # Replacing a support with several bodies (or recorded roles) asks first.
+            with v3.VDialog(
+                v_model=("support_switch_dialog",),
+                max_width=480,
+                persistent=True,
+                __properties=[("aria_label", "aria-label")],
+                aria_label="Replace the support",
+            ):
+                with v3.VCard(v_if="support_switch", classes="cg-support-switch"):
+                    v3.VCardTitle("{{ support_switch.title }}")
+                    with v3.VCardText():
+                        html.P("{{ support_switch.message }}", role="alert")
+                        v3.VCheckbox(
+                            v_if="support_switch.can_clear",
+                            v_model=("support_switch_clear",),
+                            label=("support_switch.clear_label",),
+                            density="compact",
+                            hide_details=True,
+                        )
+                    with v3.VCardActions():
+                        v3.VSpacer()
+                        v3.VBtn("Cancel", variant="text", click=ctrl.cancel_support_switch)
+                        v3.VBtn(
+                            "{{ support_switch.confirm_label }}",
+                            color="error",
+                            variant="flat",
+                            click=ctrl.confirm_support_switch,
+                        )
             # A native select updates immediately in the client. Cover the previous
             # wire and checks until the selected archive and its scene are ready.
             with v3.VDialog(

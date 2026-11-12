@@ -353,4 +353,50 @@ def scene_layers(arrays, key, *, component="Bz", b0_direction=(0.0, 0.0, 1.0), o
                 extra={"paired_target": comparable, "color_limits": limits},
             )
         )
+    support = next((index for index, layer in enumerate(layers) if layer.name == "support"), None)
+    if support is not None:
+        layers[support + 1 : support + 1] = support_outline_layers(arrays)
     return layers, ""
+
+
+def support_outline_layers(arrays):
+    """Open support edges (cylinder ends and windows) as one bold line layer."""
+    from .scene_views import OUTLINE_COLOR, outline_paths
+
+    paths = outline_paths(arrays["vertices_m"], arrays["faces"])
+    if not paths:
+        return []
+    return [
+        SceneLayer(
+            "support_edges",
+            "lines",
+            np.vstack(paths),
+            lines=paths,
+            color=OUTLINE_COLOR,
+            extra={"role": "open_edges", "line_width": 4, "count": len(paths)},
+        )
+    ]
+
+
+def highlight_layers(points, segments=()):
+    """Located check evidence: the witness points and the recorded intervals between them."""
+    from .scene_views import HIGHLIGHT_COLOR, valid_witness
+
+    witness = valid_witness(points, segments)
+    if witness is None:
+        return []
+    points, segments = witness
+    layers = [SceneLayer("highlight_points", "points", points, color=HIGHLIGHT_COLOR, extra={"point_size": 14})]
+    if segments:
+        lines = tuple(points[list(pair)] for pair in segments)
+        layers.append(
+            SceneLayer(
+                "highlight_segments",
+                "lines",
+                np.vstack(lines),
+                lines=lines,
+                color=HIGHLIGHT_COLOR,
+                extra={"line_width": 7},
+            )
+        )
+    return layers

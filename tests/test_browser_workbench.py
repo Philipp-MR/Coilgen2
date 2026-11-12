@@ -187,7 +187,8 @@ def test_geometry_form_edits_the_selected_support(tmp_path):
         ("cylinder", "cylinder_radius_mm"),
         ("biplanar", "biplanar_separation_mm"),
         ("conical_harmonic", "conical_bottom_radius_mm"),
-        ("shielded_gy", None),
+        # The shielded example is an editable cylinder pair, not an opaque owned mesh.
+        ("shielded_gy", "pair_primary_radius_mm"),
     ):
         state.template = template
         browser.load_template()

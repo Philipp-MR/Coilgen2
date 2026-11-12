@@ -155,7 +155,8 @@ def test_concurrent_field_analysis_has_visible_individual_progress_and_operation
         assert indicator.progress.maximum() == 0
     finally:
         window._research_busy("Field analysis", False)
-    assert window.computation_indicator.label.text() == "Computing (53%)"
+    # No stage or start time recorded; the overall work estimate is not shown as the bar label.
+    assert window.computation_indicator.label.text() == "Computing"
 
 
 def test_inactive_system_support_loading_is_reported_independently(windows):

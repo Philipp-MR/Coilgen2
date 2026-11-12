@@ -49,12 +49,26 @@ _CHOICES = {
         "centered": "Centered on support",
     },
     "conductor_path_reference": {"centroid": "Profile centroid", "profile_origin": "Profile origin (0, 0)"},
+    "layout_terminal_strategy": {
+        "undefined": "Not decided",
+        "pads": "Terminal pads",
+        "wire_stubs": "Wire stubs",
+        "waived": "Handled outside CoilGen",
+    },
     "support_body_mode": {
         "off": "Off",
         "inside": "Grooved solid inside the winding",
         "outside": "Grooved solid outside the winding",
     },
     "routing_circuit_scope": {"per_part": "Separate circuit per support", "system": "System circuit"},
+    "suppression_field_component": {
+        "vector": "All three components (Bx, By, Bz)",
+        "target": "Same component as the target",
+        "bz": "Bz only",
+        "b_normal": "Normal to the surface",
+        "magnitude": "Field magnitude |B|",
+    },
+    "suppression_surface_weighting": {"area": "By surface area", "uniform": "Equal per sample"},
     "interconnection_axis": {"support_axis": "Along the support bore", "b0": "Along the main field"},
     "inter_group_connection_path_method": {
         "mesh_geodesic": "Geodesic on the mesh",

@@ -38,6 +38,7 @@ from .dataset_capabilities import (
     resolve_dataset,
 )
 from ..application.evidence import path_array_names
+from ..application.live_preview import PREVIEW_FEATURE_PLOTS as _PREVIEW_FEATURE_PLOTS
 from ..application.scene_spec import (
     DATASET_GROUPS,
     PREFERRED_RUN_PLOTS,
@@ -49,21 +50,25 @@ from ..application.scene_spec import (
     model_preview,
     scene_layers,
 )
+from ..application.scene_views import (
+    BODY_VIEWS,
+    BOTH,
+    OUTLINE_COLOR,
+    VIEW_PRESETS,
+    apply_view_preset,
+    body_view_choices,
+    filter_body_view,
+    outline_paths,
+    roi_bounds,
+    support_roles,
+    view_preset_name,
+)
+from ..application.unwrapped_view import is_cylindrical
 from ..application.submitted_design import contour_fit_caption
 from ..persistence import json_value
 
 
 # Worker completion order. A verified result can arrive before the last live preview.
-_PREVIEW_FEATURE_PLOTS = {
-    "interconnections": ("routes",),
-    "realized_centerlines": ("fabrication",),
-    "sweep": ("swept",),
-    "evaluated_winding": ("routed_field", "contour_field", "evaluated_winding"),
-    "independent_field": ("validation",),
-    "review_conductor": ("review_conductor", "review_electrical"),
-    "fabricated_field": ("fabricated",),
-    "winding_validation": ("winding_validation",),
-}
 _LATEST_FEATURE_PLOTS = tuple(key for options in reversed(_PREVIEW_FEATURE_PLOTS.values()) for key in options)
 
 
@@ -442,7 +447,7 @@ class ScientificViewport(QWidget):
         self.view = QComboBox()
         self.view.setAccessibleName("Camera orientation")
         self.view.setToolTip("Choose a world-coordinate camera view; the coil model is unchanged.")
-        self.view.addItems(["Isometric", "XY", "XZ", "YZ", "Custom"])
+        self.view.addItems([*VIEW_PRESETS, "Custom"])
         self.view.model().item(self.view.findText("Custom")).setEnabled(False)
         for index in range(self.view.count()):
             self.view.setItemIcon(index, icon("placement"))
@@ -451,6 +456,15 @@ class ScientificViewport(QWidget):
         reset.setIcon(icon("fit"))
         reset.setToolTip("Fit the visible geometry and samples in the viewport.")
         view_toolbar.addWidget(reset)
+        self.fit_roi = QPushButton("Fit ROI")
+        self.fit_roi.setIcon(icon("fit"))
+        self.fit_roi.setToolTip("Fit the imaging region of the field map; shielding samples are left out.")
+        self.fit_roi.setEnabled(False)
+        view_toolbar.addWidget(self.fit_roi)
+        # Lives in the Display popup: the toolbar must still fit an 800 px window.
+        self.unwrapped = QPushButton("Unwrapped φ–z view…")
+        self.unwrapped.setToolTip("Flat φ–z map of each cylinder: stream function, contours and openings.")
+        self.unwrapped.setEnabled(False)
         view_toolbar.addStretch()
 
         def controls_popup(label, title, symbol, minimum_width):
@@ -506,6 +520,7 @@ class ScientificViewport(QWidget):
             "Display", "Display and sampling", "settings", 330
         )
         self.display_button.setObjectName("viewport_display_button")
+        display.addWidget(self.unwrapped)
         layout.addLayout(view_toolbar)
         self.orthographic = QCheckBox("Orthographic")
         self.orthographic.setToolTip("Parallel camera projection; it changes viewing perspective only.")
@@ -525,6 +540,17 @@ class ScientificViewport(QWidget):
         self.clip.setToolTip("Inspect a cross-section of the displayed dataset with an interactive clipping plane.")
         for widget in (self.support_layer, self.roi_layer):
             layers.addWidget(widget)
+        self.open_edges = QCheckBox("Open edges")
+        self.open_edges.setToolTip("Outline the open support edges: cylinder ends and windows.")
+        self.open_edges.setChecked(True)
+        layers.addWidget(self.open_edges)
+        self.body_view = QComboBox()
+        self.body_view.setAccessibleName("Bodies shown")
+        self.body_view.setToolTip("Show the primary, the shield or both. Field maps always show the whole coil.")
+        for value, title in BODY_VIEWS:
+            self.body_view.addItem(title, value)
+        self.body_view.setEnabled(False)
+        layers.addWidget(self.body_view)
         for widget in (self.orthographic, self.edges, self.clip):
             display.addWidget(widget)
         self.slice_controls = QWidget()
@@ -627,6 +653,10 @@ class ScientificViewport(QWidget):
         self.view.activated.connect(self._set_view)
         self.orthographic.toggled.connect(self._set_projection)
         reset.clicked.connect(self._fit_view)
+        self.fit_roi.clicked.connect(self._fit_roi)
+        self.unwrapped.clicked.connect(self.show_unwrapped)
+        self.body_view.currentIndexChanged.connect(self._render)
+        self.open_edges.toggled.connect(self._render)
         # VTK disables its interactor in offscreen mode; picking needs one.
         if getattr(self.plotter, "iren", None) is not None:
             self.plotter.enable_mesh_picking(
@@ -1219,6 +1249,7 @@ class ScientificViewport(QWidget):
                 }
                 mesh = None
             self._support = self._mesh(mesh.vertices, mesh.faces) if mesh is not None else None
+            self._preview_roles = (getattr(mesh, "metadata", None) or {}).get("part_roles")
             channel_id = self._system_active_channel
             identity = self._system_identities.get(channel_id)
             if identity is not None and identity[:2] == (self._model_owner, self._support_identity):
@@ -1543,7 +1574,8 @@ class ScientificViewport(QWidget):
                 if name in state:
                     if not isinstance(state[name], str):
                         raise ValueError(f"Invalid {name} selection.")
-                    index = getattr(self, name).findText(state[name])
+                    text = view_preset_name(state[name]) or state[name] if name == "view" else state[name]
+                    index = getattr(self, name).findText(text)
                     if index < 0:
                         raise ValueError(f"Unknown {name} selection.")
                     indices[name] = index
@@ -1940,6 +1972,9 @@ class ScientificViewport(QWidget):
         model = key in {"support", "preview_target"}
         live = self._live_stage_preview and not model
         arrays = self._preview_arrays if model else self._stage_arrays if live else self._arrays
+        arrays, body_cut = self._body_filter(arrays, model)
+        self.fit_roi.setEnabled(roi_bounds(arrays, key) is not None)
+        self.unwrapped.setEnabled(is_cylindrical({**self._preview_geometry, **arrays} if model else arrays))
         self.plotter.add_axes()
         locating = self._located_issue is not None
         self.clear_highlight.setVisible(locating)
@@ -1996,6 +2031,8 @@ class ScientificViewport(QWidget):
                 if self._source_support_available
                 else None
             )
+            if body_cut:
+                support = self._mesh(arrays["vertices_m"], arrays["faces"])
             if (
                 support is not None
                 and self._active_support_visible()
@@ -2019,6 +2056,9 @@ class ScientificViewport(QWidget):
                     if key == "preview_target"
                     else 0.15,
                 )
+            outline = self.open_edges.isChecked() and key != "print_former"
+            if outline and support is not None and self._active_support_visible():
+                self._add_outline(support, opacity=0.18 if locating else 1.0)
             if self.support_layer.isChecked() and key != "print_former":
                 colors = ("#4b869f", "#c48a53", "#82985d", "#947aaa", "#579c90")
                 for index, (id_, channel) in enumerate(self._system_channels.items()):
@@ -2061,7 +2101,7 @@ class ScientificViewport(QWidget):
                     points = self.pv.PolyData(np.asarray(arrays["target_points_m"], dtype=float))
                     self._add(points, "target", color="#c5965b", point_size=4, opacity=0.45)
             if key == "support":
-                mesh = self._support if self._active_support_visible() else None
+                mesh = support if self._active_support_visible() else None
                 caption += " · support hidden" if hidden_support else " · current model support"
                 options = {"color": SUPPORT_COLOR, "show_edges": self.edges.isChecked(), "opacity": 0.72}
                 preview = self._preview_arrays or {}
@@ -2373,15 +2413,72 @@ class ScientificViewport(QWidget):
             self.plotter.render()
 
     def _set_view(self, *_args):
-        preset = {
-            "Isometric": self.plotter.view_isometric,
-            "XY": self.plotter.view_xy,
-            "XZ": self.plotter.view_xz,
-            "YZ": self.plotter.view_yz,
-        }.get(self.view.currentText())
-        if preset is not None:
-            preset()
+        if apply_view_preset(self.plotter, self.view.currentText()):
             self._fit_view()
+
+    def _body_filter(self, arrays, model):
+        """Arrays cut to the bodies chosen under Layers; ``(arrays, True)`` when something was cut."""
+        source = {**getattr(self, "_preview_geometry", {}), **arrays} if model else arrays
+        roles = support_roles(
+            source, getattr(self, "_preview_roles", None) if model else None, None if model else self._metadata
+        )
+        available = bool(body_view_choices(roles))
+        self.body_view.setEnabled(available)
+        filtered = filter_body_view(source, self.body_view.currentData() if available else BOTH, roles)
+        return (filtered, True) if filtered is not source else (arrays, False)
+
+    def _add_outline(self, support, opacity=1.0):
+        """Open support edges (cylinder ends and windows) as a bold copper outline."""
+        faces = np.asarray(support.faces).reshape(-1, 4)[:, 1:] if support.n_cells else np.zeros((0, 3), int)
+        paths = outline_paths(np.asarray(support.points), faces)
+        if paths:
+            lines = self.pv.merge([self.pv.lines_from_points(path) for path in paths], merge_points=False)
+            self._add(lines, "geometry", color=OUTLINE_COLOR, line_width=4, opacity=opacity, pickable=False)
+
+    def show_unwrapped(self, *_args):
+        """Open the unwrapped (φ, z) view of the displayed support in its own window."""
+        from PySide6.QtGui import QPixmap
+
+        from ..application.unwrapped_view import unwrapped_png
+
+        model = self.dataset.currentData() in {"support", "preview_target"}
+        arrays = self._preview_arrays if model else self._stage_arrays if self._live_stage_preview else self._arrays
+        try:
+            data, note = unwrapped_png(
+                {**self._preview_geometry, **arrays} if model else arrays,
+                roles=getattr(self, "_preview_roles", None) if model else None,
+                metadata=None if model else self._metadata,
+                title="Current model" if model else self._metadata.get("name", "Saved run"),
+            )
+        except (ValueError, KeyError, TypeError) as exc:
+            self.error.emit(f"Unwrapped view unavailable: {exc}")
+            return None
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Unwrapped view (φ, z)")
+        layout = QVBoxLayout(dialog)
+        image = QLabel()
+        pixmap = QPixmap()
+        pixmap.loadFromData(data, "PNG")
+        image.setPixmap(pixmap)
+        layout.addWidget(image)
+        caption = QLabel(note)
+        caption.setWordWrap(True)
+        layout.addWidget(caption)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.show()
+        return dialog
+
+    def _fit_roi(self, *_args):
+        """Fit the camera to the field map's imaging region, like Locate evidence does for a witness."""
+        key = self.dataset.currentData()
+        model = key in {"support", "preview_target"}
+        arrays = self._preview_arrays if model else self._stage_arrays if self._live_stage_preview else self._arrays
+        bounds = roi_bounds(arrays, key)
+        if bounds is None:
+            self.error.emit("Fit ROI needs a field map.")
+            return
+        self.plotter.reset_camera(bounds=bounds)
+        self.plotter.render()
 
     def _set_projection(self, enabled):
         self.plotter.enable_parallel_projection() if enabled else self.plotter.disable_parallel_projection()

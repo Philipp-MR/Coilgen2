@@ -14,8 +14,57 @@ SHIELDING_SOURCES = {
 }
 
 
-def draw_shielding_surface(figure, fields, component="magnitude", *, title=None, net_detail=False):
-    """Compare the actual vector contributions on the same physical samples and scale."""
+OPENING_COLOR = "#b4651e"
+
+
+def shielding_limits(metadata) -> dict:
+    """The design's shielding limits in tesla: ``{"rms_T": ..., "peak_T": ...}`` (missing when not set)."""
+    metadata = metadata or {}
+    suppression = (metadata.get("fabricated_physics") or {}).get("sampled_suppression") or {}
+    config = metadata.get("config") or {}
+    limits = {}
+    for key, saved, configured in (
+        ("rms_T", "rms_limit_T", "suppression_field_rms_limit_T"),
+        ("peak_T", "peak_limit_T", "suppression_field_peak_limit_T"),
+    ):
+        value = suppression.get(saved, config.get(configured))
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and np.isfinite(value) and value > 0:
+            limits[key] = float(value)
+    return limits
+
+
+def record_openings(record):
+    """Window outlines of a saved run's support (metres), for drawing over the shielding map."""
+    from ..application.scene_views import opening_loops
+
+    try:
+        if not {"vertices_m", "faces"} <= set(getattr(record, "array_names", ())):
+            return ()
+        return opening_loops(record.array("vertices_m", copy=False), record.array("faces", copy=False))
+    except (KeyError, TypeError, ValueError, OSError):
+        return ()
+
+
+def limit_verdict(rms_uT, peak_uT, limits, label="Combined") -> str:
+    """ "Combined RMS 26.3 µT > limit 20 µT · Fails" for each limit that is set."""
+    parts = []
+    for name, value, key in (("RMS", rms_uT, "rms_T"), ("peak", peak_uT, "peak_T")):
+        if key in limits:
+            limit = limits[key] * 1e6
+            passed = value <= limit
+            relation, outcome = ("≤", "Passes") if passed else (">", "Fails")
+            parts.append(f"{label} {name} {value:.3g} µT {relation} limit {limit:.3g} µT · {outcome}")
+    return "  |  ".join(parts)
+
+
+def draw_shielding_surface(
+    figure, fields, component="magnitude", *, title=None, net_detail=False, limits=None, openings_m=()
+):
+    """Compare the actual vector contributions on the same physical samples and scale.
+
+    ``limits`` (from :func:`shielding_limits`) marks the limit on the colour bar and
+    puts pass/fail in the title; ``openings_m`` outlines the support windows.
+    """
     from matplotlib import colormaps
     from matplotlib.cm import ScalarMappable
     from matplotlib.colors import Normalize
@@ -45,6 +94,11 @@ def draw_shielding_surface(figure, fields, component="magnitude", *, title=None,
     peaks = [float(np.max(np.abs(scalar))) for scalar in values]
     rms = [float(np.sqrt(np.average(scalar**2, weights=fields.area_weights_m2))) for scalar in values]
     total = 2 if has_parts else 0
+    limits = dict(limits or {})
+    checked = len(values) - 1 if nonzero_target else total
+    verdict = limit_verdict(
+        rms[checked], peaks[checked], limits, "Combined − requested" if nonzero_target else "Combined"
+    )
     net_readout = f"Net RMS {rms[total]:.3g} µT · peak {peaks[total]:.3g} µT"
     weighting = "area-weighted" if fields.area_weights_m2 is not None else "equal-sample"
     interior = fields.sampling == "triangle_interior"
@@ -93,7 +147,9 @@ def draw_shielding_surface(figure, fields, component="magnitude", *, title=None,
         else "at saved suppression samples"
     )
     figure.suptitle(
-        (f"{title}\n" if title else "") + f"{component_label} {location} · {excitation}",
+        (f"{title}\n" if title else "")
+        + f"{component_label} {location} · {excitation}"
+        + (f"\n{verdict}" if verdict else ""),
         fontsize=12,
     )
     # Opposing viewpoints make the back of a closed surface visible in static exports.
@@ -119,6 +175,8 @@ def draw_shielding_surface(figure, fields, component="magnitude", *, title=None,
                     depthshade=False,
                     linewidths=0,
                 )
+            for loop in openings_m:
+                axis.plot(*(np.asarray(loop) * 1e3).T, color=OPENING_COLOR, linewidth=1.8, zorder=9)
             if net_detail:
                 # Show the projection of the same peak vertex from either side.
                 axis.computed_zorder = False
@@ -157,6 +215,17 @@ def draw_shielding_surface(figure, fields, component="magnitude", *, title=None,
     if max(peaks) == 0:
         legend.set_ticks([0])
     legend.ax.tick_params(labelsize=8)
+    # Per-sample colours are compared with the peak limit; the RMS limit is shown when it is the only one.
+    marker = "peak_T" if "peak_T" in limits else "rms_T" if "rms_T" in limits else None
+    if marker is not None:
+        limit = limits[marker] * 1e6
+        for value in (limit, -limit) if signed else (limit,):
+            if norm.vmin <= value <= norm.vmax:
+                legend.ax.axvline(value, color="black", linewidth=2)
+        name = "Peak" if marker == "peak_T" else "RMS"
+        legend.ax.set_title(f"{name} limit {limit:.3g} µT (black line)", fontsize=8)
+    if openings_m:
+        summary += f" · {len(openings_m)} support opening{'s' if len(openings_m) != 1 else ''} outlined"
     if triangulated:
         summary += " · Facet colors average the vertex samples"
     elif interior:

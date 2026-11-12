@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..application.diagnostics import run_problems
+from ..application.support_import import body_label, body_roles
 from .colors import apply_tone, item_foreground
 from .icons import icon
 
@@ -110,6 +111,7 @@ class ProblemsPanel(QWidget):
             "" if has_request else "The original request.json was not saved with verified integrity."
         )
         self.issues = run_problems(record) if record is not None else ()
+        roles = body_roles(record.metadata) if record is not None else {}
         errors = sum(issue.severity == "error" for issue in self.issues)
         warnings = sum(issue.severity == "warning" for issue in self.issues)
         self.summary.setText(
@@ -122,13 +124,13 @@ class ProblemsPanel(QWidget):
         self.table.setRowCount(len(self.issues))
         for row, issue in enumerate(self.issues):
             measured = "—" if issue.value is None else f"{issue.value:.6g}"
-            budget = "—" if issue.limit is None else f"{issue.limit:.6g}"
+            budget = "—" if issue.limit is None else f"{issue.comparator} {issue.limit:.6g}".strip()
             scope = {"pipeline_sweep_geometry": "Pipeline sweep", "fabrication_review": "Fabrication review"}.get(
                 issue.scope, issue.scope.replace("_", " ")
             )
             values = (
                 f"{issue.severity.capitalize()}: {issue.title}",
-                " / ".join(value for value in (scope, issue.body_id) if value) or "Run",
+                " / ".join(value for value in (scope, body_label(roles, issue.body_id)) if value) or "Run",
                 f"{measured} / {budget} {issue.unit}",
                 "Recorded evidence" if issue.locatable else "Not recorded",
             )
@@ -149,7 +151,8 @@ class ProblemsPanel(QWidget):
             key = (issue.scope, issue.body_id)
             groups[key] = groups.get(key, 0) + 1
         for key, count in groups.items():
-            label = " / ".join(value.replace("_", " ") for value in key if value) or "Run"
+            scope, body = key
+            label = " / ".join(value for value in (scope.replace("_", " "), body_label(roles, body)) if value) or "Run"
             self.group_filter.addItem(f"{label} ({count})", key)
         self.group_filter.setCurrentIndex(max(0, self.group_filter.findData(previous)))
         self.group_filter.blockSignals(False)

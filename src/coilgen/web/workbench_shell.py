@@ -270,21 +270,25 @@ def build_model_builder(ctrl):
                 classes="cg-readiness",
                 role="status",
                 __properties=[("data_state", "data-state")],
-                data_state=("settings_dirty ? 'pending' : readiness.state",),
+                data_state=("settings_dirty ? 'pending' : current_job_active ? 'computing' : readiness.state",),
             ):
                 v3.VIcon(
-                    "{{ settings_dirty ? 'mdi-pencil-outline' : readiness.state === 'blocking' ? "
-                    "'mdi-close-circle-outline' : 'mdi-check-circle-outline' }}",
+                    "{{ settings_dirty ? 'mdi-pencil-outline' : current_job_active ? 'mdi-progress-clock' : "
+                    "readiness.state === 'blocking' ? 'mdi-close-circle-outline' : 'mdi-check-circle-outline' }}",
                     classes="cg-readiness-icon",
                     __properties=[("aria_hidden", "aria-hidden")],
                     aria_hidden="true",
                 )
                 with html.Div(classes="cg-readiness-text"):
                     html.Div(
-                        "{{ settings_dirty ? 'Edits not applied yet' : readiness.title }}", classes="cg-readiness-title"
+                        "{{ settings_dirty ? 'Edits not applied yet' : current_job_active ? "
+                        "'Computing this revision' : readiness.title }}",
+                        classes="cg-readiness-title",
                     )
                     html.Div(
-                        "{{ settings_dirty ? 'Apply them to check the inputs again.' : readiness.detail }}",
+                        "{{ settings_dirty ? 'Apply them to check the inputs again.' : current_job_active ? "
+                        "'The run keeps the inputs it was submitted with. Edits you apply now start a new revision.' "
+                        ": readiness.detail }}",
                         classes="cg-readiness-detail",
                     )
                 v3.VBtn(
@@ -463,7 +467,12 @@ def build_activity_bar():
                 height=6,
                 raw_attrs=['aria-label="Run progress"'],
             )
-            html.Span("{{ active_jobs[0].progress_label || 'Working…' }}")
+            html.Span("{{ active_jobs[0].progress_label || 'Working…' }}", classes="cg-progress-label")
+            html.Span(
+                "{{ active_jobs[0].progress_detail }}",
+                v_if="active_jobs[0].progress_detail",
+                classes="cg-progress-detail",
+            )
         v3.VBtn(RUNS_LABEL, size="small", variant="outlined", prepend_icon="mdi-history", click="runs_dialog = true")
 
 
@@ -514,7 +523,8 @@ def _job_rows(expression, ctrl, *, active=False):
             html.Div("{{ job.stage }}", v_if="job.stage")
             html.Div(
                 "{{ job.status === 'queued' ? 'Waiting for a worker' : "
-                "job.status === 'cancelling' ? 'Waiting for the worker to stop' : job.progress_label || 'Working…' }}",
+                "job.status === 'cancelling' ? 'Waiting for the worker to stop' : "
+                "(job.progress_label || 'Working…') + (job.progress_detail ? ' · ' + job.progress_detail : '') }}",
                 classes="cg-hint mb-1",
             )
             v3.VBtn(

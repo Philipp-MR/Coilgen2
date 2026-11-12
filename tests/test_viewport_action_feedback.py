@@ -58,21 +58,21 @@ def test_clipping_gesture_does_not_claim_camera_changed(scientific_viewport, app
     mouse(viewport, QEvent.Type.MouseMove, (60, 60), buttons=Qt.MouseButton.LeftButton)
     mouse(viewport, QEvent.Type.MouseButtonRelease, (60, 60), button=Qt.MouseButton.LeftButton)
     application.processEvents()
-    assert viewport.view.currentText() == "Isometric"
+    assert viewport.view.currentText() == "Oblique"
 
 
 def test_same_camera_preset_can_be_reselected_and_programmatic_presets_still_apply(scientific_viewport, monkeypatch):
     viewport = scientific_viewport
     calls = []
-    monkeypatch.setattr(viewport.plotter, "view_isometric", lambda: calls.append("Isometric"))
-    monkeypatch.setattr(viewport.plotter, "view_xy", lambda: calls.append("XY"))
-    assert viewport.view.currentText() == "Isometric"
+    monkeypatch.setattr(viewport.plotter, "view_vector", lambda vector, **_: calls.append(tuple(vector)), raising=False)
+    oblique, top = (1.0, 0.6, 0.4), (0.0, 0.0, 1.0)
+    assert viewport.view.currentText() == "Oblique"
     viewport.view.activated.emit(viewport.view.currentIndex())
-    assert calls == ["Isometric"]
-    viewport.view.setCurrentText("XY")
-    assert calls == ["Isometric", "XY"]
+    assert calls == [oblique]
+    viewport.view.setCurrentText("From +z (XY)")
+    assert calls == [oblique, top]
     viewport.view.activated.emit(viewport.view.currentIndex())
-    assert calls == ["Isometric", "XY", "XY"]
+    assert calls == [oblique, top, top]
 
 
 def test_custom_camera_roundtrips_without_refitting(scientific_viewport, application, monkeypatch):
@@ -84,7 +84,7 @@ def test_custom_camera_roundtrips_without_refitting(scientific_viewport, applica
     application.processEvents()
     saved = viewport.view_state()
     assert saved["view"] == "Custom"
-    viewport.view.setCurrentText("XY")
+    viewport.view.setCurrentText("From +z (XY)")
     monkeypatch.setattr(viewport.plotter, "reset_camera", lambda: pytest.fail("Saved custom camera was refitted"))
     assert viewport.restore_view_state(saved)
     assert viewport.view_state() == saved
@@ -131,6 +131,7 @@ def test_primary_probe_reports_actual_dataset_distance_units_and_stored_sample(s
 @pytest.mark.parametrize("layer", ["support", "roi"])
 def test_context_layer_pick_does_not_borrow_primary_field_value(scientific_viewport, layer):
     viewport = scientific_viewport
+    viewport.open_edges.setChecked(False)
     field_scene(viewport)
     viewport.roi_layer.setChecked(True)
     mesh, _, actor = viewport.plotter.meshes[0 if layer == "support" else 1]

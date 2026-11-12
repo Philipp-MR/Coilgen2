@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QMenu, QProgressBar, QSizePol
 
 from ..application.workbench_presentation import FINALIZING_FABRICATION, is_finalizing_fabrication
 from .colors import apply_tone
-from .runtime_feedback import RuntimeFeedback, fraction_percent as _percent, runtime_feedback, work_detail
+from .runtime_feedback import RuntimeFeedback, fraction_percent as _percent, run_progress, runtime_feedback, work_detail
 
 
 _STAGES = (
@@ -168,24 +168,13 @@ class ComputationIndicator(QWidget):
             elif cancelling:
                 text = "Cancelling…"
             else:
-                runtime = runtime_feedback(active[0])
-                percent = (
-                    runtime.phase_percent
-                    if runtime.phase_percent is not None
-                    else (None if runtime.allocated else _percent(active[0].get("progress")))
-                )
-                indeterminate = bool(active[0].get("progress_indeterminate"))
-                if indeterminate:
-                    percent = None
-                text = (
-                    FINALIZING_FABRICATION
-                    if is_finalizing_fabrication(active[0])
-                    else f"Operation {percent}%"
-                    if runtime.phase_percent is not None
-                    else f"Computing ({percent}%)"
-                    if percent is not None
-                    else "Computing…"
-                )
+                # Stage and elapsed time lead; the bar only shows the operation's own scale.
+                progress = run_progress(active[0])
+                percent = progress.percent
+                indeterminate = percent is None
+                text = FINALIZING_FABRICATION if is_finalizing_fabrication(active[0]) else progress.label
+                if progress.detail:
+                    details.append(progress.detail)
             for state in active:
                 value = _percent(state.get("progress"))
                 details.append(

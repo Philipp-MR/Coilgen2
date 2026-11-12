@@ -215,10 +215,34 @@ class GradientGeometryDialog(EngineeringDialog):
         self.axis = QLineEdit(" ".join(f"{v:.17g}" for v in primary.axis))
         self.form.addRow("Common center x y z [m]", self.center)
         self.form.addRow("Common axis x y z", self.axis)
+        from ..application.cylinder_pair import OPENINGS_HELP, format_openings
+
+        self._openings_text = format_openings(self.original)
+        self.openings = QPlainTextEdit(self._openings_text.replace("; ", "\n"))
+        self.openings.setPlaceholderText("90, 30, 0, 60, both")
+        self.openings.setMaximumHeight(90)
+        self.openings.setToolTip(OPENINGS_HELP.replace("separated by ';'", "one per line"))
+        self.form.addRow("Openings (angle °, width °, z mm, height mm, surface)", self.openings)
+        self.note(OPENINGS_HELP.replace("separated by ';'", "one per line"))
+        self._rms_initial = float(project.config.suppression_field_rms_limit_T)
+        self.rms_limit = _number(self._rms_initial * 1e6)
+        self.rms_limit.setEnabled(self.enabled["suppression"].isChecked())
+        self.enabled["suppression"].toggled.connect(self.rms_limit.setEnabled)
+        self.form.addRow("External field RMS limit [µT] · 0 sets no limit", self.rms_limit)
         self.note(
-            "The external cylinder is a closed suppression region. Set its RMS field bound in the optimization requirements; creating geometry does not invent an acceptance limit."
+            "The external cylinder is a closed suppression region. The RMS limit applies to the field sampled on it; creating geometry does not invent an acceptance limit."
         )
-        self.resize(700, 760)
+        self.resize(700, 820)
+
+    def config_changes(self):
+        """Config edits applied together with the geometry (the RMS limit)."""
+        if not self.enabled["suppression"].isChecked():
+            return {}
+        limit = _values(self.rms_limit) * 1e-6
+        # The µT display round trip must not count as an edit.
+        if abs(limit - self._rms_initial) <= 1e-12 * abs(self._rms_initial):
+            return {}
+        return {"suppression_field_rms_limit_T": limit}
 
     def value(self):
         from ..application.gradient_geometry import CylindricalGeometry, CylinderSurface
@@ -228,23 +252,41 @@ class GradientGeometryDialog(EngineeringDialog):
         if len(centers) != 1 or len(axes) != 1:
             raise ValueError("Enter exactly one common center and axis vector.")
         center, axis = tuple(centers[0]), tuple(axes[0])
+        from ..application.cylinder_pair import parse_openings
+
+        text = "; ".join(line.strip() for line in self.openings.toPlainText().splitlines() if line.strip())
+        has_shield = self.enabled["shield"].isChecked()
+        if text == self._openings_text and self.original is not None:
+            # Unchanged text keeps the stored openings exactly.
+            openings = {
+                role: getattr(self.original, role).openings if getattr(self.original, role) else ()
+                for role in ("primary", "shield")
+            }
+            if openings["shield"] and not has_shield:
+                raise ValueError("Remove the shield openings before removing the shield.")
+        else:
+            openings = parse_openings(text, has_shield=has_shield)
         surfaces = {}
         for role, controls in self.surfaces.items():
             radius, length, angular, axial = controls
             original = getattr(self.original, role, None) if self.original else None
-            surfaces[role] = (
-                CylinderSurface(
-                    _values(radius),
-                    _values(length),
-                    angular.value(),
-                    axial.value(),
-                    center,
-                    axis,
-                    azimuth_rad=original.azimuth_rad if original else 0.0,
+            try:
+                surfaces[role] = (
+                    CylinderSurface(
+                        _values(radius),
+                        _values(length),
+                        angular.value(),
+                        axial.value(),
+                        center,
+                        axis,
+                        azimuth_rad=original.azimuth_rad if original else 0.0,
+                        openings=openings.get(role, ()),
+                    )
+                    if self.enabled[role].isChecked()
+                    else None
                 )
-                if self.enabled[role].isChecked()
-                else None
-            )
+            except ValueError as exc:
+                raise ValueError(f"{role.title()}: {exc}") from exc
         return CylindricalGeometry(**surfaces)
 
 

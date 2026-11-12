@@ -531,6 +531,7 @@ class CoilGenWorkbench(QMainWindow):
         layout.addWidget(self.readiness_panel)
         self.modeling_notes_panel = ReadinessPanel(self)
         self.modeling_notes_panel.issue_requested.connect(self._open_readiness_issue)
+        self.modeling_notes_panel.fix_requested.connect(self._apply_issue_fix)
         self.modeling_notes_window = PanelWindow(
             "Modeling notes — CoilGen2", self.modeling_notes_panel, self, size=(780, 350)
         )
@@ -3417,6 +3418,7 @@ class CoilGenWorkbench(QMainWindow):
                     "or support_axis for the support's bore axis. Field targets and errors use the B₀ direction."
                 )
             self._check(form, "sweep", "Generate conductor solids", not config.skip_sweep)
+            self._terminal_handling_control(form, config)
             winding_info = QLabel()
             winding_info.setObjectName("winding_scope")
             winding_info.setWordWrap(True)
@@ -3482,6 +3484,7 @@ class CoilGenWorkbench(QMainWindow):
                     else config.interconnection_axis
                 ),
                 "skip_sweep": not self._value("sweep"),
+                "layout_terminal_strategy": self._value("layout_terminal_strategy"),
                 **winding_overrides(config, self._value("winding_intent")),
             }
             note(
@@ -4319,6 +4322,14 @@ class CoilGenWorkbench(QMainWindow):
             source = self._draft_controls["support_type"].currentData()
             editor = next(entry for entry in SUPPORT_EDITORS if entry.source == source)
             changes.update(coil_mesh_file=source, surface_is_cylinder_flag=editor.cylindrical)
+            from ..application.support_switch import support_switch_prompt
+
+            switch = support_switch_prompt(self.project, source)
+            if switch is not None:
+                cleared = self._ask_support_switch(switch)
+                if cleared is None:
+                    return False
+                changes.update(cleared)
         if self._changed_controls.intersection({"target_region_shape", "target_region_sampling"}):
             config = replace(self.project.config, **changes)
             changes.update(self._region_choice_changes(config))
@@ -4327,6 +4338,24 @@ class CoilGenWorkbench(QMainWindow):
                 self._value("target_mode"), replace(self.project.config, **changes), changes, commit
             )
         return commit(changes, "Edit scientific model")
+
+    def _ask_support_switch(self, switch):
+        """Ask before replacing bodies; return the shielding edits to add, or None when cancelled."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(switch.title)
+        box.setText(switch.message)
+        replace_button = box.addButton(switch.confirm_label, QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        clear = None
+        if switch.clear_changes:
+            clear = QCheckBox(switch.clear_label)
+            clear.setChecked(True)
+            box.setCheckBox(clear)
+        box.exec()
+        if box.clickedButton() is not replace_button:
+            return None
+        return dict(switch.clear_changes) if clear is not None and clear.isChecked() else {}
 
     def _region_choice_needs_file(self):
         return (
@@ -4387,6 +4416,33 @@ class CoilGenWorkbench(QMainWindow):
                 widget.setItemIcon(index, icon(symbol))
         widget.setCurrentText(str(value))
         self._register(form, key, label, widget)
+
+    def _terminal_handling_control(self, form, config):
+        from ..application.session import TERMINAL_STRATEGIES
+
+        self._combo(
+            form,
+            "layout_terminal_strategy",
+            "Terminal handling",
+            list(TERMINAL_STRATEGIES),
+            config.layout_terminal_strategy,
+        )
+        self._draft_controls["layout_terminal_strategy"].setToolTip(
+            "How the coil's feed ends are connected. CoilGen records this choice for review; "
+            "it does not build pads or stubs."
+        )
+
+    def _apply_issue_fix(self, issue):
+        """Apply a modeling note's one-click fix as one undoable edit."""
+        if not issue.fix or self.project is None:
+            return False
+        if self._draft_dirty and not self.apply_settings():
+            self._focus_draft_error()
+            return False
+        if not self.apply_inputs(config_changes=dict(issue.fix), label=issue.fix_label or "Apply suggested fix"):
+            return False
+        self.statusBar().showMessage(f"Applied: {issue.fix_label or 'suggested fix'}. Undo reverts it.", 8000)
+        return True
 
     @staticmethod
     def _size_combo(widget):
@@ -5780,8 +5836,13 @@ class CoilGenWorkbench(QMainWindow):
             except (ValueError, TypeError) as exc:
                 self._error(f"Cannot rename project: {exc}")
 
-    def import_mesh(self, path, *, length_scale_to_m=1.0):
-        """Use the shared support loader, then capture the validated input bytes."""
+    def import_mesh(self, path, *, length_scale_to_m=1.0, part_roles=None):
+        """Use the shared support loader, then capture the validated input bytes.
+
+        An STL becomes an owned SI mesh that records one role per body
+        (``part_roles``, in pipeline order; default: inner radius group primary,
+        outer group active shield), so the primary/shield split survives import.
+        """
         from ..geometry import load_mesh_from_config
 
         if self.project is None:
@@ -5791,6 +5852,26 @@ class CoilGenWorkbench(QMainWindow):
             raise ValueError("Support meshes must be STL or CoilGen NPZ; coordinates must have explicit units.")
         if not self.apply_settings():
             raise ValueError("Correct pending settings before importing.")
+        if path.suffix.lower() == ".stl":
+            from ..application.support_import import (
+                default_part_roles,
+                read_support_stl,
+                support_bodies,
+                with_part_roles,
+            )
+
+            mesh = read_support_stl(path, length_scale_to_m)
+            if part_roles is None:
+                bodies = support_bodies(mesh)
+                part_roles = default_part_roles(bodies) if len(bodies) >= 2 else None
+            candidate = self.project.with_mesh(
+                with_part_roles(mesh, part_roles),
+                field="coil_mesh_file",
+                changes={"surface_is_cylinder_flag": False},
+            )
+            self.undo_stack.push(ProjectEdit(self, self.project, candidate, "Import support mesh"))
+            self.select_node("geometry")
+            return candidate
         changes = {
             "coil_mesh_file": str(path),
             "imported_mesh_length_scale_to_m": length_scale_to_m,
@@ -5814,8 +5895,18 @@ class CoilGenWorkbench(QMainWindow):
             if not accepted:
                 return
             scale = {"mm": 1e-3, "m": 1.0, "cm": 1e-2, "µm": 1e-6}[unit]
+        roles = None
         try:
-            self.import_mesh(path, length_scale_to_m=scale)
+            if Path(path).suffix.lower() == ".stl":
+                from ..application.support_import import read_support_stl, support_import_summary
+                from .support_import_dialog import SupportImportDialog
+
+                summary = support_import_summary(read_support_stl(path, scale))
+                dialog = SupportImportDialog(summary, Path(path).name, self)
+                if dialog.exec() != SupportImportDialog.DialogCode.Accepted:
+                    return
+                roles = dialog.roles()
+            self.import_mesh(path, length_scale_to_m=scale, part_roles=roles)
         except (ValueError, TypeError, OSError, KeyError, RuntimeError) as exc:
             self._error(f"Support import rejected: {exc}")
 
@@ -6258,9 +6349,22 @@ class CoilGenWorkbench(QMainWindow):
             self._error(f"Gradient support geometry: {exc}")
             return
         if dialog.exec() == QDialog.DialogCode.Accepted:
+            from ..application.cylinder_pair import apply_geometry
+            from ..application.support_switch import SHIELDED_PAIR_SOURCE, support_switch_prompt
+
             geometry = dialog.result_value
+            changes = dialog.config_changes() if hasattr(dialog, "config_changes") else {}
+            if dialog.original is None:
+                # Applying replaces an imported support: ask as the support selector does.
+                switch = support_switch_prompt(
+                    project,
+                    SHIELDED_PAIR_SOURCE,
+                    new_text="a shielded cylinder pair" if geometry.shield else "1 cylinder",
+                )
+                if switch is not None and self._ask_support_switch(replace(switch, clear_changes={})) is None:
+                    return
             self._gradient_task(
-                lambda captured: geometry.apply(captured, expected_fingerprint=project.fingerprint),
+                lambda captured: apply_geometry(captured, geometry, changes, expected_fingerprint=project.fingerprint),
                 lambda result: self._apply_design_document(result, "Edit cylindrical gradient supports"),
                 "Build gradient support meshes",
             )

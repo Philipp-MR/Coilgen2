@@ -75,6 +75,7 @@ def test_review_draws_only_physical_centerlines_and_reports_prerouting_fits(scie
     frame_only = {"review_conductor_0_frame_points_m": physical[:-1]}
     assert not resolve_dataset(frame_only, "review_conductor").available
     arrays = {**saved_geometry(), **frame_only, "review_conductor_0_points_m": physical}
+    viewport.open_edges.setChecked(False)
     viewport.roi_layer.setChecked(True)
     viewport.display_run(
         arrays, {"contour_smoothing": [{"smoothed_count": 24, "fit_rejected_count": 8, "spacing_rejected_count": 16}]}

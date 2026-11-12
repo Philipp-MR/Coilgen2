@@ -9,6 +9,7 @@ from numbers import Real
 
 from ..application.diagnostics import run_verdicts
 from ..field_components import field_component_label, normalize_field_component
+from .coil_statistics import display_quantity
 from .run_metadata import read_run_metadata
 
 
@@ -54,6 +55,24 @@ def _number(value, scale=1.0, *, nonnegative=False):
     except (ValueError, OverflowError):
         return None
     return result if math.isfinite(result) and (not nonnegative or result >= 0) else None
+
+
+def _common_current(values):
+    """Return (current, body count) when every recorded body current is the same, else (None, count).
+
+    Bodies driven in series by one supply carry one current; a single shared value is then the
+    circuit current. Only two or more bodies are collapsed: a lone body's current is reported through
+    the run summary, which already decides whether that body forms a complete circuit. Differing or
+    missing values stay per body; nothing is averaged or inferred.
+    """
+    values = list(values)
+    numbers = [number for number in (_number(value) for value in values) if number is not None]
+    if len(numbers) < 2 or len(numbers) != len(values):
+        return None, len(numbers)
+    first = numbers[0]
+    if all(math.isclose(number, first, rel_tol=1e-9, abs_tol=0.0) for number in numbers[1:]):
+        return first, len(numbers)
+    return None, len(numbers)
 
 
 def _count(value):
@@ -224,21 +243,26 @@ def summarize_field_result(record, *, source_error="", stale=False):
         else ("Recorded current" if policy == "current policy unrecorded" else "Original current")
     )
     current_display = ""
+    shared_bodies = 0
     if key == "winding_validation" and _mapping(evidence.get("currents_A")):
-        current, current_label, current_display = None, "Original body currents", "Per body"
+        body_currents = list(_mapping(evidence.get("currents_A")).values())
+        current, shared_bodies = _common_current(body_currents)
+        if current is None:
+            current_label, current_display = "Original body currents", "Per body"
     summary = _mapping(metadata.get("summary"))
     if key == "fabricated" and summary.get("scope") == "fabrication_review":
         current = _number(summary.get("current_a"))
         if current is None:
-            currents = _mapping(parent.get("currents_A"))
-            if any(_number(value) is not None for value in currents.values()):
-                current_label, current_display = "Original body currents", "Per body"
-            else:
+            body_currents = list(_mapping(parent.get("currents_A")).values())
+            if not any(_number(value) is not None for value in body_currents):
                 electrical = _mapping(_mapping(metadata.get("fabrication")).get("electrical_metrics"))
                 bodies = electrical.get("bodies", ())
-                if isinstance(bodies, (list, tuple)) and any(
-                    _number(_mapping(body).get("current_A")) is not None for body in bodies
-                ):
+                body_currents = (
+                    [_mapping(body).get("current_A") for body in bodies] if isinstance(bodies, (list, tuple)) else []
+                )
+            if any(_number(value) is not None for value in body_currents):
+                current, shared_bodies = _common_current(body_currents)
+                if current is None:
                     current_label, current_display = "Original body currents", "Per body"
     if key in {"sheet", "validation"}:
         current, current_label, current_display = None, "Wire current", "Not applicable"
@@ -270,6 +294,8 @@ def summarize_field_result(record, *, source_error="", stale=False):
         tooltip += " Wire RMS uses active unsuppressed positive-weight design samples; thin-wire Biot–Savart model."
     if current_display == "Per body":
         tooltip += " Signed original body currents are recorded separately; no aggregate circuit current is inferred."
+    elif shared_bodies > 1:
+        tooltip += f" All {shared_bodies} bodies carry the same recorded original current, shown as one value."
     if key in {"sheet", "validation"}:
         tooltip += " A stream function solution does not define a single discrete wire current."
     if source_error:
@@ -346,6 +372,27 @@ def drive_metric_cards(summary):
     return cards
 
 
+# Cards the gradient row already states in its own terms: the current for the
+# target, the shape error at that current, and series R and L.
+GRADIENT_SHOWN_ELSEWHERE = frozenset({"relative", "current", "resistance", "inductance"})
+
+
+def without_gradient_duplicates(cards, gradient_cards):
+    """Leave out the cards a gradient headline already states, so no value appears twice."""
+    if not gradient_cards:
+        return list(cards)
+    return [card for card in cards if card["key"] not in GRADIENT_SHOWN_ELSEWHERE]
+
+
+def field_context_with_current(summary, gradient_cards):
+    """Name the current of the RMS and peak errors once its own card is left out."""
+    context = summary.context if summary.visible else ""
+    if gradient_cards and context and summary.current_A is not None:
+        first, newline, rest = context.partition("\n")
+        context = f"{first} · errors at {summary.current_A:+.4g} A{newline}{rest}"
+    return context
+
+
 def field_metric_cards(summary):
     cards = []
     for key, name, number, unit in (
@@ -404,3 +451,228 @@ def coil_metric_cards(report):
     )
     mass_scope = "recorded conductor mass" if has_mass else "mass needs density"
     return cards, report.overview_scope + " · " + mass_scope, "\n".join(scopes) + "\n" + report.message
+
+
+GRADIENT_TOOLTIP = (
+    "Gradient headline. The current is the one that produces the requested gradient on the named "
+    "conductor; the efficiency is the requested gradient divided by that current. Series resistance and "
+    "inductance assume one supply drives every part in series; the layout inductance is 1ᵀL1 and includes "
+    "the signed mutual inductance between parts."
+)
+
+
+def _design_context(metadata):
+    for source in (metadata, _mapping(metadata.get("summary")), _mapping(metadata.get("config"))):
+        value = source.get("design_context")
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _with_unit(value, unit):
+    text, label = display_quantity(value, unit)
+    return f"{text} {label}".strip()
+
+
+def shield_fringe_reading(metadata):
+    """Return the saved fringe-field reading against its limit, reviewed conductor first.
+
+    Reads ``fabricated_physics.sampled_suppression`` exactly as saved: the field at the original contour
+    current on the suppression samples. Returns None when no suppression samples were recorded.
+    """
+    suppression = _mapping(_mapping(metadata.get("fabricated_physics")).get("sampled_suppression"))
+    if not suppression:
+        return None
+    measure = "rms"
+    if _number(suppression.get("rms_limit_T"), nonnegative=True) is None and (
+        _number(suppression.get("peak_limit_T"), nonnegative=True) is not None
+    ):
+        measure = "peak"
+    for kind, label in (("fabricated", "Reviewed conductor"), ("sheet", "Stream function model")):
+        entry = _mapping(suppression.get(kind))
+        value = _number(entry.get(measure + "_T"), nonnegative=True)
+        if entry.get("available") is True and value is not None:
+            passed = entry.get(measure + "_passed")
+            return {
+                "source": label,
+                "measure": measure.upper(),
+                "value_T": value,
+                "limit_T": _number(suppression.get(measure + "_limit_T"), nonnegative=True),
+                "passed": passed if isinstance(passed, bool) else None,
+                "sample_count": _count(suppression.get("sample_count")),
+            }
+    return None
+
+
+def _series_resistance(metadata, summary):
+    """Reviewed bodies in series when they share one current; else the layout part sum."""
+    bodies = _mapping(_mapping(metadata.get("fabrication")).get("electrical_metrics")).get("bodies", ())
+    bodies = [_mapping(body) for body in bodies] if isinstance(bodies, (list, tuple)) else []
+    resistances = [_number(body.get("resistance_ohm"), nonnegative=True) for body in bodies]
+    if bodies and None not in resistances:
+        if len(bodies) == 1 and _number(summary.get("resistance_ohm"), nonnegative=True) is not None:
+            return resistances[0], "reviewed conductor"
+        if _common_current(body.get("current_A") for body in bodies)[0] is not None:
+            return sum(resistances), f"reviewed conductor, {len(bodies)} bodies in series"
+    layout = _number(summary.get("layout_series_resistance_ohm"), nonnegative=True)
+    return (layout, "layout winding, parts in series") if layout is not None else (None, "")
+
+
+def gradient_metric_cards(record, field=None):
+    """Headline cards for a gradient coil: efficiency, current for the target, series R and L, error, fringe.
+
+    Empty unless the run is an MR gradient design that recorded its target gradient, so older runs keep
+    the general drive row. Values come from the saved run; nothing is recalculated.
+    """
+    metadata = read_run_metadata(record) if record is not None else {}
+    summary = _mapping(metadata.get("summary"))
+    strength = _number(summary.get("target_gradient_t_per_m"), nonnegative=True)
+    if _design_context(metadata) != "mr_gradient" or not strength:
+        return []
+    field = field if field is not None else summarize_field_result(record)
+    wire = field.visible and field.source_key not in {"sheet", "validation"} and bool(field.drive_current_A)
+    if wire:
+        current, source = abs(field.drive_current_A), field.source_label
+    else:
+        current, source = _number(summary.get("layout_current_for_target_a"), nonnegative=True), "Layout winding"
+    if not current:
+        return []
+    target = f"{strength * 1e3:.4g} mT/m"
+    resistance, resistance_scope = _series_resistance(metadata, summary)
+    single = _number(summary.get("inductance_h"), nonnegative=True)
+    inductance = single if single is not None else _number(summary.get("layout_series_inductance_h"))
+    inductance_scope = (
+        "reviewed conductor, one complete circuit"
+        if single is not None
+        else "layout winding, 1ᵀL1 including mutual inductance"
+    )
+    if wire and field.shape_percent is not None:
+        error, error_name, error_tip = (
+            field.shape_percent,
+            "Field shape error",
+            "RMS residual relative to the target RMS after the current fit: what a current change cannot fix.",
+        )
+    else:
+        error, error_name, error_tip = (
+            field.relative_percent,
+            "Relative field error",
+            "Relative RMS field error at the recorded current.",
+        )
+    cards = [
+        {
+            "key": "efficiency",
+            "name": "Gradient efficiency",
+            "value": f"{1e3 * strength / current:.4g} mT/m/A",
+            "unavailable": False,
+            "status": "",
+            "source": source,
+            "tooltip": f"{target} ÷ {current:.4g} A on the {source.lower()}.\n" + GRADIENT_TOOLTIP,
+        },
+        {
+            "key": "current",
+            "name": f"Current for {target}",
+            "value": f"{current:.4g} A",
+            "unavailable": False,
+            "status": "",
+            "tooltip": (
+                "Original contour current times the fitted current scale of the shown field."
+                if wire
+                else "Layout winding current fitted to the requested gradient."
+            )
+            + "\n"
+            + GRADIENT_TOOLTIP,
+        },
+        {
+            "key": "resistance",
+            "name": "Series resistance",
+            "value": _with_unit(resistance, "Ω") if resistance is not None else "Not recorded",
+            "unavailable": resistance is None,
+            "status": "",
+            "tooltip": (f"Scope: {resistance_scope}.\n" if resistance_scope else "") + GRADIENT_TOOLTIP,
+        },
+        {
+            "key": "inductance",
+            "name": "Series inductance",
+            "value": _with_unit(inductance, "H") if inductance is not None else "Not recorded",
+            "unavailable": inductance is None,
+            "status": "",
+            "tooltip": f"Scope: {inductance_scope}.\n" + GRADIENT_TOOLTIP,
+        },
+        {
+            "key": "error",
+            "name": error_name,
+            "value": f"{error:.3g} %" if error is not None else "Not recorded",
+            "unavailable": error is None,
+            "status": "",
+            "tooltip": error_tip,
+        },
+    ]
+    fringe = shield_fringe_reading(metadata)
+    if fringe is not None:
+        mark = {True: " ✓", False: " ✕"}.get(fringe["passed"], "")
+        limit = f" / {fringe['limit_T'] * 1e6:.4g} µT" if fringe["limit_T"] is not None else ""
+        samples = f" on {fringe['sample_count']:,} samples" if fringe["sample_count"] else ""
+        verdict = {True: "within", False: "over"}.get(fringe["passed"], "unverified against")
+        cards.append(
+            {
+                "key": "fringe",
+                "name": f"Shield fringe {fringe['measure']}",
+                "value": f"{fringe['value_T'] * 1e6:.4g} µT{limit}{mark}",
+                "unavailable": False,
+                "status": {True: "passed", False: "failed"}.get(fringe["passed"], ""),
+                "tooltip": (
+                    f"{fringe['source']} field on the shield suppression samples{samples}, "
+                    f"at the original contour current; {verdict} the {fringe['measure']} limit."
+                ),
+            }
+        )
+    return cards
+
+
+def gradient_context(cards):
+    """One line naming the conductor, current and target the gradient cards refer to."""
+    if not cards:
+        return ""
+    current = next(card for card in cards if card["key"] == "current")
+    source = next(card["source"] for card in cards if card["key"] == "efficiency")
+    target = current["name"].removeprefix("Current for ")
+    return f"{source} at {current['value']} for {target} · R and L with all parts driven in series"
+
+
+def _base_body(body_id):
+    return body_id.removeprefix("pipeline_") if isinstance(body_id, str) else ""
+
+
+def failed_check_reasons(metadata, issues, limit=3):
+    """Name the failed checks, most important first: shield field, independent checks, recorded failures.
+
+    Returns (reasons, remaining): up to ``limit`` short reasons and how many further kinds failed. A
+    failure on several bodies is one reason; reviewed and pipeline copies of the same body count once.
+    """
+    reasons = []
+    fringe = shield_fringe_reading(metadata)
+    if fringe is not None and fringe["passed"] is False:
+        reasons.append("Shield fringe field over limit")
+    for key, name in (
+        ("validation", "Independent field check"),
+        ("winding_validation", "Independent winding field check"),
+    ):
+        check = _mapping(metadata.get(key))
+        if check.get("available") is True and check.get("passed") is False:
+            reasons.append(name)
+    grouped = {}
+    for issue in issues:
+        if getattr(issue, "severity", "") == "error":
+            grouped.setdefault(issue.title, set()).add(_base_body(issue.body_id))
+    for title, bodies in grouped.items():
+        count = len(bodies - {""})
+        reasons.append(title + (f" ({count} bodies)" if count > 1 else ""))
+    return reasons[:limit], max(0, len(reasons) - limit)
+
+
+def failed_check_text(metadata, issues, limit=3):
+    """``"A · B · C · +2 more"``, or empty when nothing failed."""
+    reasons, remaining = failed_check_reasons(metadata, issues, limit)
+    if not reasons:
+        return ""
+    return " · ".join(reasons) + (f" · +{remaining} more" if remaining else "")

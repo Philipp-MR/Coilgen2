@@ -89,7 +89,7 @@ def test_browser_report_shows_percent_errors_units_and_separate_geometry_checks(
         assert groups[title]["counts"] == "2 failed"
         issue = next(item for item in groups[title]["items"] if item["title"] == "Conductor bend radius is too small")
         assert (
-            body in issue["details"] and "Measured 1.4468 mm" in issue["details"] and "Limit 6 mm" in issue["details"]
+            body in issue["details"] and "Measured 1.447 mm" in issue["details"] and "Needs ≥ 6 mm" in issue["details"]
         )
     (field,) = groups["Numerical and engineering constraints"]["items"]
     assert field["status"] == "Failed" and field["title"] == "Fabricated path field error (original current)"
@@ -175,4 +175,4 @@ def test_browser_result_cards_use_signed_original_current_and_report_separate_bo
     assert board["field_plot"] == ""  # the browser's routed-field plot uses a refit
     assert board["coil_cards"][0]["value"] == "Per body"
     resistances = {row["body"]: row["value"] for row in board["body_rows"] if row["name"] == "DC resistance"}
-    assert resistances == {"a": "0.1 Ω", "b": "0.2 Ω"}
+    assert resistances == {"a": "100 mΩ", "b": "200 mΩ"}

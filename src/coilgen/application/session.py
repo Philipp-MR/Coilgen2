@@ -20,6 +20,7 @@ from ..field_components import TARGET_COMPONENTS, normalized_b0_direction
 from ..target import _target_gradient_normalization_method
 from ..target_regions import TargetRegion
 from .assembly import ProjectAssembly
+from . import cylinder_pair as _pair
 from .execution import plan_execution
 from .preflight import check_preflight
 from .project import ProjectDocument
@@ -336,6 +337,18 @@ def _field(node, key, label, kind, accessors, **kwargs) -> SettingField:
     return SettingField(node, key, label, kind, get, set_, **kwargs)
 
 
+def _pair_fields(specs):
+    """Shielded-pair fields read and write owned meshes: the session fills and applies them."""
+
+    def unavailable(value, config, study):
+        raise ValueError("Apply cylinder pair dimensions through the settings form.")
+
+    return tuple(
+        _field(node, key, label, kind, (lambda config, study: None, unavailable), unit=unit, help=help_)
+        for key, node, label, kind, unit, help_ in specs
+    )
+
+
 SETTINGS_NODES = (
     ("geometry", "Geometry and mesh"),
     ("target", "Target field and B0"),
@@ -346,9 +359,19 @@ SETTINGS_NODES = (
     ("validation", "Validation settings"),
 )
 MESH_SOURCES = tuple(_SUPPORT_PREFIXES)
+# layout_terminal_strategy values, in menu order; labels live in submitted_design.
+TERMINAL_STRATEGIES = ("undefined", "pads", "wire_stubs", "waived")
 
 SETTINGS = (
-    _field("geometry", "coil_mesh_file", "Support surface", "choice", _plain("coil_mesh_file"), choices=MESH_SOURCES),
+    _field(
+        "geometry",
+        "coil_mesh_file",
+        "Support surface",
+        "choice",
+        _plain("coil_mesh_file"),
+        choices=(*MESH_SOURCES, _pair.SHIELDED_PAIR_SOURCE),
+    ),
+    *_pair_fields(_pair.PAIR_FIELDS),
     *(
         _field(
             "geometry",
@@ -461,6 +484,33 @@ SETTINGS = (
     ),
     _field("target", "b_0_direction", "B0 direction (x, y, z)", "vector", _vector("b_0_direction")),
     _field("target", "b_0_strength_T", "B0 strength", "number", _plain("b_0_strength_T", float), unit="T"),
+    *_pair_fields(_pair.SUPPRESSION_SHAPE_FIELDS),
+    _field(
+        "target",
+        "suppression_rms_limit_uT",
+        "External field RMS limit",
+        "number",
+        _scaled("suppression_field_rms_limit_T", 1e6),
+        unit="µT",
+        help="RMS field allowed on the suppression surface. Zero sets no limit.",
+    ),
+    _field(
+        "target",
+        "suppression_field_component",
+        "Limited field component",
+        "choice",
+        _plain("suppression_field_component"),
+        choices=_pair.SUPPRESSION_COMPONENTS,
+    ),
+    _field(
+        "target",
+        "suppression_surface_weighting",
+        "Sample weighting",
+        "choice",
+        _plain("suppression_surface_weighting"),
+        choices=_pair.SUPPRESSION_WEIGHTINGS,
+        help="By area weights each sample by its share of the surface, so dense mesh regions do not dominate.",
+    ),
     _field(
         "conductor",
         "conductor_width_mm",
@@ -500,7 +550,8 @@ SETTINGS = (
         "choice",
         _plain("conductor_path_reference"),
         choices=("centroid", "profile_origin"),
-        help="profile_origin sweeps about the profile's (0, 0) point, e.g. a litz wire centre in an omega holder.",
+        help="Profile origin (0, 0) sweeps about the profile's (0, 0) point, e.g. a litz-wire centre in an omega "
+        "holder. Profile centroid follows the cross-section's area centroid.",
     ),
     _field("conductor", "return_path_lift", "Lift crossing return paths", "bool", _inverted("skip_normal_shift")),
     _field(
@@ -513,7 +564,7 @@ SETTINGS = (
         "choice",
         _plain("support_body_mode"),
         choices=("off", "inside", "outside"),
-        help="Optional. inside or outside: the side of the support the solid wall grows to; the conductor "
+        help="Optional. Choose whether the solid wall grows inside or outside the winding; the conductor "
         "paths are cut into it as grooves when the design is computed, and the former is exported as its own STL.",
     ),
     _field(
@@ -640,9 +691,20 @@ SETTINGS = (
         "choice",
         _plain("interconnection_axis"),
         choices=("b0", "support_axis"),
-        help="support_axis routes cuts and returns along the bore; try it when the bore is perpendicular to B0.",
+        help="Along the support bore routes cuts and returns along the bore; try it when the bore is "
+        "perpendicular to B0, as in transverse-field or Halbach magnets.",
     ),
     _field("winding", "sweep", "Generate conductor solids", "bool", _inverted("skip_sweep")),
+    _field(
+        "winding",
+        "layout_terminal_strategy",
+        "Terminal handling",
+        "choice",
+        _plain("layout_terminal_strategy"),
+        choices=TERMINAL_STRATEGIES,
+        help="How the coil's feed ends are connected. CoilGen records this choice for review; it does not "
+        "build pads or stubs.",
+    ),
     _field(
         "validation",
         "validation_resolution",
@@ -891,10 +953,10 @@ class WorkbenchSession:
         if self.project is None:
             return ()
         config = self.project.config
-        source = str(config.coil_mesh_file if support_source is None else support_source)
+        source = str(_pair.displayed_support_source(self.project) if support_source is None else support_source)
         # Preserve the existing mT/m setter for scripted form callers. The
         # interactive amplitude field uses the expression's native units.
-        inactive = {"target_gradient_strength"}
+        inactive = {"target_gradient_strength", *_pair.hidden_keys(self.project, source)}
         if config.skip_postprocessing or config.contour_only_sweep_mode:
             inactive.update(("interconnection_axis", "return_path_lift", "normal_shift_mm"))
         if (config.support_body_mode if former_mode is None else former_mode) == "off":
@@ -947,14 +1009,19 @@ class WorkbenchSession:
     def settings_values(self, node: str | None = None, *, support_source=None, former_mode=None) -> dict:
         project = self._require_project()
         config = project.config
-        return {
+        values = {
             item.key: item.get(config, project.study)
             for item in self.settings_fields(node, support_source=support_source, former_mode=former_mode)
         }
+        return _pair.form_values(project, values)
 
-    def apply_settings(self, values: dict):
-        """Apply form values; raises ValueError (nothing changed) when invalid."""
-        project = self._require_project()
+    def apply_settings(self, values: dict, extra_changes=None):
+        """Apply form values; raises ValueError (nothing changed) when invalid.
+
+        ``extra_changes`` are config edits committed in the same revision, such
+        as clearing the shielding target after a confirmed support switch.
+        """
+        values, project = _pair.apply_pair_settings(self._require_project(), values)
         config = project.config
         geometry = {key: value for key, value in values.items() if key in _SUPPORT_FIELDS}
         target_region = {key: value for key, value in values.items() if key in _TARGET_REGION_FIELDS}
@@ -971,15 +1038,20 @@ class WorkbenchSession:
             (study_changes if item.study else config_changes).update(changes)
         if source != config.coil_mesh_file:
             config_changes["surface_is_cylinder_flag"] = source == "create cylinder mesh"
-        return self.apply_inputs(config_changes, study_changes)
+        config_changes.update(extra_changes or {})
+        return self.apply_inputs(config_changes, study_changes, base=project)
 
-    def apply_inputs(self, config_changes, study_changes=None):
-        """Commit a single revision, preserving deliberately distinct mechanical backgrounds."""
+    def apply_inputs(self, config_changes, study_changes=None, *, base=None):
+        """Commit a single revision, preserving deliberately distinct mechanical backgrounds.
+
+        ``base`` is a revision of the current project already prepared by the caller.
+        """
         project = self._require_project()
+        start = project if base is None else base
         changes = dict(config_changes)
         if "research_physics" not in changes and {"b_0_direction", "b_0_strength_T"}.intersection(changes):
-            changes.update(_linked_background_change(project.config, changes))
-        updated = project.update_inputs(changes, study_changes)
+            changes.update(_linked_background_change(start.config, changes))
+        updated = start.update_inputs(changes, study_changes)
         if updated is not project:
             self._replace_project(updated)
         return updated
@@ -987,6 +1059,15 @@ class WorkbenchSession:
     def apply_config(self, changes: dict):
         """Advanced settings: any CoilGenConfig field, validated by the engine."""
         return self.apply_inputs(changes)
+
+    def apply_fix(self, key: str):
+        """Apply the one-click fix of the current preflight tip for ``key``."""
+        project = self._require_project()
+        report = self.preflight(project.study["pipeline_stage"])
+        issue = next((item for item in report.issues if item.key == key and item.fix), None)
+        if issue is None:
+            raise ValueError("This tip has no automatic fix any more.")
+        return self.apply_inputs(dict(issue.fix))
 
     def apply_profile_preset(
         self, kind: str, *, segments: int = 16, equal_area: bool = False, diameter_mm: float | str | None = None
@@ -1037,15 +1118,23 @@ class WorkbenchSession:
         points = validate_conductor_profile(read_profile_table(path, length_scale_to_m=length_scale_to_m)).points_m
         self._replace_project(project.update_config({"cross_sectional_points": points}))
 
-    def import_support_mesh(self, path, *, length_scale_to_m: float = 1.0):
-        from ..geometry import read_stl, normalize_mesh
+    def import_support_mesh(self, path, *, length_scale_to_m: float = 1.0, part_roles=None):
+        """Own the scaled STL; ``part_roles`` gives one role per body in pipeline order.
+
+        Without ``part_roles`` a support of two or more bodies gets the default
+        roles (inner radius group primary, outer group active shield), so a
+        shielded pair never loses its primary/shield split on import.
+        """
+        from .support_import import default_part_roles, read_support_stl, support_bodies, with_part_roles
 
         project = self._require_project()
-        mesh = read_stl(Path(path))
-        mesh.vertices = mesh.vertices * float(length_scale_to_m)
-        mesh.metadata = {**(getattr(mesh, "metadata", None) or {}), "source_file": Path(path).name, "units": "SI"}
+        mesh = read_support_stl(path, length_scale_to_m)
+        if part_roles is None:
+            bodies = support_bodies(mesh)
+            part_roles = default_part_roles(bodies) if len(bodies) >= 2 else None
+        mesh = with_part_roles(mesh, part_roles)
         self._replace_project(
-            project.with_mesh(normalize_mesh(mesh), field="coil_mesh_file", changes={"surface_is_cylinder_flag": False})
+            project.with_mesh(mesh, field="coil_mesh_file", changes={"surface_is_cylinder_flag": False})
         )
 
     def preflight(self, pipeline_stage="evaluated"):

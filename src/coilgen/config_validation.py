@@ -20,6 +20,10 @@ class ConfigValidationMessage:
     field: str
     message: str
     suggestion: str = ""
+    # Optional one-click fix: config changes that resolve this message, and a
+    # short button label. Excluded from equality so existing comparisons hold.
+    fix: dict[str, Any] | None = field(default=None, compare=False)
+    fix_label: str = field(default="", compare=False)
 
     def format(self) -> str:
         text = f"[{self.level.upper()}] {self.field}: {self.message}"
@@ -65,8 +69,8 @@ def validate_config(config: CoilGenConfig, *, project_root: str | Path | None = 
     def error(field: str, message: str, suggestion: str = "") -> None:
         messages.append(ConfigValidationMessage("error", field, message, suggestion))
 
-    def warning(field: str, message: str, suggestion: str = "") -> None:
-        messages.append(ConfigValidationMessage("warning", field, message, suggestion))
+    def warning(field: str, message: str, suggestion: str = "", *, fix=None, fix_label: str = "") -> None:
+        messages.append(ConfigValidationMessage("warning", field, message, suggestion, fix, fix_label))
 
     _validate_mesh_settings(config, error, warning, project_root=project_root)
     _validate_target_settings(config, error, warning, project_root=project_root)
@@ -1922,6 +1926,16 @@ def _validate_optimization_settings(config: CoilGenConfig, error, warning) -> No
             )
 
 
+# Terminal handling is a recorded decision; CoilGen does not build pads or
+# stubs. "Handled outside CoilGen" (waived) is the one choice that needs no
+# further input, so it is the one-click fix.
+_TERMINAL_SUGGESTION = (
+    "Choose Terminal handling in Winding and routing: terminal pads, wire stubs, or handled outside CoilGen."
+)
+_TERMINAL_FIX = {"layout_terminal_strategy": "waived"}
+_TERMINAL_FIX_LABEL = "Mark as handled outside CoilGen"
+
+
 def _validate_routing_settings(config: CoilGenConfig, error, warning) -> None:
     _enum(error, "routing_circuit_scope", config.routing_circuit_scope, {"single", "per_part"})
     for name, label in (
@@ -2144,7 +2158,9 @@ def _validate_routing_settings(config: CoilGenConfig, error, warning) -> None:
         warning(
             "layout_terminal_strategy",
             "Connected-layout routing has no terminal handling strategy.",
-            "Set pads, wire_stubs, or waived when the result is intended for manufacturing review.",
+            _TERMINAL_SUGGESTION,
+            fix=dict(_TERMINAL_FIX),
+            fix_label=_TERMINAL_FIX_LABEL,
         )
     if config.skip_postprocessing:
         warning(
@@ -2372,7 +2388,9 @@ def _validate_manufacturing_settings(config: CoilGenConfig, error, warning) -> N
         warning(
             "layout_terminal_strategy",
             "Swept-body export is enabled without explicit terminal handling.",
-            "Define terminal pads/wire stubs or mark terminal handling as waived.",
+            _TERMINAL_SUGGESTION,
+            fix=dict(_TERMINAL_FIX),
+            fix_label=_TERMINAL_FIX_LABEL,
         )
     if bool(getattr(config, "contour_only_sweep_mode", False)) and bool(config.skip_sweep):
         warning(
@@ -2411,7 +2429,10 @@ def _validate_manufacturing_settings(config: CoilGenConfig, error, warning) -> N
         warning(
             "conductor_mounting_mode",
             "Manufacturing conductor centerline is offset from the electromagnetic wire path.",
-            "Use centered mode for exact field-evaluation consistency, or re-evaluate fields with the shifted manufacturing path.",
+            # No one-click fix: an outer/inner side is usually deliberate, and
+            # "Centered on support" would embed the conductor in the support.
+            "Choose 'Centered on support' for exact field consistency, or keep the offset and re-check the fields "
+            "with the shifted path.",
         )
 
 
