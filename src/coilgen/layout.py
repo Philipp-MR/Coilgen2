@@ -5673,6 +5673,70 @@ def _wire_segment_pair_allowed(
     return True
 
 
+def _wire_segment_pairs_allowed(
+    pairs: np.ndarray,
+    n_segments: int,
+    closed: bool,
+    starts: np.ndarray,
+    directions: np.ndarray,
+    local_exclusion: float,
+    segment_length_prefix: np.ndarray,
+) -> np.ndarray:
+    """``_wire_segment_pair_allowed`` for each row of ``pairs``, with the same arithmetic."""
+
+    seg_a = pairs[:, 0]
+    seg_b = pairs[:, 1]
+    allowed = seg_b > seg_a + 1
+    if closed:
+        allowed &= ~((seg_a == 0) & (seg_b == n_segments - 1))
+    if directions is None or not local_exclusion > 0.0 or not np.any(allowed):
+        return allowed
+    prefix = np.asarray(segment_length_prefix, dtype=float)
+    rows = np.flatnonzero(allowed)
+    a = seg_a[rows]
+    b = seg_b[rows]
+    gap = prefix[b] - prefix[a + 1]
+    if closed:
+        wrap = prefix[-1] - (prefix[b + 1] - prefix[a])
+        gap = np.where(wrap < gap, wrap, gap)  # min(gap, wrap) keeps gap on ties
+    direction_a = directions[a]
+    direction_b = directions[b]
+    norm_a = np.sqrt(direction_a[:, 0] * direction_a[:, 0] + direction_a[:, 1] * direction_a[:, 1] + direction_a[:, 2] * direction_a[:, 2])
+    norm_b = np.sqrt(direction_b[:, 0] * direction_b[:, 0] + direction_b[:, 1] * direction_b[:, 1] + direction_b[:, 2] * direction_b[:, 2])
+    norm_product = norm_a * norm_b
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cosine = (
+            direction_a[:, 0] * direction_b[:, 0] + direction_a[:, 1] * direction_b[:, 1] + direction_a[:, 2] * direction_b[:, 2]
+        ) / norm_product
+    continuation = ~(gap > float(local_exclusion)) & (norm_product > 1e-30) & (cosine > -0.9)
+    # A continuation pair is rescued only when its segment boxes touch; the rare
+    # touching pairs get the exact scalar test.
+    first = starts[a]
+    second = starts[b]
+    first_end = first + direction_a
+    second_end = second + direction_b
+    delta = np.maximum(
+        np.maximum(np.minimum(first, first_end) - np.maximum(second, second_end), np.minimum(second, second_end) - np.maximum(first, first_end)),
+        0.0,
+    )
+    box_distance_sq = delta[:, 0] * delta[:, 0] + delta[:, 1] * delta[:, 1] + delta[:, 2] * delta[:, 2]
+    separated = continuation & (box_distance_sq > 1e-18)
+    allowed[rows[separated]] = False
+    touching = continuation & ~separated
+    for row, pair_a, pair_b in zip(rows[touching], a[touching], b[touching]):
+        allowed[row] = _wire_segment_pair_allowed(
+            int(pair_a),
+            int(pair_b),
+            n_segments,
+            closed,
+            starts=starts,
+            directions=directions,
+            local_exclusion=local_exclusion,
+            segment_length_prefix=segment_length_prefix,
+        )
+    return allowed
+
+
 def _is_short_local_continuation(
     directions: np.ndarray,
     seg_a: int,
@@ -5732,44 +5796,28 @@ def _initial_wire_segment_distance_bound(
     best = math.inf
     segment_length_prefix = _wire_segment_length_prefix(directions)
     centers = starts + 0.5 * directions
-    candidate_pairs: list[tuple[int, int]] = []
-
-    def flush_candidates() -> None:
-        nonlocal best, candidate_pairs
-        if not candidate_pairs:
-            return
-        _seg_a, _seg_b, distance = _min_wire_segment_distance_pair_chunk(
-            starts,
-            directions,
-            np.asarray(candidate_pairs, dtype=np.int64),
-        )
-        if distance < best:
-            best = float(distance)
-        candidate_pairs = []
-
+    # Same candidate pairs, in the same order and the same 65536-pair chunks, as
+    # the former nested loops; the pair filter runs on arrays.
+    batches = []
     for axis in range(3):
         order = valid_indices[np.argsort(centers[valid_indices, axis], kind="mergesort")]
         window = min(16, max(len(order) - 1, 1))
-        for pos, seg_i in enumerate(order):
-            for next_pos in range(pos + 1, min(pos + 1 + window, len(order))):
-                seg_j = int(order[next_pos])
-                seg_a = int(min(seg_i, seg_j))
-                seg_b = int(max(seg_i, seg_j))
-                if not _wire_segment_pair_allowed(
-                    seg_a,
-                    seg_b,
-                    n_segments,
-                    closed,
-                    starts=starts,
-                    directions=directions,
-                    local_exclusion=local_exclusion,
-                    segment_length_prefix=segment_length_prefix,
-                ):
-                    continue
-                candidate_pairs.append((seg_a, seg_b))
-                if len(candidate_pairs) >= 65536:
-                    flush_candidates()
-    flush_candidates()
+        positions = np.arange(len(order))[:, None]
+        following = positions + np.arange(1, window + 1)[None, :]
+        inside = following < len(order)
+        seg_i = np.broadcast_to(order[:, None], following.shape)[inside]
+        seg_j = order[following[inside]]
+        batches.append(np.stack((np.minimum(seg_i, seg_j), np.maximum(seg_i, seg_j)), axis=1))
+    pairs = np.concatenate(batches).astype(np.int64, copy=False)
+    pairs = pairs[
+        _wire_segment_pairs_allowed(
+            pairs, n_segments, closed, starts, directions, local_exclusion, segment_length_prefix
+        )
+    ]
+    for begin in range(0, len(pairs), 65536):
+        _seg_a, _seg_b, distance = _min_wire_segment_distance_pair_chunk(starts, directions, pairs[begin : begin + 65536])
+        if distance < best:
+            best = float(distance)
     if math.isfinite(best):
         return best
     for seg_a in valid_indices:

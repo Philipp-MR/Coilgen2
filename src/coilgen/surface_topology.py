@@ -1160,7 +1160,9 @@ def _cut_side_geometry(
 ) -> tuple[float, np.ndarray]:
     local_polygon = np.asarray([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=float)
     clipped = _clip_local_triangle_by_cut(local_polygon, bary_a, bary_b, side)
-    face_area = face_areas(mesh)[face_ind]
+    # One row of face_areas(mesh): same operations, without computing every face.
+    tri = mesh.vertices[mesh.faces[face_ind : face_ind + 1]]
+    face_area = (0.5 * np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1))[0]
     local_area = abs(_polygon_area_2d(clipped))
     area = float(face_area * local_area / 0.5) if len(clipped) >= 3 else 0.0
     centroid_local = _polygon_centroid_2d(clipped) if len(clipped) >= 3 else np.array([1.0 / 3.0, 1.0 / 3.0])

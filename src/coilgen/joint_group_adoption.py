@@ -281,6 +281,43 @@ def _work_budget_reason(reason):
     )
 
 
+_BEND_RADIUS_TRANSITION_REASONS = frozenset({"insufficient_bend_radius", "insufficient_lifted_bend_radius"})
+
+
+def _bend_radius_blocked_first_stage(diagnostics):
+    """Return fail-fast evidence when the cheap first shaping stage is bend-radius blocked.
+
+    Progressive search only. The first stage must have shaped no candidate, and
+    every attempt must have stopped at an unsupported transition whose rejected
+    curves include a bend-radius violation. In that state the conductor cannot
+    turn between neighbouring windings at the configured spacing, and the
+    later port relocation / wider curve stage has not produced an adoptable
+    route in the benchmark templates. This is a work heuristic, not a proof of
+    infeasibility; ``joint_group_routing_search_mode="thorough"`` keeps the
+    complete bounded search.
+    """
+    stages = diagnostics.get("search_stages") or ()
+    if not stages or stages[0].get("level") != 0 or stages[0].get("shaped_candidates", 0):
+        return None
+    attempts = diagnostics.get("attempts") or ()
+    if not attempts:
+        return None
+    for attempt in attempts:
+        if list(attempt.get("reasons") or ()) != ["no_supported_transition"]:
+            return None
+        unsupported = (attempt.get("shaping") or {}).get("unsupported_transition_reasons") or ()
+        if not _BEND_RADIUS_TRANSITION_REASONS.intersection(unsupported):
+            return None
+    return {
+        "applied": True,
+        "rule": "first_stage_all_transitions_bend_radius_blocked",
+        "first_stage_attempt_count": len(attempts),
+        "skipped": "failure_directed_port_search_and_wider_curve_stage",
+        "full_search_option": "joint_group_routing_search_mode='thorough'",
+        "infeasibility_proven": False,
+    }
+
+
 def _candidate_fingerprint(context_name, candidate):
     """Identify identical validation inputs within an unchanged cut context."""
     return hashlib.sha256(
@@ -780,6 +817,11 @@ def improve_group_routes(parts, config, target_field):
                     or field_candidate_count >= limits.maximum_field_candidates
                 ):
                     break
+                if level and progressive:
+                    fail_fast = _bend_radius_blocked_first_stage(diagnostics)
+                    if fail_fast is not None:
+                        diagnostics["fail_fast"] = fail_fast
+                        break
                 if level:
                     # A local failed transition identifies a useful port search
                     # direction. Keep incumbent geometry immutable and propose
@@ -1286,6 +1328,8 @@ def improve_group_routes(parts, config, target_field):
         diagnostics["search_failure_scope"] = (
             "work_budget"
             if work_reasons
+            else "first_stage_bend_radius_fail_fast"
+            if diagnostics.get("fail_fast")
             else "bounded_proposal_coverage"
             if diagnostics.get("shape_search_budget_exhausted")
             else "physical_candidate_budget"

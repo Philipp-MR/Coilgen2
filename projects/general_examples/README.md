@@ -63,3 +63,14 @@ when `threadpoolctl` is available.
 - `benchmark_mesh_vertex_scaling.py`
 - `benchmark_active_shield_scaling.py`
 - `benchmark_sweep_case_cache_scaling.py`
+
+## Per-Step Timing
+
+`benchmark_stage_timing.py` runs GUI templates exactly as the workbench does and
+times every pipeline step and sub-step from the progress events. By default it
+runs `cylinder`, `biplanar`, `halbach_gy`, `shielded_gy` and `shim_x2_y2` with one
+thread; `--templates`, `--threads` and `--output` change that. It writes
+`stage_timing.csv`, `substep_timing.csv`, `totals.csv`, `summary.md`, the raw
+events and each run's outputs below `outputs/stage_timing/` (or `--output`).
+Comparing two runs' `scientific_result.npz` files checks that a speed change
+left the results unchanged.

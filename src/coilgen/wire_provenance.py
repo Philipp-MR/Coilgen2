@@ -183,37 +183,122 @@ def _indexed_segment_matches(
     task = ProgressReporter(label="Path provenance").task(
         "indexed target intervals", len(midpoints), indeterminate=True
     )
-    for target_index, seed in enumerate(seeds):
-        task.update(target_index)
-        target_slice = slice(target_index, target_index + 1)
-        seed_slice = slice(seed, seed + 1)
-        score = float(
-            _segment_match_scores(
-                midpoints[target_slice],
-                directions[target_slice],
-                target_length_sq[target_slice],
-                starts[seed_slice],
-                vectors[seed_slice],
-                length_sq[seed_slice],
-                unit_vectors[seed_slice],
-                source_scale_sq,
-            )[0, 0]
+    # All targets at once, chunked to bound memory. Pair scores repeat the
+    # per-target arithmetic element by element; ties keep the first source in
+    # sorted order, as np.argmin over the sorted ball did.
+    chunk = 2048
+    for begin in range(0, len(midpoints), chunk):
+        task.update(begin)
+        rows = np.arange(begin, min(begin + chunk, len(midpoints)))
+        seed = seeds[rows]
+        seed_scores = _segment_match_pair_scores(
+            midpoints[rows],
+            directions[rows],
+            target_length_sq[rows],
+            starts[seed],
+            vectors[seed],
+            length_sq[seed],
+            unit_vectors[seed],
+            source_scale_sq,
         )
-        radius = np.nextafter(np.sqrt(score) + half_length + rounding_guard, np.inf)
-        indices = np.asarray(tree.query_ball_point(midpoints[target_index], radius, return_sorted=True), dtype=np.int64)
-        scores = _segment_match_scores(
+        radius = np.nextafter(np.sqrt(seed_scores) + half_length + rounding_guard, np.inf)
+        balls = tree.query_ball_point(midpoints[rows], radius, return_sorted=True)
+        counts = np.fromiter((len(ball) for ball in balls), dtype=np.int64, count=len(balls))
+        sources = np.fromiter((index for ball in balls for index in ball), dtype=np.int64, count=int(counts.sum()))
+        targets = np.repeat(rows, counts)
+        scores = _segment_match_pair_scores(
+            midpoints[targets],
+            directions[targets],
+            target_length_sq[targets],
+            starts[sources],
+            vectors[sources],
+            length_sq[sources],
+            unit_vectors[sources],
+            source_scale_sq,
+        )
+        # First pair at each row's minimum. A NaN in a row makes its minimum NaN,
+        # nothing equals it, and the row falls back to the per-target search
+        # (whose argmin returns the first NaN). Empty rows fall back too.
+        first = np.full(len(rows), -1, dtype=np.int64)
+        nonempty = np.flatnonzero(counts > 0)
+        if len(nonempty):
+            offsets = np.concatenate(([0], np.cumsum(counts)[:-1]))[nonempty]
+            row_minimum = np.full(len(rows), np.nan)
+            row_minimum[nonempty] = np.minimum.reduceat(scores, offsets)
+            owner = np.repeat(np.arange(len(rows)), counts)
+            hit = np.flatnonzero(scores == row_minimum[owner])
+            hit_rows, first_hit = np.unique(owner[hit], return_index=True)
+            first[hit_rows] = hit[first_hit]
+        usable = first >= 0
+        nearest[rows[usable]] = sources[first[usable]]
+        for local in np.flatnonzero(~usable):
+            nearest[rows[local]] = _indexed_segment_match_one(
+                int(rows[local]), int(seeds[rows[local]]), tree, midpoints, directions, target_length_sq,
+                starts, vectors, length_sq, unit_vectors, source_scale_sq, half_length, rounding_guard,
+            )
+    task.done()
+    return nearest
+
+
+def _segment_match_pair_scores(
+    midpoints: np.ndarray,
+    directions: np.ndarray,
+    target_length_sq: np.ndarray,
+    starts: np.ndarray,
+    vectors: np.ndarray,
+    length_sq: np.ndarray,
+    unit_vectors: np.ndarray,
+    source_scale_sq: float,
+) -> np.ndarray:
+    """``_segment_match_scores`` for matched rows (target i against source i).
+
+    Same expressions and einsum contractions, which give the same value per
+    element in either layout.
+    """
+
+    relative = midpoints - starts
+    parameters = np.einsum("pi,pi->p", relative, vectors) / length_sq
+    parameters = np.clip(parameters, 0.0, 1.0)
+    closest = starts + parameters[:, None] * vectors
+    distance_sq = np.einsum("pi,pi->p", midpoints - closest, midpoints - closest)
+    alignment = np.abs(np.einsum("pi,pi->p", directions, unit_vectors))
+    local_scale_sq = np.maximum(target_length_sq, source_scale_sq)
+    return distance_sq + 1e-4 * (1.0 - alignment) ** 2 * local_scale_sq
+
+
+def _indexed_segment_match_one(
+    target_index, seed, tree, midpoints, directions, target_length_sq,
+    starts, vectors, length_sq, unit_vectors, source_scale_sq, half_length, rounding_guard,
+) -> int:
+    """The former per-target search; used for rows with NaN scores or an empty ball."""
+
+    target_slice = slice(target_index, target_index + 1)
+    seed_slice = slice(seed, seed + 1)
+    score = float(
+        _segment_match_scores(
             midpoints[target_slice],
             directions[target_slice],
             target_length_sq[target_slice],
-            starts[indices],
-            vectors[indices],
-            length_sq[indices],
-            unit_vectors[indices],
+            starts[seed_slice],
+            vectors[seed_slice],
+            length_sq[seed_slice],
+            unit_vectors[seed_slice],
             source_scale_sq,
-        )
-        nearest[target_index] = indices[int(np.argmin(scores[0]))]
-    task.done()
-    return nearest
+        )[0, 0]
+    )
+    radius = np.nextafter(np.sqrt(score) + half_length + rounding_guard, np.inf)
+    indices = np.asarray(tree.query_ball_point(midpoints[target_index], radius, return_sorted=True), dtype=np.int64)
+    scores = _segment_match_scores(
+        midpoints[target_slice],
+        directions[target_slice],
+        target_length_sq[target_slice],
+        starts[indices],
+        vectors[indices],
+        length_sq[indices],
+        unit_vectors[indices],
+        source_scale_sq,
+    )
+    return int(indices[int(np.argmin(scores[0]))])
 
 
 def nearest_source_segment_indices(

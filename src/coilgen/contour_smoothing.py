@@ -1108,41 +1108,115 @@ def _periodic_linear_interpolation(
 
 
 def _map_uv_points(chart: _SurfaceChart, points_uv: np.ndarray) -> np.ndarray | None:
-    mapped = []
+    points_uv = np.asarray(points_uv, dtype=float)
+    if len(points_uv) == 0:
+        return np.asarray([], dtype=float)
+    cached = _UvBarycentricCache.build(chart, points_uv)
+    faces = np.empty(len(points_uv), dtype=np.int64)
+    weights = np.empty((len(points_uv), 3), dtype=float)
     hint: int | None = None
     for point_index, point in enumerate(points_uv):
         if point_index % 512 == 0:
             _report_smoothing_activity("mapping fitted contour to surface")
-        located = _locate_uv_point(chart, point, hint)
+        located = _locate_uv_point(
+            chart, point, hint, None if cached is None else cached.for_point(point_index, point)
+        )
         if located is None:
             return None
         hint, barycentric = located
-        global_face = int(chart.global_faces[hint])
-        mapped.append(barycentric @ chart.mesh.vertices[chart.mesh.faces[global_face]])
-    result = np.asarray(mapped, dtype=float)
+        faces[point_index] = int(chart.global_faces[hint])
+        weights[point_index] = barycentric
+    corners = chart.mesh.vertices[chart.mesh.faces[faces]]
+    # Same summation order as ``barycentric @ corners`` per point.
+    result = weights[:, 0, None] * corners[:, 0] + weights[:, 1, None] * corners[:, 1] + weights[:, 2, None] * corners[:, 2]
     if len(result):
         result[-1] = result[0]
     return result
+
+
+class _UvBarycentricCache:
+    """Barycentric coordinates of each point in its nearby chart triangles, solved in one batch.
+
+    ``np.linalg.det`` and ``np.linalg.solve`` run the same LAPACK routine on every matrix of
+    a stack, so each cached value equals ``_barycentric_2d`` exactly. Triangles that are not
+    cached are solved on demand with ``_barycentric_2d``.
+    """
+
+    _NEIGHBOURS = 6
+
+    def __init__(self, chart: _SurfaceChart, points_uv: np.ndarray, values: dict[int, np.ndarray]):
+        self._triangles = chart.triangles_uv
+        self._face_count = len(chart.triangles_uv)
+        self._values = values
+
+    @classmethod
+    def build(cls, chart: _SurfaceChart, points_uv: np.ndarray) -> "_UvBarycentricCache | None":
+        triangles = np.asarray(chart.triangles_uv, dtype=float)
+        if len(points_uv) < 2 or len(triangles) == 0 or not np.all(np.isfinite(points_uv)):
+            return None
+        try:
+            from scipy.spatial import cKDTree
+        except ImportError:
+            return None
+        k = min(cls._NEIGHBOURS, len(triangles))
+        _distances, nearest = cKDTree(np.mean(triangles, axis=1)).query(points_uv, k=k)
+        nearest = np.asarray(nearest, dtype=np.int64).reshape(len(points_uv), k)
+        # Point i is usually located in the triangle chosen for point i - 1 or a neighbour of it.
+        previous = np.vstack((nearest[:1], nearest[:-1]))
+        face_count = len(triangles)
+        keys = np.unique((np.arange(len(points_uv))[:, None] * face_count + np.hstack((nearest, previous))).ravel())
+        point_index = keys // face_count
+        face_index = keys % face_count
+        triangle = triangles[face_index]
+        matrices = np.stack((triangle[:, 1] - triangle[:, 0], triangle[:, 2] - triangle[:, 0]), axis=2)
+        determinants = np.linalg.det(matrices)
+        solvable = np.abs(determinants) > 1.0e-15
+        values = np.full((len(keys), 3), -np.inf, dtype=float)
+        try:
+            solution = np.linalg.solve(
+                matrices[solvable], (points_uv[point_index[solvable]] - triangle[solvable, 0])[..., None]
+            )[..., 0]
+        except np.linalg.LinAlgError:
+            return None
+        values[solvable] = np.stack((1.0 - solution[:, 0] - solution[:, 1], solution[:, 0], solution[:, 1]), axis=1)
+        return cls(chart, points_uv, dict(zip(keys.tolist(), values)))
+
+    def for_point(self, point_index: int, point: np.ndarray):
+        base = point_index * self._face_count
+        values = self._values
+        triangles = self._triangles
+
+        def barycentric(face: int) -> np.ndarray:
+            cached = values.get(base + face)
+            return cached if cached is not None else _barycentric_2d(triangles[face], point)
+
+        return barycentric
 
 
 def _locate_uv_point(
     chart: _SurfaceChart,
     point: np.ndarray,
     hint: int | None = None,
+    barycentric_in=None,
 ) -> tuple[int, np.ndarray] | None:
+    if barycentric_in is None:
+
+        def barycentric_in(face: int) -> np.ndarray:
+            return _barycentric_2d(chart.triangles_uv[face], point)
+
     if hint is not None:
-        barycentric = _barycentric_2d(chart.triangles_uv[int(hint)], point)
+        barycentric = barycentric_in(int(hint))
         if np.min(barycentric) >= -1.0e-9:
             return int(hint), _normalise_barycentric(barycentric)
         for neighbor in set(chart.neighbors_across_edge[int(hint)].values()):
-            barycentric = _barycentric_2d(chart.triangles_uv[int(neighbor)], point)
+            barycentric = barycentric_in(int(neighbor))
             if np.min(barycentric) >= -1.0e-9:
                 return int(neighbor), _normalise_barycentric(barycentric)
     best_face = -1
     best_barycentric: np.ndarray | None = None
     best_violation = float("inf")
-    for face_index, triangle in enumerate(chart.triangles_uv):
-        barycentric = _barycentric_2d(triangle, point)
+    for face_index in range(len(chart.triangles_uv)):
+        barycentric = barycentric_in(face_index)
         violation = max(0.0, -float(np.min(barycentric)))
         if violation < best_violation:
             best_face = int(face_index)

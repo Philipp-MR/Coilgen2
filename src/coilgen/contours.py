@@ -2647,7 +2647,117 @@ def _part_min_centerline_distance(contours: list[ContourLine]) -> float:
     return minimum
 
 
+# Below this many segment pairs the full grid is cheaper than building k-d trees.
+_PAIR_DISTANCE_GRID_LIMIT = 20_000
+
+
 def _contour_pair_min_distance(points_a: np.ndarray, points_b: np.ndarray) -> float:
+    """Smallest segment-to-segment distance between two polylines.
+
+    Large inputs evaluate only the segment pairs that can hold the minimum, using the
+    same per-pair arithmetic as the full grid, so the returned value is identical to
+    ``_contour_pair_min_distance_grid``.
+    """
+
+    pts_a = np.asarray(points_a, dtype=float)
+    pts_b = np.asarray(points_b, dtype=float)
+    if len(pts_a) < 2 or len(pts_b) < 2:
+        return float("inf")
+    if (len(pts_a) - 1) * (len(pts_b) - 1) <= _PAIR_DISTANCE_GRID_LIMIT:
+        return _contour_pair_min_distance_grid(pts_a, pts_b)
+    if not (np.all(np.isfinite(pts_a)) and np.all(np.isfinite(pts_b))):
+        return _contour_pair_min_distance_grid(pts_a, pts_b)
+    try:
+        from scipy.spatial import cKDTree
+    except ImportError:
+        return _contour_pair_min_distance_grid(pts_a, pts_b)
+    starts_a = pts_a[:-1]
+    directions_a = np.diff(pts_a, axis=0)
+    starts_b = pts_b[:-1]
+    directions_b = np.diff(pts_b, axis=0)
+    middles_a = starts_a + 0.5 * directions_a
+    middles_b = starts_b + 0.5 * directions_b
+    halves_a = 0.5 * np.linalg.norm(directions_a, axis=1)
+    halves_b = 0.5 * np.linalg.norm(directions_b, axis=1)
+    tree_b = cKDTree(middles_b)
+    # Upper bound: each segment of A against the segment of B with the nearest midpoint.
+    _distances, nearest = tree_b.query(middles_a, k=1)
+    rows = np.arange(len(starts_a))
+    upper = float(np.min(_segment_pair_distances(starts_a, directions_a, starts_b[nearest], directions_b[nearest])))
+    # A pair whose midpoints are farther apart than upper + both half-lengths cannot be
+    # closer than ``upper``; the margin covers rounding in that bound.
+    scale = float(max(np.max(np.abs(pts_a)), np.max(np.abs(pts_b)), 1.0))
+    reach = upper + 1.0e-9 * scale
+    max_half_b = float(np.max(halves_b))
+    neighbours = tree_b.query_ball_point(middles_a, r=reach + halves_a + max_half_b)
+    counts = np.fromiter((len(found) for found in neighbours), dtype=np.int64, count=len(neighbours))
+    if not np.any(counts):
+        return upper
+    pair_a = np.repeat(rows, counts)
+    pair_b = np.fromiter((index for found in neighbours for index in found), dtype=np.int64, count=int(counts.sum()))
+    gap = np.linalg.norm(middles_a[pair_a] - middles_b[pair_b], axis=1) - halves_a[pair_a] - halves_b[pair_b]
+    keep = gap <= reach
+    pair_a = pair_a[keep]
+    pair_b = pair_b[keep]
+    if len(pair_a) == 0:
+        return upper
+    distances = _segment_pair_distances(starts_a[pair_a], directions_a[pair_a], starts_b[pair_b], directions_b[pair_b])
+    return min(upper, float(np.min(distances)))
+
+
+def _segment_pair_distances(
+    starts_a: np.ndarray,
+    directions_a: np.ndarray,
+    starts_b: np.ndarray,
+    directions_b: np.ndarray,
+) -> np.ndarray:
+    """Distances between matched segment pairs (row i of A with row i of B).
+
+    Repeats ``_contour_pair_min_distance_grid`` element by element: the same einsum
+    contractions, which give the same value per element in either layout.
+    """
+
+    eps = 1e-30
+    u = directions_a
+    v = directions_b
+    w = starts_a - starts_b
+    a = np.einsum("ij,ij->i", u, u)
+    c = np.einsum("ij,ij->i", v, v)
+    a_safe = np.where(a > eps, a, 1.0)
+    c_safe = np.where(c > eps, c, 1.0)
+    b = np.einsum("ik,ik->i", u, v)
+    d = np.einsum("ik,ik->i", u, w)
+    e = np.einsum("ik,ik->i", v, w)
+    denom = a_safe * c_safe - b * b
+    with np.errstate(divide="ignore", invalid="ignore"):
+        s = np.where(np.abs(denom) > eps, (b * e - c_safe * d) / denom, 0.0)
+    s = np.clip(s, 0.0, 1.0)
+    t = (b * s + e) / c_safe
+    t_negative = t < 0.0
+    t = np.where(t_negative, 0.0, t)
+    s = np.where(t_negative, np.clip(-d / a_safe, 0.0, 1.0), s)
+    t_positive = t > 1.0
+    t = np.where(t_positive, 1.0, t)
+    s = np.where(t_positive, np.clip((b - d) / a_safe, 0.0, 1.0), s)
+    closest_delta = w + s[:, None] * u - t[:, None] * v
+    distances = np.linalg.norm(closest_delta, axis=1)
+    point_point = (a <= eps) & (c <= eps)
+    if np.any(point_point):
+        distances = np.where(point_point, np.linalg.norm(w, axis=1), distances)
+    point_segment_a = (a <= eps) & (c > eps)
+    if np.any(point_segment_a):
+        point_t = np.clip(e / c_safe, 0.0, 1.0)
+        distances = np.where(point_segment_a, np.linalg.norm(w - point_t[:, None] * v, axis=1), distances)
+    point_segment_b = (a > eps) & (c <= eps)
+    if np.any(point_segment_b):
+        point_s = np.clip(-d / a_safe, 0.0, 1.0)
+        distances = np.where(point_segment_b, np.linalg.norm(w + point_s[:, None] * u, axis=1), distances)
+    return distances
+
+
+def _contour_pair_min_distance_grid(points_a: np.ndarray, points_b: np.ndarray) -> float:
+    """All segment pairs, chunked; the reference for ``_contour_pair_min_distance``."""
+
     pts_a = np.asarray(points_a, dtype=float)
     pts_b = np.asarray(points_b, dtype=float)
     if len(pts_a) < 2 or len(pts_b) < 2:

@@ -2783,25 +2783,20 @@ def _polyline_circumradii(
     if len(points) < 3:
         radii = np.zeros(0, dtype=float)
         return (radii, np.zeros(0, dtype=np.int64)) if return_indices else radii
-    radii: list[float] = []
-    retained_indices: list[int] = []
-    indices = range(len(points)) if closed else range(1, len(points) - 1)
-    for index in indices:
-        previous = points[(index - 1) % len(points)]
-        current = points[index]
-        following = points[(index + 1) % len(points)]
-        if _turn_angle_deg(previous, current, following) <= minimum_turn_angle_deg:
-            continue
-        first = float(np.linalg.norm(current - previous))
-        second = float(np.linalg.norm(following - current))
-        third = float(np.linalg.norm(following - previous))
-        area_twice = float(np.linalg.norm(np.cross(current - previous, following - previous)))
-        if area_twice <= 1e-30:
-            continue
-        radii.append(first * second * third / (2.0 * area_twice))
-        retained_indices.append(index)
-    values = np.asarray(radii, dtype=float)
-    return (values, np.asarray(retained_indices, dtype=np.int64)) if return_indices else values
+    points = np.asarray(points, dtype=float)
+    previous, current, following, indices = _polyline_vertex_triples(points, closed=closed)
+    # Same arithmetic as the former per-vertex loop, evaluated for all vertices at once.
+    angles = _turn_angles_deg_batch(previous, current, following)
+    first = np.sqrt(_dot3_rows(current - previous, current - previous))
+    second = np.sqrt(_dot3_rows(following - current, following - current))
+    third = np.sqrt(_dot3_rows(following - previous, following - previous))
+    normal = np.cross(current - previous, following - previous)
+    area_twice = np.sqrt(_dot3_rows(normal, normal))
+    keep = ~(angles <= minimum_turn_angle_deg) & ~(area_twice <= 1e-30)
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        values = (first * second * third / (2.0 * area_twice))[keep]
+    retained_indices = indices[keep]
+    return (values, retained_indices) if return_indices else values
 
 
 def _surface_adaptive_resample(
@@ -6169,6 +6164,8 @@ class _SurfaceProjector:
         )
         vertex_candidates = None
         centroid_candidates = None
+        # One point is faster through the scalar loop below than through the batch.
+        single_point = False
         if self.vertex_tree is not None and len(points) > 1:
             vertex_count = min(8, len(self.vertices))
             face_count = min(8, len(self.faces))
@@ -6178,6 +6175,18 @@ class _SurfaceProjector:
                 vertex_candidates = np.asarray(vertex_candidates)[:, None]
             if face_count == 1:
                 centroid_candidates = np.asarray(centroid_candidates)[:, None]
+        if vertex_candidates is not None:
+            self._project_batch(
+                points,
+                vertex_candidates,
+                centroid_candidates,
+                (projected, normals, closest_face_normals, closest_face_indices, closest_barycentric),
+                task,
+                single_point_order=single_point,
+            )
+            if task is not None:
+                task.done()
+            return projected, normals, closest_face_normals, closest_face_indices, closest_barycentric
         for point_index, point in enumerate(points):
             if task is not None:
                 task.update(point_index)
@@ -6201,6 +6210,108 @@ class _SurfaceProjector:
         if task is not None:
             task.done()
         return projected, normals, closest_face_normals, closest_face_indices, closest_barycentric
+
+    # Points per vectorized block; small blocks stay in cache and measured fastest.
+    _BATCH_CHUNK = 256
+
+    def _vertex_face_table(self) -> np.ndarray:
+        table = getattr(self, "_vertex_face_table_cache", None)
+        if table is None:
+            width = max((len(faces) for faces in self.vertex_faces), default=0)
+            table = np.full((len(self.vertex_faces), max(width, 1)), -1, dtype=np.int64)
+            for vertex_index, faces in enumerate(self.vertex_faces):
+                table[vertex_index, : len(faces)] = faces
+            self._vertex_face_table_cache = table
+        return table
+
+    def _project_batch(
+        self, points, vertex_candidates, centroid_candidates, outputs, task, *, single_point_order=False
+    ) -> None:
+        """Vectorized form of the per-point loop in ``project_with_details``.
+
+        Every arithmetic step repeats the scalar code in the same order (dot products as
+        explicit ``x0*y0 + x1*y1 + x2*y2``, which equals ``np.dot`` bit for bit), so the
+        results are identical. The scalar loop keeps the first face, in its candidate
+        set's iteration order, that reaches the smallest distance; tied rows rebuild that
+        set and pick the same face from the batched distances. Rows without a finite
+        distance use the scalar code. ``single_point_order`` builds the set the way the
+        one-point path (``_closest_face``) did.
+        """
+
+        projected, normals, closest_face_normals, closest_face_indices, closest_barycentric = outputs
+        vertex_candidates = np.asarray(vertex_candidates, dtype=np.int64)
+        centroid_candidates = np.asarray(centroid_candidates, dtype=np.int64)
+        table = self._vertex_face_table()
+        count = len(points)
+        for start in range(0, count, self._BATCH_CHUNK):
+            stop = min(start + self._BATCH_CHUNK, count)
+            rows = stop - start
+            candidates = np.concatenate(
+                (centroid_candidates[start:stop], table[vertex_candidates[start:stop]].reshape(rows, -1)),
+                axis=1,
+            )
+            candidates.sort(axis=1)
+            valid = candidates >= 0
+            valid[:, 1:] &= candidates[:, 1:] != candidates[:, :-1]
+            safe = np.where(valid, candidates, 0)
+            closest, barycentric, distance_sq = _closest_points_batch(points[start:stop], self.triangles[safe])
+            distance_sq = np.where(valid, distance_sq, np.inf)
+            best = np.argmin(distance_sq, axis=1)
+            row_index = np.arange(rows)
+            best_distance = distance_sq[row_index, best]
+            scalar_rows = ~np.isfinite(best_distance) | (np.count_nonzero(distance_sq == best_distance[:, None], axis=1) > 1)
+            face_index = candidates[row_index, best]
+            point_closest = closest[row_index, best]
+            point_barycentric = barycentric[row_index, best]
+            for local in np.flatnonzero(scalar_rows):
+                point_index = start + int(local)
+                if single_point_order:
+                    candidate_faces: set[int] = set()
+                    for vertex_index in vertex_candidates[point_index]:
+                        candidate_faces.update(self.vertex_faces[int(vertex_index)])
+                    candidate_faces.update(int(index) for index in centroid_candidates[point_index])
+                else:
+                    candidate_faces = {int(index) for index in centroid_candidates[point_index]}
+                    for vertex_index in vertex_candidates[point_index]:
+                        candidate_faces.update(self.vertex_faces[int(vertex_index)])
+                if not np.isfinite(best_distance[local]):
+                    face, point, weights = self._closest_face_from_candidates(points[point_index], candidate_faces)
+                    face_index[local] = face
+                    point_closest[local] = point
+                    point_barycentric[local] = weights
+                    continue
+                column = {int(face): col for col, face in enumerate(candidates[local]) if valid[local, col]}
+                for face in candidate_faces:
+                    col = column[face]
+                    if distance_sq[local, col] == best_distance[local]:
+                        face_index[local] = face
+                        point_closest[local] = closest[local, col]
+                        point_barycentric[local] = barycentric[local, col]
+                        break
+            corner_normals = self.vertex_normals[self.faces[face_index]]
+            normal = (
+                point_barycentric[:, 0, None] * corner_normals[:, 0]
+                + point_barycentric[:, 1, None] * corner_normals[:, 1]
+                + point_barycentric[:, 2, None] * corner_normals[:, 2]
+            )
+            normal_length = np.sqrt(normal[:, 0] * normal[:, 0] + normal[:, 1] * normal[:, 1] + normal[:, 2] * normal[:, 2])
+            degenerate = normal_length <= 1e-15
+            if np.any(degenerate):
+                fallback = self.face_normals[face_index[degenerate]]
+                normal[degenerate] = fallback
+                normal_length[degenerate] = np.sqrt(
+                    fallback[:, 0] * fallback[:, 0] + fallback[:, 1] * fallback[:, 1] + fallback[:, 2] * fallback[:, 2]
+                )
+            usable = normal_length > 1e-15
+            unit = np.tile(np.array([0.0, 0.0, 1.0]), (rows, 1))
+            unit[usable] = normal[usable] / normal_length[usable, None]
+            projected[start:stop] = point_closest
+            normals[start:stop] = unit
+            closest_face_normals[start:stop] = self.face_normals[face_index]
+            closest_face_indices[start:stop] = face_index
+            closest_barycentric[start:stop] = point_barycentric
+            if task is not None:
+                task.update(stop)
 
     def _closest_face(self, point: np.ndarray) -> tuple[int, np.ndarray, np.ndarray]:
         candidate_faces: set[int] = set()
@@ -6290,6 +6401,75 @@ def _closest_point_and_barycentric(point: np.ndarray, triangle: np.ndarray) -> t
     v = vb * inverse
     w = vc * inverse
     return a + ab * v + ac * w, np.array([1.0 - v - w, v, w])
+
+
+def _dot3(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    # Same summation order as np.dot on 3-vectors, so the result matches bit for bit.
+    return left[..., 0] * right[..., 0] + left[..., 1] * right[..., 1] + left[..., 2] * right[..., 2]
+
+
+def _closest_points_batch(points: np.ndarray, triangles: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """``_closest_point_and_barycentric`` for each point (rows) against its candidate triangles (columns).
+
+    ``points`` is ``(rows, 3)`` and ``triangles`` is ``(rows, candidates, 3, 3)``. Returns the
+    closest points, barycentric weights and squared distances, computed with the same
+    operations and region order as the scalar function.
+    """
+
+    point = points[:, None, :]
+    a = triangles[:, :, 0]
+    b = triangles[:, :, 1]
+    c = triangles[:, :, 2]
+    ab = b - a
+    ac = c - a
+    ap = point - a
+    d1 = _dot3(ab, ap)
+    d2 = _dot3(ac, ap)
+    bp = point - b
+    d3 = _dot3(ab, bp)
+    d4 = _dot3(ac, bp)
+    vc = d1 * d4 - d3 * d2
+    cp = point - c
+    d5 = _dot3(ab, cp)
+    d6 = _dot3(ac, cp)
+    vb = d5 * d2 - d1 * d6
+    va = d3 * d6 - d5 * d4
+    region_a = (d1 <= 0.0) & (d2 <= 0.0)
+    region_b = (d3 >= 0.0) & (d4 <= d3)
+    region_ab = (vc <= 0.0) & (d1 >= 0.0) & (d3 <= 0.0)
+    region_c = (d6 >= 0.0) & (d5 <= d6)
+    region_ac = (vb <= 0.0) & (d2 >= 0.0) & (d6 <= 0.0)
+    region_bc = (va <= 0.0) & ((d4 - d3) >= 0.0) & ((d5 - d6) >= 0.0)
+    denominator = va + vb + vc
+    region_degenerate = np.abs(denominator) <= 1e-30
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        inverse = 1.0 / denominator
+        v = vb * inverse
+        w = vc * inverse
+        closest = a + ab * v[..., None] + ac * w[..., None]
+        barycentric = np.stack((1.0 - v - w, v, w), axis=-1)
+        # Overwrite from the lowest-priority region up, so the first matching region wins.
+        cases = [
+            (region_degenerate, a, (1.0, 0.0, 0.0)),
+        ]
+        w_bc = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+        cases.append((region_bc, b + w_bc[..., None] * (c - b), (0.0, 1.0 - w_bc, w_bc)))
+        w_ac = d2 / (d2 - d6)
+        cases.append((region_ac, a + w_ac[..., None] * ac, (1.0 - w_ac, 0.0, w_ac)))
+        cases.append((region_c, c, (0.0, 0.0, 1.0)))
+        v_ab = d1 / (d1 - d3)
+        cases.append((region_ab, a + v_ab[..., None] * ab, (1.0 - v_ab, v_ab, 0.0)))
+        cases.append((region_b, b, (0.0, 1.0, 0.0)))
+        cases.append((region_a, a, (1.0, 0.0, 0.0)))
+        for mask, region_point, weights in cases:
+            if not np.any(mask):
+                continue
+            closest = np.where(mask[..., None], region_point, closest)
+            region_weights = np.stack([np.broadcast_to(np.asarray(weight, dtype=float), mask.shape) for weight in weights], axis=-1)
+            barycentric = np.where(mask[..., None], region_weights, barycentric)
+    difference = point - closest
+    distance_sq = _dot3(difference, difference)
+    return closest, barycentric, distance_sq
 
 
 def _fallback_normal(tangent: np.ndarray, previous_normal: np.ndarray | None) -> np.ndarray:
@@ -6409,14 +6589,39 @@ def _rotate_between_vectors(vector: np.ndarray, source: np.ndarray, target: np.n
 def _polyline_turn_angles_deg(points: np.ndarray, *, closed: bool = False) -> np.ndarray:
     if len(points) <= 2:
         return np.zeros(0, dtype=float)
-    indices = range(len(points)) if closed else range(1, len(points) - 1)
-    return np.asarray(
-        [
-            _turn_angle_deg(points[(ind - 1) % len(points)], points[ind], points[(ind + 1) % len(points)])
-            for ind in indices
-        ],
-        dtype=float,
-    )
+    previous, current, following, _indices = _polyline_vertex_triples(np.asarray(points, dtype=float), closed=closed)
+    return _turn_angles_deg_batch(previous, current, following)
+
+
+def _polyline_vertex_triples(points: np.ndarray, *, closed: bool):
+    count = len(points)
+    indices = np.arange(count, dtype=np.int64) if closed else np.arange(1, count - 1, dtype=np.int64)
+    return points[(indices - 1) % count], points[indices], points[(indices + 1) % count], indices
+
+
+def _dot3_rows(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    # Same summation order as np.dot on 3-vectors (and np.linalg.norm via sqrt), bit for bit.
+    return left[:, 0] * right[:, 0] + left[:, 1] * right[:, 1] + left[:, 2] * right[:, 2]
+
+
+def _turn_angles_deg_batch(previous: np.ndarray, current: np.ndarray, following: np.ndarray) -> np.ndarray:
+    """``_turn_angle_deg`` for every row, with the same operations in the same order."""
+
+    a = current - previous
+    b = following - current
+    a_len = np.sqrt(_dot3_rows(a, a))
+    b_len = np.sqrt(_dot3_rows(b, b))
+    straight = (a_len <= 1e-15) | (b_len <= 1e-15)
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        unit_a = a / a_len[:, None]
+        unit_b = b / b_len[:, None]
+        unit_a_len = np.sqrt(_dot3_rows(unit_a, unit_a))
+        unit_b_len = np.sqrt(_dot3_rows(unit_b, unit_b))
+        straight |= (unit_a_len <= 1e-15) | (unit_b_len <= 1e-15)
+        cosine = _dot3_rows(unit_a, unit_b) / (unit_a_len * unit_b_len)
+        angles = np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))
+    angles[straight] = 0.0
+    return angles.astype(float, copy=False)
 
 
 def _turn_angle_deg(previous: np.ndarray, current: np.ndarray, following: np.ndarray) -> float:

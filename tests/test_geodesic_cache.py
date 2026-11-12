@@ -100,7 +100,10 @@ def test_ordered_endpoints_and_point_set_ties_are_not_reverse_cached() -> None:
             fresh = SurfaceGeodesicSolver(mesh).distance_between_point_sets(source, target)
             _assert_identical(actual, fresh)
             _assert_identical(solver.distance_between_point_sets(source, target), fresh)
-    assert dijkstra.call_count == 4
+    # One untargeted search per distinct ordered source set (a, b, a[::-1]); the
+    # (a, b[::-1]) query replays the cached search from a. Reversed endpoints still
+    # search from their own sources, and every result equals a fresh solver's.
+    assert dijkstra.call_count == 3
     assert (solver.path_cache_hits, solver.path_cache_misses) == (4, 4)
 
 

@@ -19,7 +19,8 @@ import math
 import os
 from pathlib import Path
 import sys
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 import uuid
 import zipfile
 
@@ -520,7 +521,19 @@ def _identity(value: Any) -> str:
     return digest.hexdigest()
 
 
-def _allowed_types() -> dict[str, type]:
+def _allowed_types() -> Mapping[str, type]:
+    """Checkpoint-serializable classes by name (computed once; read-only)."""
+
+    global _ALLOWED_TYPES
+    if _ALLOWED_TYPES is None:
+        _ALLOWED_TYPES = MappingProxyType(_collect_allowed_types())
+    return _ALLOWED_TYPES
+
+
+_ALLOWED_TYPES: Mapping[str, type] | None = None
+
+
+def _collect_allowed_types() -> dict[str, type]:
     from . import models
     from .design_context import CoilApplication, CoilDesignContext, EvaluationFeature
     from .surface_topology import FaceAdjacency, FaceCut, VirtualCutGraph, BoundaryComponent, LoopTopologySignature

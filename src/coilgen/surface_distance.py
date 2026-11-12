@@ -36,11 +36,16 @@ class _DijkstraResult:
     source_vertex: np.ndarray
     best_target_sample: int
     settled_count: int
+    # Recorded only for untargeted searches: vertices in the order they were
+    # settled and their distances (nondecreasing), used to replay targeted queries.
+    settled_vertices: np.ndarray | None = None
+    settled_distances: np.ndarray | None = None
 
 
 _SAMPLE_CACHE_MAX_ENTRIES = 256
 _PATH_CACHE_MAX_ENTRIES = 512
 _PATH_CACHE_MAX_BYTES = 16 * 1024 * 1024
+_FULL_SEARCH_CACHE_MAX_BYTES = 64 * 1024 * 1024
 
 
 class SurfaceGeodesicSolver:
@@ -73,6 +78,8 @@ class SurfaceGeodesicSolver:
         self._route_cache = OrderedDict()
         self._route_cache_bytes = 0
         self.last_route_diagnostics = {}
+        self._full_search_cache: OrderedDict[tuple[object, ...], tuple[_DijkstraResult, np.ndarray, int]] = OrderedDict()
+        self._full_search_cache_bytes = 0
 
     def route_between_points(self, point_a: np.ndarray, point_b: np.ndarray) -> GeodesicPathResult:
         """Refine only mutable connector proposals; distance queries are unchanged."""
@@ -139,6 +146,8 @@ class SurfaceGeodesicSolver:
         self.last_dijkstra_settled_count = 0
         self._route_cache.clear()
         self._route_cache_bytes = 0
+        self._full_search_cache.clear()
+        self._full_search_cache_bytes = 0
 
     def distance_between_points(self, point_a: np.ndarray, point_b: np.ndarray) -> GeodesicPathResult:
         return self._distance_between_samples(self.samples_from_points(point_a), self.samples_from_points(point_b))
@@ -279,13 +288,15 @@ class SurfaceGeodesicSolver:
             self.last_dijkstra_settled_count = 0
             return direct
 
-        dijkstra = self._multi_source_dijkstra(
-            samples_a.vertices,
-            samples_a.offsets,
-            samples_a.point_indices,
-            target_vertices=samples_b.vertices,
-            target_offsets=samples_b.offsets,
-        )
+        dijkstra = self._replayed_targeted_search(samples_a, samples_b)
+        if dijkstra is None:
+            dijkstra = self._multi_source_dijkstra(
+                samples_a.vertices,
+                samples_a.offsets,
+                samples_a.point_indices,
+                target_vertices=samples_b.vertices,
+                target_offsets=samples_b.offsets,
+            )
         self.last_dijkstra_settled_count = dijkstra.settled_count
         if dijkstra.best_target_sample >= 0:
             best_target_ind = dijkstra.best_target_sample
@@ -387,6 +398,68 @@ class SurfaceGeodesicSolver:
             )
 
         nearest_candidates = self._nearest_vertex_candidates(points, k=8)
+        batched = self._batched_support_faces(points, nearest_candidates)
+        if batched is not None:
+            return batched
+        return self._support_vertices_point_by_point(points, nearest_candidates)
+
+    def _vertex_face_table(self) -> np.ndarray:
+        table = getattr(self, "_vertex_face_table_cache", None)
+        if table is None:
+            width = max((len(faces) for faces in self.vertex_faces), default=0)
+            table = np.full((len(self.vertex_faces), max(width, 1)), -1, dtype=np.int64)
+            for vertex, faces in enumerate(self.vertex_faces):
+                table[vertex, : len(faces)] = faces
+            self._vertex_face_table_cache = table
+        return table
+
+    def _batched_support_faces(
+        self, points: np.ndarray, nearest_candidates: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """Vectorized ``_support_vertices_point_by_point`` with the same results.
+
+        Every point-triangle distance repeats the scalar arithmetic. ``min`` over the
+        candidate set keeps the first face in set order among equal distances, so rows
+        with a tied or non-finite best distance are resolved by the scalar code.
+        """
+
+        table = self._vertex_face_table()
+        candidates = table[nearest_candidates].reshape(len(points), -1)
+        candidates.sort(axis=1)
+        valid = candidates >= 0
+        valid[:, 1:] &= candidates[:, 1:] != candidates[:, :-1]
+        if not np.all(np.any(valid, axis=1)):
+            return None
+        vertices = self.mesh.vertices
+        triangles = vertices[self.mesh.faces[np.where(valid, candidates, 0)]]
+        distance_sq = np.where(valid, _point_triangle_distance_sq_batch(points, triangles), np.inf)
+        best = np.argmin(distance_sq, axis=1)
+        rows = np.arange(len(points))
+        best_distance = distance_sq[rows, best]
+        best_faces = candidates[rows, best]
+        scalar_rows = ~np.isfinite(best_distance) | (np.count_nonzero(distance_sq == best_distance[:, None], axis=1) > 1)
+        for row in np.flatnonzero(scalar_rows):
+            point = points[row]
+            candidate_faces: set[int] = set()
+            for vertex in nearest_candidates[row]:
+                candidate_faces.update(self.vertex_faces[int(vertex)])
+            best_faces[row] = min(
+                candidate_faces,
+                key=lambda face_ind: _point_triangle_distance_sq(point, vertices[self.mesh.faces[int(face_ind)]]),
+            )
+        support_vertices = self.mesh.faces[best_faces].astype(np.int64)
+        delta = points[:, None, :] - vertices[support_vertices]
+        # sqrt of the sequential sum equals np.linalg.norm on each 3-vector.
+        offsets = np.sqrt(delta[..., 0] * delta[..., 0] + delta[..., 1] * delta[..., 1] + delta[..., 2] * delta[..., 2])
+        return (
+            support_vertices.reshape(-1),
+            offsets.reshape(-1).astype(float),
+            np.repeat(rows, support_vertices.shape[1]).astype(np.int64),
+        )
+
+    def _support_vertices_point_by_point(
+        self, points: np.ndarray, nearest_candidates: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         support_vertices: list[int] = []
         support_offsets: list[float] = []
         support_point_indices: list[int] = []
@@ -417,6 +490,89 @@ class SurfaceGeodesicSolver:
             np.asarray(support_point_indices, dtype=np.int64),
         )
 
+    def _replayed_targeted_search(
+        self, samples_a: _SurfaceSamples, samples_b: _SurfaceSamples
+    ) -> _DijkstraResult | None:
+        """Answer a targeted search from a cached untargeted search from the same sources.
+
+        A targeted search pops exactly the same entries as the untargeted one until it
+        stops, so its settled vertices, their distances, predecessors and sources are
+        the untargeted values. Replaying the settle order with the targeted stopping
+        rule gives the same best target sample and settled count. The caller reads
+        only settled vertices (the chosen target and its predecessor chain), or, when
+        no target was reached, distances of a search that ran to completion.
+        """
+
+        key = tuple(
+            _array_cache_token(array) for array in (samples_a.vertices, samples_a.offsets, samples_a.point_indices)
+        )
+        entry = self._full_search_cache.get(key)
+        if entry is None:
+            full = self._multi_source_dijkstra(
+                samples_a.vertices, samples_a.offsets, samples_a.point_indices, record_settled_order=True
+            )
+            distances = full.settled_distances
+            if len(distances) > 1 and not np.all(distances[1:] >= distances[:-1]):
+                return None
+            position = np.full(self.mesh.n_vertices, -1, dtype=np.int64)
+            position[full.settled_vertices] = np.arange(len(full.settled_vertices))
+            for array in (full.dist, full.prev, full.source_index, full.source_vertex, distances, position):
+                array.flags.writeable = False
+            size = sum(array.nbytes for array in (full.dist, full.prev, full.source_index, full.source_vertex))
+            size += distances.nbytes + full.settled_vertices.nbytes + position.nbytes
+            while self._full_search_cache and self._full_search_cache_bytes + size > _FULL_SEARCH_CACHE_MAX_BYTES:
+                _, (_, _, evicted) = self._full_search_cache.popitem(last=False)
+                self._full_search_cache_bytes -= evicted
+            if size <= _FULL_SEARCH_CACHE_MAX_BYTES:
+                self._full_search_cache[key] = (full, position, size)
+                self._full_search_cache_bytes += size
+            entry = (full, position, size)
+        else:
+            self._full_search_cache.move_to_end(key)
+        full, position, _size = entry
+
+        target_vertices = np.asarray(samples_b.vertices, dtype=np.int64)
+        target_offsets = np.asarray(samples_b.offsets, dtype=float).tolist()
+        n_vertices = self.mesh.n_vertices
+        in_range = (target_vertices >= 0) & (target_vertices < n_vertices)
+        target_position = np.full(len(target_vertices), -1, dtype=np.int64)
+        target_position[in_range] = position[target_vertices[in_range]]
+        reached = np.flatnonzero(target_position >= 0)
+        # Targets in settle order; several samples on one vertex in sample order.
+        reached = reached[np.lexsort((reached, target_position[reached]))].tolist()
+        positions = target_position.tolist()
+        distances = full.settled_distances
+        best_distance = math.inf
+        best_sample = -1
+        settled_count = None
+        index = 0
+        while index < len(reached):
+            settled = positions[reached[index]]
+            current = float(distances[settled])
+            if current >= best_distance:
+                break
+            while index < len(reached) and positions[reached[index]] == settled:
+                sample = reached[index]
+                score = current + target_offsets[sample]
+                if score < best_distance:
+                    best_distance = score
+                    best_sample = sample
+                index += 1
+            if current >= best_distance:
+                settled_count = settled + 1
+                break
+        if settled_count is None:
+            # Stops at the first settled vertex at or beyond the best target (or runs out).
+            settled_count = int(np.searchsorted(distances, best_distance, side="left"))
+        return _DijkstraResult(
+            dist=full.dist,
+            prev=full.prev,
+            source_index=full.source_index,
+            source_vertex=full.source_vertex,
+            best_target_sample=best_sample,
+            settled_count=settled_count,
+        )
+
     def _multi_source_dijkstra(
         self,
         source_vertices: np.ndarray,
@@ -425,62 +581,80 @@ class SurfaceGeodesicSolver:
         *,
         target_vertices: np.ndarray | None = None,
         target_offsets: np.ndarray | None = None,
+        record_settled_order: bool = False,
     ) -> _DijkstraResult:
+        # Plain Python lists inside the loop: numpy element access is far slower,
+        # and float64 values, comparisons and heap order are unchanged.
         n_vertices = self.mesh.n_vertices
-        dist = np.full(n_vertices, math.inf, dtype=float)
-        prev = np.full(n_vertices, -1, dtype=np.int64)
-        source_index = np.full(n_vertices, -1, dtype=np.int64)
-        source_vertex = np.full(n_vertices, -1, dtype=np.int64)
+        dist = [math.inf] * n_vertices
+        prev = [-1] * n_vertices
+        source_index = [-1] * n_vertices
+        source_vertex = [-1] * n_vertices
         heap: list[tuple[float, int]] = []
-        for point_ind, vertex in enumerate(np.asarray(source_vertices, dtype=np.int64)):
-            offset = float(source_offsets[point_ind])
+        point_indices = np.asarray(source_point_indices).tolist()
+        offsets = np.asarray(source_offsets, dtype=float).tolist()
+        for point_ind, vertex in enumerate(np.asarray(source_vertices, dtype=np.int64).tolist()):
+            offset = offsets[point_ind]
             if offset < dist[vertex]:
                 dist[vertex] = offset
-                source_index[vertex] = int(source_point_indices[point_ind])
-                source_vertex[vertex] = int(vertex)
+                source_index[vertex] = int(point_indices[point_ind])
+                source_vertex[vertex] = vertex
                 prev[vertex] = -1
-                heapq.heappush(heap, (offset, int(vertex)))
+                heapq.heappush(heap, (offset, vertex))
 
         target_samples_by_vertex: list[list[int]] | None = None
+        target_offset_values: list[float] = []
         if target_vertices is not None and target_offsets is not None and len(target_vertices):
             target_samples_by_vertex = [[] for _ in range(n_vertices)]
-            for target_sample_ind, vertex in enumerate(np.asarray(target_vertices, dtype=np.int64)):
+            for target_sample_ind, vertex in enumerate(np.asarray(target_vertices, dtype=np.int64).tolist()):
                 if 0 <= vertex < n_vertices:
-                    target_samples_by_vertex[int(vertex)].append(int(target_sample_ind))
+                    target_samples_by_vertex[vertex].append(target_sample_ind)
+            target_offset_values = np.asarray(target_offsets, dtype=float).tolist()
 
         best_target_sample = -1
         best_target_distance = math.inf
         settled_count = 0
+        settled_vertices: list[int] = []
+        settled_distances: list[float] = []
+        record = record_settled_order and target_samples_by_vertex is None
+        adjacency = self.adjacency
+        heappop = heapq.heappop
+        heappush = heapq.heappush
         while heap:
-            current_dist, vertex = heapq.heappop(heap)
+            current_dist, vertex = heappop(heap)
             if current_dist > dist[vertex]:
                 continue
             if current_dist >= best_target_distance:
                 break
             settled_count += 1
+            if record:
+                settled_vertices.append(vertex)
+                settled_distances.append(current_dist)
             if target_samples_by_vertex is not None:
                 for target_sample_ind in target_samples_by_vertex[vertex]:
-                    target_score = current_dist + float(target_offsets[target_sample_ind])
+                    target_score = current_dist + target_offset_values[target_sample_ind]
                     if target_score < best_target_distance:
                         best_target_distance = target_score
-                        best_target_sample = int(target_sample_ind)
+                        best_target_sample = target_sample_ind
                 if current_dist >= best_target_distance:
                     break
-            for neighbor, weight in self.adjacency[vertex]:
+            for neighbor, weight in adjacency[vertex]:
                 candidate = current_dist + weight
                 if candidate < dist[neighbor]:
                     dist[neighbor] = candidate
                     prev[neighbor] = vertex
                     source_index[neighbor] = source_index[vertex]
                     source_vertex[neighbor] = source_vertex[vertex]
-                    heapq.heappush(heap, (candidate, neighbor))
+                    heappush(heap, (candidate, neighbor))
         return _DijkstraResult(
-            dist=dist,
-            prev=prev,
-            source_index=source_index,
-            source_vertex=source_vertex,
+            dist=np.asarray(dist, dtype=float),
+            prev=np.asarray(prev, dtype=np.int64),
+            source_index=np.asarray(source_index, dtype=np.int64),
+            source_vertex=np.asarray(source_vertex, dtype=np.int64),
             best_target_sample=best_target_sample,
             settled_count=settled_count,
+            settled_vertices=np.asarray(settled_vertices, dtype=np.int64) if record else None,
+            settled_distances=np.asarray(settled_distances, dtype=float) if record else None,
         )
 
     def _path_vertices(self, source_vertex: int, target_vertex: int, prev: np.ndarray) -> np.ndarray:
@@ -544,6 +718,59 @@ def _build_vertex_faces(mesh: Mesh) -> list[list[int]]:
         for vertex in face:
             vertex_faces[int(vertex)].append(face_ind)
     return vertex_faces
+
+
+def _dot3(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    # Same summation order as np.dot on 3-vectors, so values match bit for bit.
+    return left[..., 0] * right[..., 0] + left[..., 1] * right[..., 1] + left[..., 2] * right[..., 2]
+
+
+def _point_triangle_distance_sq_batch(points: np.ndarray, triangles: np.ndarray) -> np.ndarray:
+    """``_point_triangle_distance_sq`` for points ``(n, 3)`` against triangles ``(n, k, 3, 3)``.
+
+    Uses the same operations and region order as ``_closest_point_on_triangle``.
+    """
+
+    point = points[:, None, :]
+    a = triangles[:, :, 0]
+    b = triangles[:, :, 1]
+    c = triangles[:, :, 2]
+    ab = b - a
+    ac = c - a
+    ap = point - a
+    d1 = _dot3(ab, ap)
+    d2 = _dot3(ac, ap)
+    bp = point - b
+    d3 = _dot3(ab, bp)
+    d4 = _dot3(ac, bp)
+    vc = d1 * d4 - d3 * d2
+    cp = point - c
+    d5 = _dot3(ab, cp)
+    d6 = _dot3(ac, cp)
+    vb = d5 * d2 - d1 * d6
+    va = d3 * d6 - d5 * d4
+    denom = va + vb + vc
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        closest = a + ab * (vb / denom)[..., None] + ac * (vc / denom)[..., None]
+        # Lowest priority first; each later region overrides, so the first match in
+        # the scalar order wins.
+        regions = (
+            (np.abs(denom) <= 1e-30, a),
+            (
+                (va <= 0.0) & ((d4 - d3) >= 0.0) & ((d5 - d6) >= 0.0),
+                b + ((d4 - d3) / ((d4 - d3) + (d5 - d6)))[..., None] * (c - b),
+            ),
+            ((vb <= 0.0) & (d2 >= 0.0) & (d6 <= 0.0), a + (d2 / (d2 - d6))[..., None] * ac),
+            ((d6 >= 0.0) & (d5 <= d6), c),
+            ((vc <= 0.0) & (d1 >= 0.0) & (d3 <= 0.0), a + (d1 / (d1 - d3))[..., None] * ab),
+            ((d3 >= 0.0) & (d4 <= d3), b),
+            ((d1 <= 0.0) & (d2 <= 0.0), a),
+        )
+        for mask, region_point in regions:
+            if np.any(mask):
+                closest = np.where(mask[..., None], region_point, closest)
+    difference = point - closest
+    return _dot3(difference, difference)
 
 
 def _point_triangle_distance_sq(point: np.ndarray, triangle: np.ndarray) -> float:

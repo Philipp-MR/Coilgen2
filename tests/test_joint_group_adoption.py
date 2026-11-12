@@ -1729,6 +1729,99 @@ def test_progressive_shape_failure_expands_without_sweeping_failed_geometry(setu
     assert [row["physical_candidate_budget"] for row in part.joint_route_diagnostics["search_stages"]] == [0, 1]
     assert len(calls.validate) == 1
     assert len(calls.baseline) == 1
+    assert "fail_fast" not in part.joint_route_diagnostics
+
+
+def _first_stage_failure(unsupported):
+    return GroupRouteProposals(
+        reason="no_supported_transition",
+        diagnostics={"unsupported_transition_reasons": unsupported},
+    )
+
+
+def _stage_tracking_shapes(monkeypatch, first_stage_unsupported):
+    """Level-0 shaping fails with the given per-attempt reasons; later levels shape normally."""
+    stage = SimpleNamespace(level=0, attempts=0)
+    monkeypatch.setattr(
+        adoption,
+        "JointTransitionEvaluator",
+        lambda *_a, **_k: SimpleNamespace(set_search_level=lambda level: setattr(stage, "level", level)),
+    )
+    old_shape = adoption.shape_joint_group_route
+
+    def shape(*args, **kwargs):
+        if stage.level:
+            return old_shape(*args, **kwargs)
+        reasons = first_stage_unsupported[min(stage.attempts, len(first_stage_unsupported) - 1)]
+        stage.attempts += 1
+        return _first_stage_failure(reasons)
+
+    monkeypatch.setattr(adoption, "shape_joint_group_route", shape)
+    return stage
+
+
+@pytest.mark.parametrize("bend_reason", ["insufficient_bend_radius", "insufficient_lifted_bend_radius"])
+def test_progressive_fails_fast_when_first_stage_is_bend_radius_blocked(setup_adoption, monkeypatch, bend_reason):
+    target, calls, _ = setup_adoption
+    stage = _stage_tracking_shapes(monkeypatch, [{bend_reason: 2, "no_feasible_corridor_family": 1}])
+    part = make_part()
+    adoption.improve_group_routes([part], CoilGenConfig(), target)
+    diagnostics = part.joint_route_diagnostics
+    assert stage.level == 0, "the wider curve / port relocation stage must be skipped"
+    assert stage.attempts >= 1
+    assert [row["level"] for row in diagnostics["search_stages"]] == [0]
+    assert diagnostics["fail_fast"]["applied"]
+    assert diagnostics["fail_fast"]["first_stage_attempt_count"] == stage.attempts
+    assert not diagnostics["fail_fast"]["infeasibility_proven"]
+    assert diagnostics["search_failure_scope"] == "first_stage_bend_radius_fail_fast"
+    assert diagnostics["status"] == "baseline_retained"
+    assert not diagnostics["infeasibility_proven"]
+    assert "failure_directed_cut_search" not in diagnostics
+    assert calls.validate == []
+
+
+def test_progressive_expands_when_any_first_stage_failure_is_not_bend_radius(setup_adoption, monkeypatch):
+    target, calls, _ = setup_adoption
+    stage = _stage_tracking_shapes(
+        monkeypatch,
+        [{"insufficient_bend_radius": 2}, {"protected_corridor_clearance": 3}],
+    )
+    part = make_part()
+    adoption.improve_group_routes([part], CoilGenConfig(), target)
+    assert stage.attempts >= 2
+    assert stage.level == 1
+    assert "fail_fast" not in part.joint_route_diagnostics
+    assert len(calls.validate) == 1
+
+
+@pytest.mark.parametrize(
+    "diagnostics,expected",
+    [
+        ({}, False),
+        ({"search_stages": [{"level": 0, "shaped_candidates": 1}], "attempts": []}, False),
+        ({"search_stages": [{"level": 0, "shaped_candidates": 0}], "attempts": []}, False),
+        (
+            {
+                "search_stages": [{"level": 0, "shaped_candidates": 0}],
+                "attempts": [
+                    {"reasons": ["no_supported_transition"], "shaping": {"unsupported_transition_reasons": ["insufficient_bend_radius"]}}
+                ],
+            },
+            True,
+        ),
+        (
+            {
+                "search_stages": [{"level": 0, "shaped_candidates": 0}],
+                "attempts": [
+                    {"reasons": ["pointwise_field_delta_budget"], "shaping": {}},
+                ],
+            },
+            False,
+        ),
+    ],
+)
+def test_bend_radius_fail_fast_evidence(diagnostics, expected):
+    assert (adoption._bend_radius_blocked_first_stage(diagnostics) is not None) is expected
 
 
 @pytest.mark.parametrize("policy,expected_cut_calls", [("regular", 2), ("physical", 1)])

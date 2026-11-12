@@ -56,6 +56,17 @@ are generated for a small batch. Initial curves retain compact, B0-oriented
 and lifted representatives, including opposite cylindrical winding directions
 and rail extremes. When the initial batch finds no accepted improvement,
 broader curves and circuit orders use the remaining physical validation budget.
+Progressive search stops after the initial batch (fail-fast) when that batch
+shaped no candidate and every attempt stopped at an unsupported transition
+whose rejected curves include `insufficient_bend_radius` or
+`insufficient_lifted_bend_radius`: the conductor cannot turn between
+neighbouring windings at the configured spacing, and failure-directed port
+relocation plus wider curves did not produce an adoptable route in the GUI
+template benchmarks while costing most of the routing time. The incumbent is
+retained, `fail_fast` is recorded in the part diagnostics and
+`search_failure_scope` is `first_stage_bend_radius_fail_fast`. This is a work
+heuristic, not an infeasibility proof; `"thorough"` keeps the complete bounded
+search.
 Search levels share cumulative work limits; earlier supported options remain
 available. `"thorough"` retains the wider eager transition search and original
 curve grids for comparison or known-pattern regressions. Neither mode proves
