@@ -11,9 +11,7 @@ library, a desktop workbench and a browser workbench with the same numerical eng
 [Examples](../docs/EXAMPLES.md) ·
 [Documentation](../docs/README.md)
 
-![Previous and updated X²−Y² shim at the same scale, showing the recorded mounted winding and a developed view of one lobe.](../validation/gui_winding_quality_2026-11-03/x2y2-reviewed-windings.png)
-
-[GUI gallery: winding layouts, field comparisons and fabrication checks](../validation/gui_winding_quality_2026-11-03/README.md).
+![Previous and updated X²−Y² shim at the same scale, showing the recorded mounted winding and a developed view of one lobe.](../docs/images/x2y2-reviewed-windings.png)
 
 The table below reports **earlier ISMRM 2027 abstract designs**, with fields
 evaluated on their mounted conductor centerlines. Their configurations and
@@ -83,7 +81,7 @@ For scripts without the GUI, install `python -m pip install -e ".[research,plot]
 - **Evaluate** the fields from the stream function, contours and conductor centerlines.
   Inspect spacing, bend and clearance diagnostics, resistance and inductance estimates.
 
-![Browser workbench showing the X²−Y² shim. Model Builder is on the left, the reviewed winding and field metrics are in the center, and the five completed design steps are on the right. Engineering checks failed.](../validation/gui_winding_quality_2026-11-03/browser-workbench-results.jpg)
+![Browser workbench showing the X²−Y² shim. Model Builder is on the left, the reviewed winding and field metrics are in the center, and the five completed design steps are on the right. Engineering checks failed.](../docs/images/browser-workbench-results.jpg)
 
 The workbench and Python scripts share the numerical engine. Saved projects
 retain editable geometry, targets and processing settings.

@@ -9,8 +9,7 @@ For a first desktop design on Windows, run `Setup CoilGen2.cmd`, open
 After completion, open **Jobs → View results → Run design choices** to inspect
 the submitted revision, including which contour fits were accepted. The
 [desktop guide](NATIVE_WORKBENCH.md) and [browser guide](BROWSER_WORKBENCH.md)
-cover the two interfaces. See the [winding gallery](../validation/gui_winding_quality_2026-11-03/README.md)
-for a same-scale comparison of the previous and updated X²−Y² mounted wire.
+cover the two interfaces.
 
 For active shielding, load the **Actively shielded XYZ foil gradient system**
 under **Coil systems**. Open a channel result and choose **Shielding surface**
@@ -109,8 +108,6 @@ the repository root, where `pyproject.toml` and `Start CoilGen2 GUI.cmd` live.
   solver capabilities, minimax current density, and mathematical limitations.
 - [Headless physical design](RESEARCH_PHYSICS_API.md): power/energy/current-density
   objectives, force/torque limits, reproducible studies and compiled fabrication checks.
-- [Main integration and validation](MAIN_CORE_IMPROVEMENTS.md): changes, examples,
-  compatibility decisions and remaining engineering limitations.
 - [File Formats](FILE_FORMATS.md): CSV/TSV/JSON/NPZ target maps and
   preoptimized stream functions.
 - [Diagnostics](DIAGNOSTICS.md): design reports, route diagnostics, and field
@@ -132,9 +129,6 @@ the repository root, where `pyproject.toml` and `Start CoilGen2 GUI.cmd` live.
   literature.
 - [Engineering Roadmap](IMPROVEMENT_ROADMAP.md): remaining physical-model,
   fabrication, validation and downstream-analysis work.
-- [Coil Design Review](COIL_DESIGN_REVIEW.md): reproduced numerical/export
-  errors, implemented corrections, and priorities for conductor sweeps,
-  assembly clearance, terminals, and practical winding instructions.
 - [Contributing](CONTRIBUTING.md): numerical-change rules and the automated
   quality checks used by the project.
 - [Project Data Layout](PROJECT_DATA.md): local storage for meshes, measured

@@ -11,8 +11,7 @@ power/energy caps and reusable DPP tolerance studies are now available through
 the opt-in [headless physical API](RESEARCH_PHYSICS_API.md). The numerical
 formulations and original audit evidence below remain useful; the numbered
 gaps section records the audit's original recommendations rather than current
-implementation status. See [main integration](MAIN_CORE_IMPROVEMENTS.md) for
-current limits and validation.
+implementation status.
 
 ## Physical model
 

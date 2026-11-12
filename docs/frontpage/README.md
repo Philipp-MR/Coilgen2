@@ -84,7 +84,7 @@ a final **4% full-volume Bz RMS error limit** at the original current. Six
 small central biplanar loops are removed. The smallest cylindrical loops are
 retained because dropping them after smoothing would exceed that limit.
 The settings, retained/dropped loop identities, displacements and before/after
-fields are recorded in [contour_processing.json](contour_processing.json).
+fields are recorded in `contour_processing.json`.
 
 | Processed-contour check | Samples | Cylindrical Gy | Biplanar Gz |
 | --- | ---: | ---: | ---: |
@@ -133,27 +133,30 @@ from this illustration. These are not released conductor designs.
 
 ## Files
 
+The `.npz` and `.json` data files are written by the scripts listed here and
+are not committed; run the scripts to recreate them.
+
 - [generate_figures.py](generate_figures.py): complete configurations,
   computation, validation and figure generation.
-- [presentation.py](presentation.py), [presentation.json](presentation.json):
+- [presentation.py](presentation.py), `presentation.json`:
   geometry, stream-function and full-volume fidelity plots, with input hashes
   and derived residual statistics.
-- [contour_processing.py](contour_processing.py), [contour_processing.json](contour_processing.json):
+- [contour_processing.py](contour_processing.py), `contour_processing.json`:
   physical spline smoothing, contribution-based pruning, and fixed-current
   before/after field validation.
-- [refined_case_0.npz](refined_case_0.npz), [refined_case_1.npz](refined_case_1.npz):
+- `refined_case_0.npz`, `refined_case_1.npz`:
   retained smooth paths, original stream functions and reevaluated contour fields.
-- [field_maps.py](field_maps.py), [field_maps.json](field_maps.json),
-  [field_maps.npz](field_maps.npz): dense field evaluation for the stream functions and contours,
+- [field_maps.py](field_maps.py), `field_maps.json`,
+  `field_maps.npz`: dense field evaluation for the stream functions and contours,
   roundoff reconstruction checks, points and SI fields.
-- [swept_bodies.py](swept_bodies.py), [swept_bodies.json](swept_bodies.json),
-  [swept_bodies.npz](swept_bodies.npz): conductor sweep inputs, triangle bodies
+- [swept_bodies.py](swept_bodies.py), `swept_bodies.json`,
+  `swept_bodies.npz`: conductor sweep inputs, triangle bodies
   and rendering provenance.
-- [metrics.json](metrics.json): executed configurations and mesh bounds, solver status, field
+- `metrics.json`: executed configurations and mesh bounds, solver status, field
   errors, current values, dependency versions, source fingerprint and artifact
   checksums. The source fingerprint identifies the working tree used for the
   figures, which may include changes after the recorded base commit.
-- [case_0.npz](case_0.npz), [case_1.npz](case_1.npz): SI mesh vertices,
+- `case_0.npz`, `case_1.npz`: SI mesh vertices,
   zero-based triangle indices, stream functions, **raw** contours and validation
   points and target, stream function and contour fields. Load with `numpy.load(path,
   allow_pickle=False)`.

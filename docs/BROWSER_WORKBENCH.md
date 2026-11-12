@@ -9,7 +9,7 @@
 5. Use **Review conductor centerlines** to inspect the connected wire. Switch to **Contours before routing** to see the fitted loops, or **Independent stream function field validation** with **Component** set to **BdotB0** to inspect the stream function field. Open **File → Save / download**, click **Save project**, then **Download project** to keep the editable `.coilgen` file with its verified results.
 6. To export geometry for inspection, choose **Export conductor geometry** in **Model Builder**, expand **Choose files and formats** and select the paths or solids. Choose the length unit for STL/CSV. If exporting a solid with failed checks, review the DRAFT notice and acknowledgment. Click **Export selected** and download the ZIP. Its manifest lists the geometry, units, checksums and source revision.
 
-[Choosing an example](../validation/gui_winding_quality_2026-11-03/browser-workbench-start.jpg) · [Completed winding in the browser workbench](../validation/gui_winding_quality_2026-11-03/browser-workbench-results.jpg)
+[Choosing an example](images/browser-workbench-start.jpg) · [Completed winding in the browser workbench](images/browser-workbench-results.jpg)
 
 ### Install, update or choose a port
 
@@ -104,7 +104,7 @@ The cards above the result plot identify the field and sample set used for each 
 
 When a full run has a reviewed wire, its first result plot shows **Review conductor centerlines**, including cuts, connections and mounting. An outside-mounted wire opens against the solid former so the near-side turns are easy to trace. Rotate the coil to inspect the opposite side, or toggle **See through support** beside **Fit view** to see both sides at once. Other mounting modes use a transparent support. **Fit view** brings the whole model back into frame.
 
-Under **Plot**, choose **Contours before routing** to inspect the fitted loops before cuts and connections. The contour fit count describes those loops. [X²−Y² example and winding gallery](../validation/gui_winding_quality_2026-11-03/README.md)
+Under **Plot**, choose **Contours before routing** to inspect the fitted loops before cuts and connections. The contour fit count describes those loops.
 
 In **Export conductor geometry**, use the suggested STL selection or expand **Choose files and formats** for other recorded solids or 3D paths. Choose the STL/CSV length unit and click **Export selected**. Download the resulting ZIP. STEP retains its declared unit. **Include matching run project** includes the exact source revision when available. For an older run without that revision, open the matching project or clear this option for a geometry-only package. DRAFT solids require explicit acknowledgment of the failed checks. The package manifest records source identity, units, checks and artifact hashes. The saved project and CAD ZIP have separate download links.
 

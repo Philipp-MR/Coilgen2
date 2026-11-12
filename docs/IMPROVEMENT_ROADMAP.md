@@ -22,8 +22,7 @@ Keep insulation, tolerance, former clearance and conductor dimensions distinct.
 Validate continuity and current direction through every joint, evaluate fields
 and electrical properties including leads, and reject cyclic winding orders or
 inaccessible installation steps. Benchmark manufactured paths against accepted
-contours without concealing added field error or clearance failures. See
-[Coil Design Review](COIL_DESIGN_REVIEW.md) for the detailed fabrication issues.
+contours without concealing added field error or clearance failures.
 
 ## Thermal operation
 

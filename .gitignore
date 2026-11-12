@@ -26,3 +26,11 @@ dist/
 /tests/test_dental_*.py
 # Website deployment drafts and private review artifacts are maintained separately.
 /website-draft/
+
+# Figure data rebuilt by docs/frontpage/*.py
+docs/frontpage/*.npz
+docs/frontpage/contour_processing.json
+docs/frontpage/field_maps.json
+docs/frontpage/metrics.json
+docs/frontpage/presentation.json
+docs/frontpage/swept_bodies.json

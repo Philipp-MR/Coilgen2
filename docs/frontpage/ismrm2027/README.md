@@ -3,9 +3,7 @@
 These figures and results come from the CoilGen2 ISMRM 2027 abstract package.
 Numerical results use **v26**; the gradient summaries below are derived from its
 saved fields. They are not a benchmark of the current checkout. The original
-abstract PNGs and its evidence file are not included in this directory. For
-figures generated with the current GUI presets, see the
-[gallery review](../../../validation/gui_review_2026-11-03/GUI_REVIEW.md).
+abstract PNGs and its evidence file are not included in this directory.
 
 | Original figure name | Abstract source |
 | --- | --- |

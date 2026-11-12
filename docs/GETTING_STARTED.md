@@ -27,7 +27,7 @@ On Windows, run `Setup CoilGen2.cmd` once. Choose one interface:
 - Open `Start CoilGen2 Browser.cmd` for the browser. Choose **Browse examples…**,
   select **Gradients · Cylindrical Y gradient (Gy)** and click **Load template**.
   Click **Compute full design** and follow the job in **Design plan**. When it
-  finishes, open **Run design choices** above the result plot. [First-run screen](../validation/gui_winding_quality_2026-11-03/browser-workbench-start.jpg) · [Browser walkthrough](BROWSER_WORKBENCH.md)
+  finishes, open **Run design choices** above the result plot. [First-run screen](images/browser-workbench-start.jpg) · [Browser walkthrough](BROWSER_WORKBENCH.md)
 
 Both interfaces use the same engine. The cylindrical Gy example designs a
 connected winding for a 20 mT/m gradient along the world y axis. Gradient and shim

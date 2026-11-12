@@ -726,9 +726,7 @@ the current orientation. **Layers → Target points** and **Display → Edges**
 let you add sampling points and mesh triangles when you need them.
 
 For the X²−Y² cylindrical shim, loading a fresh template selects a 64 × 32
-mesh at the same 200 mm length and 80 mm radius. The [matched before/after
-views and physical measurements](../validation/gui_winding_quality_2026-11-03/README.md)
-show why this changes the wire itself. Opening an earlier project instead will
+mesh at the same 200 mm length and 80 mm radius, which changes the wire itself. Opening an earlier project instead will
 correctly display the mesh, fits and routed wire from that earlier run.
 
 **Resample only** adds points without rounding corners; connected routing
