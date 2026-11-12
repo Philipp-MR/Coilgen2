@@ -370,7 +370,7 @@ def test_cancellation_progress_and_explicit_work_budgets(tmp_path):
 
 
 def test_sheet_slice_exposes_kernel_progress_before_target_chunk_finishes(monkeypatch):
-    from types import SimpleNamespace
+    from dataclasses import dataclass
     from coilgen.application import field_sampling
     from coilgen.config import CoilGenConfig
     from coilgen.progress import ProgressReporter
@@ -378,7 +378,14 @@ def test_sheet_slice_exposes_kernel_progress_before_target_chunk_finishes(monkey
 
     points = np.zeros((16, 3))
     stream = np.arange(100, dtype=float)
-    part = SimpleNamespace(sensitivity_matrix=None)
+
+    @dataclass
+    class Part:
+        sensitivity_matrix: object = None
+
+    # _physical works on a copy of the part (dataclasses.replace), so the
+    # stand-in must be a dataclass and the original must stay untouched.
+    part = Part()
     calls = []
 
     def sensitivity(parts, target, config):

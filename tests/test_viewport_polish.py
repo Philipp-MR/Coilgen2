@@ -118,6 +118,7 @@ def test_grouped_selector_retains_all_session_keys_and_skips_headers(scientific_
         "review_conductor",
         "review_electrical",
         "fabricated",
+        "print_former",
     }
     keys = set()
     headers = []

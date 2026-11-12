@@ -354,10 +354,13 @@ class ScientificViewport(QWidget):
         self.dataset.setMinimumWidth(120)
         self.dataset.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.dataset.view().setMinimumWidth(330)
+        # Hold the item models: a wrapper fetched again later via ``combo.model()``
+        # can come back as a stale QStandardItem when shiboken reuses an address.
+        self._dataset_model = self.dataset.model()
         self._dataset_headers = {}
         for group, entries in DATASET_GROUPS:
             self.dataset.addItem(group)
-            header = self.dataset.model().item(self.dataset.count() - 1)
+            header = self._dataset_model.item(self.dataset.count() - 1)
             self._dataset_headers[group] = self.dataset.count() - 1
             header.setEnabled(False)
             font = header.font()
@@ -434,6 +437,7 @@ class ScientificViewport(QWidget):
         self.wire_current.setObjectName("viewport_wire_current")
         self.wire_current.setAccessibleName("Saved wire field current policy")
         self.wire_current.addItems(["Stored evaluation", "Original contour current"])
+        self._wire_current_model = self.wire_current.model()
         self.wire_current.setToolTip("Select already computed wire maps; no current fitting or field recalculation.")
         current_label.setBuddy(self.wire_current)
         current_toolbar.addWidget(self.wire_current)
@@ -764,7 +768,7 @@ class ScientificViewport(QWidget):
             if key is None:
                 continue
             capability = self._capability(key)
-            item = self.dataset.model().item(index)
+            item = self._dataset_model.item(index)
             item.setEnabled(capability.available)
             item.setToolTip("Available evidence." if capability.available else capability.explanation)
         source = "SAVED RUN"
@@ -777,7 +781,7 @@ class ScientificViewport(QWidget):
         elif self._verification_error:
             source = "CACHED RUN · VERIFICATION FAILED"
         for suffix in ("GEOMETRY", "FIELD MAPS"):
-            header = self.dataset.model().item(self._dataset_headers["SAVED RUN · " + suffix])
+            header = self._dataset_model.item(self._dataset_headers["SAVED RUN · " + suffix])
             header.setText(source + " · " + suffix)
         key = self.dataset.currentData()
         for index, original in enumerate((False, True)):
@@ -786,7 +790,7 @@ class ScientificViewport(QWidget):
             else:
                 options = [self._capability(field, original=original) for field in WIRE_FIELDS]
                 capability = next((item for item in options if item.available), options[0])
-            item = self.wire_current.model().item(index)
+            item = self._wire_current_model.item(index)
             item.setEnabled(capability.available)
             item.setToolTip("Saved field maps at this current." if capability.available else capability.explanation)
         for task, action in self.inspection_actions.items():
