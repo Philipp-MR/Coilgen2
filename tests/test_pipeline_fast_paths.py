@@ -7,7 +7,12 @@ import numpy as np
 import pytest
 
 from coilgen.geometry import build_cylinder_mesh, build_planar_mesh
-from coilgen.layout import _initial_wire_segment_distance_bound, _min_wire_segment_distance_pair_chunk, _wire_segment_pair_allowed, _wire_segment_length_prefix
+from coilgen.layout import (
+    _initial_wire_segment_distance_bound,
+    _min_wire_segment_distance_pair_chunk,
+    _wire_segment_pair_allowed,
+    _wire_segment_length_prefix,
+)
 from coilgen.manufacturing import _polyline_circumradii, _polyline_turn_angles_deg, _turn_angle_deg
 from coilgen.surface_distance import SurfaceGeodesicSolver, _point_triangle_distance_sq
 from coilgen.wire_provenance import nearest_source_segment_indices
@@ -27,7 +32,11 @@ def _reference_circumradii(points, closed, minimum_turn_angle_deg):
     radii, kept = [], []
     indices = range(len(points)) if closed else range(1, len(points) - 1)
     for index in indices:
-        previous, current, following = points[(index - 1) % len(points)], points[index], points[(index + 1) % len(points)]
+        previous, current, following = (
+            points[(index - 1) % len(points)],
+            points[index],
+            points[(index + 1) % len(points)],
+        )
         if _turn_angle_deg(previous, current, following) <= minimum_turn_angle_deg:
             continue
         first = float(np.linalg.norm(current - previous))
@@ -45,13 +54,17 @@ def _reference_circumradii(points, closed, minimum_turn_angle_deg):
 @pytest.mark.parametrize("minimum_turn_angle_deg", [1e-7, 2.0])
 def test_vectorized_circumradii_and_turn_angles_match_per_vertex_loop(closed, minimum_turn_angle_deg) -> None:
     points = _wavy_loop(400, 1)
-    radii, kept = _polyline_circumradii(points, closed=closed, minimum_turn_angle_deg=minimum_turn_angle_deg, return_indices=True)
+    radii, kept = _polyline_circumradii(
+        points, closed=closed, minimum_turn_angle_deg=minimum_turn_angle_deg, return_indices=True
+    )
     expected_radii, expected_kept = _reference_circumradii(points, closed, minimum_turn_angle_deg)
     np.testing.assert_array_equal(radii, expected_radii)
     np.testing.assert_array_equal(kept, expected_kept)
 
     indices = range(len(points)) if closed else range(1, len(points) - 1)
-    expected_angles = [_turn_angle_deg(points[(i - 1) % len(points)], points[i], points[(i + 1) % len(points)]) for i in indices]
+    expected_angles = [
+        _turn_angle_deg(points[(i - 1) % len(points)], points[i], points[(i + 1) % len(points)]) for i in indices
+    ]
     np.testing.assert_array_equal(_polyline_turn_angles_deg(points, closed=closed), np.asarray(expected_angles))
 
 
@@ -68,13 +81,21 @@ def _reference_bound(starts, directions, valid, closed, local_exclusion):
             for next_pos in range(pos + 1, min(pos + 1 + window, len(order))):
                 seg_a, seg_b = int(min(seg_i, order[next_pos])), int(max(seg_i, order[next_pos]))
                 if _wire_segment_pair_allowed(
-                    seg_a, seg_b, n_segments, closed, starts=starts, directions=directions,
-                    local_exclusion=local_exclusion, segment_length_prefix=prefix,
+                    seg_a,
+                    seg_b,
+                    n_segments,
+                    closed,
+                    starts=starts,
+                    directions=directions,
+                    local_exclusion=local_exclusion,
+                    segment_length_prefix=prefix,
                 ):
                     pairs.append((seg_a, seg_b))
     best = math.inf
     for begin in range(0, len(pairs), 65536):
-        _a, _b, distance = _min_wire_segment_distance_pair_chunk(starts, directions, np.asarray(pairs[begin : begin + 65536]))
+        _a, _b, distance = _min_wire_segment_distance_pair_chunk(
+            starts, directions, np.asarray(pairs[begin : begin + 65536])
+        )
         best = min(best, distance)
     return best
 
@@ -97,7 +118,10 @@ def test_batched_segment_matching_matches_exhaustive_matching() -> None:
     target += np.random.default_rng(4).normal(scale=1.0e-4, size=target.shape)
     indexed = nearest_source_segment_indices(source, target)  # large enough for the k-d tree path
     exhaustive = np.concatenate(
-        [nearest_source_segment_indices(source, target[begin : begin + 401]) for begin in range(0, len(target) - 1, 400)]
+        [
+            nearest_source_segment_indices(source, target[begin : begin + 401])
+            for begin in range(0, len(target) - 1, 400)
+        ]
     )
     np.testing.assert_array_equal(indexed, exhaustive)
 
@@ -112,7 +136,9 @@ def _reference_geodesic(solver: SurfaceGeodesicSolver, points_a, points_b):
             faces = set()
             for vertex in nearest[index]:
                 faces.update(solver.vertex_faces[int(vertex)])
-            best = min(faces, key=lambda f: _point_triangle_distance_sq(point, solver.mesh.vertices[solver.mesh.faces[f]]))
+            best = min(
+                faces, key=lambda f: _point_triangle_distance_sq(point, solver.mesh.vertices[solver.mesh.faces[f]])
+            )
             for vertex in solver.mesh.faces[best]:
                 vertices.append(int(vertex))
                 offsets.append(float(np.linalg.norm(point - solver.mesh.vertices[int(vertex)])))

@@ -1804,7 +1804,10 @@ def test_progressive_expands_when_any_first_stage_failure_is_not_bend_radius(set
             {
                 "search_stages": [{"level": 0, "shaped_candidates": 0}],
                 "attempts": [
-                    {"reasons": ["no_supported_transition"], "shaping": {"unsupported_transition_reasons": ["insufficient_bend_radius"]}}
+                    {
+                        "reasons": ["no_supported_transition"],
+                        "shaping": {"unsupported_transition_reasons": ["insufficient_bend_radius"]},
+                    }
                 ],
             },
             True,

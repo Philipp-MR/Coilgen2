@@ -51,10 +51,34 @@ DEFAULT_TEMPLATES = ("cylinder", "biplanar", "halbach_gy", "shielded_gy", "shim_
 
 # Pipeline step label -> coarse phase, for the per-phase summary.
 PHASES = (
-    ("prepare", ("loaded meshes", "prepared coil meshes", "defined target field", "built one-ring", "built stream-function", "calculated sensitivity")),
+    (
+        "prepare",
+        (
+            "loaded meshes",
+            "prepared coil meshes",
+            "defined target field",
+            "built one-ring",
+            "built stream-function",
+            "calculated sensitivity",
+        ),
+    ),
     ("solve", ("calculated resistance", "optimized stream function", "loaded preoptimized")),
-    ("contours", ("calculated potential", "extracted contours", "filtered loop", "regularized contour", "validated contourability", "processed contour", "calculated contour distances")),
-    ("draft routing", ("grouped contour topology", "interconnected within", "interconnected among", "shifted return", "cleaned wire")),
+    (
+        "contours",
+        (
+            "calculated potential",
+            "extracted contours",
+            "filtered loop",
+            "regularized contour",
+            "validated contourability",
+            "processed contour",
+            "calculated contour distances",
+        ),
+    ),
+    (
+        "draft routing",
+        ("grouped contour topology", "interconnected within", "interconnected among", "shifted return", "cleaned wire"),
+    ),
     ("route check/improve", ("realized fabrication", "selected joint group routes")),
     ("sweep/build", ("finalized swept", "built grooved", "skipped topology")),
     ("evaluate", ("calculated inductance", "evaluated field errors", "evaluated gradient slice")),
@@ -276,7 +300,13 @@ def _write_outputs(root: Path, stage_rows, sub_rows, totals) -> None:
     lines += ["", "## Slowest steps (all templates)", "", "| template | step | s |", "|---|---|---|"]
     for row in sorted(stage_rows, key=lambda r: -r["seconds"])[:20]:
         lines.append(f"| {row['template']} | {row['step']} | {row['seconds']:.1f} |")
-    lines += ["", "## Slowest sub-steps (all templates)", "", "| template | operation | label | message | s |", "|---|---|---|---|---|"]
+    lines += [
+        "",
+        "## Slowest sub-steps (all templates)",
+        "",
+        "| template | operation | label | message | s |",
+        "|---|---|---|---|---|",
+    ]
     for row in sorted(sub_rows, key=lambda r: -r["seconds"])[:30]:
         message = row["message"].replace("|", "/")
         lines.append(f"| {row['template']} | {row['operation']} | {row['label']} | {message} | {row['seconds']:.1f} |")

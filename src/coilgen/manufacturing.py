@@ -6259,7 +6259,9 @@ class _SurfaceProjector:
             best = np.argmin(distance_sq, axis=1)
             row_index = np.arange(rows)
             best_distance = distance_sq[row_index, best]
-            scalar_rows = ~np.isfinite(best_distance) | (np.count_nonzero(distance_sq == best_distance[:, None], axis=1) > 1)
+            scalar_rows = ~np.isfinite(best_distance) | (
+                np.count_nonzero(distance_sq == best_distance[:, None], axis=1) > 1
+            )
             face_index = candidates[row_index, best]
             point_closest = closest[row_index, best]
             point_barycentric = barycentric[row_index, best]
@@ -6294,7 +6296,9 @@ class _SurfaceProjector:
                 + point_barycentric[:, 1, None] * corner_normals[:, 1]
                 + point_barycentric[:, 2, None] * corner_normals[:, 2]
             )
-            normal_length = np.sqrt(normal[:, 0] * normal[:, 0] + normal[:, 1] * normal[:, 1] + normal[:, 2] * normal[:, 2])
+            normal_length = np.sqrt(
+                normal[:, 0] * normal[:, 0] + normal[:, 1] * normal[:, 1] + normal[:, 2] * normal[:, 2]
+            )
             degenerate = normal_length <= 1e-15
             if np.any(degenerate):
                 fallback = self.face_normals[face_index[degenerate]]
@@ -6465,7 +6469,9 @@ def _closest_points_batch(points: np.ndarray, triangles: np.ndarray) -> tuple[np
             if not np.any(mask):
                 continue
             closest = np.where(mask[..., None], region_point, closest)
-            region_weights = np.stack([np.broadcast_to(np.asarray(weight, dtype=float), mask.shape) for weight in weights], axis=-1)
+            region_weights = np.stack(
+                [np.broadcast_to(np.asarray(weight, dtype=float), mask.shape) for weight in weights], axis=-1
+            )
             barycentric = np.where(mask[..., None], region_weights, barycentric)
     difference = point - closest
     distance_sq = _dot3(difference, difference)

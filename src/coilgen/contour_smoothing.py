@@ -1118,9 +1118,7 @@ def _map_uv_points(chart: _SurfaceChart, points_uv: np.ndarray) -> np.ndarray | 
     for point_index, point in enumerate(points_uv):
         if point_index % 512 == 0:
             _report_smoothing_activity("mapping fitted contour to surface")
-        located = _locate_uv_point(
-            chart, point, hint, None if cached is None else cached.for_point(point_index, point)
-        )
+        located = _locate_uv_point(chart, point, hint, None if cached is None else cached.for_point(point_index, point))
         if located is None:
             return None
         hint, barycentric = located
@@ -1128,7 +1126,9 @@ def _map_uv_points(chart: _SurfaceChart, points_uv: np.ndarray) -> np.ndarray | 
         weights[point_index] = barycentric
     corners = chart.mesh.vertices[chart.mesh.faces[faces]]
     # Same summation order as ``barycentric @ corners`` per point.
-    result = weights[:, 0, None] * corners[:, 0] + weights[:, 1, None] * corners[:, 1] + weights[:, 2, None] * corners[:, 2]
+    result = (
+        weights[:, 0, None] * corners[:, 0] + weights[:, 1, None] * corners[:, 1] + weights[:, 2, None] * corners[:, 2]
+    )
     if len(result):
         result[-1] = result[0]
     return result

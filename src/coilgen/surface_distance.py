@@ -78,7 +78,9 @@ class SurfaceGeodesicSolver:
         self._route_cache = OrderedDict()
         self._route_cache_bytes = 0
         self.last_route_diagnostics = {}
-        self._full_search_cache: OrderedDict[tuple[object, ...], tuple[_DijkstraResult, np.ndarray, int]] = OrderedDict()
+        self._full_search_cache: OrderedDict[tuple[object, ...], tuple[_DijkstraResult, np.ndarray, int]] = (
+            OrderedDict()
+        )
         self._full_search_cache_bytes = 0
 
     def route_between_points(self, point_a: np.ndarray, point_b: np.ndarray) -> GeodesicPathResult:
@@ -437,7 +439,9 @@ class SurfaceGeodesicSolver:
         rows = np.arange(len(points))
         best_distance = distance_sq[rows, best]
         best_faces = candidates[rows, best]
-        scalar_rows = ~np.isfinite(best_distance) | (np.count_nonzero(distance_sq == best_distance[:, None], axis=1) > 1)
+        scalar_rows = ~np.isfinite(best_distance) | (
+            np.count_nonzero(distance_sq == best_distance[:, None], axis=1) > 1
+        )
         for row in np.flatnonzero(scalar_rows):
             point = points[row]
             candidate_faces: set[int] = set()

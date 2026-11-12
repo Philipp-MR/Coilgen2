@@ -5701,12 +5701,22 @@ def _wire_segment_pairs_allowed(
         gap = np.where(wrap < gap, wrap, gap)  # min(gap, wrap) keeps gap on ties
     direction_a = directions[a]
     direction_b = directions[b]
-    norm_a = np.sqrt(direction_a[:, 0] * direction_a[:, 0] + direction_a[:, 1] * direction_a[:, 1] + direction_a[:, 2] * direction_a[:, 2])
-    norm_b = np.sqrt(direction_b[:, 0] * direction_b[:, 0] + direction_b[:, 1] * direction_b[:, 1] + direction_b[:, 2] * direction_b[:, 2])
+    norm_a = np.sqrt(
+        direction_a[:, 0] * direction_a[:, 0]
+        + direction_a[:, 1] * direction_a[:, 1]
+        + direction_a[:, 2] * direction_a[:, 2]
+    )
+    norm_b = np.sqrt(
+        direction_b[:, 0] * direction_b[:, 0]
+        + direction_b[:, 1] * direction_b[:, 1]
+        + direction_b[:, 2] * direction_b[:, 2]
+    )
     norm_product = norm_a * norm_b
     with np.errstate(divide="ignore", invalid="ignore"):
         cosine = (
-            direction_a[:, 0] * direction_b[:, 0] + direction_a[:, 1] * direction_b[:, 1] + direction_a[:, 2] * direction_b[:, 2]
+            direction_a[:, 0] * direction_b[:, 0]
+            + direction_a[:, 1] * direction_b[:, 1]
+            + direction_a[:, 2] * direction_b[:, 2]
         ) / norm_product
     continuation = ~(gap > float(local_exclusion)) & (norm_product > 1e-30) & (cosine > -0.9)
     # A continuation pair is rescued only when its segment boxes touch; the rare
@@ -5716,7 +5726,10 @@ def _wire_segment_pairs_allowed(
     first_end = first + direction_a
     second_end = second + direction_b
     delta = np.maximum(
-        np.maximum(np.minimum(first, first_end) - np.maximum(second, second_end), np.minimum(second, second_end) - np.maximum(first, first_end)),
+        np.maximum(
+            np.minimum(first, first_end) - np.maximum(second, second_end),
+            np.minimum(second, second_end) - np.maximum(first, first_end),
+        ),
         0.0,
     )
     box_distance_sq = delta[:, 0] * delta[:, 0] + delta[:, 1] * delta[:, 1] + delta[:, 2] * delta[:, 2]
@@ -5815,7 +5828,9 @@ def _initial_wire_segment_distance_bound(
         )
     ]
     for begin in range(0, len(pairs), 65536):
-        _seg_a, _seg_b, distance = _min_wire_segment_distance_pair_chunk(starts, directions, pairs[begin : begin + 65536])
+        _seg_a, _seg_b, distance = _min_wire_segment_distance_pair_chunk(
+            starts, directions, pairs[begin : begin + 65536]
+        )
         if distance < best:
             best = float(distance)
     if math.isfinite(best):

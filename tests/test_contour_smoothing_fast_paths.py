@@ -19,13 +19,19 @@ def _polyline_pairs():
         np.c_[np.linspace(0.3, 1.4, 400), np.full(400, 1.0e-3), np.zeros(400)],
     )
     curve = np.c_[np.linspace(0.0, 1.0, 300), np.linspace(0.0, 1.0, 300) ** 2, np.zeros(300)]
-    yield "repeated_points", np.repeat(curve, 2, axis=0), np.c_[np.full(300, 0.5), np.linspace(-1, 1, 300), np.zeros(300)]
+    yield (
+        "repeated_points",
+        np.repeat(curve, 2, axis=0),
+        np.c_[np.full(300, 0.5), np.linspace(-1, 1, 300), np.zeros(300)],
+    )
     yield "crossing_curves", curve, np.c_[np.linspace(0.0, 1.0, 400), 1.0 - np.linspace(0.0, 1.0, 400), np.zeros(400)]
     walks = [np.cumsum(rng.normal(scale=0.01, size=(int(count), 3)), axis=0) for count in (450, 520)]
     yield "random_walks", walks[0], walks[1]
 
 
-@pytest.mark.parametrize("name,points_a,points_b", list(_polyline_pairs()), ids=lambda value: value if isinstance(value, str) else "")
+@pytest.mark.parametrize(
+    "name,points_a,points_b", list(_polyline_pairs()), ids=lambda value: value if isinstance(value, str) else ""
+)
 def test_pruned_pair_distance_matches_full_grid(name, points_a, points_b) -> None:
     assert (len(points_a) - 1) * (len(points_b) - 1) > 20_000, "must exercise the pruned path"
     assert _contour_pair_min_distance(points_a, points_b) == _contour_pair_min_distance_grid(points_a, points_b)

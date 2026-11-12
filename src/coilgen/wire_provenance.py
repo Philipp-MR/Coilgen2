@@ -233,8 +233,19 @@ def _indexed_segment_matches(
         nearest[rows[usable]] = sources[first[usable]]
         for local in np.flatnonzero(~usable):
             nearest[rows[local]] = _indexed_segment_match_one(
-                int(rows[local]), int(seeds[rows[local]]), tree, midpoints, directions, target_length_sq,
-                starts, vectors, length_sq, unit_vectors, source_scale_sq, half_length, rounding_guard,
+                int(rows[local]),
+                int(seeds[rows[local]]),
+                tree,
+                midpoints,
+                directions,
+                target_length_sq,
+                starts,
+                vectors,
+                length_sq,
+                unit_vectors,
+                source_scale_sq,
+                half_length,
+                rounding_guard,
             )
     task.done()
     return nearest
@@ -267,8 +278,19 @@ def _segment_match_pair_scores(
 
 
 def _indexed_segment_match_one(
-    target_index, seed, tree, midpoints, directions, target_length_sq,
-    starts, vectors, length_sq, unit_vectors, source_scale_sq, half_length, rounding_guard,
+    target_index,
+    seed,
+    tree,
+    midpoints,
+    directions,
+    target_length_sq,
+    starts,
+    vectors,
+    length_sq,
+    unit_vectors,
+    source_scale_sq,
+    half_length,
+    rounding_guard,
 ) -> int:
     """The former per-target search; used for rows with NaN scores or an empty ball."""
 
