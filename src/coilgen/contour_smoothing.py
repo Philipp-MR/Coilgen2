@@ -1125,7 +1125,7 @@ def _map_uv_points(chart: _SurfaceChart, points_uv: np.ndarray) -> np.ndarray | 
         faces[point_index] = int(chart.global_faces[hint])
         weights[point_index] = barycentric
     corners = chart.mesh.vertices[chart.mesh.faces[faces]]
-    # Same summation order as ``barycentric @ corners`` per point.
+    # Same algebra as ``barycentric @ corners``; BLAS fusion can change the last bits.
     result = (
         weights[:, 0, None] * corners[:, 0] + weights[:, 1, None] * corners[:, 1] + weights[:, 2, None] * corners[:, 2]
     )

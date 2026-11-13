@@ -759,7 +759,6 @@ def test_background_previews_keep_qt_responsive_and_latest_revision_wins(applica
     from threading import Event
     import time
     from PySide6.QtCore import QTimer
-    from PySide6.QtTest import QTest
 
     pytest.importorskip("pyvista")
     pyvistaqt = pytest.importorskip("pyvistaqt")
@@ -796,8 +795,13 @@ def test_background_previews_keep_qt_responsive_and_latest_revision_wins(applica
         release.set()
         deadline = time.monotonic() + 5
         while viewport._preview_worker is not None and time.monotonic() < deadline:
-            QTest.qWait(10)
+            application.processEvents()
+            # qWait can hold the GIL and starve the Python preview worker on CI.
+            time.sleep(0.01)
+        assert viewport._preview_worker is None, viewport._preview_error
+        assert viewport._pending_preview is None
         assert calls == [preset_config().cylinder_mesh_parameter_list[1], 0.19]
+        assert viewport._support is not None, viewport._preview_error
         assert np.max(np.linalg.norm(viewport._support.points[:, :2], axis=1)) == pytest.approx(0.19)
         assert "Preparing" not in viewport.caption.text()
     finally:

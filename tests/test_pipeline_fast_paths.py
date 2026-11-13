@@ -1,4 +1,4 @@
-"""Vectorized and cached fast paths must reproduce the original per-item algorithms exactly."""
+"""Fast paths preserve discrete choices and agree with scalar arithmetic to roundoff."""
 
 import heapq
 import math
@@ -58,14 +58,18 @@ def test_vectorized_circumradii_and_turn_angles_match_per_vertex_loop(closed, mi
         points, closed=closed, minimum_turn_angle_deg=minimum_turn_angle_deg, return_indices=True
     )
     expected_radii, expected_kept = _reference_circumradii(points, closed, minimum_turn_angle_deg)
-    np.testing.assert_array_equal(radii, expected_radii)
+    epsilon = np.finfo(float).eps
+    # Scalar BLAS norms/dots can fuse operations that the batch evaluates separately.
+    np.testing.assert_allclose(radii, expected_radii, rtol=32 * epsilon, atol=0)
     np.testing.assert_array_equal(kept, expected_kept)
 
     indices = range(len(points)) if closed else range(1, len(points) - 1)
     expected_angles = [
         _turn_angle_deg(points[(i - 1) % len(points)], points[i], points[(i + 1) % len(points)]) for i in indices
     ]
-    np.testing.assert_array_equal(_polyline_turn_angles_deg(points, closed=closed), np.asarray(expected_angles))
+    np.testing.assert_allclose(
+        _polyline_turn_angles_deg(points, closed=closed), expected_angles, rtol=32 * epsilon, atol=32 * epsilon * 180
+    )
 
 
 def _reference_bound(starts, directions, valid, closed, local_exclusion):
@@ -126,10 +130,13 @@ def test_batched_segment_matching_matches_exhaustive_matching() -> None:
     np.testing.assert_array_equal(indexed, exhaustive)
 
 
-def _reference_geodesic(solver: SurfaceGeodesicSolver, points_a, points_b):
-    """The original per-point support selection and targeted list-free Dijkstra."""
+def _reference_geodesic(solver: SurfaceGeodesicSolver, points_a, points_b, *, scalar_support=True):
+    """Targeted Dijkstra, with scalar support unless isolating cache replay."""
 
     def support(points):
+        if not scalar_support:
+            samples = solver.samples_from_points(points)
+            return samples.vertices, samples.offsets, samples.point_indices
         nearest = solver._nearest_vertex_candidates(points, k=8)
         vertices, offsets, owners = [], [], []
         for index, point in enumerate(points):
@@ -191,11 +198,19 @@ def test_replayed_geodesic_queries_match_direct_search(mesh) -> None:
         for _ in range(6):  # repeated sources exercise the cached full search
             target = vertices[rng.integers(0, len(vertices), 3)] + rng.normal(scale=1e-3, size=(3, 3))
             result = solver.distance_between_point_sets(source, target)
-            best, best_sample, settled, (va, oa, ia) = _reference_geodesic(solver, source, target)
+            best, best_sample, _settled, (va, oa, ia) = _reference_geodesic(solver, source, target)
             samples = solver.samples_from_points(source)
             np.testing.assert_array_equal(samples.vertices, va)
-            np.testing.assert_array_equal(samples.offsets, oa)
+            epsilon = np.finfo(float).eps
+            np.testing.assert_allclose(samples.offsets, oa, rtol=32 * epsilon, atol=0)
             np.testing.assert_array_equal(samples.point_indices, ia)
-            assert result.distance == best
-            assert solver.last_dijkstra_settled_count == settled
+            assert result.distance == pytest.approx(best, rel=32 * epsilon, abs=0)
+            # Isolate cache replay from scalar/batch support-offset roundoff: at
+            # identical graph attachments, distance and settle count remain exact.
+            batched_best, batched_sample, batched_settled, _ = _reference_geodesic(
+                solver, source, target, scalar_support=False
+            )
+            assert result.distance == batched_best
+            assert solver.last_dijkstra_settled_count == batched_settled
+            assert batched_sample == best_sample
             assert best_sample >= 0

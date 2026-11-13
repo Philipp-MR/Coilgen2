@@ -48,6 +48,15 @@ jobs:
         run: python -m ruff check src tests projects tools
       - name: Check source formatting
         run: python -m ruff format --check src tests projects tools
+      - name: Check geometry and preview regressions
+        env:
+          MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
+        run: >-
+          python -X faulthandler -m pytest -q --tb=short
+          tests/test_contour_smoothing_fast_paths.py
+          tests/test_surface_projector_batch.py
+          tests/test_pipeline_fast_paths.py
+          tests/test_native_workbench.py::test_background_previews_keep_qt_responsive_and_latest_revision_wins
       - name: Run regression suite
         env:
           MPLCONFIGDIR: ${{ runner.temp }}/matplotlib

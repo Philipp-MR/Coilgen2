@@ -453,7 +453,7 @@ class SurfaceGeodesicSolver:
             )
         support_vertices = self.mesh.faces[best_faces].astype(np.int64)
         delta = points[:, None, :] - vertices[support_vertices]
-        # sqrt of the sequential sum equals np.linalg.norm on each 3-vector.
+        # Equivalent to per-vector np.linalg.norm up to BLAS rounding differences.
         offsets = np.sqrt(delta[..., 0] * delta[..., 0] + delta[..., 1] * delta[..., 1] + delta[..., 2] * delta[..., 2])
         return (
             support_vertices.reshape(-1),

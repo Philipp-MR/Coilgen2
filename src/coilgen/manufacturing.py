@@ -6230,8 +6230,8 @@ class _SurfaceProjector:
         """Vectorized form of the per-point loop in ``project_with_details``.
 
         Every arithmetic step repeats the scalar code in the same order (dot products as
-        explicit ``x0*y0 + x1*y1 + x2*y2``, which equals ``np.dot`` bit for bit), so the
-        results are identical. The scalar loop keeps the first face, in its candidate
+        explicit ``x0*y0 + x1*y1 + x2*y2``; scalar BLAS can round the last bits
+        differently). The scalar loop keeps the first face, in its candidate
         set's iteration order, that reaches the smallest distance; tied rows rebuild that
         set and pick the same face from the batched distances. Rows without a finite
         distance use the scalar code. ``single_point_order`` builds the set the way the
@@ -6408,7 +6408,7 @@ def _closest_point_and_barycentric(point: np.ndarray, triangle: np.ndarray) -> t
 
 
 def _dot3(left: np.ndarray, right: np.ndarray) -> np.ndarray:
-    # Same summation order as np.dot on 3-vectors, so the result matches bit for bit.
+    # Same algebra as np.dot on 3-vectors; BLAS may fuse the scalar operations.
     return left[..., 0] * right[..., 0] + left[..., 1] * right[..., 1] + left[..., 2] * right[..., 2]
 
 
@@ -6606,12 +6606,12 @@ def _polyline_vertex_triples(points: np.ndarray, *, closed: bool):
 
 
 def _dot3_rows(left: np.ndarray, right: np.ndarray) -> np.ndarray:
-    # Same summation order as np.dot on 3-vectors (and np.linalg.norm via sqrt), bit for bit.
+    # Three-term dot product; scalar BLAS may round differently through fused operations.
     return left[:, 0] * right[:, 0] + left[:, 1] * right[:, 1] + left[:, 2] * right[:, 2]
 
 
 def _turn_angles_deg_batch(previous: np.ndarray, current: np.ndarray, following: np.ndarray) -> np.ndarray:
-    """``_turn_angle_deg`` for every row, with the same operations in the same order."""
+    """Vectorized ``_turn_angle_deg``, subject to scalar BLAS rounding differences."""
 
     a = current - previous
     b = following - current
