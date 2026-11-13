@@ -6229,13 +6229,11 @@ class _SurfaceProjector:
     ) -> None:
         """Vectorized form of the per-point loop in ``project_with_details``.
 
-        Every arithmetic step repeats the scalar code in the same order (dot products as
-        explicit ``x0*y0 + x1*y1 + x2*y2``; scalar BLAS can round the last bits
-        differently). The scalar loop keeps the first face, in its candidate
-        set's iteration order, that reaches the smallest distance; tied rows rebuild that
-        set and pick the same face from the batched distances. Rows without a finite
-        distance use the scalar code. ``single_point_order`` builds the set the way the
-        one-point path (``_closest_face``) did.
+        Scalar BLAS dot products can round differently from batched sums. When
+        competing faces are within coordinate roundoff, recompute the row with
+        the original scalar code and candidate order to preserve face provenance.
+        Non-finite rows also use the scalar code. ``single_point_order`` builds
+        the set the way the one-point path (``_closest_face``) did.
         """
 
         projected, normals, closest_face_normals, closest_face_indices, closest_barycentric = outputs
@@ -6243,6 +6241,7 @@ class _SurfaceProjector:
         centroid_candidates = np.asarray(centroid_candidates, dtype=np.int64)
         table = self._vertex_face_table()
         count = len(points)
+        mesh_scale = float(np.max(np.abs(self.vertices)))
         for start in range(0, count, self._BATCH_CHUNK):
             stop = min(start + self._BATCH_CHUNK, count)
             rows = stop - start
@@ -6259,8 +6258,12 @@ class _SurfaceProjector:
             best = np.argmin(distance_sq, axis=1)
             row_index = np.arange(rows)
             best_distance = distance_sq[row_index, best]
+            coordinate_scale = np.maximum(mesh_scale, np.max(np.abs(points[start:stop]), axis=1))
+            coordinate_roundoff = 32 * np.finfo(float).eps * coordinate_scale
+            # Propagate coordinate roundoff to squared distance, including d=0.
+            distance_roundoff = coordinate_roundoff * (2 * np.sqrt(best_distance) + coordinate_roundoff)
             scalar_rows = ~np.isfinite(best_distance) | (
-                np.count_nonzero(distance_sq == best_distance[:, None], axis=1) > 1
+                np.count_nonzero(valid & (distance_sq <= (best_distance + distance_roundoff)[:, None]), axis=1) > 1
             )
             face_index = candidates[row_index, best]
             point_closest = closest[row_index, best]
@@ -6276,20 +6279,10 @@ class _SurfaceProjector:
                     candidate_faces = {int(index) for index in centroid_candidates[point_index]}
                     for vertex_index in vertex_candidates[point_index]:
                         candidate_faces.update(self.vertex_faces[int(vertex_index)])
-                if not np.isfinite(best_distance[local]):
-                    face, point, weights = self._closest_face_from_candidates(points[point_index], candidate_faces)
-                    face_index[local] = face
-                    point_closest[local] = point
-                    point_barycentric[local] = weights
-                    continue
-                column = {int(face): col for col, face in enumerate(candidates[local]) if valid[local, col]}
-                for face in candidate_faces:
-                    col = column[face]
-                    if distance_sq[local, col] == best_distance[local]:
-                        face_index[local] = face
-                        point_closest[local] = closest[local, col]
-                        point_barycentric[local] = barycentric[local, col]
-                        break
+                face, point, weights = self._closest_face_from_candidates(points[point_index], candidate_faces)
+                face_index[local] = face
+                point_closest[local] = point
+                point_barycentric[local] = weights
             corner_normals = self.vertex_normals[self.faces[face_index]]
             normal = (
                 point_barycentric[:, 0, None] * corner_normals[:, 0]

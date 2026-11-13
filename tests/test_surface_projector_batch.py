@@ -4,7 +4,9 @@ import numpy as np
 import pytest
 
 from coilgen.geometry import build_cylinder_mesh, build_planar_mesh
+import coilgen.manufacturing as manufacturing
 from coilgen.manufacturing import _SurfaceProjector
+from coilgen.models import Mesh
 
 
 def _scalar_reference(projector: _SurfaceProjector, points: np.ndarray):
@@ -98,3 +100,29 @@ def test_batch_projection_handles_chunk_boundaries(monkeypatch) -> None:
 
     for actual, expected in zip(chunked, whole):
         np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize("scale", [1e-6, 1.0, 1e6])
+def test_roundoff_at_shared_edge_preserves_scalar_face_selection(monkeypatch, scale) -> None:
+    # Folded triangles share an edge but have different face normals. Selecting
+    # the other face changes provenance even when the projected point agrees.
+    mesh = Mesh(
+        vertices=scale * np.asarray([[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0.25]]),
+        faces=np.asarray([[0, 1, 2], [1, 3, 2]]),
+    )
+    projector = _SurfaceProjector(mesh)
+    points = scale * np.asarray([[0.5, 0.5, 0.0], [0.5, 0.5, 0.0]])
+    expected = _scalar_reference(projector, points)
+    original = manufacturing._closest_points_batch
+
+    def rounded_distances(points, triangles):
+        projected, barycentric, distance_sq = original(points, triangles)
+        selected = np.all(triangles == projector.triangles[expected[3][0]], axis=(-2, -1))
+        # Simulate a BLAS-dependent last-bit difference at this exact shared edge.
+        distance_sq[selected] += (8 * np.finfo(float).eps * scale) ** 2
+        return projected, barycentric, distance_sq
+
+    monkeypatch.setattr(manufacturing, "_closest_points_batch", rounded_distances)
+    actual = projector.project_with_details(points)
+    np.testing.assert_array_equal(actual[3], expected[3])
+    np.testing.assert_array_equal(actual[2], expected[2])
