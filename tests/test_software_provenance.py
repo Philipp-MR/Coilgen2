@@ -60,9 +60,8 @@ def test_new_run_evidence_retains_software_credit_under_its_metadata_checksum(tm
     assert result["metadata_sha256"] == storage.result_metadata_digest(result)
     assert DesignService.load_run(directory).metadata["software"] == software_attribution()
     if stage == "evaluated":
-        assert "Created and maintained by Philipp Amrein" in (directory / "design_report.md").read_text(
-            encoding="utf-8"
-        )
+        report = (directory / "design_report.md").read_text(encoding="utf-8")
+        assert f"Generated with **CoilGen2** · version {result['software']['version']}." in report
 
 
 def test_replaying_saved_run_never_rewrites_its_recorded_software_credit(tmp_path, monkeypatch):

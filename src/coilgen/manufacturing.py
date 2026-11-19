@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .attribution import AUTHOR_CREDIT, AUTHOR_ROLE, SOFTWARE_NAME
+from .attribution import AUTHOR_CREDIT, SOFTWARE_NAME
 from .config import CoilGenConfig
 from .conductor_geometry import conductor_trace, trace_segment_geometry
 from .geometry_collision import (
@@ -5260,7 +5260,7 @@ def _save_xyz_polylines_as_step(
             "HEADER;",
             f"FILE_DESCRIPTION(('{_step_string(description)}'),'2;1');",
             f"FILE_NAME('{_step_string(path.name)}','{timestamp}',('CoilGen'),('CoilGen'),"
-            f"'{_step_string(f'{SOFTWARE_NAME} - {AUTHOR_CREDIT} ({AUTHOR_ROLE})')}','{_step_string(SOFTWARE_NAME)}','');",
+            f"'{_step_string(f'{SOFTWARE_NAME} - {AUTHOR_CREDIT}')}','{_step_string(SOFTWARE_NAME)}','');",
             "FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));",
             "ENDSEC;",
             "DATA;",
@@ -5412,7 +5412,7 @@ def save_mesh_as_step(
             "HEADER;",
             f"FILE_DESCRIPTION(('{description}'),'2;1');",
             f"FILE_NAME('{_step_string(path.name)}','{timestamp}',('CoilGen'),('CoilGen'),"
-            f"'{_step_string(f'{SOFTWARE_NAME} - {AUTHOR_CREDIT} ({AUTHOR_ROLE})')}','{_step_string(SOFTWARE_NAME)}','');",
+            f"'{_step_string(f'{SOFTWARE_NAME} - {AUTHOR_CREDIT}')}','{_step_string(SOFTWARE_NAME)}','');",
             f"FILE_SCHEMA(('{schema}'));",
             "ENDSEC;",
             "DATA;",

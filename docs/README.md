@@ -1,6 +1,5 @@
 # CoilGen2
 
-Created and maintained by **Philipp Amrein — MRI hardware engineer**.
 [Project source](https://github.com/Philipp-MR/Coilgen2).
 [Kontakt and project information](CONTACT.md).
 
@@ -70,22 +69,6 @@ Neumann/Biot-Savart integral rather than any FastHenry interface.
 The recommended regression and inspection path uses generated meshes and
 generated target fields only. No MATLAB `.mat` data is required for these
 examples.
-
-## Attribution and citation
-
-CoilGen2 builds on the original CoilGen work by Philipp Amrein, Feng Jia,
-Maxim Zaitsev and Sebastian Littin. Please cite the original publication when
-using CoilGen and record the CoilGen2 version or commit used for reproducibility:
-
-Amrein P, Jia F, Zaitsev M, Littin S. **CoilGen: Open-source MR coil layout
-generator.** *Magnetic Resonance in Medicine.* 2022;88(3):1465–1479.
-[doi:10.1002/mrm.29294](https://doi.org/10.1002/mrm.29294).
-
-[CITATION.cff](../CITATION.cff) provides machine-readable software and publication
-credits. The original paper describes CoilGen; the current CoilGen2 documentation
-describes this implementation and its additional capabilities. Software credits
-in reports and exports identify the tool's creator and maintainer; they do not
-assign authorship of a user's coil design.
 
 ## User Documentation
 
@@ -642,3 +625,22 @@ The triangular sweep remains a visualization/mesh-export
 backend rather than an analytic CAD solid. Each swept-body STL export also
 writes the corresponding current-carrying surface mesh as
 `<prefix>_partN_current_carrying_surface.stl` in the same directory.
+
+## Maintenance, contributions and citation
+
+Maintainer: [Philipp Amrein](https://github.com/Philipp-MR).
+See [Contributing](CONTRIBUTING.md) for bug reports and contributions.
+
+CoilGen2 builds on the original CoilGen work by Philipp Amrein, Feng Jia,
+Maxim Zaitsev and Sebastian Littin. Please cite the original publication when
+using CoilGen and record the CoilGen2 version or commit used for reproducibility:
+
+Amrein P, Jia F, Zaitsev M, Littin S. **CoilGen: Open-source MR coil layout
+generator.** *Magnetic Resonance in Medicine.* 2022;88(3):1465–1479.
+[doi:10.1002/mrm.29294](https://doi.org/10.1002/mrm.29294).
+
+[CITATION.cff](../CITATION.cff) provides machine-readable software and publication
+credits. The original paper describes CoilGen; the current CoilGen2 documentation
+describes this implementation and its additional capabilities. Software attribution
+is retained in report and export metadata, separate from authorship of a user's
+coil design.

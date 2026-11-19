@@ -7,10 +7,8 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFrame, QLabel, QScrollArea, QTabWidget, QVBoxLayout, QWidget
 
 from ..attribution import (
-    AUTHOR_CREDIT,
     AUTHOR_NAME,
     AUTHOR_PROFILE_URL,
-    AUTHOR_ROLE,
     COILGEN_CITATION,
     COILGEN_PUBLICATION_URL,
     CONTACT_EMAIL,
@@ -39,15 +37,17 @@ class AboutDialog(QDialog):
         self.tabs.setAccessibleName("CoilGen2 information pages")
         layout.addWidget(self.tabs)
         about = self._page("about", "About")
-        self._text(about, f"{AUTHOR_CREDIT}\n{AUTHOR_ROLE}", "software_author_credit")
-        self._link(about, "CoilGen2 source and project", PROJECT_URL, "software_repository")
+        self._text(about, f"Maintainer: {AUTHOR_NAME}", "software_author_credit")
+        self._link(about, "Source code", PROJECT_URL, "software_repository")
+        self._link(about, "Documentation", f"{PROJECT_URL}#readme", "software_documentation")
+        self._link(about, "Report an issue", PROJECT_ISSUES_URL, "software_issues")
         about.addSpacing(12)
         about.addWidget(QLabel("Original CoilGen publication"))
         self._text(about, COILGEN_CITATION, "coilgen_citation")
         self._link(about, "Read the publication", COILGEN_PUBLICATION_URL, "coilgen_publication")
         about.addStretch(1)
         contact = self._page("contact", "Contact / Kontakt")
-        self._text(contact, f"Software creator and maintainer\n{AUTHOR_NAME}\n{AUTHOR_ROLE}", "software_contact_name")
+        self._text(contact, f"Maintainer: {AUTHOR_NAME}", "software_contact_name")
         self._text(
             contact,
             "Project contact is available by email and on GitHub. Use the issue tracker for bug reports and feature requests.",
@@ -59,9 +59,7 @@ class AboutDialog(QDialog):
         contact.addStretch(1)
         imprint = self._page("impressum", "Impressum")
         self._text(imprint, "Project information / Impressum — project notice", "impressum_status")
-        self._text(
-            imprint, f"{AUTHOR_NAME}\n{AUTHOR_ROLE}\nCreator and maintainer of {SOFTWARE_NAME}.", "impressum_name"
-        )
+        self._text(imprint, f"Maintainer: {AUTHOR_NAME}", "impressum_name")
         self._text(
             imprint,
             "Public contact: email and GitHub. Postal contact details are not published here.",

@@ -58,7 +58,8 @@ def test_design_report_schema_has_stable_required_keys_and_sections(tmp_path: Pa
     csv_path = write_design_summary_csv(result, tmp_path / "design_summary.csv")
 
     report_text = report_path.read_text(encoding="utf-8")
-    assert "Generated with **CoilGen2**. Created and maintained by Philipp Amrein" in report_text
+    assert f"Generated with **CoilGen2** · version {summary['software_version']}." in report_text
+    assert "software_creator" not in report_text
     assert "Amrein P, Jia F, Zaitsev M, Littin S." in report_text
     assert "https://doi.org/10.1002/mrm.29294" in report_text
     markdown_validation = validate_markdown_sections(report_text)

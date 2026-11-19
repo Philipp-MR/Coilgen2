@@ -17,6 +17,11 @@ generator.** *Magnetic Resonance in Medicine.* 2022;88(3):1465–1479.
 
 Citation metadata is available in [CITATION.cff](CITATION.cff).
 
+## Maintenance and contributions
+
+Maintainer: [Philipp Amrein](https://github.com/Philipp-MR).
+See the [contributing guide](docs/CONTRIBUTING.md) for bug reports and contributions.
+
 ## License
 
 The CoilGen2 code is licensed under the

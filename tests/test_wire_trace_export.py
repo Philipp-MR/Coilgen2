@@ -86,7 +86,7 @@ class WireTraceExportTest(unittest.TestCase):
         self.assertEqual(files, [path])
         self.assertIn("ISO-10303-21", step_text)
         self.assertIn(
-            "('CoilGen'),('CoilGen'),'CoilGen2 - Created and maintained by Philipp Amrein (MRI hardware engineer)','CoilGen2','');",
+            "('CoilGen'),('CoilGen'),'CoilGen2 - Maintained by Philipp Amrein','CoilGen2','');",
             step_text,
         )
         self.assertIn("SHAPE_REPRESENTATION", step_text)

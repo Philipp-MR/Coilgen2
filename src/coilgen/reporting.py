@@ -8,8 +8,6 @@ from typing import Any
 import numpy as np
 
 from .attribution import (
-    AUTHOR_CREDIT,
-    AUTHOR_ROLE,
     COILGEN_CITATION,
     COILGEN_PUBLICATION_URL,
     SOFTWARE_NAME,
@@ -2029,7 +2027,7 @@ def write_design_report(
     lines: list[str] = [
         f"# {title}",
         "",
-        f"Generated with **{SOFTWARE_NAME}**. {AUTHOR_CREDIT} — {AUTHOR_ROLE}.",
+        f"Generated with **{SOFTWARE_NAME}** · version {summary.get('software_version', 'unknown')}.",
         "",
         f"Original CoilGen reference: [{COILGEN_CITATION}]({COILGEN_PUBLICATION_URL})",
         "",
@@ -2069,7 +2067,7 @@ def write_design_report(
     lines.extend(_markdown_table(suppression_clearance_report_dict(result)))
     lines.append("")
     lines.extend(["## Numerical Summary", ""])
-    lines.extend(_markdown_table(summary))
+    lines.extend(_markdown_table({key: value for key, value in summary.items() if not key.startswith("software_")}))
     lines.append("")
     pruning_summary = _sparsification_pruning_summary(result)
     pruning_rows = _sparsification_pruning_audit_rows(result)

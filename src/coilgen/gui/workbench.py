@@ -82,7 +82,7 @@ from ..application.design_studies import (
     set_study_notes,
     set_study_notes_batch,
 )
-from ..attribution import AUTHOR_CREDIT, AUTHOR_ROLE, PROJECT_URL, software_attribution
+from ..attribution import AUTHOR_CREDIT, AUTHOR_NAME, PROJECT_URL, SOFTWARE_VERSION, software_attribution
 from ..application.preflight import overall_readiness, section_readiness
 from ..application.session import PIPELINE_STAGES, request_controls, stage_study_changes, submit_design
 from ..application.workbench_presentation import (
@@ -619,7 +619,7 @@ class CoilGenWorkbench(QMainWindow):
             button.clicked.connect(callback)
             welcome.addWidget(button, alignment=Qt.AlignmentFlag.AlignHCenter)
         welcome.addStretch(1)
-        credits = QLabel(f"{AUTHOR_CREDIT}\n{AUTHOR_ROLE}", self.welcome)
+        credits = QLabel(AUTHOR_CREDIT, self.welcome)
         credits.setObjectName("welcome_author_credit")
         credits.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
         credit_font = credits.font()
@@ -5711,7 +5711,8 @@ class CoilGenWorkbench(QMainWindow):
             assembly.save(project_path, **({"progress": self._portable_progress} if compact else {}))
             source = (
                 '"""Independent CoilGen2 channels; coupling and assembly checks require separate evaluation."""\n'
-                f"# CoilGen2 software: {AUTHOR_CREDIT} ({AUTHOR_ROLE}).\n"
+                f"# Generated with CoilGen2 - version {SOFTWARE_VERSION}.\n"
+                f"# Software maintainer: {AUTHOR_NAME}.\n"
                 f"# Project: {PROJECT_URL}\n"
                 "from pathlib import Path\n"
                 "from coilgen.application import DesignService, ProjectAssembly\n\n"

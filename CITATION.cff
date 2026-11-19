@@ -10,8 +10,8 @@ authors:
     given-names: Philipp
 repository-code: https://github.com/Philipp-MR/Coilgen2
 abstract: >-
-  Magnetostatic coil design and field analysis software created and maintained
-  by Philipp Amrein, MRI hardware engineer.
+  Magnetostatic coil design and field analysis software for generating winding
+  layouts from target magnetic fields and support geometry.
 preferred-citation:
   type: article
   title: "CoilGen: Open-source MR coil layout generator"

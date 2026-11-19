@@ -1,9 +1,16 @@
 """Software credits, separate from coil design authorship and numerical inputs."""
 
+from importlib.metadata import PackageNotFoundError, version
+
 SOFTWARE_NAME = "CoilGen2"
+try:
+    SOFTWARE_VERSION = version("coilgen-python")
+except PackageNotFoundError:
+    SOFTWARE_VERSION = "unknown"
+
 AUTHOR_NAME = "Philipp Amrein"
 AUTHOR_ROLE = "MRI hardware engineer"
-AUTHOR_CREDIT = f"Created and maintained by {AUTHOR_NAME}"
+AUTHOR_CREDIT = f"Maintained by {AUTHOR_NAME}"
 CONTACT_EMAIL = "pamrein11@mgh.harvard.edu"
 PROJECT_URL = "https://github.com/Philipp-MR/Coilgen2"
 PROJECT_ISSUES_URL = f"{PROJECT_URL}/issues"
@@ -20,6 +27,7 @@ def software_attribution() -> dict[str, str]:
     """Return detached software provenance for newly generated artifacts."""
     return {
         "name": SOFTWARE_NAME,
+        "version": SOFTWARE_VERSION,
         "creator": AUTHOR_NAME,
         "maintainer": AUTHOR_NAME,
         "creator_role": AUTHOR_ROLE,

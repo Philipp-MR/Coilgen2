@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from coilgen.attribution import AUTHOR_CREDIT, AUTHOR_ROLE, SOFTWARE_NAME
+from coilgen.attribution import AUTHOR_CREDIT, SOFTWARE_NAME
 from coilgen.manufacturing import save_mesh_as_step
 from coilgen.models import Mesh
 
@@ -16,9 +16,7 @@ def test_solid_step_header_credits_software_without_claiming_design_authorship(t
     text = path.read_text(encoding="ascii")
     header = next(line for line in text.splitlines() if line.startswith("FILE_NAME("))
 
-    assert (
-        f"('CoilGen'),('CoilGen'),'{SOFTWARE_NAME} - {AUTHOR_CREDIT} ({AUTHOR_ROLE})','{SOFTWARE_NAME}','');"
-    ) in header
+    assert f"('CoilGen'),('CoilGen'),'{SOFTWARE_NAME} - {AUTHOR_CREDIT}','{SOFTWARE_NAME}','');" in header
     assert "SI_UNIT($,.METRE.)" in text
     assert "CARTESIAN_POINT('',(0.01,0.,0.))" in text
     assert "CARTESIAN_POINT('',(0.,0.02,0.))" in text

@@ -13,7 +13,7 @@ from types import MappingProxyType
 from typing import Any, Mapping
 from uuid import uuid4
 
-from ..attribution import AUTHOR_NAME, AUTHOR_ROLE, PROJECT_URL, SOFTWARE_NAME
+from ..attribution import AUTHOR_NAME, PROJECT_URL, SOFTWARE_NAME, SOFTWARE_VERSION
 from ..config import CoilGenConfig
 from ..geometry import geometry_factory
 from ..object_registry import (
@@ -650,8 +650,8 @@ class ProjectDocument:
         (self if include_results else self.inputs_only()).save(project_path)
         text = (
             '"""Reproducible CoilGen2 design exported from a project revision.\n\n'
-            f"Generated with {SOFTWARE_NAME}.\n"
-            f"Software creator and maintainer: {AUTHOR_NAME}, {AUTHOR_ROLE}.\n"
+            f"Generated with {SOFTWARE_NAME} - version {SOFTWARE_VERSION}.\n"
+            f"Software maintainer: {AUTHOR_NAME}.\n"
             f"Software repository: {PROJECT_URL}\n"
             '"""\n'
             "from pathlib import Path\n"

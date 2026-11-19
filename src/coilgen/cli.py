@@ -9,7 +9,7 @@ import multiprocessing
 from pathlib import Path
 import sys
 
-from .attribution import AUTHOR_CREDIT, AUTHOR_ROLE
+from .attribution import AUTHOR_CREDIT
 
 
 def main(argv=None) -> int:
@@ -18,7 +18,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="coilgen",
         description="CoilGen2 reproducible scientific projects",
-        epilog=f"{AUTHOR_CREDIT} ({AUTHOR_ROLE}).",
+        epilog=f"{AUTHOR_CREDIT}.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
     new = commands.add_parser("new", help="Create an editable generated-data project")

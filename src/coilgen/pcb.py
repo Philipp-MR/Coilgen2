@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .attribution import AUTHOR_CREDIT, AUTHOR_ROLE, SOFTWARE_NAME, software_attribution
+from .attribution import AUTHOR_CREDIT, SOFTWARE_NAME, software_attribution
 from .config import CoilGenConfig
 from .models import CoilGenResult, CoilPart, PcbLayout, PcbWirePart
 
@@ -216,7 +216,7 @@ def _save_single_pcb_svg(layout: PcbLayout, path: Path, *, title: str) -> Path:
 def _save_single_pcb_dxf(layout: PcbLayout, path: Path) -> Path:
     lines = [
         "999",
-        f"{SOFTWARE_NAME} software: {AUTHOR_CREDIT} ({AUTHOR_ROLE}).",
+        f"{SOFTWARE_NAME} software: {AUTHOR_CREDIT}.",
         "0",
         "SECTION",
         "2",

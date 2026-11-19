@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
-from coilgen.attribution import AUTHOR_CREDIT, AUTHOR_ROLE, SOFTWARE_NAME, software_attribution
+from coilgen.attribution import AUTHOR_CREDIT, SOFTWARE_NAME, software_attribution
 from coilgen.models import PcbLayout, PcbWirePart
 from coilgen.pcb import save_pcb_centerlines_as_csv, save_pcb_layouts_as_dxf, save_pcb_layouts_as_svg
 
@@ -45,7 +45,7 @@ def test_pcb_dxf_comment_preserves_millimeter_units_and_copper_entities(tmp_path
     lines = path.read_text(encoding="ascii").splitlines()
     pairs = list(zip(lines[::2], lines[1::2]))
 
-    assert pairs[0] == ("999", f"{SOFTWARE_NAME} software: {AUTHOR_CREDIT} ({AUTHOR_ROLE}).")
+    assert pairs[0] == ("999", f"{SOFTWARE_NAME} software: {AUTHOR_CREDIT}.")
     assert pairs[1:5] == [("0", "SECTION"), ("2", "HEADER"), ("9", "$INSUNITS"), ("70", "4")]
     copper = pairs[pairs.index(("8", "upper")) + 1 :]
     assert copper[:2] == [("90", "3"), ("70", "1")]

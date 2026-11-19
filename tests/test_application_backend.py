@@ -181,7 +181,7 @@ def test_exported_script_compiles_and_project_reopens(tmp_path):
     reopened = ProjectDocument.load(path.with_suffix(".coilgen.json"))
     assert reopened.fingerprint == project.fingerprint
     assert "run_coilgen" in path.read_text(encoding="utf-8")
-    assert f"Software creator and maintainer: {AUTHOR_NAME}" in path.read_text(encoding="utf-8")
+    assert f"Software maintainer: {AUTHOR_NAME}" in path.read_text(encoding="utf-8")
 
 
 def test_dependency_plan_keeps_wire_and_hardware_constraints_upstream():

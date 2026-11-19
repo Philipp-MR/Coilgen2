@@ -1,8 +1,8 @@
 # Kontakt and project information
 
-**Philipp Amrein — MRI hardware engineer**
+Maintainer: [Philipp Amrein](https://github.com/Philipp-MR)
 
-Creator and maintainer of CoilGen.
+MRI hardware engineer.
 
 Email: [pamrein11@mgh.harvard.edu](mailto:pamrein11@mgh.harvard.edu)
 
