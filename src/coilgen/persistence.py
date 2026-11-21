@@ -55,19 +55,7 @@ def atomic_text_writer(path: str | Path, *, newline: str = "\n") -> Iterator[Tex
             yield output
             output.flush()
             os.fsync(output.fileno())
-        # Windows readers and background scanners can briefly deny replacement.
-        # Retry only its sharing/access errors; retain atomic replacement and
-        # propagate a persistent denial without touching the previous file.
-        delays = iter((0.01, 0.02, 0.04, 0.08, 0.16))
-        while True:
-            try:
-                os.replace(temporary, path)
-                break
-            except PermissionError as exc:
-                delay = next(delays, None)
-                if getattr(exc, "winerror", None) not in {5, 32, 33} or delay is None:
-                    raise
-                time.sleep(delay)
+        _retry_windows_file_operation(os.replace, temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -83,11 +71,25 @@ def atomic_json(path: Path, value: Any) -> None:
     atomic_text(path, text)
 
 
+def _retry_windows_file_operation(operation, *args) -> None:
+    """Tolerate brief scanner/reader locks without changing atomicity or overwrite policy."""
+    delays = iter((0.01, 0.02, 0.04, 0.08, 0.16))
+    while True:
+        try:
+            operation(*args)
+            return
+        except PermissionError as exc:
+            delay = next(delays, None)
+            if getattr(exc, "winerror", None) not in {5, 32, 33} or delay is None:
+                raise
+            time.sleep(delay)
+
+
 def publish_exclusive(source: Path, target: Path) -> None:
     """Publish a staged file on the same volume, never replacing an existing target."""
     if os.name == "nt":
         # Windows rename is exclusive and works on volumes without hard links.
-        os.rename(source, target)
+        _retry_windows_file_operation(os.rename, source, target)
     else:
         os.link(source, target)
 

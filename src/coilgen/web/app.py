@@ -70,7 +70,6 @@ from ..application.workbench_presentation import (
     COMPUTE_CAPTIONS,
     DESIGN_PLAN_TITLE,
     FINALIZING_FABRICATION,
-    MODEL_BUILDER_TITLE,
     STATUS_COLORS,
     is_finalizing_fabrication,
 )
@@ -168,6 +167,9 @@ class BrowserWorkbench:
         self.live_preview = BrowserLivePreview(self)
         self.editing_identity = None
         self.editing_fingerprint = None
+        self._advanced_owner = None
+        self._export_generation = 0
+        self._pinned_completion = None
         self.view = None
         self.exports = session.workspace / "exports"
         self.exports.mkdir(parents=True, exist_ok=True)
@@ -178,12 +180,21 @@ class BrowserWorkbench:
                     "coilgen-client": str(Path(__file__).with_name("assets")),
                     "coilgen-brand": str(Path(__file__).resolve().parents[1] / "gui" / "assets"),
                 },
-                "styles": ["coilgen-client/workbench.css"],
-                "scripts": ["coilgen-client/project_upload.js"],
-                "vue_use": ["CoilGenProjectUpload"],
+                "styles": ["coilgen-client/workbench.css", "coilgen-client/interconnection_editor.css"],
+                "scripts": ["coilgen-client/project_upload.js", "coilgen-client/interconnection_editor.js"],
+                "vue_use": ["CoilGenProjectUpload", "CoilGenGroupFocus", "CoilGenSetupFocus", "CoilGenWindingEditor"],
             }
         )
         self._initial_state()
+        from .design_setup import BrowserDesignSetup
+
+        self.setup = BrowserDesignSetup(self)
+        from .group_circuits import BrowserGroups
+
+        self.groups = BrowserGroups(self)
+        from .interconnection_editor import BrowserWindingEditor
+
+        self.winding = BrowserWindingEditor(self)
         self.field_inputs = SliceInputCache()
         self.field_slices = BrowserFieldSlices(self)
         self.harmonics = BrowserHarmonics(self)
@@ -194,16 +205,32 @@ class BrowserWorkbench:
 
     # -- state ---------------------------------------------------------
     def _initial_state(self):
+        from .workbench_shell import _tree_symbol
+
         state = self.server.state
         state.update(
             {
                 "user": self.user,
                 "trame__title": "CoilGen2 workbench",
                 "templates": [
-                    {"title": f"{spec.category} · {spec.title}", "value": spec.id, "description": spec.description}
+                    {
+                        "title": f"{spec.category} · {spec.title}",
+                        "value": spec.id,
+                        "description": spec.description,
+                        "symbol": _tree_symbol(spec.support_icon),
+                        "details": list(spec.gallery_details),
+                    }
                     for spec in self.session.templates()
                 ],
                 "template": None,
+                "example_filter": "",
+                "field_probes": "",
+                "field_budgets": "",
+                "follow_preview": True,
+                "new_preview_label": "",
+                "export_busy": False,
+                "export_receipt_key": "",
+                "advanced_errors": {},
                 "project_name": "No project",
                 "channel_enabled": False,
                 "channels": [],
@@ -281,11 +308,9 @@ class BrowserWorkbench:
                 "metrics": [],
                 "export_options": [],
                 "export_selected": [],
-                "former_export_selected": [],
                 "export_selection_note": "",
                 "export_unit": "mm",
                 "draft_ack": False,
-                "former_draft_ack": False,
                 "draft_notice": "",
                 "draft_selected": False,
                 "download_url": "",
@@ -300,6 +325,9 @@ class BrowserWorkbench:
                 "show_message": False,
                 "advanced_dialog": False,
                 "advanced_config": "",
+                "advanced_category": "",
+                "advanced_key_search": "",
+                "advanced_entries": [],
                 "advanced_study": "",
                 "project_open_result": None,
                 "mesh_upload": None,
@@ -322,19 +350,32 @@ class BrowserWorkbench:
         # All dismissal paths (Cancel, Escape and backdrop) update the dialog model.
         state.change("settings_dialog")(lambda **_: self._refresh_settings())
         state.change("advanced_dialog")(self._advanced_dialog_changed)
+        state.change("advanced_config")(lambda **_: self._refresh_advanced_entries())
         state.change("settings_values", "profile_preset", "mesh_upload", "profile_upload")(
             lambda **_: self._check_edits()
         )
         state.change("mesh_upload", "mesh_scale")(lambda **_: self._preview_mesh_import())
         state.change("active_channel")(lambda active_channel, **_: self._select_channel(active_channel))
         state.change("dataset")(self._plot_changed)
+        state.change("follow_preview")(
+            lambda follow_preview, **_: (
+                self.live_preview._show()
+                if follow_preview and self.live_preview.current(self.follow_job_id) is not None
+                else None
+            )
+        )
         state.change("component", "see_through_support", "field_show_target")(lambda **_: self._render())
         state.change("selected_run")(lambda selected_run, **_: self._open_run(selected_run))
         state.change("workspace_history")(lambda **_: self._refresh_jobs())
         state.change("stage")(lambda stage, **_: self._select_stage(stage))
-        state.change("export_selected", "former_export_selected", "center_section")(
-            lambda **_: self._refresh_draft_state()
-        )
+        state.change(
+            "export_selected",
+            "center_section",
+            "export_unit",
+            "include_project",
+            "selected_run",
+            "draft_ack",
+        )(self._export_changed)
         state.change("center_section")(self._shielding_section_changed)
         from .view_tools import install
 
@@ -365,7 +406,11 @@ class BrowserWorkbench:
         from .workbench_shell import model_tree_nodes, preflight_node, readiness_summary
 
         state, session = self.server.state, self.session
+        self.setup.synchronize()
         assembly = session.assembly
+        from ..application.run_progress import worker_limit_text
+
+        state.worker_limit = worker_limit_text(getattr(session._jobs, "policy", None) or session._policy)
         state.project_name = assembly.name if assembly else "No project"
         state.channels = [
             {"title": channel.name, "value": channel.id, "enabled": channel.enabled} for channel in session.channels
@@ -376,7 +421,18 @@ class BrowserWorkbench:
         )
         state.can_undo, state.can_redo = bool(session.history.undo), bool(session.history.redo)
         project = session.project
+        groups = getattr(self, "groups", None)
+        if groups is not None:
+            groups.synchronize(project)
         self.editing_fingerprint = project.fingerprint if project is not None else None
+        state.applied_formula = (
+            project.config.field_shape_function
+            if project
+            and str(project.config.target_field_definition_file).lower() in {"none", ""}
+            and not project.study.get("requirements")
+            else ""
+        )
+        self._export_changed()
         state.editing_label = f"Editing {project.name} · revision {project.revision}" if project else ""
         identity = (assembly.id, session.active_channel_id) if assembly else None
         switched = identity != self.editing_identity
@@ -429,6 +485,10 @@ class BrowserWorkbench:
             state.settings_support, state.geometry_help = "", ""
             return
         values = self.session.settings_values(state.node)
+        from ..application.targets import field_budget_text, target_probe_text
+
+        state.field_probes = target_probe_text(project.config) if not project.study.get("requirements") else ""
+        state.field_budgets = field_budget_text(project.config, project.study["design_margin"])
         if state.node == "conductor":
             state.profile_diameter_mm = values["conductor_width_mm"]
             config = project.config
@@ -459,6 +519,8 @@ class BrowserWorkbench:
                 if project.config.contour_only_sweep_mode
                 else "Connected routing is disabled in this model."
                 if project.config.skip_postprocessing
+                else "An explicit Groups & circuits plan controls circuit membership, spiral order and cut side."
+                if project.config.routing_group_plan is not None
                 else ""
             )
         self._install_settings_fields(self.session.settings_fields(state.node), values)
@@ -604,6 +666,14 @@ class BrowserWorkbench:
             )
 
     def _ready_to_submit(self):
+        if self.server.state.groups_dirty:
+            self._notify("Apply or revert the pending Groups & circuits plan first.", "warning")
+            return False
+        if self._advanced_has_edits():
+            self._notify("Apply or cancel the advanced parameter edits first.", "warning")
+            return False
+        if not self.setup.apply():
+            return False
         if self._check_edits():
             self._notify("Apply or discard the pending edits in Model settings first.", "warning")
             return False
@@ -611,11 +681,17 @@ class BrowserWorkbench:
 
     def _select_channel(self, channel_id):
         if channel_id and channel_id != self.session.active_channel_id:
+            if not self._ready_to_submit():
+                self.server.state.active_channel = self.session.active_channel_id
+                return
             self._guard(self.session.select_channel, channel_id)
 
     def _select_stage(self, stage):
         project = self.session.project
         if project and stage and stage != project.study["pipeline_stage"]:
+            if not self._ready_to_submit():
+                self.server.state.stage = project.study["pipeline_stage"]
+                return
             self._guard(self.session.set_stage, stage)
 
     # -- actions -------------------------------------------------------
@@ -926,25 +1002,111 @@ class BrowserWorkbench:
             apply({})
 
     @_bind("advanced_settings")
-    def open_advanced(self):
+    def open_advanced(self, category=None):
         project = self.session.project
         if project is None:
             return
+        if self.server.state.setup_dirty and not self.setup.apply():
+            return
+        project = self.session.project
         state = self.server.state
-        state.advanced_config = json.dumps(project.values, indent=2)
-        state.advanced_study = json.dumps(_json_safe(project.study), indent=2, default=str)
+        owner = (project.id, project.fingerprint)
+        if not state.advanced_dialog or self._advanced_owner != owner:
+            state.advanced_errors = {}
+            state.advanced_config = json.dumps(project.values, indent=2)
+            state.advanced_study = json.dumps(_json_safe(project.study), indent=2, default=str)
+            self._advanced_owner = owner
+            self._advanced_initial = (state.advanced_config, state.advanced_study)
         state.advanced_dialog = True
+        state.advanced_category = category if isinstance(category, str) else ""
+        state.advanced_key_search = state.advanced_category
+        self._refresh_advanced_entries()
+
+    def _refresh_advanced_entries(self):
+        state = self.server.state
+        try:
+            values = json.loads(state.advanced_config)
+        except ValueError:
+            values = {}
+        if not isinstance(values, dict):
+            values = {}
+        entries = []
+        for key, value in sorted(values.items()):
+            if key.startswith(
+                ("routing_", "joint_group_", "inter_group_", "interconnection_", "within_group_")
+            ) or key in {
+                "force_cut_selection",
+                "group_interconnection_method",
+                "normal_shift_length",
+                "skip_normal_shift",
+            }:
+                section = "Routing"
+            elif key.startswith(("regularization_", "tikonov_", "l_curve_")):
+                section = "Optimization Regularization"
+            elif key.startswith(("sf_opt_", "stream_function_", "optimization_", "constrained_")):
+                section = "Optimization"
+            else:
+                section = "Other settings"
+            entries.append(
+                {
+                    "key": key,
+                    "category": section,
+                    "aliases": "return-path lift crossover bridge layer shift metres"
+                    if key in {"normal_shift_length", "skip_normal_shift"}
+                    else "",
+                    "value": json.dumps(value),
+                    "inactive": key == "force_cut_selection" and values.get("routing_group_plan") is not None,
+                }
+            )
+        state.advanced_entries = entries
+
+    def edit_advanced_field(self, key, value):
+        state = self.server.state
+        try:
+            config = json.loads(state.advanced_config, object_pairs_hook=_json_object)
+            if key not in config:
+                raise ValueError("Unknown native setting.")
+            config[key] = json.loads(value)
+            state.advanced_config = json.dumps(config, indent=2, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            self._notify(str(exc), "warning")
 
     def _advanced_dialog_changed(self, advanced_dialog, **_):
         if not advanced_dialog:
             self.server.state.advanced_config = self.server.state.advanced_study = ""
+            self._advanced_owner = None
 
-    def apply_advanced(self):
+    def _advanced_has_edits(self):
+        state = self.server.state
+        return bool(
+            state.advanced_dialog
+            and (
+                state.advanced_errors
+                or (state.advanced_config, state.advanced_study) != getattr(self, "_advanced_initial", None)
+            )
+        )
+
+    def apply_advanced(self, config_text=None, study_text=None, errors=None):
         project = self.session.project
         state = self.server.state
+        if state.setup_dirty:
+            self._notify(
+                "Revert the setup edits before applying advanced parameters, or cancel advanced edits and preview the setup.",
+                "warning",
+            )
+            return
+        if project is None or self._advanced_owner != (project.id, project.fingerprint):
+            self._notify("The project changed. Reopen Advanced settings to edit its current revision.", "warning")
+            return
         try:
-            config = json.loads(state.advanced_config, object_pairs_hook=_json_object)
-            study = json.loads(state.advanced_study, object_pairs_hook=_json_object)
+            if errors or state.advanced_errors:
+                raise ValueError("Correct the highlighted setting before applying.")
+            config = json.loads(
+                state.advanced_config if config_text is None else config_text, object_pairs_hook=_json_object
+            )
+            study = json.loads(
+                state.advanced_study if study_text is None else study_text, object_pairs_hook=_json_object
+            )
         except (TypeError, ValueError) as exc:
             self._notify(f"Invalid JSON: {exc}", "error")
             return
@@ -970,11 +1132,13 @@ class BrowserWorkbench:
 
     @_bind("duplicate_channel")
     def duplicate_channel(self):
-        self._guard(self.session.duplicate_channel)
+        if self._ready_to_submit():
+            self._guard(self.session.duplicate_channel)
 
     @_bind("remove_channel")
     def remove_channel(self):
-        self._guard(self.session.remove_channel)
+        if self._ready_to_submit():
+            self._guard(self.session.remove_channel)
 
     @_bind("select_channel")
     def toggle_channel(self, channel_id, enabled):
@@ -1077,18 +1241,20 @@ class BrowserWorkbench:
         current = (project.id, project.revision, fingerprint, state.stage) if project else None
         active = {identity(job) for job in active_states}
         state.current_job_active = current in active
+        current_job = next((job for job in active_states if identity(job) == current), None)
+        state.current_run_label = (
+            f"Computing {current_job['id'][:8]} · r{current_job.get('project_revision')}" if current_job else ""
+        )
         # Imported archives have no submission ordering in this workspace.
         last = next((job for job in job_states if not job.get("embedded") and identity(job) == current), {})
-        stopped = {
-            "failed": "Read the worker error in Runs, then choose Compute to retry.",
-            "cancelled": "Choose Compute to start another run when ready.",
-            "interrupted": "Check Runs, then choose Compute to retry.",
-        }
+        stopped = {"failed", "cancelled", "interrupted"}
         status = last.get("status")
+        from ..application.run_progress import stopped_run_text
+
         state.attempt_notice = (
             {
                 "title": f"Run {last['id'][:8]} {status} for {project.name} r{project.revision}.",
-                "action": f"This attempt produced no completed result. {stopped[status]}",
+                "action": stopped_run_text(last),
                 "color": "error" if status == "failed" else "warning",
             }
             if status in stopped and not state.current_job_active
@@ -1120,6 +1286,8 @@ class BrowserWorkbench:
             pending = self.session.states.get(self.follow_job_id, {})
             if pending.get("status") in {"completed", "failed", "cancelled", "interrupted"}:
                 if pending.get("status") == "completed" and any(job["id"] == self.follow_job_id for job in jobs):
+                    if state.follow_preview is False:
+                        self._pinned_completion = self.follow_job_id
                     state.selected_run = self.follow_job_id
                 self.follow_job_id = None
         if restore_saved and state.selected_run is None:
@@ -1170,6 +1338,7 @@ class BrowserWorkbench:
         state.plan_channels = [
             {
                 "id": channel.channel_id,
+                "job_id": channel.job_id,
                 "name": channel.name,
                 "enabled": channel.enabled,
                 "activity": (
@@ -1195,9 +1364,30 @@ class BrowserWorkbench:
             for channel in plan.channels
         ]
 
+    def view_stage(self, job_id, stage):
+        from ..application.live_preview import recorded_stage_plot
+
+        state = self.server.state
+        job = self.session.states.get(job_id) or {}
+        if job.get("status") == "completed":
+            self.view_job_result(job_id)
+            if state.displayed_run != job_id:
+                self._open_run(job_id)
+            record = self.record if state.displayed_run == job_id else None
+            arrays = record.select_arrays(copy=False) if record else {}
+        else:
+            live = self.live_preview.current(self.follow_job_id) if job_id == self.follow_job_id else None
+            arrays = live.arrays if live and stage in job.get("completed_stages", ()) else {}
+        key = recorded_stage_plot(stage, arrays)
+        if key:
+            state.follow_preview, state.groups_open, state.workspace_panel, state.dataset = False, False, "center", key
+        else:
+            self._notify("This stage has no available plot in the selected run.", "info")
+
     def view_job_result(self, job_id):
         """Inspect an exact completed job without switching the editing channel."""
         state = self.server.state
+        state.groups_open = False
         if self.session.states.get(job_id, {}).get("status") != "completed":
             self._notify("This job has no completed result.", "warning")
             return
@@ -1237,9 +1427,7 @@ class BrowserWorkbench:
                 "metrics": [],
                 "export_options": [],
                 "export_selected": [],
-                "former_export_selected": [],
                 "draft_ack": False,
-                "former_draft_ack": False,
                 "draft_notice": "",
                 "draft_selected": False,
                 "download_url": "",
@@ -1306,6 +1494,9 @@ class BrowserWorkbench:
         summary["contour_fit_caption"] = contour_fit_caption(meta)
         summary["reviewed_wire_metric"] = reviewed_wire_metric(meta)
         summary["overview"] = result_overview(record)
+        from ..application.targets import result_field_scope
+
+        summary["field_scope"] = result_field_scope(meta)
         summary["print_former_status"] = print_former_status(meta)
         summary["constraints"] = [
             f"{'Failed' if check.get('passed') is False else 'Unverified'} · {check.get('name', 'Unnamed constraint')}"
@@ -1379,7 +1570,6 @@ class BrowserWorkbench:
             for option in options
         ]
         state.export_selected = list(default_export_selection(options))
-        state.former_export_selected = [option["value"] for option in state.export_options if option["former"]]
         fabrication_issues = [
             item["title"]
             for group in summary["problems"]
@@ -1387,18 +1577,29 @@ class BrowserWorkbench:
             for item in group["items"]
         ]
         state.draft_notice = draft_export_notice(list(dict.fromkeys(fabrication_issues)))
-        state.draft_ack = state.former_draft_ack = False
+        state.draft_ack = False
         arrays = record.select_arrays(copy=False)
+        pinned = self._pinned_completion == job_id
+        self._pinned_completion = None
         keep_former = state.dataset == "print_former" and has_saved_print_former(meta)
-        if not keep_former and (
+        from ..application.scene_spec import preferred_winding_field
+
+        completed_field = preferred_winding_field(arrays)
+        if not (keep_former or pinned) and completed_field:
+            state.dataset = completed_field
+        elif not (keep_former or pinned) and (
             state.dataset in {"support", "preview_target"} or not resolve_dataset(arrays, state.dataset).available
         ):
             state.dataset = next(
                 (key for key in PREFERRED_RUN_PLOTS if resolve_dataset(arrays, key).available),
                 "print_former" if has_saved_print_former(meta) else "saved_unavailable",
             )
-        state.result_plot = state.dataset
-        self._render()
+        state.result_plot = (
+            next((key for key in PREFERRED_RUN_PLOTS if resolve_dataset(arrays, key).available), None)
+            if state.dataset in {"support", "preview_target"}
+            else state.dataset
+        )
+        self._render(preserve_camera=pinned)
         state.displayed_run = job_id
         self._refresh_plan(self.session.job_states())
 
@@ -1531,7 +1732,7 @@ class BrowserWorkbench:
 
     def _refresh_draft_state(self):
         state = self.server.state
-        names = state.former_export_selected if state.center_section == "export_former" else state.export_selected
+        names = state.export_selected
         selected = set(names or ())
         state.draft_selected = any(is_draft_artifact(name) for name in selected)
         kinds = [option.get("format") for option in state.export_options or () if option["value"] in selected]
@@ -1543,52 +1744,95 @@ class BrowserWorkbench:
             if kinds
             else "Choose files and formats below to enable export."
         )
+        if selected:
+            state.export_selection_note += (
+                " · "
+                + ", ".join(
+                    f"{option['value'].split('/')[-1]} ({option['status']})"
+                    for option in state.export_options
+                    if option["value"] in selected
+                )
+                + f" · {state.export_unit}"
+            )
+
+    def _export_changed(self, **_):
+        self._export_generation += 1
+        state = self.server.state
+        state.download_url = state.download_label = state.export_receipt_key = ""
+        self._refresh_draft_state()
 
     def open_print_former(self):
         state = self.server.state
         if self.record is None or state.selected_run != state.displayed_run:
             return
-        state.former_export_selected = [option["value"] for option in state.export_options if option["former"]]
-        if not state.former_export_selected:
+        names = [option["value"] for option in state.export_options if option["former"]]
+        if not names:
             return
-        state.former_draft_ack = False
+        state.export_selected, state.draft_ack = names, False
         state.download_url, state.download_label = "", ""
-        state.center_section = "export_former"
+        state.center_section = "export"
         self._refresh_draft_state()
 
     @_bind("export_geometry")
     def export_geometry(self):
+        """Synchronous entry point for headless callers; the UI runs packaging off-thread."""
+        return asyncio.run(self.prepare_geometry())
+
+    async def prepare_geometry(self):
         state = self.server.state
-        former = state.center_section == "export_former"
-        names = state.former_export_selected if former else state.export_selected
-        draft_ack = state.former_draft_ack if former else state.draft_ack
+        if state.export_busy:
+            return
+        names, draft_ack = state.export_selected, state.draft_ack
         if self.record is None or state.selected_run != state.displayed_run or not names:
             self._notify("Select a completed run and at least one file.", "warning")
-            return
-        if former and not set(names) <= {option["value"] for option in state.export_options if option["former"]}:
-            self._notify("Select only saved print former STL files.", "warning")
             return
         if any(is_draft_artifact(name) for name in names) and not draft_ack:
             self._notify(state.draft_notice + " Tick the DRAFT confirmation to export.", "warning")
             return
-        package = self._guard(
-            self.session.export,
-            self.record,
-            list(names),
-            unit=state.export_unit,
-            allow_draft=bool(draft_ack),
-            include_project=bool(state.include_project),
-        )
-        if package is None:
-            return
-        archive = package.directory.with_suffix(".zip")
-        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
-            for path in sorted(package.directory.rglob("*")):
-                if path.is_file():
-                    bundle.write(path, path.relative_to(package.directory))
-        drafts = any(row.get("draft") for row in package.manifest["geometry"])
-        self._offer_download(archive, f"Download {archive.name}" + (" (DRAFT)" if drafts else ""))
-        self._notify(f"Exported {len(package.manifest['geometry'])} files.", "warning" if drafts else "success")
+        state.download_url = state.download_label = state.export_receipt_key = ""
+        state.export_busy = True
+        state.flush()
+        generation = self._export_generation
+        record, unit, companion, names = self.record, state.export_unit, bool(state.include_project), list(names)
+
+        def build():
+            package = self.session.export(
+                record, names, unit=unit, allow_draft=bool(draft_ack), include_project=companion
+            )
+            if package is None:
+                raise ValueError("Geometry export did not return a verified package.")
+            archive = package.directory.with_suffix(".zip")
+            with tempfile.TemporaryDirectory(dir=self.exports, ignore_cleanup_errors=True) as staging:
+                pending = Path(staging) / archive.name
+                with zipfile.ZipFile(pending, "w", zipfile.ZIP_DEFLATED) as bundle:
+                    for path in sorted(package.directory.rglob("*")):
+                        if path.is_file():
+                            bundle.write(path, path.relative_to(package.directory))
+                with zipfile.ZipFile(pending) as bundle:
+                    damaged = bundle.testzip()
+                    if damaged is not None:
+                        raise ValueError(f"The exported archive failed its integrity check for {damaged}.")
+                pending.replace(archive)
+            return archive
+
+        try:
+            archive = await asyncio.to_thread(build)
+            if generation == self._export_generation and record is self.record:
+                kind = (
+                    ("STL" if len(names) == 1 else "STLs")
+                    if all(n.lower().endswith(".stl") for n in names)
+                    else "files"
+                )
+                self._offer_download(archive, f"Download {len(names)} {kind} ({unit})")
+                state.export_receipt_key = json.dumps(
+                    [state.center_section, state.selected_run, sorted(names), unit, companion, bool(draft_ack)],
+                    separators=(",", ":"),
+                )
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+            self._notify(str(exc), "error")
+        finally:
+            state.export_busy = False
+            state.flush()
 
     def _offer_download(self, path: Path, label: str):
         state = self.server.state
@@ -1652,7 +1896,31 @@ class BrowserWorkbench:
         else:
             self._render()
 
-    def _render(self):
+    def _update_plot_choices(self, saved_arrays, pending_former=False):
+        state = self.server.state
+        state.datasets = [
+            {
+                "title": label,
+                "value": key,
+                "props": {
+                    "disabled": self.session.project is None
+                    if key in {"support", "preview_target"}
+                    else not (
+                        (key == "print_former" and pending_former) or resolve_dataset(saved_arrays, key).available
+                    ),
+                    "subtitle": group.title(),
+                },
+            }
+            for group, entries in DATASET_GROUPS
+            for label, key in entries
+        ]
+        groups = {}
+        for item in state.datasets:
+            if not item["props"]["disabled"]:
+                groups.setdefault(item["props"]["subtitle"], []).append(item)
+        state.available_plots = [{"label": label, "items": items} for label, items in groups.items()]
+
+    def _render(self, *, preserve_camera=False):
         state, plotter, pv = self.server.state, self.plotter, self.pv
         project = self.session.project
         plotter.clear()
@@ -1689,27 +1957,7 @@ class BrowserWorkbench:
                 reason = f"Model preview unavailable: {type(exc).__name__}: {exc}"
         elif not current_model:
             arrays = saved_arrays
-        state.datasets = [
-            {
-                "title": label,
-                "value": key,
-                "props": {
-                    "disabled": project is None
-                    if key in {"support", "preview_target"}
-                    else not (
-                        (key == "print_former" and pending_former) or resolve_dataset(saved_arrays, key).available
-                    ),
-                    "subtitle": group.title(),
-                },
-            }
-            for group, entries in DATASET_GROUPS
-            for label, key in entries
-        ]
-        groups = {}
-        for item in state.datasets:
-            if not item["props"]["disabled"]:
-                groups.setdefault(item["props"]["subtitle"], []).append(item)
-        state.available_plots = [{"label": label, "items": items} for label, items in groups.items()]
+        self._update_plot_choices(saved_arrays, pending_former)
         if not current_model and self.record is not None:
             b0 = (self.record.metadata_view.get("config") or {}).get("b_0_direction")
             source = f"Saved run · {state.run_source}"
@@ -1718,6 +1966,8 @@ class BrowserWorkbench:
             source = f"Editing model · {project.name} · r{project.revision}" if project else ""
         if live is not None and not current_model:
             source = "Live preview"
+            if project is None or project.model_fingerprint != live.metadata.get("project_model_fingerprint"):
+                b0 = None
         try:
             b0 = normalized_b0_direction(b0) if b0 is not None else None
         except (TypeError, ValueError):
@@ -1837,6 +2087,8 @@ class BrowserWorkbench:
                     "gradient": f"linear-gradient(to right, {', '.join(stops)})",
                 }
         markers = self._orientation_widgets(bool(layers), b0)
+        if live is not None and not current_model:
+            caption += f" · {live.metadata['name']} r{live.metadata['project_revision']} · {self.follow_job_id[:8]}"
         if any(layer.name == "former_preview" for layer in layers):
             caption += " · 3D-print former preview (grooves are cut after routing)"
         if layers:
@@ -1862,7 +2114,7 @@ class BrowserWorkbench:
             # set_widgets sends the geometry and camera together. The first
             # view following the welcome screen must already be isometric.
             self.view.set_widgets(markers)
-            if layers:
+            if layers and not preserve_camera:
                 self.view.push_camera(camera=plotter.camera)
 
     # -- polling -------------------------------------------------------
@@ -1876,17 +2128,18 @@ class BrowserWorkbench:
                 with self.server.state:
                     self.session.poll()
                 await self.live_preview.poll()
+            await self.groups.poll()
 
     # -- layout --------------------------------------------------------
     def _build_ui(self):
         from trame.ui.vuetify3 import VAppLayout
         from trame.widgets import html, vuetify3 as v3
         from .center_panel import build_center_panel
+        from .design_setup import build_design_setup
         from .workbench_shell import (
             build_activity_bar,
             build_design_plan,
             build_file_dialog,
-            build_model_builder,
             build_runs_dialog,
             build_toolbar,
             build_welcome,
@@ -1910,9 +2163,10 @@ class BrowserWorkbench:
         ctrl.duplicate_channel, ctrl.remove_channel = self.duplicate_channel, self.remove_channel
         ctrl.toggle_channel = self.toggle_channel
         ctrl.compute, ctrl.compute_channels, ctrl.cancel_job = self.compute, self.compute_channels, self.cancel_job
-        ctrl.export_geometry = self.export_geometry
+        ctrl.export_geometry = self.prepare_geometry
         ctrl.open_print_former = self.open_print_former
         ctrl.view_job_result = self.view_job_result
+        ctrl.view_stage = self.view_stage
         ctrl.review_submitted_design = self.review_submitted_design
         ctrl.show_shielding = self.show_shielding
 
@@ -1941,8 +2195,9 @@ class BrowserWorkbench:
                 with html.Div(
                     v_show="channels.length || history_open",
                     classes="cg-work-area",
-                    __properties=[("data_panel", "data-panel")],
+                    __properties=[("data_panel", "data-panel"), ("data_plan", "data-plan")],
                     data_panel=("workspace_panel",),
+                    data_plan=("plan_open ? 'open' : 'closed'",),
                 ):
                     with html.Nav(
                         classes="cg-panel-switcher",
@@ -1950,7 +2205,7 @@ class BrowserWorkbench:
                         aria_label="Workbench panels",
                     ):
                         for value, label in (
-                            ("model", MODEL_BUILDER_TITLE),
+                            ("model", "Design setup"),
                             ("center", "Plot and results"),
                             ("plan", DESIGN_PLAN_TITLE),
                         ):
@@ -1959,24 +2214,36 @@ class BrowserWorkbench:
                                 type="button",
                                 __properties=[("aria_pressed", "aria-pressed")],
                                 aria_pressed=(f"workspace_panel === '{value}'",),
-                                click=f"workspace_panel = '{value}'",
+                                click=f"workspace_panel = '{value}'"
+                                + ("; plan_open = true" if value == "plan" else ""),
                             )
                     with html.Aside(
-                        classes="cg-model", __properties=[("aria_label", "aria-label")], aria_label=MODEL_BUILDER_TITLE
+                        classes="cg-model cg-setup",
+                        __properties=[("aria_label", "aria-label")],
+                        aria_label="Design setup",
                     ):
-                        build_model_builder(ctrl)
+                        build_design_setup(ctrl)
                     with html.Main(
                         classes="cg-center", __properties=[("aria_label", "aria-label")], aria_label="Plot and results"
                     ):
                         build_center_panel(self)
                     with html.Aside(
-                        classes="cg-plan", __properties=[("aria_label", "aria-label")], aria_label=DESIGN_PLAN_TITLE
+                        v_show="plan_open",
+                        classes="cg-plan",
+                        __properties=[("aria_label", "aria-label")],
+                        aria_label=DESIGN_PLAN_TITLE,
                     ):
+                        v3.VBtn(
+                            "Close progress",
+                            variant="text",
+                            size="small",
+                            click="plan_open = false; workspace_panel = 'model'",
+                        )
                         build_design_plan(ctrl)
                 build_activity_bar()
                 with html.Footer(classes="cg-footer"):
                     html.Div(
-                        "{{ settings_dirty ? 'Pending edits · open Model settings to apply or discard' : "
+                        "{{ setup_dirty ? 'Pending setup edits' : settings_dirty ? 'Pending specialist edits' : "
                         "readiness?.state === 'blocking' ? readiness.title : "
                         "channels.length ? editing_label : 'No project open' }}",
                         role="status",
@@ -2014,6 +2281,20 @@ class BrowserWorkbench:
                         )
                         html.Div(
                             "{{ winding_help }}", v_if="node === 'winding' && winding_help", classes="text-caption mb-2"
+                        )
+                        html.P("{{ field_probes }}", v_if="node === 'target' && field_probes", classes="cg-detail-note")
+                        html.P(
+                            "{{ field_budgets }}",
+                            v_if="['validation','optimization'].includes(node)",
+                            classes="cg-detail-note",
+                        )
+                        v3.VBtn(
+                            "Show applied target",
+                            v_if="node === 'target'",
+                            disabled=("settings_dirty",),
+                            click="follow_preview = false; settings_dialog = false; groups_open = false; dataset = 'preview_target'; workspace_panel = 'center'",
+                            size="small",
+                            variant="outlined",
                         )
                         with html.Div(
                             v_for="field in settings_fields",
@@ -2093,7 +2374,6 @@ class BrowserWorkbench:
                                 ("rectangle", "Rectangle"),
                                 ("round", "Round wire"),
                                 ("u_shape", "U-shape"),
-                                ("omega", "Omega holder"),
                             ):
                                 v3.VBtn(
                                     title,
@@ -2416,24 +2696,6 @@ class BrowserWorkbench:
                     with v3.VCardActions():
                         v3.VSpacer()
                         v3.VBtn("Close", click="review_dialog = false", variant="tonal")
-            with v3.VDialog(
-                v_model=("advanced_dialog",),
-                max_width=900,
-                scrollable=True,
-                __properties=[("aria_label", "aria-label")],
-                aria_label="Advanced settings",
-            ):
-                with v3.VCard():
-                    v3.VCardTitle("Advanced settings — every configuration and study field")
-                    with v3.VCardText():
-                        v3.VTextarea(
-                            v_model=("advanced_config",), label="Configuration (JSON)", rows=16, classes="text-caption"
-                        )
-                        v3.VTextarea(v_model=("advanced_study",), label="Study (JSON)", rows=6, classes="text-caption")
-                    with v3.VCardActions():
-                        v3.VSpacer()
-                        v3.VBtn("Cancel", click="advanced_dialog = false")
-                        v3.VBtn("Apply", color="primary", click=ctrl.apply_advanced)
             v3.VSnackbar("{{ message }}", v_model=("show_message",), color=("message_color",), timeout=6000)
 
 

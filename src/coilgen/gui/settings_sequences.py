@@ -520,6 +520,12 @@ def build_settings_sequence(window, page, form, layout):
             summary=lambda: sequence.text("interconnection_axis"),
         )
         sequence.add(
+            "Return-path lift",
+            ("return_path_lift", "normal_shift_mm"),
+            "surface-normal",
+            summary=lambda: sequence.text("normal_shift_mm") if controls["return_path_lift"].isChecked() else "Off",
+        )
+        sequence.add(
             "Conductor solids",
             ("sweep",),
             "conductor-sweep",
@@ -778,6 +784,10 @@ def _configure_visibility(sequence, page):
         controls["target_error_constraint_metric"].currentTextChanged.connect(strategy)
         strategy()
     elif page == "winding":
+        if "return_path_lift" in controls:
+            lift = controls["return_path_lift"]
+            lift.toggled.connect(lambda enabled: visible("normal_shift_mm", enabled))
+            visible("normal_shift_mm", lift.isChecked())
 
         def contour_policy(*_args):
             from dataclasses import replace

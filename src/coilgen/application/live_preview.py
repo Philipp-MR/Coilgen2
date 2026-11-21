@@ -28,6 +28,17 @@ PREVIEW_FEATURE_PLOTS = {
 }
 
 
+def recorded_stage_plot(stage, arrays):
+    choices = {
+        "prepared": ("target",),
+        "sheet": ("stream_function", "sheet"),
+        "contours": ("contours",),
+        "routed": ("routes", "swept", "fabrication"),
+        "evaluated": ("routed_field", "contour_field", "validation", "sheet"),
+    }
+    return next((key for key in choices.get(stage, ()) if resolve_dataset(arrays, key).available), None)
+
+
 def stage_preview_request(jobs_root, state):
     """``(directory, identity, signature)`` for a job's current manifest, or None.
 

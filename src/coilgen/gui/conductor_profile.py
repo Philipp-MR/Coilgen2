@@ -178,7 +178,8 @@ class ConductorProfileEditor(QWidget):
         layout.addLayout(shape_options)
         bottom.addWidget(self.rectangle_button)
         bottom.addWidget(self.u_shape_button)
-        bottom.addWidget(self.omega_button)
+        # Keep the API for saved/custom profiles; omit this confusing preset.
+        self.omega_button.hide()
         bottom.addStretch(1)
         layout.addLayout(bottom)
         self.status_label = QLabel(self)

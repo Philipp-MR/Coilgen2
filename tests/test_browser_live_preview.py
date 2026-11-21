@@ -59,9 +59,19 @@ def test_followed_job_previews_switch_to_the_newest_stage_and_clear_when_it_ends
         asyncio.run(browser.live_preview.poll())
         assert browser.live_preview.preview is loaded
 
+        with state:
+            state.follow_preview = False
+        pinned_caption = state.scene_caption
+        camera = browser.plotter.camera_position
         publish_stage_preview(directory, checkpoint(tmp_path, "contours"), request(), DIGEST)
         asyncio.run(browser.live_preview.poll())
+        assert state.dataset == "stream_function" and state.scene_caption == pinned_caption
+        assert browser.plotter.camera_position == camera
+        assert "contours" in _enabled(state) and state.new_preview_label == "Contours before routing"
+        with state:
+            state.follow_preview = True
         assert state.dataset == "contours"
+        assert not state.new_preview_label
         assert {"stream_function", "contours"} <= _enabled(state)
         assert state.scene_caption.startswith("Live preview · Contours before routing · not final")
 

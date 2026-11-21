@@ -282,6 +282,7 @@ WINDING_ICONS = MappingProxyType(
     {
         "single": "connected-winding",
         "per_part": "separate-circuits",
+        "groups": "separate-circuits",
         "independent": "independent-turns",
         "contours": "contours",
     }

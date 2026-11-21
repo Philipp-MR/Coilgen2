@@ -1938,6 +1938,22 @@ _TERMINAL_FIX_LABEL = "Mark as handled outside CoilGen"
 
 def _validate_routing_settings(config: CoilGenConfig, error, warning) -> None:
     _enum(error, "routing_circuit_scope", config.routing_circuit_scope, {"single", "per_part"})
+    try:
+        from .group_circuits import validate_group_plan
+
+        validate_group_plan(config.routing_group_plan)
+        if config.routing_group_plan is not None and (config.skip_postprocessing or config.contour_only_sweep_mode):
+            raise ValueError("Group circuit plans require connected winding processing.")
+    except (TypeError, ValueError) as exc:
+        error("routing_group_plan", str(exc))
+    try:
+        from .interconnection_editor import validate_editor_plan
+
+        validate_editor_plan(config.routing_editor_plan)
+        if config.routing_editor_plan is not None and (config.skip_postprocessing or config.contour_only_sweep_mode):
+            raise ValueError("Manual interconnections require connected winding processing.")
+    except (TypeError, ValueError) as exc:
+        error("routing_editor_plan", str(exc))
     for name, label in (
         ("routing_jump_height_tolerance_m", "jump height tolerance"),
         ("routing_jump_sample_spacing_m", "jump sample spacing"),

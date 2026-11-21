@@ -2,6 +2,7 @@
 
 from hashlib import sha256
 import json
+from pathlib import Path
 import struct
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -29,6 +30,62 @@ def _rewrite(source, destination, transform):
     with ZipFile(destination, "w", compression=ZIP_DEFLATED) as archive:
         for name, data in files.items():
             archive.writestr(name, data)
+
+
+@pytest.mark.parametrize("lock_count", [2, 100])
+def test_compact_save_retries_transient_windows_locks_without_losing_previous_project(
+    tmp_path, saved_project, monkeypatch, lock_count
+):
+    from coilgen.application import portable
+
+    project, _ = saved_project
+    path = project.save(tmp_path / "locked.coilgen")
+    original = path.read_bytes()
+    revised = project.with_results(project.saved_runs, session={"saved_revision": "new"})
+    real_replace, attempts = portable.os.replace, []
+
+    def locked_replace(source, destination):
+        attempts.append(destination)
+        if len(attempts) <= lock_count:
+            error = PermissionError("File is being read")
+            error.winerror = 32
+            raise error
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(portable.os, "replace", locked_replace)
+    monkeypatch.setattr("coilgen.persistence.time.sleep", lambda _: None)
+    if lock_count == 2:
+        revised.save(path)
+        assert load_bundle(path).session == revised.session
+        assert len(attempts) == 3
+    else:
+        with pytest.raises(PermissionError):
+            revised.save(path)
+        assert path.read_bytes() == original
+        assert len(attempts) == 6
+    assert not list(tmp_path.glob(".locked.coilgen.*.tmp"))
+
+
+def test_large_archive_can_outlast_a_windows_scanner_lock(tmp_path, saved_project, monkeypatch):
+    project, record = saved_project
+    archive = project.saved_runs[0]
+    rename, attempts = Path.rename, []
+
+    def scanned_rename(path, destination):
+        attempts.append(destination)
+        if len(attempts) < 8:
+            error = PermissionError("Scanner holds a new fabrication directory")
+            error.winerror = 32
+            raise error
+        return rename(path, destination)
+
+    monkeypatch.setattr(Path, "rename", scanned_rename)
+    monkeypatch.setattr("coilgen.application.bundles.time.sleep", lambda _: None)
+    reopened = archive.materialize(tmp_path / "scanned-cache")
+    assert len(attempts) == 8
+    assert reopened.metadata == record.metadata
+    for name, array in record.arrays.items():
+        np.testing.assert_array_equal(reopened.array(name), array)
 
 
 @pytest.mark.parametrize("extension", (".json", ".coilgen"))

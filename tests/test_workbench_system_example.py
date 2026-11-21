@@ -206,7 +206,8 @@ def test_channel_overview_action_opens_selected_channel_settings_without_computa
     panel.table.selectRow(8)
     panel.open_button.click()
     assert window._active_channel_id == "xy"
-    assert not window.findChild(QDockWidget, "settings_dock").isHidden()
+    assert not window.findChild(QDockWidget, "model_dock").isHidden()
+    assert window.setup_panel.details["geometry"][0].isChecked()
     assert fingerprints(window.assembly) == before
     assert not window.jobs.states
     assert not window.service.submissions

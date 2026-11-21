@@ -489,9 +489,16 @@ def create_grooved_support_bodies(parts: list[CoilPart], config) -> list[CoilPar
             part.support_body = None
         return parts
     paths = [path for part in parts for path in _paths_of(part)]
+    from .group_circuits import source_support_specs
+
     for part in parts:
+        part.support_body = None
+    for index, support_mesh, source_ids in source_support_specs(parts):
+        part = parts[index]
         try:
-            part.support_body = build_grooved_support(part.mesh, paths, config)
+            part.support_body = build_grooved_support(support_mesh, paths, config)
+            if source_ids:
+                part.support_body.diagnostics["source_support_indices"] = list(source_ids)
         except SupportBodyError as exc:
             part.support_body = SupportBody(
                 mesh=Mesh(vertices=np.zeros((0, 3)), faces=np.zeros((0, 3))),

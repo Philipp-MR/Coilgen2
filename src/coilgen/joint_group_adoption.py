@@ -531,6 +531,10 @@ def improve_group_routes(parts, config, target_field):
     task = progress.task("completed parts", len(eligible), indeterminate=True)
     for completed, index in enumerate(eligible):
         part = parts[index]
+        if production_config.routing_group_plan is not None:
+            from .group_circuits import circuit_config
+
+            config = circuit_config(part, config)
         task.update(completed, message=f"part {index + 1}/{len(parts)}: searching group routes", force=True)
         start_time = time.perf_counter()
         try:

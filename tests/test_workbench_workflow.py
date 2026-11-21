@@ -7,7 +7,7 @@ import test_workbench_usability as usability
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QComboBox, QDockWidget, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QDockWidget, QLabel, QPushButton
 
 from coilgen.application import ProjectAssembly, ProjectDocument
 from coilgen.application import preflight
@@ -188,7 +188,9 @@ def test_workflow_reopens_hidden_settings_and_review_evidence(windows, applicati
     window.evidence.close_all()
 
     window.navigate_workflow("target")
-    assert not settings.isHidden()
+    assert window.setup_panel.details["target"][0].isChecked()
+    assert not window.findChild(QDockWidget, "model_dock").isHidden()
+    assert settings.isHidden()
     assert not window.evidence.any_open()
 
     settings.hide()
@@ -416,12 +418,10 @@ def test_missing_input_in_inactive_enabled_channel_blocks_all_and_focuses_owner(
         issue.blocking and issue.key == "field_shape_function" and issue.node == "target"
         for issue in window.readiness_panel.issues
     )
-    choice = window.settings.widget().findChild(QComboBox, "target_mode")
-    section = next(section for section in window._focused_sections if choice in section.controls)
-    assert section.dialog.isVisible()
-    assert choice.scroll.isAncestorOf(section.dialog.focusWidget())
-    assert choice.currentIndex() == -1
-    assert "field_shape_function" not in window._draft_controls
+    assert window.setup_panel.details["target"][0].isChecked()
+    control = window.setup_panel.controls["field_shape_function"]
+    assert control.isVisible() and control.hasFocus()
+    assert control.text() == "none"
     assert window.assembly.channels[0].project is ready
     assert window.assembly.channels[1].project is blocked
     assert QApplication.activeModalWidget() is None

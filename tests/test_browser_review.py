@@ -4,6 +4,8 @@ import asyncio
 from unittest.mock import Mock
 
 import numpy as np
+
+
 import pytest
 
 pytest.importorskip("trame")
@@ -42,7 +44,7 @@ def test_browser_former_export_preselects_only_former_and_requires_draft_ack(tmp
         template = state.trame__template_main
         assert "results_metrics_expanded = false; dataset = 'print_former'" in template
         assert 'aria-controls="coilgen-result-metrics"' in template
-        assert 'v-if="export_options.filter(option => option.former).length > 1"' in template
+        assert "Choose files and formats" in template
         state.selected_run = "with-former"
         browser._open_run("with-former")
         assert state.summary["print_former_status"] == "Print former · geometry checks passed"
@@ -54,14 +56,14 @@ def test_browser_former_export_preselects_only_former_and_requires_draft_ack(tmp
         assert "saved fabrication STL" in state.scene_caption
         assert state.export_selected == [conductor]
         browser.open_print_former()
-        assert state.center_section == "export_former" and state.former_export_selected == [former]
+        assert state.center_section == "export" and state.export_selected == [former]
         browser.export_geometry()
         export.assert_not_called()
         assert "DRAFT confirmation" in state.message
-        state.former_draft_ack = True
+        state.draft_ack = True
         browser.export_geometry()
         export.assert_called_once_with(record, [former], unit="mm", allow_draft=True, include_project=True)
-        assert state.export_selected == [conductor] and not state.draft_ack
+        assert state.export_selected == [former] and state.draft_ack
     finally:
         browser.session.close()
 
@@ -124,7 +126,7 @@ def test_view_completed_batch_job_verifies_that_channel_without_changing_editor(
         browser._open_run(state.selected_run)  # Vue's selected-run callback
     assert state.workspace_history and len(state.runs) == 3
     assert session.active_channel_id == editing and state.settings_dirty
-    assert state.plan_summary == "15/15 steps recorded · 3/3 channels with verified results"
+    assert state.plan_summary == "15/15 steps recorded · result files verified for 3/3 channels"
     assert state.run_context == f"Viewing channel {session.channels[-1].name} · editing {session.project.name}"
     browser.view_job_result("missing")
     assert state.selected_run == "batch-2" and state.message_color == "warning"
@@ -315,7 +317,8 @@ def test_empty_results_explains_only_the_latest_matching_attempt(tmp_path):
         browser._refresh_jobs()
 
     add("failed-here", "failed", error="Could not publish results", completed_stages=["prepared"])
-    assert "failed" in state.attempt_notice["title"] and "worker error" in state.attempt_notice["action"]
+    assert "failed" in state.attempt_notice["title"] and "Could not publish results" in state.attempt_notice["action"]
+    assert "Last recorded boundary: prepared" in state.attempt_notice["action"]
     channel = state.plan_channels[0]
     assert channel["steps"][0]["status"] == "Completed"
     assert channel["error"] and "Execution failed" in channel["activity"]
@@ -329,7 +332,7 @@ def test_empty_results_explains_only_the_latest_matching_attempt(tmp_path):
     assert state.current_job_active and state.attempt_notice is None
     session.states["retry"]["status"] = "cancelled"
     browser._refresh_jobs()
-    assert "retry cancelled" in state.attempt_notice["title"] and "Choose Compute" in state.attempt_notice["action"]
+    assert "retry cancelled" in state.attempt_notice["title"] and "Compute restarts" in state.attempt_notice["action"]
     add("successful", "completed")
     assert not state.current_job_active and state.attempt_notice is None
     assert state.jobs[0]["id"] == "successful"
@@ -504,3 +507,59 @@ def test_worker_thread_count_is_explicit_or_derived_from_seats(tmp_path, monkeyp
     assert Hub(tmp_path, local_user="local", password=None, max_users=4, threads_per_worker=2).threads == 2
     with pytest.raises(ValueError, match="at least one"):
         Hub(tmp_path, local_user="local", password=None, threads_per_worker=0)
+
+
+def test_older_export_cannot_publish_a_link_after_selection_changes(tmp_path):
+    from threading import Event
+    from types import SimpleNamespace
+    from coilgen.web.app import BrowserWorkbench
+
+    entered, release = Event(), Event()
+    former, copper = "former.stl", "copper.stl"
+    state = SimpleNamespace(
+        export_busy=False,
+        center_section="export",
+        export_selected=[former],
+        export_unit="mm",
+        draft_ack=False,
+        include_project=False,
+        selected_run="a",
+        displayed_run="a",
+        export_options=[{"value": n, "format": "stl", "status": "passed"} for n in (former, copper)],
+        download_url="previous",
+        download_label="previous",
+        flush=lambda: None,
+    )
+    browser = BrowserWorkbench.__new__(BrowserWorkbench)
+    browser.server, browser.record, browser.exports = SimpleNamespace(state=state), object(), tmp_path
+    browser._export_generation = 0
+
+    def export(_record, names, **kwargs):
+        entered.set()
+        assert release.wait(8)
+        package = tmp_path / ("one" if len(names) == 1 else "two")
+        package.mkdir()
+        for name in names:
+            (package / name).write_text("mesh")
+        return SimpleNamespace(directory=package)
+
+    browser.session = SimpleNamespace(export=export)
+
+    async def change_during_export():
+        task = asyncio.create_task(browser.prepare_geometry())
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            assert state.export_busy and not state.download_url
+            state.export_selected = [copper, former]
+            browser._export_changed()
+        finally:
+            release.set()
+            await task
+        assert not state.download_url and not state.export_busy
+        await browser.prepare_geometry()
+        assert state.download_label == "Download 2 STLs (mm)"
+        state.export_unit = "m"
+        browser._export_changed()
+        assert not state.download_url
+
+    asyncio.run(change_during_export())

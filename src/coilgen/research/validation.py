@@ -16,7 +16,7 @@ from ..basis import calculate_basis_functions, calculate_one_ring_by_mesh
 from ..field_components import field_component_values, normalize_field_component
 from ..field_units import field_values_to_tesla
 from ..geometry import compute_face_normals, compute_vertex_normals
-from ..models import TargetField
+from ..models import TargetField, sheet_parts
 from ..physics import biot_savart_wire_path, calculate_sensitivity_matrix
 from ..target import evaluate_field_expression
 from .convex import ResearchPhysicsSpec
@@ -216,7 +216,7 @@ def validate_on_independent_grid(result: Any, *, resolution: int = 12, design_ma
             node_triangles=[],
             current_density_mat=None,
         )
-        for part in result.coil_parts
+        for part in sheet_parts(result)
     ]
     for index, part in enumerate(parts):
         part.mesh.face_normals = compute_face_normals(part.mesh)

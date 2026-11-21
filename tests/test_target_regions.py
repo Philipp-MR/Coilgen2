@@ -298,6 +298,7 @@ def test_old_json_migration_preserves_prior_fingerprints_and_stays_narrow():
     value = project.to_dict()
     value["config"].pop("target_region_geometry")
     value["config"].pop("contour_smoothing_local_fallback")
+    value["config"].pop("routing_editor_plan")
 
     def encoded(data):
         return sha256(json.dumps(data, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()

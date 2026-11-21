@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from ..field_components import field_component_values
+from ..models import sheet_parts
 from ..pipeline import CoilGenPipeline
 from ..pipeline_stages import PipelineCheckpoint, PipelineStage
 from ..part_roles import normalize_part_role
@@ -368,7 +369,12 @@ def _save_partial_result(
     work_ranges = _design_work_ranges(request) if work_ranges is None else work_ranges
     diagnostics = checkpoint.diagnostics
     arrays = _scientific_arrays(
-        state.parts, state.target_field, state.combined_mesh, state.sf_b_field, include_routing=True
+        state.parts,
+        state.target_field,
+        state.combined_mesh,
+        state.sf_b_field,
+        include_routing=True,
+        source_parts=state.source_parts,
     )
     arrays.update(state.shielding_arrays)
     pipeline_sweeps = _pipeline_sweep_evidence(state.parts, checkpoint.config)
@@ -386,7 +392,11 @@ def _save_partial_result(
 
         with progress_scope(*work_ranges["validation"], "Reviewing regional checkpoint fields", overall=True):
             requirements_review, requirement_arrays = evaluate_requirements(
-                state.parts, checkpoint.config, request.requirements, design_margin=request.design_margin
+                state.parts,
+                checkpoint.config,
+                request.requirements,
+                design_margin=request.design_margin,
+                source_parts=state.source_parts,
             )
         arrays.update(requirement_arrays)
     if checkpoint.stage.index >= PipelineStage.SHEET.index:
@@ -395,6 +405,7 @@ def _save_partial_result(
             target_field=state.target_field,
             combined_mesh=state.combined_mesh,
             coil_parts=state.parts,
+            source_parts=state.source_parts,
             regularization_diagnostics=diagnostics,
         )
         if request.requirements is None:
@@ -526,7 +537,7 @@ def _save_partial_result(
             key: value for key, value in validation.items() if key not in {"points_m", "field_T", "target_T"}
         },
         "pipeline_sweeps": pipeline_sweeps,
-        "contour_smoothing": _contour_smoothing_evidence(state.parts),
+        "contour_smoothing": _contour_smoothing_evidence(state.source_parts or state.parts),
         "routing": routing_evidence(state.parts),
         **({"requirements_review": requirements_review} if requirements_review is not None else {}),
         **({"scene_review": scene_review} if scene_review is not None else {}),
@@ -676,7 +687,12 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         )
     result = checkpoint.result
     arrays = _scientific_arrays(
-        result.coil_parts, result.target_field, result.combined_mesh, result.b_field_opt_sf, include_routing=True
+        result.coil_parts,
+        result.target_field,
+        result.combined_mesh,
+        result.b_field_opt_sf,
+        include_routing=True,
+        source_parts=sheet_parts(result),
     )
     with progress_scope(
         *work_ranges["wire_evidence"], "Retaining evaluated wire-field maps and current provenance", overall=True
@@ -704,7 +720,11 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
 
         with progress_scope(*work_ranges["validation"], "Checking named regions and physical poses", overall=True):
             requirements_review, requirements_arrays = evaluate_requirements(
-                result.coil_parts, config, request.requirements, design_margin=request.design_margin
+                result.coil_parts,
+                config,
+                request.requirements,
+                design_margin=request.design_margin,
+                source_parts=sheet_parts(result),
             )
             validation = named_independent_sheet_validation(requirements_review, request.requirements)
     else:
@@ -990,6 +1010,7 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
                     fabrication=fabrication,
                     complete_paths=complete_paths,
                     design_margin=request.design_margin,
+                    source_parts=sheet_parts(result),
                 )
         from ..application.research_requirements import requirements_constraint_rows
 
@@ -1058,7 +1079,7 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         "fabricated_torque_nm": fabricated_physics.get("torque_Nm") if fabricated_physics else None,
         "sheet_thickness_m": config.conductor_thickness,
         "conductor_resistivity_ohm_m": config.specific_conductivity_conductor,
-        "minimum_spacing_m": _recorded_contour_surface_spacing(result.coil_parts, config),
+        "minimum_spacing_m": _recorded_contour_surface_spacing(sheet_parts(result), config),
         "minimum_spacing_scope": "recorded surface-geodesic spacing between unconnected contour centerlines; separate from routed/envelope clearance",
         "contour_components": sum(len(part.contour_lines) for part in result.coil_parts),
         "vertices": len(result.combined_mesh.vertices),
@@ -1123,7 +1144,7 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         **({"requirements_review": requirements_review} if requirements_review is not None else {}),
         **({"scene_review": scene_review} if scene_review is not None else {}),
         "pipeline_sweeps": pipeline_sweeps,
-        "contour_smoothing": _contour_smoothing_evidence(result.coil_parts),
+        "contour_smoothing": _contour_smoothing_evidence(sheet_parts(result)),
         "routing": routing_evidence(result.coil_parts),
         "fabrication": fabrication.summary() if fabrication else None,
         **(

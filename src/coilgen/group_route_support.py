@@ -14,6 +14,7 @@ import numpy as np
 
 from .connector_bridge_validation import _SpatialSupport, _segment_hits_triangle
 from .group_route_convex_shell import ConvexSupportShell, certify_shell_body, convex_circular_shell
+from .group_route_convex_cap import ConvexCapSupport, certify_cap_body, convex_mesh_cap
 
 
 @dataclass(frozen=True)
@@ -21,7 +22,7 @@ class GroupRouteSupport:
     accepted: bool
     reasons: tuple[str, ...]
     diagnostics: dict = field(default_factory=dict)
-    _domain: tuple | ConvexSupportShell | None = field(default=None, repr=False, compare=False)
+    _domain: tuple | ConvexSupportShell | ConvexCapSupport | None = field(default=None, repr=False, compare=False)
 
 
 def _planar_convex_domain(mesh, tolerance, maximum_faces):
@@ -554,6 +555,16 @@ def check_group_route_support_domain(part_mesh, config, *, tolerance_m=1e-8, max
             diagnostics["curved_support_rejection_reason"] = shell_reason
             if shell_reason == "support_face_edge_work_budget_exceeded":
                 return GroupRouteSupport(False, (shell_reason,), diagnostics)
+            cap, cap_reason = convex_mesh_cap(part_mesh, tolerance_m)
+            if cap is not None:
+                diagnostics.update(
+                    support_geometry="verified_convex_mesh_cap",
+                    support_realization="actual_triangle_mesh",
+                    support_side_plane_count=len(cap.plane_points),
+                    centered_profile_embedding_intended=False,
+                )
+                return GroupRouteSupport(True, (), diagnostics, cap)
+            diagnostics["convex_cap_rejection_reason"] = cap_reason
         allowed = {
             "unsupported_nonplanar_support",
             "unsupported_nonconvex_support",
@@ -572,6 +583,58 @@ def check_group_route_support_domain(part_mesh, config, *, tolerance_m=1e-8, max
         return GroupRouteSupport(True, (), diagnostics)
     diagnostics.update(support_geometry="oriented_convex_planar_disk", support_normal=domain[1].tolist())
     return GroupRouteSupport(True, (), diagnostics, domain)
+
+
+def _convex_exterior_reference_certificate(part, config, origins, domain, tolerance, maximum_evaluations, diagnostics):
+    """Whole-chord proof using convex distance and exact solid exclusion.
+
+    Distance to a closed convex solid is convex along each chord, so its
+    endpoint maximum bounds the entire chord. A separate halfspace/clipping
+    check proves every reference chord stays exterior and inside the rim
+    domain. The finite conductor body has already passed its own exact test.
+    """
+    from .manufacturing import _SurfaceProjector
+    from .models import WirePathGeometry
+
+    source = part.wire_path
+    free = np.asarray([value != WirePathGeometry.SURFACE for value in source.segment_geometry])
+    raw_segments = np.stack((source.v[:-1], source.v[1:]), axis=1)[free]
+    surface = np.flatnonzero(~free)
+    surface_vertices = source.v[np.unique(np.r_[surface, surface + 1])]
+    final = np.vstack((origins, origins[0])) if part.fabrication_path.closed else origins
+    segments = np.concatenate((np.stack((final[:-1], final[1:]), axis=1), raw_segments))
+    points = np.vstack((segments.reshape(-1, 3), surface_vertices))
+    points, inverse = np.unique(points, axis=0, return_inverse=True)
+    if len(points) > maximum_evaluations:
+        return "support_certificate_budget_exceeded"
+    ends = inverse[: len(segments) * 2].reshape(-1, 2)
+    # Degenerate triangles represent complete line intervals under the same
+    # convex clipping predicate; isolated surface samples are checked too.
+    faces = np.column_stack((ends, ends[:, 1]))
+    if len(surface_vertices):
+        isolated = inverse[len(segments) * 2 :]
+        faces = np.vstack((faces, np.repeat(isolated[:, None], 3, axis=1)))
+    check = certify_cap_body if isinstance(domain, ConvexCapSupport) else certify_shell_body
+    reference = {}
+    reason = check(domain, points, faces, "surface_outer", tolerance, 50_000_000, reference)
+    diagnostics["reference_solid_exclusion"] = reference
+    if reason:
+        return "reference_" + reason
+    projector = _SurfaceProjector(part.mesh)
+    projected, _ = projector.project(points)
+    distances = np.linalg.norm(points - projected, axis=1)
+    maximum = float(distances.max(initial=0.0))
+    diagnostics.update(
+        reference_support_evaluations=len(points),
+        maximum_reference_support_distance_m=maximum,
+        configured_maximum_lift_m=float(config.normal_shift_length),
+        final_reference_chord_count=len(final) - 1,
+        raw_free_reference_chord_count=len(raw_segments),
+        raw_surface_reference_vertex_count=len(surface_vertices),
+        reference_lift_certificate="convex_distance_endpoint_upper_bound_and_exact_chord_exclusion",
+        body_footprint_certificate="complete_body_triangles_inside_verified_rim_domain",
+    )
+    return "lift_limit_violation" if maximum > float(config.normal_shift_length) + tolerance else ""
 
 
 def certify_group_route_support(
@@ -682,7 +745,8 @@ def certify_group_route_support(
         return reject("body_section_loft_topology_mismatch")
     mounting_offset = _mounting_centerline_offset(config, section)
     final_origins = trace.points_m - (mounting_offset + centroid[1]) * trace.normals - centroid[0] * trace.transverse
-    if domain is None or isinstance(domain, ConvexSupportShell):
+    curved_domain = isinstance(domain, (ConvexSupportShell, ConvexCapSupport))
+    if domain is None or curved_domain:
         ring_vertex_count = len(final_origins) * len(section)
         actual_ring_offsets = body_points[:ring_vertex_count].reshape(rings.shape) - final_origins[:, None]
         envelope = float(np.linalg.norm(actual_ring_offsets, axis=2).max())
@@ -691,8 +755,9 @@ def certify_group_route_support(
                 envelope,
                 float(np.linalg.norm(body_points[-2:] - final_origins[[0, -1]], axis=1).max()),
             )
-        if isinstance(domain, ConvexSupportShell):
-            reason = certify_shell_body(domain, body_points, body.faces, mode, tolerance_m, 50_000_000, diagnostics)
+        if curved_domain:
+            certificate = certify_cap_body if isinstance(domain, ConvexCapSupport) else certify_shell_body
+            reason = certificate(domain, body_points, body.faces, mode, tolerance_m, 50_000_000, diagnostics)
             if reason:
                 diagnostics.update(
                     certificate_scope="curved_mesh_support_mounting_and_whole_body_footprint",
@@ -701,19 +766,24 @@ def certify_group_route_support(
                     support_realization="actual_triangle_mesh",
                 )
                 return reject(reason)
-        reason = _general_centered_certificate(
-            part,
-            config,
-            final_origins,
-            envelope,
-            tolerance_m,
-            maximum_support_evaluations,
-            diagnostics,
-            analytic_surface_chords=_analytic_surface_chord_allowances(
-                part, config, final_origins, tolerance_m, diagnostics
-            ),
-        )
-        if isinstance(domain, ConvexSupportShell):
+        if curved_domain and mode == "surface_outer" and maximum_lift >= 0:
+            reason = _convex_exterior_reference_certificate(
+                part, config, final_origins, domain, tolerance_m, maximum_support_evaluations, diagnostics
+            )
+        else:
+            reason = _general_centered_certificate(
+                part,
+                config,
+                final_origins,
+                envelope,
+                tolerance_m,
+                maximum_support_evaluations,
+                diagnostics,
+                analytic_surface_chords=_analytic_surface_chord_allowances(
+                    part, config, final_origins, tolerance_m, diagnostics
+                ),
+            )
+        if curved_domain:
             diagnostics.update(
                 certificate_scope="curved_mesh_support_mounting_and_whole_body_footprint",
                 mounting_mode=mode,

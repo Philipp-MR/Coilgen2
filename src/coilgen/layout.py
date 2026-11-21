@@ -685,6 +685,9 @@ def _axial_ring_cut_frame(loop_group, mesh, b_0_direction):
     b0 = _normalize_vector(np.asarray(b_0_direction, dtype=float), fallback=np.array([0.0, 0.0, 1.0]))
     if np.linalg.norm(np.cross(axis, b0)) >= 0.01:
         return None
+    from .regular_rings import ring_height_profile, separated_ring_profiles
+
+    nonaxial = False
     for loop in loop_group.loops:
         points = np.asarray(loop.v, dtype=float)
         if len(points) < 4 or not np.all(np.isfinite(points)) or np.linalg.norm(points[0] - points[-1]) > 1e-10:
@@ -692,8 +695,12 @@ def _axial_ring_cut_frame(loop_group, mesh, b_0_direction):
         centered = points - points[0]
         normal = np.sum(np.cross(centered[:-1], centered[1:]), axis=0)
         normal_length = float(np.linalg.norm(normal))
-        if normal_length <= 1e-24 or np.linalg.norm(np.cross(axis, normal / normal_length)) >= 0.01:
+        if normal_length <= 1e-24:
             return None
+        if np.linalg.norm(np.cross(axis, normal / normal_length)) >= 0.01:
+            if ring_height_profile(points, origin, axis) is None:
+                return None
+            nonaxial = True
         relative = points - origin
         radial = relative - np.outer(relative @ axis, axis)
         lengths = np.linalg.norm(radial, axis=1)
@@ -705,6 +712,13 @@ def _axial_ring_cut_frame(loop_group, mesh, b_0_direction):
             np.einsum("ij,ij->i", radial[:-1], radial[1:]),
         )
         if abs(abs(float(np.sum(turns))) - 2.0 * np.pi) > 1e-6:
+            return None
+    if nonaxial:
+        profiles = [ring_height_profile(loop.v, origin, axis) for loop in loop_group.loops]
+        if any(profile is None for profile in profiles):
+            return None
+        profiles.sort(key=lambda profile: float(np.mean(profile["height"])))
+        if not separated_ring_profiles(profiles):
             return None
     preferred = _preferred_cylindrical_cut_radial(axis)
     return origin, np.cross(axis, preferred), preferred
@@ -998,6 +1012,14 @@ def interconnect_within_groups(
     open_singletons: bool = False,
     cut_plan=None,
 ) -> list[CoilPart]:
+    if config.routing_group_plan is not None:
+        from .group_circuits import circuit_config
+
+        for part in parts:
+            interconnect_within_groups(
+                [part], circuit_config(part, config), progress, open_singletons=open_singletons, cut_plan=cut_plan
+            )
+        return parts
     if cut_plan is not None and len(parts) != 1:
         raise ValueError("A routing port plan belongs to one isolated support context")
     use_geodesic_connections = _use_geodesic_inter_group_paths(config)
@@ -1170,6 +1192,10 @@ def interconnect_within_groups(
                         f"score={rail.score:.4g}; candidates={rail.candidate_count}"
                     ),
                 )
+    from .group_circuits import apply_spiral_choices
+
+    for part in parts:
+        apply_spiral_choices(part)
     if task is not None:
         task.done()
     return parts
@@ -1189,6 +1215,12 @@ def interconnect_among_groups(
     """
 
     config = CoilGenConfig() if config is None else config
+    if config.routing_group_plan is not None:
+        from .group_circuits import circuit_config
+
+        for part in parts:
+            interconnect_among_groups([part], circuit_config(part, config), progress)
+        return parts
     use_geodesic_connections = _use_geodesic_inter_group_paths(config)
     require_surface_connections = _strict_geodesic_inter_group_paths(config)
     total_connections = sum(max(len(part.connected_groups) - 1, 0) for part in parts)
@@ -2885,6 +2917,8 @@ def _group_route_variants(group: ConnectedGroup) -> list[GroupRouteVariant]:
     variants: list[GroupRouteVariant] = []
     signatures: set[tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...], tuple[float, ...]]] = set()
     for name, spiral_v, variant_return_v in raw_variants:
+        if group.routing_spiral_order != "auto" and name != group.routing_spiral_order:
+            continue
         spiral_v = _terminal_path_array(spiral_v)
         variant_return_v = _terminal_path_array(variant_return_v)
         if len(spiral_v) < 2 or len(variant_return_v) < 2:
@@ -3035,6 +3069,7 @@ def _copy_connected_group(group: ConnectedGroup) -> ConnectedGroup:
         spiral_in_v=group.spiral_in_v.copy(),
         spiral_out_v=group.spiral_out_v.copy(),
         outer_loop_indices=tuple(group.outer_loop_indices),
+        routing_spiral_order=group.routing_spiral_order,
     )
 
 

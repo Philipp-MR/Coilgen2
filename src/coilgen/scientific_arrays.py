@@ -33,8 +33,16 @@ def shielding_contribution_arrays(parts, target, source, *, current_A=None) -> d
     if source not in {"sheet", "contour", "routed"}:
         raise ValueError(f"Unknown shielding field source {source!r}.")
     fields = {role: np.zeros((np.count_nonzero(mask), 3)) for role in set(roles)}
+    seen_sources = set()
     for part, role in zip(parts, roles):
         if source == "sheet":
+            sources = getattr(part, "source_support_indices", ())
+            if sources:
+                if len(sources) != 1:
+                    return {}  # A union has no independently retained source FEM operator.
+                if sources[0] in seen_sources:
+                    continue
+                seen_sources.add(sources[0])
             if part.sensitivity_matrix is None or part.stream_function is None:
                 return {}
             # Contract before indexing to avoid a potentially large advanced-indexing copy.
@@ -85,13 +93,17 @@ def routing_evidence(parts) -> dict:
         "accepted_improvement_found_within_budget",
         "infeasibility_proven",
     )
+    from .group_circuits import circuit_metadata
+
     return {
         "scope": "recorded_routes_and_typed_interval_ownership",
         "parts": [
             {
                 "part_index": index,
+                **circuit_metadata(part),
                 "current_A": part.contour_step,
                 "loop_groups": [list(group.loop_indices) for group in part.groups],
+                "group_choices": part.topology_diagnostics.get("group_editor_choices", []),
                 "joint_routing": {
                     key: part.joint_route_diagnostics[key] for key in keys if key in part.joint_route_diagnostics
                 },
@@ -101,12 +113,13 @@ def routing_evidence(parts) -> dict:
     }
 
 
-def scientific_arrays(parts, target, mesh=None, sheet_field=None, *, include_routing=False) -> dict:
+def scientific_arrays(parts, target, mesh=None, sheet_field=None, *, include_routing=False, source_parts=None) -> dict:
     """Select recorded geometry and fields; never construct routes or fit currents."""
     if mesh is None:
-        vertices = np.vstack([part.mesh.vertices for part in parts])
-        offsets = np.cumsum([0] + [part.mesh.n_vertices for part in parts[:-1]])
-        faces = np.vstack([part.mesh.faces + offset for part, offset in zip(parts, offsets)])
+        supports = source_parts or parts
+        vertices = np.vstack([part.mesh.vertices for part in supports])
+        offsets = np.cumsum([0] + [part.mesh.n_vertices for part in supports[:-1]])
+        faces = np.vstack([part.mesh.faces + offset for part, offset in zip(supports, offsets)])
     else:
         vertices, faces = mesh.vertices, mesh.faces
     arrays = {
@@ -121,15 +134,27 @@ def scientific_arrays(parts, target, mesh=None, sheet_field=None, *, include_rou
         arrays["stream_function_A"] = mesh.stream_function
     if sheet_field is not None:
         arrays["sheet_field_T"] = sheet_field
-    densities = [getattr(part, "current_density", None) for part in parts]
+    density_parts = []
+    density_sources = set()
+    for part in source_parts or parts:
+        sources = getattr(part, "source_support_indices", ())
+        if sources and len(sources) != 1:
+            density_parts = []
+            break
+        if sources and sources[0] in density_sources:
+            continue
+        if sources:
+            density_sources.add(sources[0])
+        density_parts.append(part)
+    densities = [getattr(part, "current_density", None) for part in density_parts]
     if densities and all(
-        value is not None and np.shape(value) == (part.mesh.n_faces, 3) for part, value in zip(parts, densities)
+        value is not None and np.shape(value) == (part.mesh.n_faces, 3) for part, value in zip(density_parts, densities)
     ):
         values = np.vstack(densities)
         if np.all(np.isfinite(values)):
             arrays["sheet_current_density_A_per_m"] = values
             arrays["sheet_current_density_points_m"] = np.vstack(
-                [part.mesh.vertices[part.mesh.faces].mean(axis=1) for part in parts]
+                [part.mesh.vertices[part.mesh.faces].mean(axis=1) for part in density_parts]
             )
     for part_index, part in enumerate(parts):
         if include_routing:

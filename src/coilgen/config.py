@@ -610,6 +610,10 @@ class CoilGenConfig:
     group_interconnection_method: str = "crossed"
     # A connected layout is one series circuit; independent circuits are explicit.
     routing_circuit_scope: str = "single"
+    # Explicit, contour-snapshot-bound choices. None preserves historical routing.
+    routing_group_plan: dict | None = None
+    # Content-bound manual edits, applied after automatic routing and before checks.
+    routing_editor_plan: dict | None = None
     # Adopt a joint return route only after an isolated physical/field preview.
     joint_group_routing: bool = True
     # Cheap circuit ranking followed by staged curve generation. Thorough keeps

@@ -338,7 +338,7 @@ class RunArchive:
             if destination.resolve() != destination:
                 raise ValueError("Archived run cache must not redirect to another directory.")
             return self._verify_materialized(destination)
-        with TemporaryDirectory(prefix=f".{self.id[:12]}-", dir=root) as staging:
+        with TemporaryDirectory(prefix=f".{self.id[:12]}-", dir=root, ignore_cleanup_errors=True) as staging:
             directory = Path(staging)
             for name, payload in self._files:
                 path = directory / name
@@ -347,7 +347,7 @@ class RunArchive:
                     stream.write(payload)
             self._verify_materialized(directory)
             # Scanners and sync clients briefly hold handles in a newly written directory on Windows.
-            delays = iter((0.02, 0.05, 0.1, 0.2, 0.4, 0.8))
+            delays = iter((0.02, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 3.2, 3.2))
             while True:
                 try:
                     directory.rename(destination)

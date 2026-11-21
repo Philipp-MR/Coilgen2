@@ -15,7 +15,7 @@ windows = usability_tests.windows
 
 
 def template_actions(window):
-    return [action for group in window.template_menu.actions() for action in group.menu().actions()]
+    return [action for group in window.template_menu.actions() if group.menu() for action in group.menu().actions()]
 
 
 def test_project_actions_and_templates_are_in_file_menu_without_toolbar_duplicates(windows):
@@ -27,11 +27,16 @@ def test_project_actions_and_templates_are_in_file_menu_without_toolbar_duplicat
     assert [action.data() for action in actions] == [spec.id for spec in TEMPLATE_SPECS]
     assert all(spec.icon in ICON_NAMES for spec in TEMPLATE_SPECS)
     assert all(not action.icon().isNull() and action.toolTip() for action in actions)
-    assert {group.text() for group in window.template_menu.actions()} == {
+    assert {group.text() for group in window.template_menu.actions() if group.menu()} == {
         "Gradients",
         "Shim coils",
         "Coil systems",
     }
+    search = window.template_menu.actions()[0].defaultWidget()
+    search.setText("conical Z2")
+    assert [action.data() for action in actions if action.isVisible()] == ["conical_harmonic"]
+    search.clear()
+    assert all(action.isVisible() for action in actions)
     button = window.findChild(QToolButton, "load_template_button")
     assert button is None
 
@@ -98,10 +103,12 @@ def test_loading_template_closes_previous_focused_windows_and_keeps_editing_opti
     assert not any(dialog.isVisible() for dialog in window.findChildren(QDialog))
     original = window.project
     window._inspect_node("geometry")
-    assert not window.findChild(QDockWidget, "settings_dock").isHidden()
-    assert window._draft_controls["radius_mm"].value() == original.config.cylinder_mesh_parameter_list[1] * 1000
+    assert not window.findChild(QDockWidget, "model_dock").isHidden()
+    assert float(window.setup_panel.controls["cylinder_radius_mm"].text()) == pytest.approx(
+        original.config.cylinder_mesh_parameter_list[1] * 1000
+    )
     assert window.apply_settings() and window.project is original
-    window._draft_controls["radius_mm"].setValue(95)
+    window.setup_panel._edit("cylinder_radius_mm", "95")
     assert window.apply_settings()
     assert window.project.config.cylinder_mesh_parameter_list[1] == pytest.approx(0.095)
     assert window.project.revision == original.revision + 1

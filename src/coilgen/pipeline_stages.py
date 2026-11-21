@@ -27,7 +27,7 @@ import zipfile
 import numpy as np
 
 from .config import CoilGenConfig
-from .models import CoilGenResult, CoilPart, Mesh, TargetField
+from .models import CoilGenResult, CoilPart, Mesh, TargetField, WirePathGeometry, WireSegmentOwner
 from .persistence import file_digest, numerical_source_digest
 
 
@@ -159,6 +159,8 @@ def config_field_stage(name: str, config: CoilGenConfig | None = None) -> Pipeli
         return PipelineStage.CONTOURS
     if name in _CONTOUR_FIELDS or name.startswith(("contour_path_", "contour_resample_", "contour_smoothing_")):
         return PipelineStage.CONTOURS
+    if name in {"routing_group_plan", "routing_editor_plan"}:
+        return PipelineStage.ROUTED
     if name in _ROUTING_FIELDS or name.startswith(("joint_group_routing", "routing_", "inter_group_", "sweep_")):
         if config is None or _contours_check_manufacturing(config):
             return PipelineStage.CONTOURS
@@ -207,6 +209,7 @@ class PipelineState:
     primary_surface_index: int = 0
     result: CoilGenResult | None = None
     shielding_arrays: dict[str, np.ndarray] = field(default_factory=dict)
+    source_parts: list[CoilPart] = field(default_factory=list)
 
 
 class PipelineCheckpoint:
@@ -216,7 +219,7 @@ class PipelineCheckpoint:
     source, numerical settings, and input-content hashes before execution.
     """
 
-    SCHEMA = "coilgen.pipeline-checkpoint/6"
+    SCHEMA = "coilgen.pipeline-checkpoint/10"
 
     def __init__(
         self,
@@ -272,7 +275,9 @@ class PipelineCheckpoint:
         from .scientific_arrays import scientific_arrays
 
         state = self._state
-        arrays = scientific_arrays(state.parts, state.target_field, state.combined_mesh, state.sf_b_field)
+        arrays = scientific_arrays(
+            state.parts, state.target_field, state.combined_mesh, state.sf_b_field, source_parts=state.source_parts
+        )
         if max_bytes is not None and sum(np.asarray(value).nbytes for value in arrays.values()) > max_bytes:
             raise ValueError("Stage preview arrays exceed the permitted size.")
         return {key: np.array(value, copy=True) for key, value in arrays.items()}
@@ -316,12 +321,17 @@ class PipelineCheckpoint:
         manifest["payload_sha256"] = sha256(
             json.dumps(manifest, allow_nan=False, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
+        manifest_text = json.dumps(manifest, allow_nan=False, separators=(",", ":"))
+        if len(manifest_text.encode()) > 64 * 1024**2:
+            raise ValueError("Checkpoint manifest exceeds the permitted size.")
         temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
         try:
             with temporary.open("wb") as output:
                 with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as archive:
-                    archive.writestr("manifest.json", json.dumps(manifest, allow_nan=False, separators=(",", ":")))
-                    archive.writestr("arrays.npz", numerical)
+                    # Stable ZIP metadata lets portable projects deduplicate an
+                    # unchanged stage saved both as a boundary and final result.
+                    archive.writestr(zipfile.ZipInfo("manifest.json"), manifest_text)
+                    archive.writestr(zipfile.ZipInfo("arrays.npz"), numerical)
                 output.flush()
                 os.fsync(output.fileno())
             os.replace(temporary, path)
@@ -349,6 +359,10 @@ class PipelineCheckpoint:
             "coilgen.pipeline-checkpoint/3",
             "coilgen.pipeline-checkpoint/4",
             "coilgen.pipeline-checkpoint/5",
+            "coilgen.pipeline-checkpoint/6",
+            "coilgen.pipeline-checkpoint/7",
+            "coilgen.pipeline-checkpoint/8",
+            "coilgen.pipeline-checkpoint/9",
         }:
             raise ValueError("Unsupported pipeline checkpoint schema.")
         # Stage and inputs are scientific evidence too. Numerical-array hashes
@@ -391,6 +405,10 @@ class PipelineCheckpoint:
             raise ValueError("Checkpoint is missing typed prepared geometry.")
         if not isinstance(state.target_field, TargetField):
             raise ValueError("Checkpoint is missing typed target data.")
+        if not isinstance(state.source_parts, list) or not all(
+            isinstance(part, CoilPart) for part in state.source_parts
+        ):
+            raise ValueError("Checkpoint source supports must be typed CoilPart objects.")
         if self.stage.index >= PipelineStage.SHEET.index:
             if not isinstance(state.combined_mesh, Mesh) or state.sf_b_field is None:
                 raise ValueError("Solved checkpoint is missing its combined mesh or stream-function field.")
@@ -398,7 +416,7 @@ class PipelineCheckpoint:
                 raise ValueError("Checkpoint stream function field does not match its target sample shape.")
             if any(
                 part.stream_function is None or len(part.stream_function) != part.mesh.n_vertices
-                for part in state.parts
+                for part in state.parts + state.source_parts
             ):
                 raise ValueError("Checkpoint stream functions do not match prepared mesh vertices.")
         if self.stage is PipelineStage.EVALUATED and not isinstance(state.result, CoilGenResult):
@@ -587,6 +605,22 @@ def _encode(value: Any, arrays: dict[str, np.ndarray]) -> Any:
     if isinstance(value, dict):
         return {"$dict": [[_encode(key, arrays), _encode(item, arrays)] for key, item in value.items()]}
     if isinstance(value, (list, tuple)):
+        # Per-segment provenance often repeats for tens of thousands of sweep
+        # intervals. Store its index vector in the bounded NPZ rather than
+        # duplicating full owner records in the JSON manifest.
+        if 32 <= len(value) <= 2_000_000 and all(type(item) in (WireSegmentOwner, WirePathGeometry) for item in value):
+            table, lookup, indices = [], {}, []
+            for item in value:
+                key = (type(item).__name__, item.value if isinstance(item, Enum) else tuple(vars(item).values()))
+                if key not in lookup:
+                    lookup[key] = len(table)
+                    table.append(_encode(item, arrays))
+                indices.append(lookup[key])
+            return {
+                "$provenance": "tuple" if isinstance(value, tuple) else "list",
+                "values": table,
+                "indices": _encode(np.asarray(indices, dtype=np.uint32), arrays),
+            }
         return {"$tuple" if isinstance(value, tuple) else "$list": [_encode(item, arrays) for item in value]}
     raise TypeError(f"Unsupported checkpoint value {type(value).__name__}.")
 
@@ -607,7 +641,22 @@ def _migrate_config(value: Any, schema: str) -> Any:
     migrated = {key: _migrate_config(item, schema) for key, item in value.items()}
     if value.get("$class") == "PipelineState" and "shielding_arrays" not in migrated["fields"]:
         migrated["fields"]["shielding_arrays"] = {"$dict": []}
-    if value.get("$class") == "CoilGenConfig" and schema != "coilgen.pipeline-checkpoint/5":
+    if value.get("$class") == "ConnectedGroup":
+        migrated["fields"].setdefault("routing_spiral_order", "auto")
+    if value.get("$class") in {"PipelineState", "CoilGenResult"}:
+        migrated["fields"].setdefault("source_parts", {"$list": []})
+    if value.get("$class") == "CoilGenConfig":
+        migrated["fields"].setdefault("routing_group_plan", None)
+        migrated["fields"].setdefault("routing_editor_plan", None)
+    if value.get("$class") == "CoilPart":
+        migrated["fields"].setdefault("routing_editor_baseline", None)
+    if value.get("$class") == "CoilGenConfig" and schema not in {
+        "coilgen.pipeline-checkpoint/5",
+        "coilgen.pipeline-checkpoint/6",
+        "coilgen.pipeline-checkpoint/7",
+        "coilgen.pipeline-checkpoint/8",
+        "coilgen.pipeline-checkpoint/9",
+    }:
         additions = (
             {}
             if schema == "coilgen.pipeline-checkpoint/4"
@@ -637,6 +686,33 @@ def _decode(value: Any, arrays: Any) -> Any:
         return value
     if not isinstance(value, dict):
         raise ValueError("Malformed checkpoint value.")
+    if "$provenance" in value:
+        if set(value) != {"$provenance", "values", "indices"} or value["$provenance"] not in {"list", "tuple"}:
+            raise ValueError("Malformed checkpoint provenance table.")
+        indices = _decode(value["indices"], arrays)
+        table = value["values"]
+        if (
+            not isinstance(indices, np.ndarray)
+            or indices.dtype != np.dtype(np.uint32)
+            or indices.ndim != 1
+            or not 0 < len(indices) <= 2_000_000
+            or not isinstance(table, list)
+            or not 0 < len(table) <= len(indices)
+            or int(indices.max()) >= len(table)
+        ):
+            raise ValueError("Invalid checkpoint provenance indices.")
+        prototypes = [_decode(item, arrays) for item in table]
+        if any(type(item) not in (WireSegmentOwner, WirePathGeometry) for item in prototypes):
+            raise ValueError("Checkpoint provenance requires segment owners or geometry labels.")
+        # Owners are mutable; retain the detached-object semantics of the old
+        # expanded representation instead of aliasing all repeated intervals.
+        items = [
+            WireSegmentOwner(**vars(prototypes[index]))
+            if isinstance(prototypes[index], WireSegmentOwner)
+            else prototypes[index]
+            for index in indices
+        ]
+        return tuple(items) if value["$provenance"] == "tuple" else items
     if "$array" in value:
         array = arrays[value["$array"]]
         if array.dtype.str != value["dtype"] or list(array.shape) != value["shape"]:

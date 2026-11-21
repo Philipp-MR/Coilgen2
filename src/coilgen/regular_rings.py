@@ -100,6 +100,87 @@ def ring_geometry(points: np.ndarray, origin: np.ndarray, axis: np.ndarray):
     }
 
 
+def ring_height_profile(points, origin, axis):
+    """A once-encircling, azimuth-monotone polygon as height over angle.
+
+    Optimized rings on a tapered support need not be planar or have their area
+    normal parallel to the support axis. Keep their exact points and use their
+    angular order only to propose a traversal. Manufacturing checks still own
+    clearance, curvature and support acceptance.
+    """
+    points = np.asarray(points, dtype=float)
+    if (
+        points.ndim != 2
+        or points.shape[1] != 3
+        or len(points) < 4
+        or not np.isfinite(points).all()
+        or np.linalg.norm(points[0] - points[-1]) > 1e-10
+    ):
+        return None
+    radial_axis = np.eye(3)[int(np.argmin(np.abs(axis)))]
+    radial_axis = radial_axis - axis * (radial_axis @ axis)
+    radial_axis /= np.linalg.norm(radial_axis)
+    second_axis = np.cross(axis, radial_axis)
+    relative = points - origin
+    xy = np.column_stack((relative @ radial_axis, relative @ second_axis))
+    if np.any(np.linalg.norm(xy, axis=1) <= 1e-12):
+        return None
+    angle = np.unwrap(np.arctan2(xy[:, 1], xy[:, 0]))
+    turns = float(angle[-1] - angle[0])
+    if abs(abs(turns) - 2 * np.pi) > 1e-6:
+        return None
+    sign = 1 if turns > 0 else -1
+    if np.any(sign * np.diff(angle) <= 1e-12):
+        return None
+    height = relative @ axis
+    if sign < 0:
+        angle, xy, height = angle[::-1], xy[::-1], height[::-1]
+    return dict(angle=angle, xy=xy, height=height, orientation=sign)
+
+
+def _ring_heights(profile, angles):
+    """Intersect the original straight segments with the requested radial planes."""
+    angle = profile["angle"]
+    query = (angles - angle[0]) % (2 * np.pi) + angle[0]
+    index = np.clip(np.searchsorted(angle, query, side="right") - 1, 0, len(angle) - 2)
+    a, b = profile["xy"][index], profile["xy"][index + 1]
+    ray = np.column_stack((np.cos(query), np.sin(query)))
+
+    def cross(u, v):
+        return u[:, 0] * v[:, 1] - u[:, 1] * v[:, 0]
+
+    fraction = -cross(a, ray) / cross(b - a, ray)
+    return profile["height"][index] + fraction * (profile["height"][index + 1] - profile["height"][index])
+
+
+def _profile_ring_order(part, indices, origin, axis):
+    profiles = {i: ring_height_profile(part.contour_lines[i].v, origin, axis) for i in indices}
+    if any(p is None for p in profiles.values()):
+        return None
+    signs = {p["orientation"] for p in profiles.values()}
+    if len(signs) != 1:
+        return None
+    sign = next(iter(signs))
+    positions = {i: float((closed_curve_centroid(part.contour_lines[i].v) - origin) @ axis) * sign for i in indices}
+    ordered = sorted(indices, key=positions.get)
+    if not separated_ring_profiles([profiles[i] for i in ordered], sign):
+        return None
+    return ordered, positions, sign
+
+
+def separated_ring_profiles(profiles, sign=1):
+    """Reject height-order reversals before proposing a common cut meridian."""
+    for a, b in zip(profiles, profiles[1:]):
+        nodes = np.unique(np.r_[a["angle"] % (2 * np.pi), b["angle"] % (2 * np.pi), 0.0, 2 * np.pi])
+        # Include interval midpoints; this is a conservative ordering proposal,
+        # never a replacement for the independent conductor collision audit.
+        query = np.sort(np.r_[nodes, (nodes[:-1] + nodes[1:]) / 2])
+        separation = sign * (_ring_heights(b, query) - _ring_heights(a, query))
+        if np.min(separation) <= 1e-8:
+            return False
+    return True
+
+
 def regular_ring_order(part, loop_indices, signatures, contains, axis_result):
     """Return a monotone order only for verified, separate essential rings.
 
@@ -131,7 +212,21 @@ def regular_ring_order(part, loop_indices, signatures, contains, axis_result):
     origin, axis = (np.asarray(value, dtype=float) for value in axis_result)
     geometry = {index: ring_geometry(part.contour_lines[index].v, origin, axis) for index in original}
     if any(value is None for value in geometry.values()):
-        return unchanged("not_closed_transverse_once_encircling_rings")
+        profile_order = _profile_ring_order(part, original, origin, axis)
+        if profile_order is None:
+            return unchanged("not_closed_transverse_once_encircling_rings")
+        ordered, positions, sign = profile_order
+        diagnostics.update(
+            method="directed_support_axis_monotone",
+            reason="ordered_azimuth_monotone_essential_rings",
+            ordered_loop_indices=ordered,
+            support_origin_m=origin.tolist(),
+            traversal_axis=(sign * axis).tolist(),
+            original_axial_travel_m=float(np.abs(np.diff([positions[i] for i in original])).sum()),
+            ordered_axial_travel_m=float(np.abs(np.diff([positions[i] for i in ordered])).sum()),
+            axial_positions_m=[positions[i] for i in ordered],
+        )
+        return ordered, diagnostics
     signs = {value["orientation"] for value in geometry.values()}
     if len(signs) != 1:
         return unchanged("incompatible_directed_ring_orientation")

@@ -7,6 +7,47 @@ from coilgen.application.session import WorkbenchSession
 from coilgen.geometry import load_mesh_from_config
 
 
+def test_field_budget_labels_follow_the_executed_contract(tmp_path):
+    from dataclasses import replace
+    from coilgen.application.targets import field_budget_text
+
+    session = WorkbenchSession(tmp_path)
+    session.load_template("conical_harmonic")
+    config = session.project.config
+    assert "Design 4% · Independent 5%" in field_budget_text(config, 0.8)
+    std = replace(config, target_error_constraint_metric="std", target_error_std_limit_T=2e-6)
+    text = field_budget_text(std, 0.8)
+    assert "2 µT" in text and "Independent standard deviation check unavailable" in text
+    custom = replace(config, research_physics={"include_default_field_constraints": False})
+    assert "matching validation operator" in field_budget_text(custom, 0.8)
+
+
+def test_translate_harmonic_without_moving_design_samples(tmp_path):
+    from coilgen.application.scene_spec import model_preview
+    from coilgen.target import evaluate_field_expression
+
+    session = WorkbenchSession(tmp_path)
+    session.load_template("conical_harmonic")
+    initial = session.project
+    original = model_preview(initial.config, initial.project_root)[1]["target_points_m"]
+    session.apply_settings({**session.settings_values("target"), "field_origin_x_mm": "12"})
+    shifted = session.project
+    actual = model_preview(shifted.config, shifted.project_root)[1]["target_points_m"]
+    np.testing.assert_array_equal(original, actual)
+    x, y, z = actual.T
+    np.testing.assert_allclose(
+        evaluate_field_expression(shifted.config.field_shape_function, actual),
+        0.002 * (2 * z * z - (x - 0.012) ** 2 - y * y),
+        atol=2e-20,
+        rtol=0,
+    )
+    assert shifted.revision == initial.revision + 1
+    session.apply_settings(session.settings_values("target"))
+    assert session.project.revision == shifted.revision
+    session.apply_settings({"field_shape_function": "z*z"})
+    assert "field_origin_x_mm" not in session.settings_values("target")
+
+
 def test_cylinder_form_edits_physical_mesh_in_one_undo_step(tmp_path):
     session = WorkbenchSession(tmp_path)
     session.load_template("cylinder")

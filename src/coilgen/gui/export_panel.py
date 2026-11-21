@@ -53,6 +53,7 @@ class GeometryExportState:
     unit: str = "mm"
     include_project: bool = True
     receipt: ExportReceipt = field(default_factory=ExportReceipt)
+    receipt_selection: tuple | None = None
 
 
 def export_record_key(record):
@@ -151,6 +152,9 @@ def geometry_export_description(package):
     text += " · " + ", ".join(formats) if formats else ""
     if manifest.get("project_companion"):
         text += " · project JSON and results included"
+    for item in geometry:
+        if item.get("body_id"):
+            text += f" · {item['body_id']} ({item.get('geometry_checks', 'checks unrecorded')})"
     return text + f". Units and provenance: {package.manifest_path.name}."
 
 
@@ -489,6 +493,13 @@ class GeometryExportPanel(QWidget):
         self.state.names = names
         self.state.unit = self.units.currentData()
         self.state.include_project = self.include_project.isChecked()
+        signature = (names, self.state.unit, self.state.include_project)
+        if self.state.receipt_selection is not None and self.state.receipt_selection != signature:
+            self.state.receipt_selection = None
+            self.state.receipt = ExportReceipt()
+            if hasattr(self, "receipt"):
+                self.receipt.receipt = self.state.receipt
+                self.receipt.refresh()
         drafts = any(is_draft_artifact(name) for name in names)
         if hasattr(self, "draft_ack"):
             self.draft_notice.setVisible(drafts)

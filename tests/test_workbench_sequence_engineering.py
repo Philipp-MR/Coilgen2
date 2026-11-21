@@ -31,6 +31,7 @@ def test_independent_turns_hide_connector_controls_and_keep_their_saved_preferen
     )
     window.select_node("winding")
     assert "Interconnection direction" not in window._settings_decisions
+    assert "Return-path lift" not in window._settings_decisions
     window._draft_controls["winding_intent"].setCurrentText("Connected circuit")
     assert window.apply_settings()
     assert "Interconnection direction" in window._settings_decisions
@@ -38,6 +39,15 @@ def test_independent_turns_hide_connector_controls_and_keep_their_saved_preferen
         window.project.config.interconnection_axis == "support_axis"
         and window.project.config.normal_shift_length == 0.007
     )
+    lift = window._settings_decisions["Return-path lift"]
+    enabled = window._draft_controls["return_path_lift"]
+    height = window._draft_controls["normal_shift_mm"]
+    assert enabled in lift.controls and height in lift.controls
+    enabled.setChecked(True)
+    height.setValue(0)
+    assert window.project.config.normal_shift_length == 0.007
+    assert window.apply_settings()
+    assert window.project.config.normal_shift_length == 0 and not window.project.config.skip_normal_shift
 
 
 def test_physical_placement_is_explicit_si_edit_with_exact_profile_and_undo(windows):

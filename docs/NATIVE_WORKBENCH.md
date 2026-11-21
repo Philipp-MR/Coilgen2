@@ -12,8 +12,8 @@ Philipp Amrein's personal gratitude, with the official logo and website link.
 The desktop workbench is an optional PySide6/Qt interface to the same Python
 numerical engine used by existing CoilGen scripts. Qt owns the model editor and
 graphics, and isolated numerical workers own computation. The browser has the
-same **Model Builder**, central plot and **Design plan** arrangement on wide
-screens. Both use the same Python design engine and project format. Save a
+same **Design setup** sidebar and central plot on wide screens. The optional
+**Design plan** panel opens when needed. Both use the same Python design engine and project format. Save a
 self-contained `.coilgen` file to open the design and its saved results in
 either workbench. The browser guide covers team workspaces, downloads and how
 to locate the same run.
@@ -32,7 +32,7 @@ to locate the same run.
    Click **Run design choices** beside the plot to see the submitted inputs.
    Open **Engineering checks** to see what passed, failed or lacks evidence.
 4. Choose **File → Save project** to keep the model and its available runs
-   together. **Export conductor geometry** in the Model Builder creates a
+   together. **Export geometry** in the results tools creates a
    separate CAD package for the selected run.
 
 Coil systems show a labeled **Editing channel** selector above the plot. Its
@@ -60,7 +60,7 @@ space; **View → Design plan** restores it, and starting a computation opens it
 Its visibility is saved with the project view. The lower-left computing indicator
 continues to cover other background operations as well.
 
-On narrower windows, **Model Builder** and **Design plan** share a tabbed
+On narrower windows, **Design setup** and **Design plan** share a tabbed
 sidebar so the plot and Compute button fit. Click the tab for the panel you
 want. Starting a run brings the Design plan to the front.
 
@@ -116,7 +116,17 @@ scientific figures and existing script plotbooks.
 
 ## Scientific workflow
 
+**Groups & circuits** beside the central plot prepares a source-group map and
+edits circuit membership, spiral order and cut side in one integrated table.
+Opening it preserves existing numerical defaults. See [Groups and circuits](GROUPS_CIRCUITS.md)
+for workflow, current continuity, regeneration and export contracts.
+
 ### Coil results and field analysis
+
+Completed designs open with the winding layout over its calculated field. The
+field view uses its recorded electrical paths: fabrication-review paths for the
+review field, evaluated paths for the routed field, and contours for the contour
+field. Partial results without a matching field retain the latest geometry view.
 
 Selecting a saved result automatically displays an overview above the viewport:
 RMS and peak field error, relative RMS error, recorded current, resistance,
@@ -253,45 +263,27 @@ returns to the welcome screen after checking pending changes.
 Save includes pending design notes from every channel. Discarding a project
 clears its drafts.
 
-An open design shows the Model Builder and plot. The left Model Builder is the
-main workflow navigation; there is no second workflow button bar. Click a model or study
-item to open its settings; keyboard users can select it and press Enter.
-Settings open in a floating inspector. Placement, mesh, harmonic basis/origin,
-sheet material and numerical details open in smaller modeless windows from that
-inspector. **Apply & preview** and **Revert draft** stay outside its scrolling area.
-**Cancel** or the window’s **×** closes the editor and discards its unapplied
-changes. In a focused decision this restores the values present when it opened.
-Other decisions keep their pending edits. **Apply & preview** commits the
-settings and refreshes the editor.
-Native drafts mark the document as modified immediately. Applying, undoing and
-redoing acknowledge the applied revision; reverting or restoring the original
-value clears the pending-edit message. Rejected edits retain their values and
-show their error in the owning editor.
+An open design shows a persistent **Design setup** sidebar beside the plot. Common
+parameters remain visible in seven sections: Support geometry, Target field,
+Conductor, Optimization, Winding, Printed former and Validation. Each **Details**
+button expands the less common inputs in the same panel. Opening Details makes
+no model revision, preserves exact saved SI values and starts no computation.
 
-Inspectors present **numbered decision cards**, with the current choice and its
-scientific icon. Open any card directly; numbers indicate a useful order without
-locking navigation or claiming that a design passed a check. **Back** retains
-pending edits and **Apply & next** validates and applies them before opening the
-next decision. The final decision offers the next section, opening its first
-choice directly; reaching Study never starts a computation automatically.
-**Revert draft** resets the form in place. **Cancel** resets it and closes the window. An invalid
-entry reopens its owning window, even if changing a mode hid or disabled that row.
-Opening and closing decisions preserves exact saved SI values and makes no
-model revision.
+Edit several sections together, then use **Preview** to apply the whole setup as
+one undoable revision. **Compute** and Save validate and apply pending setup
+edits before continuing. **Revert edits** restores the applied values. Invalid
+inputs retain their text and reveal their owning section. Undo and Redo revisit
+complete applied revisions. Applied inputs remain separate from saved run evidence.
 
-Choose a structural option and click **Apply & preview** to open the settings
-for that support, target family, region shape or sampling mode. **Import and
-apply** commits the selected file after the file and units have been confirmed.
+**More tools** contains support and target imports, Groups and circuits, and
+Advanced parameters. Advanced parameters expand inside the sidebar with searchable
+typed controls and a synchronized JSON editor. Apply or cancel that separate
+draft before applying ordinary setup edits. Specialized import and engineering
+tools remain available through explicit actions and menus.
 
-**Choose support** shows the complete primitive gallery. Choosing a different support reveals its dimensions in the same window. Set them before applying the change. **Choose field** opens
-linear gradients, analytic expressions, spherical harmonics and an existing
-imported map as graphical tiles. Field regions and volume/boundary sampling
-have their own graphical choices. Amplitude, dimensions, placement and mesh
-remain separate windows. Inactive analytic controls are hidden for imported maps;
-normalization and solve modes expose their applicable rows while preserving other
-saved values. The insulation window contains the conductor-envelope preview.
-Custom profile editing, explicit mounting/return-path displacement, engineering
-current/spacing contouring and the full native Advanced editor remain available.
+The former model tree and sequential decision windows are no longer the main
+setup workflow. Design plan is hidden by default and remains available through
+**View → Design plan**. The plot keeps its results, inspection and export tools.
 
 Under **Study**, **Choose output** opens graphical choices for preparation,
 stream function optimization, contours, routing/sweeping or full evaluation.
@@ -426,7 +418,7 @@ shielded Gy, uniform Z0, the five second-order modes, or conical Z2. Loading a
 template protects unsaved edits and sets up a full study without starting a job.
 All template settings are already applied. Loading selects full design evaluation
 and leaves the settings windows closed; click **Compute full design** immediately.
-Open a section in the Model Builder only when you want to inspect or change it.
+Edit the Design setup sidebar when you want to change inputs; expand Details only as needed.
 The shielded template jointly optimizes primary and outer current supports
 against the ROI target and a zero-vector-field constraint on a separate closed
 external cylinder. Both support meshes and the suppression surface are owned
@@ -493,9 +485,7 @@ contours, routing, sweeping and strict review. See the
 [example definitions and script](../examples/biplanar_gradient_shim_README.md) for
 layer allocation, exact harmonic signs and recorded numerical checks.
 
-The model tree separates editable **Model** inputs, **Study** controls and
-immutable **Results**, following the
-[Model Builder workflow](https://www.comsol.com/comsol-multiphysics/model-builder).
+The setup sidebar separates editable design inputs from immutable saved results.
 CoilGen keeps its surface-coil optimization and realization operations explicit:
 
 1. Create a blank project, load a template, or open an owned project or
@@ -510,10 +500,8 @@ CoilGen keeps its surface-coil optimization and realization operations explicit:
    retains its own boundary and validation settings. Full evaluation executes
    the requested winding operations; disabled connection or sweeping options
    remain disabled and are described on the study page.
-   The left Model Builder provides direct navigation to model, study, results
-   and export settings without claiming completion or acceptance.
-   Previous/Next section controls remain below the settings scroll area. Selecting
-   the Study tree parent opens the currently requested computation boundary.
+   Design setup keeps common parameters visible and expands Details inline.
+   Use Design plan to change the requested computation boundary.
 3. Review the pending-edit banner and apply a complete settings edit, or revert
    the draft. Invalid edits retain their values and show errors beside the
    affected controls. The current revision and undo history remain intact.

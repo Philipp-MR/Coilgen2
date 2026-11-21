@@ -19,7 +19,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..application.cad import PRINT_FORMER_EXPORT_HINT, has_saved_print_former, print_former_status
+from ..application.cad import (
+    PRINT_FORMER_EXPORT_HINT,
+    has_saved_export_geometry,
+    has_saved_print_former,
+    print_former_status,
+)
 from ..application.diagnostics import run_problems
 from ..application.routing_analysis import routing_analysis_available
 from .colors import apply_tone, tone_color
@@ -120,6 +125,11 @@ class ResultsOverviewPanel(QFrame):
         self.routing_button.setMinimumHeight(28)
         self.routing_button.clicked.connect(lambda _checked=False: self.action_requested.emit("routing"))
         header.addWidget(self.routing_button)
+        self.routing_editor_button = QPushButton("Edit interconnections", self)
+        self.routing_editor_button.setObjectName("results_overview_routing_editor")
+        self.routing_editor_button.setAccessibleName("Edit saved automatic routing in 3D")
+        self.routing_editor_button.clicked.connect(lambda _checked=False: self.action_requested.emit("routing_editor"))
+        header.addWidget(self.routing_editor_button)
         self.metrics_button = QPushButton("Hide metrics", self)
         self.metrics_button.setObjectName("results_overview_toggle_metrics")
         self.metrics_button.setMinimumHeight(28)
@@ -307,6 +317,7 @@ class ResultsOverviewPanel(QFrame):
             ("field", "Field map", "field-error"),
             ("coil", "Coil stats", "conductor-profile"),
             ("checks", "Engineering checks", "check"),
+            ("export_geometry", "Export geometry…", "export-conductor"),
         ):
             button = QPushButton(icon(drawing), text, self)
             button.setObjectName("results_overview_" + key)
@@ -419,15 +430,20 @@ class ResultsOverviewPanel(QFrame):
         self.summary = summary = summarize_field_result(record, source_error=source_error, stale=stale)
         self.coil_report = build_coil_statistics(record)
         routing_available = routing_analysis_available(record)
+        from ..application.interconnection_editor import editor_available
+
+        self.routing_editor_button.setEnabled(not source_error and editor_available(record))
         metadata = read_run_metadata(record)
         former_status = print_former_status(metadata)
         former_available = has_saved_print_former(metadata)
+        export_available = has_saved_export_geometry(metadata)
         visible = record is not None and (
             summary.visible
             or self.has_coil_statistics
             or routing_available
             or bool(former_status)
             or former_plot_available
+            or export_available
         )
         self.setVisible(visible)
         if not visible:
@@ -472,15 +488,29 @@ class ResultsOverviewPanel(QFrame):
         for values in (self.metric_values, self.coil_metric_values):
             for key, value in values.items():
                 value.parentWidget().setVisible(not (gradient and key in GRADIENT_SHOWN_ELSEWHERE))
-        self.context.setText(field_context_with_current(summary, gradient) or summary.context)
+        from ..application.targets import result_field_scope
+
+        scope = result_field_scope(metadata)
+        context = field_context_with_current(summary, gradient) or summary.context
+        if (metadata.get("validation") or {}).get("limit") is not None:
+            self.context.setText("\n".join(filter(None, (scope, context))))
+        else:
+            self.context.setText(context)
+        self.context.setToolTip("\n".join(filter(None, (scope, summary.tooltip))))
         for key, button in self.buttons.items():
             button.setEnabled(
                 not source_error
-                and (key == "checks" or (key == "coil" and self.has_coil_statistics) or summary.analysis_available)
+                and (
+                    export_available
+                    if key == "export_geometry"
+                    else key == "checks" or (key == "coil" and self.has_coil_statistics) or summary.analysis_available
+                )
             )
             button.setToolTip(
                 "Inspect saved checks and source diagnostics."
                 if key == "checks"
+                else "Choose saved solids and centerlines by body, format and unit."
+                if key == "export_geometry"
                 else self.coil_report.message
                 if key == "coil"
                 else "Source verification failed; reopen and verify the run before field analysis."
@@ -529,7 +559,7 @@ class ResultsOverviewPanel(QFrame):
     def set_analysis_available(self, available):
         """Apply the controller's cached finite field/target capability check."""
         for key, button in self.buttons.items():
-            if key not in {"checks", "coil"}:
+            if key not in {"checks", "coil", "export_geometry"}:
                 button.setEnabled(bool(available) and self.summary.visible and self.summary.analysis_available)
             elif key == "coil":
                 button.setEnabled(self.buttons["checks"].isEnabled() and (bool(available) or self.has_coil_statistics))

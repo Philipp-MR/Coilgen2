@@ -98,6 +98,22 @@ def test_no_record_has_no_export_or_review_action(panels):
     )
 
 
+def test_finished_export_receipt_is_detached_when_units_change(panels, tmp_path):
+    panel = panels(_record(), _options())
+    panel.state.receipt_selection = (
+        panel.selected_names(),
+        panel.units.currentData(),
+        panel.include_project.isChecked(),
+    )
+    panel.receipt.set_finished(tmp_path, "Exported in millimetres")
+    old = panel.receipt.receipt
+    panel.units.setCurrentIndex(1)
+    assert panel.receipt.receipt is not old and not panel.receipt.receipt.complete
+    old.text = "Late completion of old package"
+    panel.receipt.refresh()
+    assert panel.receipt.isHidden()
+
+
 def test_unverified_missing_solids_direct_review_without_enabling_export(panels):
     panel = panels(_record(ready=None), project=SimpleNamespace(id="owner", revision=7))
     assert "No solid STL or solid STEP" in panel.status.text()

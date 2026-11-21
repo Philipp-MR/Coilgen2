@@ -136,13 +136,14 @@ def test_new_design_accepts_inputs_in_either_order_without_implicit_template(win
     assert window.service.submissions == []
 
 
-def test_explicit_template_has_one_compute_and_tree_navigation(window, application):
+def test_explicit_template_has_one_compute_and_inline_setup(window, application):
     window.load_template("cylinder")
     application.processEvents()
     assert window.project is not None and window.assembly is not None
     assert window.workspace_stack.currentWidget() is window.workspace
     assert window.findChild(QDockWidget, "model_dock").isVisible()
-    assert window.tree.isVisible()
+    assert window.setup_panel.isVisible()
+    assert not window.tree.isVisible()
     assert window.compute_button.isVisible()
     assert window.stage_selector.isHidden()
     assert [

@@ -54,3 +54,18 @@ test("oversize and rejected uploads produce a visible error without an open even
   assert.equal(component.busy, false);
   assert.deepEqual(events, []);
 });
+
+test("focusing a group scrolls only its table and keeps an already visible row still", () => {
+  let focus;
+  window.CoilGenGroupFocus.install({ directive(name, value) {
+    assert.equal(name, "group-focus");
+    focus = value;
+  } });
+  const table = { scrollTop: 12, getBoundingClientRect: () => ({top: 50, bottom: 150}) };
+  const row = { closest: () => table, getBoundingClientRect: () => ({top: 145, bottom: 175}) };
+  focus.updated(row, {value: true, oldValue: false});
+  assert.equal(table.scrollTop, 37);
+  row.getBoundingClientRect = () => ({top: 80, bottom: 110});
+  focus.updated(row, {value: true, oldValue: false});
+  assert.equal(table.scrollTop, 37);
+});

@@ -69,11 +69,11 @@ def test_rendered_workbench_has_labeled_panel_navigation_and_selectors(tmp_path)
         landmarks = {
             attrs["aria-label"] for tag, attrs in elements if tag in {"main", "aside"} and "aria-label" in attrs
         }
-        assert {"Model Builder", "Plot and results", "Design plan"} <= landmarks
+        assert {"Design setup", "Plot and results", "Design plan"} <= landmarks
         for pane in ("model", "center", "plan"):
             assert any(
                 tag == "button"
-                and attrs.get("@click") == f"workspace_panel = '{pane}'"
+                and attrs.get("@click", "").startswith(f"workspace_panel = '{pane}'")
                 and attrs.get(":aria-pressed") == f"workspace_panel === '{pane}'"
                 for tag, attrs in elements
             )
@@ -90,7 +90,7 @@ def test_rendered_workbench_has_labeled_panel_navigation_and_selectors(tmp_path)
         ):
             assert any(attrs.get("id") == control and attrs.get("v-model") == model for _, attrs in elements)
         tree_images = [attrs for tag, attrs in elements if tag == "img" and attrs.get("class") == "cg-tree-symbol"]
-        assert tree_images and all(attrs.get("alt") == "" for attrs in tree_images)
+        assert not tree_images  # The setup form replaces the duplicate navigation tree.
         browser.load_template("cylinder")
         original = {node["value"]: node["symbol"] for node in server.state.nodes}
         browser.load_template("biplanar")
@@ -577,6 +577,6 @@ def test_model_tree_shows_each_section_readiness_and_filters_dialog_findings(tmp
         template = state.trame__template_main
         assert "readiness.action" in template and "cg-readiness" in template
         assert "preflight.filter(i => i.node === node)" in template
-        assert 'data-state="item.state"' in template or ':data-state="item.state"' in template
+        assert "focus_setup" in template or "setup_open" in template
     finally:
         browser.session.close()

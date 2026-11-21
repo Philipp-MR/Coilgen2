@@ -76,6 +76,7 @@ The main guides are collected in `docs/`. Run the commands in these guides from
 the repository root, where `pyproject.toml` and `Start CoilGen2 GUI.cmd` live.
 
 - Load a cylindrical gradient in the browser to compute its winding, inspect its field and download the project. [Browser workbench](BROWSER_WORKBENCH.md)
+- [Interconnection editor](INTERCONNECTION_EDITOR.md): edit automatic winding routes in 3D, move cuts, lock connections, undo/redo and validate engineering.
 - [Native scientific workbench](NATIVE_WORKBENCH.md): Qt/VTK desktop workflow,
   portable projects, staged execution, channel projects and script compatibility.
 - [Installation](INSTALL.md): Python environment setup and dependency options.

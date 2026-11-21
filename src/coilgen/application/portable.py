@@ -16,6 +16,7 @@ from uuid import uuid4
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, is_zipfile
 from zlib import error as DeflateError
 
+from ..persistence import _retry_windows_file_operation
 from .assets import InputAsset
 from .bundles import RunArchive, _digest
 from .project import ProjectDocument, _json_object
@@ -126,7 +127,7 @@ def save_bundle(document, path, *, progress=None):
                         progress(completed, total, "Writing compact project")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        _retry_windows_file_operation(os.replace, temporary, path)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise

@@ -34,7 +34,7 @@ _MAX_MANIFEST_BYTES = 64 * 1024
 _MAX_ARRAYS = 10000
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _PATH_ARRAY = re.compile(r"(?:contour_\d+_\d+|route_\d+|fabrication_\d+(?:_\d+)?)_points_m\Z")
-_BODY_ARRAY = re.compile(r"swept_\d+_\d+_(?:vertices_m|faces)\Z")
+_BODY_ARRAY = re.compile(r"(?:swept_\d+_\d+|grooved_support_\d+)_(?:vertices_m|faces)\Z")
 # Features are produced during routing. Each snapshot includes the support,
 # fields, contours and any earlier geometry still present in the same solution.
 _FEATURE_GEOMETRY = {

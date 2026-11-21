@@ -1,7 +1,7 @@
 """Persistent channel-by-channel computation plan beside the scientific view.
 
-Rows report recorded evidence and milestones. Selecting a design
-step never starts computation or changes the plotted dataset.
+Rows report recorded evidence and milestones. Activating a recorded
+step opens its plot without starting computation.
 """
 
 from __future__ import annotations
@@ -55,6 +55,7 @@ class DesignPlanPanel(QWidget):
 
     follow_requested = Signal(bool)
     channel_requested = Signal(str)
+    stage_requested = Signal(str, str, str)
     compute_channels_requested = Signal()
     action_requested = Signal(str)
 
@@ -98,7 +99,7 @@ class DesignPlanPanel(QWidget):
         self.tree.setAccessibleName("Computation plan by channel")
         self.tree.setAccessibleDescription(
             "Expand channels to inspect their five computation stages. Pending stages are grey; recorded completed "
-            "stages use the normal text colour. Activate a channel header to edit that channel. Stage rows are passive."
+            "stages use the normal text colour. Activate a channel header to edit it or a completed stage to open its plot."
         )
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -115,7 +116,7 @@ class DesignPlanPanel(QWidget):
         runtime_row = QHBoxLayout()
         self.follow_button = QToolButton(self)
         self.follow_button.setObjectName("design_progress_follow")
-        self.follow_button.setText("Follow run")
+        self.follow_button.setText("Follow live preview")
         self.follow_button.setIcon(icon("visibility"))
         self.follow_button.setCheckable(True)
         self.follow_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
@@ -341,6 +342,14 @@ class DesignPlanPanel(QWidget):
         identity = item.data(0, _IDENTITY_ROLE)
         if identity and identity[0] == "channel":
             self.channel_requested.emit(identity[1])
+        elif identity and identity[0] == "stage" and self.plan:
+            channel = next((c for c in self.plan.channels if c.channel_id == identity[1]), None)
+            if (
+                channel
+                and channel.job_id
+                and any(s.key == identity[2] and s.status == "complete" for s in channel.stages)
+            ):
+                self.stage_requested.emit(channel.channel_id, channel.job_id, identity[2])
 
     def changeEvent(self, event):
         super().changeEvent(event)

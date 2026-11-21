@@ -105,6 +105,22 @@ def test_snapshot_contains_exact_recorded_si_arrays_and_no_acceptance(tmp_path, 
     assert not (tmp_path / "result.json").exists()
 
 
+def test_routed_preview_preserves_grooved_support_and_checks_its_indices(tmp_path):
+    original = checkpoint(tmp_path, "routed")
+    state = original.state
+    part = state.parts[0]
+    part.support_body = SimpleNamespace(mesh=part.mesh.copy())
+    original = PipelineCheckpoint(original.stage, state, original.config, tmp_path)
+    publish_stage_preview(tmp_path, original, request(), DIGEST)
+    loaded = load_stage_preview(tmp_path, **identity())
+    np.testing.assert_array_equal(loaded.arrays["grooved_support_0_vertices_m"], part.mesh.vertices)
+    np.testing.assert_array_equal(loaded.arrays["grooved_support_0_faces"], part.mesh.faces)
+    part.support_body.mesh.faces[0, 0] = len(part.mesh.vertices)
+    invalid = PipelineCheckpoint(original.stage, state, original.config, tmp_path)
+    with pytest.raises(ValueError, match="triangular indices"):
+        publish_stage_preview(tmp_path / "invalid", invalid, request(), DIGEST)
+
+
 def test_scientific_array_accessor_does_not_copy_operators_or_share_mutable_data(tmp_path):
     class NeverCopy:
         def __deepcopy__(self, memo):

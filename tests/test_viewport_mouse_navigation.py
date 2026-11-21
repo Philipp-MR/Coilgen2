@@ -156,7 +156,9 @@ def test_drag_keeps_winding_settings_closed_and_model_unchanged(scene, window, a
     press(viewport, actor)
     release(viewport)
     application.processEvents()
-    assert not settings.isHidden()
+    assert settings.isHidden()
+    assert window.setup_panel.details["winding"][0].isChecked()
+    assert window.setup_panel.details["winding"][1].isVisible()
     assert window.tree.currentItem().data(0, Qt.ItemDataRole.UserRole) == "winding"
     assert window.project is before
     assert window.undo_stack.count() == undo_count

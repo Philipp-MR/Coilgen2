@@ -99,6 +99,34 @@ PREFERRED_RUN_PLOTS = (
 )
 
 
+def winding_field_paths(arrays, key):
+    """The recorded electrical geometry for this field, never a nominal-route substitute."""
+    geometry = {
+        "fabricated": "review_electrical",
+        "winding_validation": "review_electrical",
+        "winding_validation_residual": "review_electrical",
+        "routed_field": "evaluated_winding",
+        "routed_residual": "evaluated_winding",
+        "contour_field": "contours",
+        "contour_residual": "contours",
+    }.get(key)
+    if geometry is None or not resolve_dataset(arrays, geometry).available:
+        return ()
+    return tuple(np.asarray(arrays[name], dtype=float) for name in path_array_names(arrays, geometry))
+
+
+def preferred_winding_field(arrays, *, original=False):
+    """Open completed designs with their winding and computed field together."""
+    return next(
+        (
+            key
+            for key in ("fabricated", "routed_field", "contour_field")
+            if resolve_dataset(arrays, key, original=original).available and winding_field_paths(arrays, key)
+        ),
+        None,
+    )
+
+
 # Field maps are shown in µT: low-field gradients and residuals are µT-scale per ampere.
 FIELD_DISPLAY_UNIT = "µT"
 FIELD_DISPLAY_SCALE = 1e6
@@ -340,6 +368,9 @@ def scene_layers(arrays, key, *, component="Bz", b0_direction=(0.0, 0.0, 1.0), o
                 scalars = desired
         if has_support:
             layers.append(_support_layer(arrays, opacity=0.24 if key == "preview_target" else 0.15))
+        paths = winding_field_paths(arrays, key)
+        if paths:
+            layers.append(SceneLayer("winding", "lines", np.vstack(paths), lines=paths, color=WINDING_COLOR))
         prefix = "Δ" if residual else "Target " if comparable and show_target else ""
         label = "|B − target|" if residual and component == "Bmag" else f"{prefix}{component}"
         layers.append(

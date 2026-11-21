@@ -162,6 +162,8 @@ def test_plan_is_a_right_dock_with_persisted_user_visibility(windows):
     assert dock.objectName() == "design_plan_dock"
     assert window.dockWidgetArea(dock) == Qt.DockWidgetArea.RightDockWidgetArea
     assert dock.isAncestorOf(window.design_progress)
+    assert dock.isHidden()
+    dock.toggleViewAction().trigger()
     assert not dock.isHidden()
     assert window._workbench_view_state()["design_plan_panel_visible"] is True
 

@@ -180,35 +180,61 @@ def certify_shell_body(shell, body_points, faces, mode, tolerance, maximum_work,
     )
     if axial.min() < -tolerance or axial.max() > shell.axial_length + tolerance:
         return "body_support_domain_violation"
-    side_count = len(shell.plane_points)
-    work = len(body_points) * side_count
+    return certify_convex_body(
+        shell.plane_points, shell.plane_normals, body_points, faces, mode, tolerance, maximum_work, diagnostics
+    )
+
+
+def certify_convex_body(plane_points, plane_normals, body_points, faces, mode, tolerance, maximum_work, diagnostics):
+    """Exact complete-triangle exclusion; supporting planes are independently verified."""
+    side_count = len(plane_points)
+    from scipy.spatial import cKDTree
+
+    # Nearest plane anchors propose witnesses only. Each proposed supporting
+    # plane is tested exactly; unsuccessful searches use all halfspaces.
+    count = side_count if mode == "surface_inner" else min(4, side_count)
+    work = len(body_points) * count
     if work > maximum_work:
         return "body_support_exterior_budget_exceeded"
-    values = np.empty((len(body_points), side_count))
-    for offset in range(0, len(body_points), 512):
-        values[offset : offset + 512] = np.einsum(
-            "pij,ij->pi", body_points[offset : offset + 512, None] - shell.plane_points, shell.plane_normals
-        )
-    diagnostics["body_support_halfspace_work"] = work
     if mode == "surface_inner":
-        diagnostics["maximum_body_outward_halfspace_height_m"] = float(values.max())
-        if np.any(values > tolerance):
+        maximum = -np.inf
+        for offset in range(0, len(body_points), 256):
+            values = np.einsum("pij,ij->pi", body_points[offset : offset + 256, None] - plane_points, plane_normals)
+            maximum = max(maximum, float(values.max()))
+        diagnostics.update(body_support_halfspace_work=work, maximum_body_outward_halfspace_height_m=maximum)
+        if maximum > tolerance:
             return "body_support_penetration"
         diagnostics["whole_body_mounting_certificate"] = "whole_triangles_inside_convex_support_halfspaces"
         return ""
-    if np.any(values.max(axis=1) < -tolerance):
-        return "body_support_penetration"
+    proposed = cKDTree(plane_points).query(body_points, k=count)[1].reshape(len(body_points), count)
+    values = np.einsum("pij,pij->pi", body_points[:, None] - plane_points[proposed], plane_normals[proposed])
+    best = np.argmax(values, axis=1)
+    strongest = proposed[np.arange(len(body_points)), best]
+    unresolved = np.flatnonzero(values[np.arange(len(body_points)), best] < -tolerance)
+    for offset in range(0, len(unresolved), 256):
+        indices = unresolved[offset : offset + 256]
+        work += len(indices) * side_count
+        if work > maximum_work:
+            return "body_support_exterior_budget_exceeded"
+        values = np.einsum("pij,ij->pi", body_points[indices, None] - plane_points, plane_normals)
+        if np.any(values.max(axis=1) < -tolerance):
+            return "body_support_penetration"
+        strongest[indices] = np.argmax(values, axis=1)
     clipped_count = 0
+    # Try each vertex's strongest separating plane before the full clipping
+    # fallback. A shared plane excludes the entire convex triangle, exactly.
     for face in faces:
-        work += 3 * side_count
+        candidates = np.unique(strongest[face])
+        work += 3 * len(candidates)
         if work > maximum_work:
             diagnostics["body_support_halfspace_work"] = work
             return "body_support_exterior_budget_exceeded"
-        if np.any(np.min(values[face], axis=0) >= -tolerance):
+        heights = np.einsum("pij,ij->pi", body_points[face, None] - plane_points[candidates], plane_normals[candidates])
+        if np.any(np.min(heights, axis=0) >= -tolerance):
             continue
         polygon = body_points[face]
         clipped_count += 1
-        for point, normal in zip(shell.plane_points, shell.plane_normals, strict=True):
+        for point, normal in zip(plane_points, plane_normals, strict=True):
             work += len(polygon)
             if work > maximum_work:
                 diagnostics["body_support_halfspace_work"] = work

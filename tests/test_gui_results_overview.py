@@ -286,6 +286,23 @@ def test_verification_failure_and_stale_snapshot_remain_visible_but_integrity_ga
     assert not panel.has_coil_statistics and not panel.buttons["coil"].isEnabled()
 
 
+def test_geometry_export_depends_on_saved_body_artifacts_and_original_current(widgets):
+    _, panel = widgets
+    metadata = _metadata()
+    metadata["artifacts"] = [{"name": "checkpoints/contours.cgstage"}]
+    panel.set_record(_record(metadata))
+    panel.set_analysis_available(True)
+    assert not panel.buttons["export_geometry"].isEnabled()
+    assert "original current -3.125 A" in panel.context.toolTip()
+    metadata["fabrication"]["paths"] = [{"body_id": "part001_body0001"}]
+    metadata["artifacts"].append({"name": "fabrication/part001_body0001_DRAFT_fabrication.stl"})
+    panel.set_record(_record(metadata))
+    panel.set_analysis_available(False)
+    assert panel.buttons["export_geometry"].isEnabled()
+    panel.set_record(_record(metadata), source_error="Source checksum changed")
+    assert not panel.buttons["export_geometry"].isEnabled()
+
+
 def test_identity_cache_avoids_repeated_metadata_work_and_invalidates_on_health_or_revision_state(widgets):
     _, panel = widgets
     record = _record()
@@ -307,7 +324,9 @@ def test_identity_cache_avoids_repeated_metadata_work_and_invalidates_on_health_
 @pytest.mark.parametrize("width", (660, 800))
 def test_native_font_render_and_primary_actions_fit_narrow_result_board(widgets, app, tmp_path, width):
     root, panel = widgets
-    panel.set_record(_record(_coil_metadata()))
+    metadata = _coil_metadata()
+    metadata["artifacts"] = [{"name": "fabrication/wire_DRAFT_fabrication.stl"}]
+    panel.set_record(_record(metadata))
     _show(root, app, width)
     assert panel.width() == width
     assert panel.height() <= 260  # Eight metric cards retain more space for the field viewport.

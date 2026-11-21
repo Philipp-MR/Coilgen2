@@ -12,6 +12,7 @@ from .manufacturing import create_swept_coil_meshes
 from .mounted_crossing_lifts import mounted_gap_proposal, mounted_lift_proposal
 from .crossing_conditioning import conditioned_lift
 from .paired_crossing_lifts import paired_witness_lift_proposal, smooth_lift_ceiling
+from .progress import ProgressReporter, progress_scope
 
 
 def crossing_repair_enabled(config):
@@ -68,7 +69,10 @@ def _score(trial):
 
 
 def _realize(trial, config):
+    progress = ProgressReporter.from_config(config, label="Mounted crossing repair")
+    progress.report(None, "Check candidate route geometry")
     cleanup_wire_paths([trial], config=config)
+    progress.report(None, "Realize and check candidate copper")
     create_swept_coil_meshes([trial], config)
 
 
@@ -84,6 +88,9 @@ def _modified(trial, config, proposal):
 
 def _paired_visits(trial, config):
     for reverse in (False, True):
+        ProgressReporter.from_config(config, label="Mounted crossing repair").report(
+            None, f"Separate paired copper visits: ordering {2 if reverse else 1}/2"
+        )
         proposal = paired_witness_lift_proposal(trial, config, reverse=reverse)
         candidate = _modified(trial, config, proposal)
         if candidate is not None:
@@ -93,9 +100,11 @@ def _paired_visits(trial, config):
 def _refine(trial, config):
     from .crossing_relaxation import improve_crossing_candidate
 
-    for _ in range(3):
+    progress = ProgressReporter.from_config(config, label="Mounted crossing repair")
+    for iteration in range(3):
         if _clear(trial):
             break
+        progress.report(None, f"Refine copper repair: pass {iteration + 1}/3")
         relaxed = improve_crossing_candidate(trial, config, max_iterations=4)
         if relaxed is None or _score(relaxed) >= _score(trial):
             break
@@ -120,8 +129,10 @@ def _condition(trial, config):
         d = part.manufacturing_diagnostics
         return (*_score(part), not d.get("mesh_solid_ok", False), d.get("short_edge_count", 0))
 
-    for _ in range(5):
+    progress = ProgressReporter.from_config(config, label="Mounted crossing repair")
+    for iteration in range(5):
         for scale, include_tight in ((1.0, False), (0.7, False), (1.5, False), (0.7, True)):
+            progress.report(None, f"Condition copper repair: pass {iteration + 1}/5, scale {scale:g}")
             proposal = conditioned_lift(trial, config, scale=scale, include_tight_bends=include_tight)
             if proposal is None:
                 continue
@@ -143,9 +154,18 @@ def repair_swept_crossings(parts, config):
     """Keep an already clear winding. Adopt a new route only after actual-body checks."""
     if not crossing_repair_enabled(config):
         return parts
+    # Candidate sweeps are local work, not completion of the enclosing repair.
+    # Only returning the whole search completes the pipeline's allocated work.
+    with progress_scope(0, 0, "Check mounted crossing clearance", label="Mounted crossing repair"):
+        return _repair_swept_crossings(parts, config)
+
+
+def _repair_swept_crossings(parts, config):
     trial_config = replace(config, fail_on_route_quality_issues=False)
+    progress = ProgressReporter.from_config(config, label="Mounted crossing repair")
     result = []
-    for part in parts:
+    for index, part in enumerate(parts):
+        progress.report(None, f"Repair conductor {index + 1}/{len(parts)}")
         result.append(part)
         if part.wire_path is None or not any(
             o.kind in {"inter_group_connector", "within_group_return"} or o.connector_role == "joint_spiral_join"
@@ -159,7 +179,8 @@ def repair_swept_crossings(parts, config):
         failed = []
         raw_seeds = []
         seen = set()
-        for trial in _proposals(part, trial_config):
+        for candidate_index, trial in enumerate(_proposals(part, trial_config), 1):
+            progress.report(None, f"Conductor {index + 1}/{len(parts)}: candidate {candidate_index}")
             digest = sha256(trial.wire_path.v.tobytes())
             for owner, geometry in zip(trial.wire_path.segment_owners, trial.wire_path.segment_geometry):
                 digest.update(repr((owner, geometry.value)).encode())
@@ -185,7 +206,8 @@ def repair_swept_crossings(parts, config):
         else:
             # When a first repair leaves two visits on the same layer, their
             # measured copper witnesses identify which branches must separate.
-            for seed in sorted(raw_seeds, key=_score):
+            for seed_index, seed in enumerate(sorted(raw_seeds, key=_score), 1):
+                progress.report(None, f"Condition retained repair seeds: {seed_index}/{len(raw_seeds)}")
                 broad = _modified(seed, trial_config, conditioned_lift(seed, trial_config, scale=1.5))
                 if broad is not None:
                     if _export_clear(broad, trial_config):
@@ -194,7 +216,8 @@ def repair_swept_crossings(parts, config):
                     failed.append(broad)
             if result[-1] is not part:
                 continue
-            for seed in sorted(failed, key=_score):
+            for seed_index, seed in enumerate(sorted(failed, key=_score), 1):
+                progress.report(None, f"Separate retained copper visits: {seed_index}/{len(failed)}")
                 for paired in _paired_visits(seed, trial_config):
                     if _export_clear(paired, trial_config):
                         result[-1] = _accepted(paired, part)
@@ -204,7 +227,8 @@ def repair_swept_crossings(parts, config):
             if result[-1] is not part:
                 continue
 
-            for trial in sorted(failed, key=_score):
+            for seed_index, trial in enumerate(sorted(failed, key=_score), 1):
+                progress.report(None, f"Refine retained repairs: {seed_index}/{len(failed)}")
                 trial = _refine(trial, trial_config)
                 if _export_clear(trial, trial_config):
                     result[-1] = _accepted(trial, part)
@@ -315,7 +339,10 @@ def _proposals(part, config):
     from .paired_cut_lifts import paired_cut_proposals
 
     yield from paired_cut_proposals(part, config)
-    for ramp, factor, separate, shorten, protect in (
+    from .progress import ProgressReporter
+
+    report = ProgressReporter.from_config(config, label="Crossing repair")
+    variants = (
         (1.0, 1.12, True, False, False),
         (1.0, 1.12, False, False, False),
         (0.70, 1.5, False, False, False),
@@ -323,7 +350,9 @@ def _proposals(part, config):
         (1.4, 1.5, True, True, False),
         (1.0, 1.12, True, True, True),
         (1.0, 1.12, True, True, False),
-    ):
+    )
+    for index, (ramp, factor, separate, shorten, protect) in enumerate(variants, 1):
+        report.report(None, f"Generate crossover candidate {index}/{len(variants)} in the ramp search")
         trial = _isolated_part(part)
         if apply_crossing_lifts(
             trial,

@@ -41,8 +41,11 @@ def realize_coil_paths(parts: list[CoilPart], config: CoilGenConfig) -> list[Coi
 
     This uses the same projection, fillets, sampling and profile-ring repair as
     the full sweep. Temporary profile samples preserve its physical centerline;
-    no triangular conductor boundary or mesh manufacturing certificate is made.
-    A subsequent full sweep supplies the final mesh and export readiness checks.
+    Ordinarily no triangular conductor boundary is made. Explicitly enabled
+    bounded exterior relief also needs a temporary body to decide crossing
+    clearance; it is discarded here. This keeps field evaluation and a later
+    full sweep on exactly the same physical path, without retaining an export
+    mesh or granting mesh readiness to this path-only result.
     """
 
     cross_section = (
@@ -58,7 +61,15 @@ def realize_coil_paths(parts: list[CoilPart], config: CoilGenConfig) -> list[Coi
             with progress_scope(
                 boundaries[index], boundaries[index + 1], f"Realize conductor {index + 1}/{len(parts)}"
             ):
-                realized, diagnostics = _realize_wire_path(part, cross_section, config)
+                if config.sweep_corner_cluster_max_source_deviation_m > 0 and (
+                    _normalised_text(config.conductor_mounting_mode) == "surface_outer"
+                ):
+                    _, diagnostics = _sweep_wire_path_with_diagnostics(part, cross_section, config)
+                    realized = part.fabrication_path
+                    for key in ("manufacturing_ok", "mesh_solid_ok", "watertight"):
+                        diagnostics.pop(key, None)
+                else:
+                    realized, diagnostics = _realize_wire_path(part, cross_section, config)
             diagnostics.update(
                 {
                     "fabrication_path_created": realized is not None,
@@ -442,6 +453,7 @@ def wire_trace_rows(result: CoilGenResult, *, source: str = "auto") -> list[dict
     """Return final physical centroid points and interval geometry in SI units."""
 
     rows: list[dict[str, int | float | str]] = []
+    circuit_columns = any(getattr(part, "circuit_id", "") for part in result.coil_parts)
     for part_ind, part in enumerate(result.coil_parts, start=1):
         points, kind = conductor_trace(part, source=source)
         if points is None:
@@ -465,6 +477,15 @@ def wire_trace_rows(result: CoilGenResult, *, source: str = "auto") -> list[dict
                     "segment_length_from_previous_m": float(segment_length),
                     "cumulative_length_m": float(cumulative_length),
                     "segment_geometry_from_previous": segment_geometry,
+                    **(
+                        {
+                            "circuit_id": getattr(part, "circuit_id", ""),
+                            "source_group_keys": ";".join(getattr(part, "source_group_keys", ())),
+                            "source_support_indices": ";".join(map(str, getattr(part, "source_support_indices", ()))),
+                        }
+                        if circuit_columns
+                        else {}
+                    ),
                 }
             )
     return rows
@@ -497,6 +518,8 @@ def save_wire_trace_as_csv(
         "cumulative_length_m",
         "segment_geometry_from_previous",
     ]
+    if any(getattr(part, "circuit_id", "") for part in result.coil_parts):
+        fieldnames += ["circuit_id", "source_group_keys", "source_support_indices"]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
@@ -1150,6 +1173,28 @@ def _sweep_wire_path_with_diagnostics(
             )
         else:
             diagnostics.update(_final_mesh_collision_diagnostics(part, mesh, diagnostics))
+    if any(
+        diagnostics.get(key, False)
+        for key in (
+            "sweep_final_min_bend_radius_violation",
+            "sweep_final_curvature_envelope_violation",
+            "sweep_final_frame_rotation_violation",
+            "sweep_triangle_quality_violation",
+            "sweep_support_penetration_violation",
+            "sweep_centerline_support_domain_violation",
+            "sweep_mesh_self_intersection",
+            "copper_clearance_failure",
+        )
+    ):
+        from .sweep_surface_relief import repair_surface_sweep
+
+        ProgressReporter.from_config(config, label="Conductor realization").report(
+            None, "Try bounded bend and crossing relief; certify the complete conductor", force=True
+        )
+        repaired = repair_surface_sweep(part, cross_section, config, diagnostics)
+        if repaired is not None:
+            part.fabrication_path = repaired.fabrication_path
+            return repaired.swept_body, repaired.manufacturing_diagnostics
     return mesh, diagnostics
 
 
@@ -5108,6 +5153,19 @@ def _mounting_centerline_offset(config: CoilGenConfig, cross_section: np.ndarray
     return 0.0
 
 
+def _physical_segment_length_diagnostics(points, cross_section, config, *, closed):
+    segment_lengths = _centerline_segment_lengths(points, closed=closed)
+    minimum = float(np.min(segment_lengths)) if len(segment_lengths) else 0.0
+    allowed = max(
+        2e-3 * _cross_section_envelope_radius(cross_section), 10.0 * float(config.sweep_collinearity_tolerance), 1e-9
+    )
+    return {
+        "sweep_min_segment_length_m": minimum,
+        "sweep_min_allowed_segment_length_m": allowed,
+        "sweep_min_segment_length_violation": bool(len(segment_lengths) > 0 and minimum < allowed),
+    }
+
+
 def _physical_clearance_diagnostics(
     part: CoilPart,
     points: np.ndarray,
@@ -5123,22 +5181,7 @@ def _physical_clearance_diagnostics(
         "sweep_conductor_envelope_diameter_m": float(envelope_diameter),
         "sweep_required_centerline_clearance_m": float(required_clearance),
     }
-    segment_lengths = _centerline_segment_lengths(points, closed=closed)
-    minimum_segment_length = float(np.min(segment_lengths)) if len(segment_lengths) else 0.0
-    minimum_allowed_segment_length = max(
-        1e-3 * envelope_diameter,
-        10.0 * float(config.sweep_collinearity_tolerance),
-        1e-9,
-    )
-    diagnostics.update(
-        {
-            "sweep_min_segment_length_m": minimum_segment_length,
-            "sweep_min_allowed_segment_length_m": float(minimum_allowed_segment_length),
-            "sweep_min_segment_length_violation": bool(
-                len(segment_lengths) > 0 and minimum_segment_length < minimum_allowed_segment_length
-            ),
-        }
-    )
+    diagnostics.update(_physical_segment_length_diagnostics(points, cross_section, config, closed=closed))
     route_min = part.route_diagnostics.get("min_wire_wire_distance")
     route_segment_a = int(part.route_diagnostics.get("min_wire_wire_segment_a", -1))
     route_segment_b = int(part.route_diagnostics.get("min_wire_wire_segment_b", -1))

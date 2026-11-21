@@ -50,15 +50,15 @@ def test_former_export_opens_a_run_bound_draft_gated_panel(windows, tmp_path, mo
     window.results_overview.metrics_button.click()
     assert not window.results_overview.metric_details.isHidden()
     window.results_overview.former_button.click()
-    panel = window.print_former_export_window.content.widget()
+    panel = window.geometry_export_panel
     assert panel.selected_names() == (name,)
-    assert panel.table.isHidden()
+    assert panel.table.rowCount() == 1
     assert not panel.export_button.isEnabled()
     panel._request_export()
     export.assert_not_called()
     panel.draft_ack.setChecked(True)
     panel.export_button.click()
-    export.assert_called_once_with((name,), "mm", False, source_id="former", source_panel=panel)
+    export.assert_called_once_with((name,), "mm", False)
 
 
 def test_export_page_updates_when_selected_saved_run_changes(windows, tmp_path, monkeypatch):

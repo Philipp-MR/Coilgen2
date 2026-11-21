@@ -325,7 +325,12 @@ class CircuitSelector(IconChoiceCombo):
                     "Contours only",
                     "Generate unconnected contours without routing or physical conductor solids.",
                 ),
+                "Groups & circuits plan": (
+                    "separate-circuits",
+                    "Group circuit plan",
+                    "Use the explicit group assignments, cut sides and spiral orders.",
+                ),
             },
         )
         self.setAccessibleName("Winding circuit intention")
-        self.addItems(list(WINDING_INTENTS))
+        self.addItems([label for label in WINDING_INTENTS if label != "Groups & circuits plan"])

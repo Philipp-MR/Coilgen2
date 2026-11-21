@@ -75,6 +75,31 @@ def current_stage(state):
     return None
 
 
+def worker_limit_text(policy=None):
+    from ..research.jobs import RuntimePolicy
+
+    seconds = getattr(policy, "timeout_seconds", RuntimePolicy().timeout_seconds)
+    return f"Worker time limit {seconds / 60:g} min per run."
+
+
+def stopped_run_text(state):
+    error = (state.get("error") or "").strip()
+    stage = STAGE_SHORT_LABELS.get(current_stage(state), "")
+    operation = state.get("progress_operation") or ""
+    completed = state.get("completed_stages") or ()
+    boundary = state.get("completed_stage") or (completed[-1] if completed else None)
+    action = (
+        f"Last recorded boundary: {boundary}. Compute checks compatible saved stages before resuming."
+        if boundary
+        else "No recorded boundary. Compute restarts this study."
+    )
+    if "contours" in state.get("completed_stages", ()):
+        action += " Open Groups & circuits to inspect saved contours."
+    activity = " / ".join(filter(None, (stage, operation)))
+    detail = " · ".join(filter(None, (error, activity)))
+    return f"{detail}. {action}" if detail else action
+
+
 def run_progress(state, *, now=None):
     """Primary label, secondary operation text and bar value for one job."""
     target = state.get("pipeline_stage")

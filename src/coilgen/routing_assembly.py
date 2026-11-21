@@ -204,6 +204,10 @@ def assemble_routing_parts(parts: list[CoilPart], *, primary_surface_index: int 
         ],
     }
     result.topology_diagnostics = {"topological_grouping_method": "source_part_assembly", "routing_assembly": assembly}
+    if any("group_editor_choices" in part.topology_diagnostics for part in parts):
+        result.topology_diagnostics["group_editor_choices"] = [
+            choice for part in parts for choice in part.topology_diagnostics.get("group_editor_choices", ())
+        ]
     if sparsification is not None:
         sparsification.diagnostics = {"source_part_histories": "topology_diagnostics.routing_assembly.sources"}
         result.contour_sparsification = sparsification

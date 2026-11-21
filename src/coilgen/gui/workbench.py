@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from ..application import DesignService, ProjectAssembly, ProjectDocument, dependency_plan
@@ -407,6 +408,7 @@ class CoilGenWorkbench(QMainWindow):
         self._build_settings_dock()
         self._build_evidence_windows()
         self._build_actions()
+        self._build_design_setup()
         self.computation_indicator = ComputationIndicator(self)
         self.activity_feedback = ComputationFeedback(self, self.computation_indicator)
         self.statusBar().addPermanentWidget(self.computation_indicator, 1)
@@ -426,8 +428,11 @@ class CoilGenWorkbench(QMainWindow):
         if inspection is not None:
             inspection.activated.connect(self.live_preview.pin_plot)
         actions = getattr(self.viewport, "inspection_actions", {})
-        for action in actions.values():
+        for action in (*actions.values(), *getattr(self.viewport, "route_comparison", {}).values()):
             action.triggered.connect(self.live_preview.pin_plot)
+        dataset = getattr(self.viewport, "dataset", None)
+        if hasattr(dataset, "activated"):
+            dataset.activated.connect(self.live_preview.pin_plot)
         self.timer = QTimer(self)
         self.timer.setInterval(200)
         self.timer.timeout.connect(self.poll_jobs)
@@ -449,6 +454,29 @@ class CoilGenWorkbench(QMainWindow):
             bounds = self.screen().availableGeometry()
             self._fit_sidebar_columns(min(1440, bounds.width()))
             self.resize(min(1440, bounds.width()), min(930, bounds.height()))
+
+    def _build_design_setup(self):
+        from .design_setup import DesignSetupPanel
+
+        dock = self.findChild(QDockWidget, "model_dock")
+        self._legacy_model_panel = dock.widget()
+        self._legacy_model_panel.setParent(self)
+        self._legacy_model_panel.hide()
+        self.setup_panel = DesignSetupPanel(self)
+        self.setup_panel.changed.connect(self._setup_draft_changed)
+        dock.setWidget(self.setup_panel)
+        dock.setWindowTitle("Design setup")
+        dock.setMinimumWidth(300)
+        self.resizeDocks([dock], [370], Qt.Orientation.Horizontal)
+        self.design_plan_dock.hide()
+        self.groups_button.hide()
+        self.resume_action.setVisible(False)
+
+    def _setup_draft_changed(self):
+        self._invalidate_project_open()
+        self._refresh_input_drafts()
+        self.undo_action.setEnabled(not self.setup_panel.dirty and self.undo_stack.canUndo())
+        self.redo_action.setEnabled(not self.setup_panel.dirty and self.undo_stack.canRedo())
 
     def _build_central(self):
         center = self.workspace = QWidget(self)
@@ -516,7 +544,12 @@ class CoilGenWorkbench(QMainWindow):
         layout.addWidget(self.view_context)
         self.results_overview = ResultsOverviewPanel(center)
         self.results_overview.action_requested.connect(self._results_action)
-        layout.addWidget(self.results_overview)
+        self.results_region = QWidget(center)
+        results_layout = QVBoxLayout(self.results_region)
+        results_layout.setContentsMargins(0, 0, 0, 0)
+        results_layout.addWidget(self.results_overview)
+        self.results_region.hide()
+        layout.addWidget(self.results_region)
         if hasattr(self.viewport, "context_changed"):
             self.viewport.context_changed.connect(self._refresh_view_context)
         else:
@@ -569,6 +602,7 @@ class CoilGenWorkbench(QMainWindow):
         self.design_progress = DesignPlanPanel(self)
         self.design_progress.follow_requested.connect(self._set_live_follow)
         self.design_progress.channel_requested.connect(self._inspect_plan_channel)
+        self.design_progress.stage_requested.connect(self._inspect_stage_plot)
         self.design_progress.compute_channels_requested.connect(self.compute_channels)
         self.design_progress.action_requested.connect(self._plan_action)
         plan_content = QWidget(self)
@@ -584,7 +618,19 @@ class CoilGenWorkbench(QMainWindow):
         self.design_plan_dock.setWidget(plan_content)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.design_plan_dock)
         self.resizeDocks([self.design_plan_dock], [310], Qt.Orientation.Horizontal)
-        layout.addWidget(self.viewport, 1)
+        group_bar = QHBoxLayout()
+        self.groups_button = QPushButton("Groups && circuits…", center)
+        self.groups_button.setAccessibleName("Groups and circuits")
+        self.groups_button.setObjectName("open_groups_circuits")
+        self.groups_button.clicked.connect(self._open_groups_editor)
+        group_bar.addWidget(self.groups_button)
+        group_bar.addStretch(1)
+        layout.addLayout(group_bar)
+        self.plot_stack = QStackedWidget(center)
+        self.plot_stack.addWidget(self.viewport)
+        self.groups_editor = None
+        self.plot_stack.currentChanged.connect(self._sync_results_region)
+        layout.addWidget(self.plot_stack, 1)
         self.workspace_stack = QStackedWidget(self)
         self.welcome = QWidget(self)
         self.welcome.setObjectName("empty_workspace")
@@ -787,6 +833,12 @@ class CoilGenWorkbench(QMainWindow):
         self.results_overview.set_record(
             record, source_error=error, stale=stale, former_plot_available=former_plot_available
         )
+        self._sync_results_region()
+
+    def _sync_results_region(self, *_args):
+        if hasattr(self, "plot_stack"):
+            editing_groups = self.groups_editor is not None and self.plot_stack.currentWidget() is self.groups_editor
+            self.results_region.setVisible(not editing_groups and not self.results_overview.isHidden())
 
     def _results_action(self, action):
         record = self.runs.get(self._selected_run)
@@ -803,8 +855,14 @@ class CoilGenWorkbench(QMainWindow):
         if action == "routing":
             self._routing_analysis_dialog()
             return
+        if action == "routing_editor":
+            self._interconnection_editor_dialog()
+            return
         if action == "export_former":
             self._open_print_former_export(self._selected_run, record)
+            return
+        if action == "export_geometry":
+            self.navigate_workflow("export")
             return
         if action == "show_former" and hasattr(self.viewport, "restore_view_state"):
             self.results_overview.metrics_button.setChecked(False)
@@ -848,6 +906,7 @@ class CoilGenWorkbench(QMainWindow):
         self._field_analysis_dialog(view=action, source=source)
 
     def _view_applied_model(self):
+        self.plot_stack.setCurrentWidget(self.viewport)
         self._pause_live_follow()
         if hasattr(self.viewport, "clear_stage_preview"):
             self.viewport.clear_stage_preview()
@@ -895,6 +954,13 @@ class CoilGenWorkbench(QMainWindow):
             return
         if hasattr(self.viewport, "display_stage_preview"):
             self.viewport.display_stage_preview(preview.arrays, preview.metadata, follow=self.live_preview.following)
+        if not self.live_preview.following:
+            from ..application.live_preview import preferred_preview_dataset
+            from ..application.scene_spec import DATASET_LABELS
+
+            plot = preferred_preview_dataset(preview.arrays, preview.metadata)
+            if plot in DATASET_LABELS:
+                self.statusBar().showMessage(f"New preview available in Plot · {DATASET_LABELS[plot]}", 8000)
         self._refresh_view_context()
         self._refresh_design_progress()
         self._refresh_stage_status(refresh_reuse=False)
@@ -991,11 +1057,38 @@ class CoilGenWorkbench(QMainWindow):
             self.live_preview.following,
             job_id=self.live_preview.job_id,
         )
+        from ..application.run_progress import worker_limit_text
+
+        self.design_progress.scope_label.setText(
+            "Recorded stages verify result files. Review engineering checks in Results. "
+            + worker_limit_text(getattr(self.jobs, "policy", None))
+        )
+        if getattr(self, "groups_editor", None) is not None and self.plot_stack.currentWidget() is self.groups_editor:
+            self._group_source()
         self.design_progress.compute_channels_button.setEnabled(
             any(channel.enabled for channel in self.assembly.channels)
             and not self._submitting
             and not self._last_runtime_error
         )
+
+    def _inspect_stage_plot(self, channel_id, job_id, stage):
+        from ..application.live_preview import recorded_stage_plot
+
+        self._inspect_plan_channel(channel_id)
+        if channel_id != self._active_channel_id or self._run_verification_error(job_id):
+            return
+        if job_id in self.runs:
+            record = self.runs[job_id]
+            arrays = record.select_arrays(copy=False)
+            self.show_run(job_id)
+        elif self.live_preview.job_id == job_id and self.live_preview.preview:
+            arrays = self.live_preview.preview.arrays
+        else:
+            return
+        key = recorded_stage_plot(stage, arrays)
+        if key and hasattr(self.viewport, "restore_view_state"):
+            self.live_preview.pin_plot()
+            self.viewport.restore_view_state({"dataset": key})
 
     def _inspect_plan_channel(self, channel_id):
         # Inspecting progress changes the editor through its normal draft guard.
@@ -1318,6 +1411,11 @@ class CoilGenWorkbench(QMainWindow):
         self.template_menu = file_menu.addMenu(icon("load-template"), "Load template")
         self.template_menu.setObjectName("load_template_menu")
         self.template_menu.setToolTipsVisible(True)
+        search_action = QWidgetAction(self.template_menu)
+        search = QLineEdit(self.template_menu)
+        search.setPlaceholderText("Find by geometry or field…")
+        search_action.setDefaultWidget(search)
+        self.template_menu.addAction(search_action)
         categories = {}
         for template in TEMPLATE_SPECS:
             if template.category not in categories:
@@ -1331,8 +1429,19 @@ class CoilGenWorkbench(QMainWindow):
             )
             action.setData(template.id)
             action.setStatusTip(template.description)
-            action.setToolTip(template.description)
+            action.setToolTip("\n".join(template.gallery_details) + "\n" + template.description)
             categories[template.category].addAction(action)
+
+        def filter_examples(text):
+            words = text.casefold().split()
+            for category in categories.values():
+                for option in category.actions():
+                    description = (option.text() + " " + option.toolTip()).casefold()
+                    option.setVisible(all(word in description for word in words))
+                category.menuAction().setVisible(any(option.isVisible() for option in category.actions()))
+
+        search.textChanged.connect(filter_examples)
+        self.template_menu.aboutToShow.connect(search.clear)
         save_action = self._action("Save project", self._save_dialog, QKeySequence.StandardKey.Save, icon_name="save")
         file_menu.addSeparator()
         file_menu.addAction(save_action)
@@ -1346,9 +1455,7 @@ class CoilGenWorkbench(QMainWindow):
         imports.addAction(self._action("Import support mesh…", self._import_mesh_dialog, icon_name="support-import"))
         imports.addAction(self._action("Import target map…", self._import_target_dialog, icon_name="target-map"))
         file_menu.addAction(
-            self._action(
-                "Export conductor geometry…", lambda: self.navigate_workflow("export"), icon_name="export-conductor"
-            )
+            self._action("Export geometry…", lambda: self.navigate_workflow("export"), icon_name="export-conductor")
         )
         exports = file_menu.addMenu("Export Python and run files")
         exports.addAction(self._action("Active channel Python script…", self._export_dialog, icon_name="export"))
@@ -1488,6 +1595,11 @@ class CoilGenWorkbench(QMainWindow):
         )
         self.routing_analysis_action.setEnabled(False)
         view_menu.addAction(self.routing_analysis_action)
+        self.routing_editor_action = self._action(
+            "Edit interconnections…", self._interconnection_editor_dialog, icon_name="connected-winding"
+        )
+        self.routing_editor_action.setEnabled(False)
+        view_menu.addAction(self.routing_editor_action)
         self.field_results_button = QPushButton("Coil results", self)
         self.field_results_button.setObjectName("field_results_button")
         self.field_results_button.setIcon(icon("field-error"))
@@ -1607,6 +1719,8 @@ class CoilGenWorkbench(QMainWindow):
     def _clear_project(self):
         self._invalidate_project_open()
         self._save_session()
+        self.setup_panel.draft = None
+        self.setup_panel.expanded.clear()
         self.live_preview.stop()
         self._discard_project_editors()
         self.evidence.close_all()
@@ -1836,10 +1950,14 @@ class CoilGenWorkbench(QMainWindow):
             self.assembly = self.assembly.update_channel(channel.id, project=project)
         self._fill_channels()
         self.project = project
+        self.setup_panel.set_project(project)
         if self._prepared_project_reuse is not None:
             self._reuse_generation += 1
             self._reuse_plan = self._prepared_project_reuse
             self._reuse_plan_fingerprint = project.fingerprint
+        groups = getattr(self, "groups_editor", None)
+        if groups is not None:
+            groups.synchronize(project)
         if self.live_preview.job_id and not self._live_owner_matches(self.live_preview.state):
             self.live_preview.stop()
             if hasattr(self.viewport, "clear_stage_preview"):
@@ -1998,7 +2116,13 @@ class CoilGenWorkbench(QMainWindow):
                 self._show_dock("evidence_dock")
                 self._size_review_evidence()
 
-    def _show_dock(self, name):
+    def _show_dock(self, name, *, prefer_setup=True):
+        if name == "settings_dock" and prefer_setup and hasattr(self, "setup_panel"):
+            key = self._current_node.data(0, Qt.ItemDataRole.UserRole) if self._current_node else "geometry"
+            if key in {"geometry", "target", "material", "optimization", "winding", "print", "validation"}:
+                self.setup_panel.focus_section(key)
+                self._show_dock("model_dock")
+                return
         if name == "evidence_dock":
             self._open_evidence(self.evidence.currentWidget() or self.evidence.widget(0))
             return
@@ -2029,6 +2153,8 @@ class CoilGenWorkbench(QMainWindow):
         for panel in ("model", "settings"):
             view[f"{panel}_panel_visible"] = not self.findChild(QDockWidget, f"{panel}_dock").isHidden()
         view["design_plan_panel_visible"] = not self.design_plan_dock.isHidden()
+        view["design_setup_panel_visible"] = not self.findChild(QDockWidget, "model_dock").isHidden()
+        view["design_setup_expanded_sections"] = sorted(self.setup_panel.expanded)
         view["evidence_panel_visible"] = self.evidence.any_open()
         return view
 
@@ -2051,11 +2177,16 @@ class CoilGenWorkbench(QMainWindow):
                 if visible and selected not in visible:
                     selected = visible[0]
                 self.evidence.setCurrentIndex(selected)
-            for panel in ("model", "settings"):
-                requested = view.get(f"{panel}_panel_visible", panel == "model") is True
+            for panel in ("model",):
+                requested = view.get("design_setup_panel_visible", view.get("model_panel_visible", True)) is True
                 self.findChild(QDockWidget, f"{panel}_dock").setVisible(requested)
+            self.findChild(QDockWidget, "settings_dock").setVisible(view.get("settings_panel_visible") is True)
+            expanded = view.get("design_setup_expanded_sections", [])
+            expanded = expanded if isinstance(expanded, list) else []
+            for key, (toggle, _details) in getattr(getattr(self, "setup_panel", None), "details", {}).items():
+                toggle.setChecked(key in expanded)
             self.design_plan_dock.setVisible(
-                self.project is not None and view.get("design_plan_panel_visible", True) is True
+                self.project is not None and view.get("design_plan_panel_visible", False) is True
             )
             if view.get("evidence_panel_visible") is True:
                 for index in visible or [selected]:
@@ -2074,7 +2205,7 @@ class CoilGenWorkbench(QMainWindow):
             (self._draft_controls[key] for key, error in self._field_errors.items() if not error.isHidden()), None
         )
         if control is not None:
-            self._show_dock("settings_dock")
+            self._show_dock("settings_dock", prefer_setup=False)
             if not open_focused_control(self, control):
                 self.settings.ensureWidgetVisible(control)
             control.setFocus(Qt.FocusReason.OtherFocusReason)
@@ -2088,8 +2219,24 @@ class CoilGenWorkbench(QMainWindow):
         if issue.key == "channel_enabled":
             self.channel_enabled.setFocus(Qt.FocusReason.OtherFocusReason)
             return
+        panel = getattr(self, "setup_panel", None)
+        if panel is not None and panel.draft is not None:
+            aliases = {
+                "target_gradient_strength": "target_amplitude_native",
+                "conductor_cross_section_width": "conductor_width_mm",
+                "conductor_cross_section_height": "conductor_height_mm",
+                "target_region_radius": "target_region_radius_mm",
+                "min_turn_distance": "min_turn_distance_mm",
+            }
+            field = aliases.get(issue.key, issue.key)
+            if field in panel.controls:
+                self.select_node(issue.node)
+                panel.focus_section(issue.node, field)
+                panel.status.setText(issue.message)
+                self._show_dock("model_dock")
+                return
         self.select_node(issue.node)
-        self._show_dock("settings_dock")
+        self._show_dock("settings_dock", prefer_setup=False)
         key = next((key for key, field in CONTROL_FIELDS.items() if field == issue.key), issue.key)
         control = self._draft_controls.get(key)
         if control is None and issue.key in {"coil_mesh_file", "field_shape_function"}:
@@ -2102,8 +2249,8 @@ class CoilGenWorkbench(QMainWindow):
             if isinstance(control, ConductorProfileEditor):
                 control.focus_error()
 
-    def _check_compute_readiness(self, project, *, channel_name=None):
-        report = check_readiness(project, pipeline_stage=project.study["pipeline_stage"])
+    def _check_compute_readiness(self, project, *, channel_name=None, pipeline_stage=None):
+        report = check_readiness(project, pipeline_stage=pipeline_stage or project.study["pipeline_stage"])
         if self.project is not None and project.id == self.project.id:
             self._refresh_modeling_notes(report)
         if report.ready:
@@ -3257,15 +3404,26 @@ class CoilGenWorkbench(QMainWindow):
             )
         elif key == "winding":
             circuit = CircuitSelector()
+            if winding_intent(config) == "Groups & circuits plan":
+                circuit.addItem("Groups & circuits plan")
             circuit.setCurrentText(winding_intent(config))
             self._register(form, "winding_intent", "Circuit intention", circuit)
             self._draft_fields["winding_intent"] = (
                 "skip_postprocessing",
                 "contour_only_sweep_mode",
                 "routing_circuit_scope",
+                "routing_group_plan",
                 "skip_sweep",
             )
             self._integer(form, "levels", "Contour levels", config.levels, 2, 1000)
+            if not config.skip_postprocessing and not config.contour_only_sweep_mode:
+                self._check(form, "return_path_lift", "Lift crossing return paths", not config.skip_normal_shift)
+                self._number(
+                    form, "normal_shift_mm", "Return-path lift", config.normal_shift_length * 1000, " mm", -10000, 10000
+                )
+                self._draft_controls["normal_shift_mm"].setToolTip(
+                    "Height of crossover bridges along the support normal. Zero keeps returns at their original layer."
+                )
             self._combo(
                 form,
                 "contour_discretization_method",
@@ -3435,6 +3593,8 @@ class CoilGenWorkbench(QMainWindow):
                         if sweep
                         else "Solid generation is disabled; only contour geometry and field evidence will be available."
                     )
+                elif mode == "groups":
+                    text = "The Groups & circuits plan assigns the retained groups to explicit circuits at the common evaluation current."
                 elif mode in {"single", "per_part"}:
                     text = (
                         "Contours are cut and interconnected separately on each support part. "
@@ -3462,6 +3622,16 @@ class CoilGenWorkbench(QMainWindow):
             show_winding_scope()
             self._draft_builder = lambda: {
                 "levels": self._value("levels"),
+                **(
+                    {"skip_normal_shift": not self._value("return_path_lift")}
+                    if "return_path_lift" in self._changed_controls
+                    else {}
+                ),
+                **(
+                    {"normal_shift_length": self._value("normal_shift_mm") / 1000}
+                    if "normal_shift_mm" in self._changed_controls
+                    else {}
+                ),
                 "contour_discretization_method": self._value("contour_discretization_method"),
                 "max_wire_current_A": self._value("max_wire_current_A"),
                 "min_wire_distance_m": self._value("min_wire_distance_mm") * 1e-3,
@@ -3491,6 +3661,11 @@ class CoilGenWorkbench(QMainWindow):
                 "Contour step Δψ gives the wire current [A]; surface current density K is [A/m]. Feed/return conductors and drive terminals require explicit definition. Geometry closure alone does not establish a complete driven circuit."
             )
         elif key == "validation":
+            from ..application.targets import field_budget_text
+            from ..application.run_progress import worker_limit_text
+
+            note(field_budget_text(config, self.design_margin))
+            note(worker_limit_text(getattr(self.jobs, "policy", None)))
             self._integer(
                 form, "validation_resolution", "Independent grid resolution", self.validation_resolution, 2, 128
             )
@@ -3839,6 +4014,19 @@ class CoilGenWorkbench(QMainWindow):
         from ..target import _target_gradient_normalization_method
 
         recipe = recognize_solid_harmonic_target(config.field_shape_function)
+        from ..application.targets import target_probe_text
+
+        if probes := target_probe_text(config):
+            note(probes)
+        target_plot = QPushButton("Show applied target")
+
+        def show_applied_target():
+            self._view_applied_model()
+            if hasattr(self.viewport, "restore_view_state"):
+                self.viewport.restore_view_state({"dataset": "preview_target"})
+
+        target_plot.clicked.connect(show_applied_target)
+        layout.addWidget(target_plot)
         imported = config.target_field_definition_file != "none"
         missing = not imported and str(config.field_shape_function).strip().lower() in {"", "none"}
         canonical = recipe and all(getattr(config, key) == value for key, value in recipe.to_config_overrides().items())
@@ -3952,7 +4140,7 @@ class CoilGenWorkbench(QMainWindow):
                 self._number(
                     form,
                     f"harmonic_center_{axis}_mm",
-                    f"Harmonic center {axis}",
+                    f"Field-pattern origin {axis} (world)",
                     recipe.center_m[index] * 1000,
                     " mm",
                     -10000,
@@ -4701,6 +4889,32 @@ class CoilGenWorkbench(QMainWindow):
         return widget.value()
 
     def apply_settings(self):
+        panel = getattr(self, "setup_panel", None)
+        if panel is not None and panel.dirty:
+            expert = getattr(self, "expert_window", None)
+            if expert is not None and expert.pending_changes:
+                panel.status.setText("Apply or cancel the advanced parameter edits first.")
+                return False
+            if self._draft_dirty:
+                panel.status.setText("Apply or revert the open specialist editor before applying the setup.")
+                return False
+            from ..application.support_switch import support_switch_prompt
+
+            switch = support_switch_prompt(self.project, panel.draft.values["coil_mesh_file"])
+            extra = self._ask_support_switch(switch) if switch is not None else {}
+            if extra is None:
+                return False
+            candidate = panel.candidate(extra_changes=extra)
+            if candidate is None:
+                return False
+            if candidate.fingerprint != self.project.fingerprint:
+                self._applying = True
+                try:
+                    self.undo_stack.push(ProjectEdit(self, self.project, candidate, "Edit design setup"))
+                finally:
+                    self._applying = False
+            else:
+                panel.reset()
         return self._apply_settings(self._commit_config_changes)
 
     def _apply_settings(self, commit_config):
@@ -4780,6 +4994,8 @@ class CoilGenWorkbench(QMainWindow):
         if existing is not None:
             if focus == "optimization":
                 existing.focus_optimization()
+            elif focus:
+                existing.focus_section(focus)
             existing.show()
             existing.raise_()
             return
@@ -4789,7 +5005,12 @@ class CoilGenWorkbench(QMainWindow):
 
         def apply_expert(changes, label):
             nonlocal identity
-            if self._draft_dirty or self.project.id != owner or self.project.model_fingerprint != identity:
+            if (
+                self._draft_dirty
+                or self.setup_panel.dirty
+                or self.project.id != owner
+                or self.project.model_fingerprint != identity
+            ):
                 self._error(
                     "The model changed while Advanced settings was open. Its draft is retained. Apply or revert model edits, or discard the expert draft and reload the current model."
                 )
@@ -4815,8 +5036,9 @@ class CoilGenWorkbench(QMainWindow):
         self.expert_window.setModal(False)
         if focus == "optimization":
             self.expert_window.focus_optimization()
-        self.expert_window.show()
-        self.expert_window.raise_()
+        elif focus:
+            self.expert_window.focus_section(focus)
+        self.setup_panel.show_advanced(self.expert_window)
 
     def _finish_expert_window(self):
         self._dispose_expert_window()
@@ -4828,6 +5050,7 @@ class CoilGenWorkbench(QMainWindow):
             expert.hide()
             expert.deleteLater()
             self.expert_window = None
+            self.setup_panel.advanced_host.hide()
 
     def _discard_project_editors(self):
         if self.assembly is not None:
@@ -4844,6 +5067,10 @@ class CoilGenWorkbench(QMainWindow):
         self._refresh_input_drafts()
 
     def _check_expert_draft(self):
+        groups = getattr(self, "groups_editor", None)
+        if groups is not None and groups.dirty:
+            self._error("Apply or revert the pending Groups & circuits plan before continuing.")
+            return False
         expert = getattr(self, "expert_window", None)
         if expert is None or not expert.pending_changes:
             return True
@@ -4864,7 +5091,10 @@ class CoilGenWorkbench(QMainWindow):
 
     def _has_input_drafts(self):
         expert = getattr(self, "expert_window", None)
-        return self._draft_dirty or (expert is not None and expert.pending_changes)
+        panel = getattr(self, "setup_panel", None)
+        return (
+            self._draft_dirty or (panel is not None and panel.dirty) or (expert is not None and expert.pending_changes)
+        )
 
     def _settings_ready_for_editor(self):
         if self.project is None:
@@ -5729,7 +5959,7 @@ class CoilGenWorkbench(QMainWindow):
             return True
         if (
             self.undo_stack.isClean()
-            and not self._draft_dirty
+            and not self._has_input_drafts()
             and not any(
                 self.history_panel.has_note_drafts(channel.project.id, design_study_state(channel.project))
                 for channel in self.assembly.channels
@@ -6244,7 +6474,7 @@ class CoilGenWorkbench(QMainWindow):
         self._refresh_stage_status(refresh_reuse=False)
         self._update_execution_feedback()
 
-    def compute(self, _checked=False, *, resume_checkpoint=None):
+    def compute(self, _checked=False, *, resume_checkpoint=None, pipeline_stage=None):
         if self.project is None:
             self.statusBar().showMessage("Create or open a project before computing.", 5000)
             return None
@@ -6259,10 +6489,13 @@ class CoilGenWorkbench(QMainWindow):
         self._submitting = True
         self._update_execution_feedback()
         try:
-            if not self._check_compute_readiness(self.project):
+            if not self._check_compute_readiness(self.project, pipeline_stage=pipeline_stage):
                 return None
             self.poll_jobs()
-            plan = plan_execution(self.project, states=self.states.values(), **self._request_controls())
+            controls = self._request_controls()
+            if pipeline_stage is not None:
+                controls = {**controls, "pipeline_stage": pipeline_stage, "fabricate": False}
+            plan = plan_execution(self.project, states=self.states.values(), **controls)
             existing = self.states.get(plan.active_job_id)
             if existing is not None and resume_checkpoint is None and not isinstance(self.service, DesignService):
                 self._begin_live_follow(existing)
@@ -6285,7 +6518,7 @@ class CoilGenWorkbench(QMainWindow):
             state = submit_design(
                 self.project,
                 self.jobs,
-                self._request_controls(),
+                controls,
                 service=self.service,
                 reuse=self._reuse_plan,
                 resume_checkpoint=resume_checkpoint,
@@ -6370,6 +6603,162 @@ class CoilGenWorkbench(QMainWindow):
                 "Build gradient support meshes",
             )
 
+    def _open_groups_editor(self, *_args):
+        if self.project is None:
+            self.statusBar().showMessage("Open a project before editing groups.", 5000)
+            return
+        if self.groups_editor is None:
+            from .group_circuits import GroupsCircuitsEditor
+
+            self.groups_editor = GroupsCircuitsEditor(self)
+            self.groups_editor.prepare_requested.connect(self._prepare_groups)
+            self.groups_editor.load_requested.connect(self._load_groups)
+            self.groups_editor.apply_requested.connect(self._apply_group_plan)
+            self.groups_editor.close_requested.connect(lambda: self.plot_stack.setCurrentWidget(self.viewport))
+            self.groups_editor.advanced_requested.connect(lambda: self._advanced_dialog(focus="Routing"))
+            self.plot_stack.addWidget(self.groups_editor)
+        self.plot_stack.setCurrentWidget(self.groups_editor)
+        self.groups_editor.synchronize(self.project)
+        self._group_source()
+        if self.groups_editor.editor is None and self._selected_run in self.runs:
+            self._load_groups()
+
+    def _group_source(self):
+        from ..application.group_editor import group_source
+
+        state, note = group_source(self.project, self.states.values(), self._selected_run, self.groups_editor.rejected)
+        record = self.runs.get(self._selected_run)
+        if (
+            record is not None
+            and read_run_metadata(record).get("project_id") == self.project.id
+            and state is None
+            and (self.project.id, self.project.fingerprint, self._selected_run) not in self.groups_editor.rejected
+        ):
+            meta = read_run_metadata(record)
+            if meta.get("pipeline_stage") in {"contours", "routed", "evaluated"} and (
+                meta.get("project_model_fingerprint") == self.project.model_fingerprint
+                or meta.get("project_fingerprint") == self.project.fingerprint
+            ):
+                state = {"id": self._selected_run, "status": "completed"}
+                note = f"{self.project.name} · saved contours from r{meta.get('project_revision')}. Load verifies the checkpoint."
+        eligible = bool(
+            state and (state.get("status") == "completed" or "contours" in state.get("completed_stages", ()))
+        )
+        self.groups_editor.source.setText(note)
+        self.groups_editor.load_button.setEnabled(eligible)
+        self.groups_editor.prepare_button.setEnabled(state is None)
+        return state, eligible
+
+    def _prepare_groups(self):
+        source, eligible = self._group_source()
+        if source:
+            if eligible:
+                self._load_groups()
+            return
+        state = self.compute(pipeline_stage="contours")
+        if state is None:
+            return
+        job_id = state["id"]
+        owner = self.project
+        self.groups_editor.note.setText("Preparing contour groups in the numerical worker…")
+
+        def check():
+            if self._closing:
+                return
+            if self.project is None or (self.project.id, self.project.project_root, self.project.fingerprint) != (
+                owner.id,
+                owner.project_root,
+                owner.fingerprint,
+            ):
+                self.groups_editor.note.setText(
+                    "The model changed while preparing groups. Prepare its current groups again."
+                )
+                return
+            status = self.states.get(job_id, {}).get("status")
+            if status == "completed":
+                diagnostic = self._run_verification_error(job_id)
+                if diagnostic:
+                    self.groups_editor.note.setText("Group preparation could not be verified: " + diagnostic)
+                    return
+                if job_id not in self.runs:
+                    # Numerical completion precedes asynchronous result verification.
+                    QTimer.singleShot(500, check)
+                    return
+                self.show_run(job_id)
+                self._load_groups()
+                self.plot_stack.setCurrentWidget(self.groups_editor)
+            elif status in {"failed", "cancelled", "stopped", "interrupted"}:
+                self.groups_editor.note.setText("Group preparation did not complete. Inspect the run details.")
+            else:
+                QTimer.singleShot(500, check)
+
+        QTimer.singleShot(500, check)
+
+    def _load_groups(self):
+        from ..application.group_editor import load_checkpoint_groups, load_group_editor
+
+        if self.project is None or self.groups_editor is None:
+            return
+        if self.groups_editor.dirty:
+            self.groups_editor.note.setText("Apply or revert the pending group plan before loading another snapshot.")
+            return
+        source, eligible = self._group_source()
+        if not eligible:
+            self.groups_editor.note.setText(self.groups_editor.source.text())
+            return
+        record = self.runs.get(source["id"])
+        threads = getattr(getattr(self.jobs, "policy", None), "threads_per_worker", 1)
+        owner = (self.project.id, self.project.project_root, self.project.fingerprint)
+
+        def display(editor):
+            if (
+                self.project is not None
+                and (self.project.id, self.project.project_root, self.project.fingerprint) == owner
+                and not self.groups_editor.dirty
+            ):
+                if isinstance(editor, Exception):
+                    self.groups_editor.rejected.add((self.project.id, self.project.fingerprint, source["id"]))
+                    self._group_source()
+                    self.groups_editor.note.setText(str(editor))
+                    return
+                self.groups_editor.set_editor(editor, self.project.fingerprint, self.project)
+                self.groups_editor.note.setText(
+                    "Source groups changed. Previous assignments were not reapplied; review and apply this plan."
+                    if editor.stale_plan
+                    else "Groups refer to the verified contour snapshot. Spiral order preserves current circulation."
+                )
+
+        def load(project):
+            try:
+                if record:
+                    return load_group_editor(project, record)
+                if source["status"] == "completed":
+                    return load_group_editor(project, self.service.load_run(self.jobs_directory / source["id"]))
+                return load_checkpoint_groups(project, source, self.jobs_directory, threads)
+            except (ValueError, OSError, TypeError) as exc:
+                return exc
+
+        self._gradient_task(load, display, "Verify contour checkpoint")
+
+    def _apply_group_plan(self):
+        widget = self.groups_editor
+        if widget is None or widget.editor is None or self.project is None:
+            return
+        if widget.invalid_fields:
+            widget.note.setText("Correct the invalid group choices before applying the plan.")
+            return
+        if widget.stale:
+            widget.note.setText("The model changed. Revert this draft, then prepare its current groups.")
+            return
+        changes = widget.editor.apply_changes(self.project)
+        if self.apply_inputs(
+            changes, label="Edit groups and circuits", expected_fingerprint=widget.expected_fingerprint
+        ):
+            widget.mark_applied(self.project.fingerprint)
+            widget.note.setText(
+                "Routing plan applied. Recompute routing or the full design to evaluate its geometry and fields."
+            )
+
     def _gradient_task(self, operation, callback, label, *, retain_receipt=False):
         """Run file verification and engineering analysis off the UI thread."""
         task = DesignStudyTask(operation, self.project)
@@ -6397,6 +6786,69 @@ class CoilGenWorkbench(QMainWindow):
                 label="Edit named research requirements",
                 expected_fingerprint=project.fingerprint,
             )
+
+    def _interconnection_editor_dialog(self):
+        from ..application.interconnection_editor import WindingEditorSession, editor_available
+        from ..application.evidence import verify_record
+        from .interconnection_editor import InterconnectionEditorDialog
+
+        record = self.runs.get(self._selected_run)
+        if record is None or self._run_verification_error(record) or not editor_available(record):
+            self._error("Select a verified saved run containing an automatic routing checkpoint.")
+            return
+        windows = getattr(self, "_interconnection_editor_windows", None)
+        if windows is None:
+            windows = self._interconnection_editor_windows = {}
+        key = str(record.directory)
+        if key in windows:
+            windows[key].show()
+            windows[key].raise_()
+            return
+        if getattr(self, "_interconnection_editor_loading", False):
+            return
+        self._interconnection_editor_loading = True
+        expected = self.project.fingerprint
+
+        def load(_project):
+            return WindingEditorSession.from_record(verify_record(record))
+
+        def display(session):
+            if self._closing:
+                return
+
+            def apply(plan):
+                nonlocal expected
+                if self._draft_dirty:
+                    self._error("Apply or discard the pending model settings before applying this winding revision.")
+                    return False
+                changed = session.model_changes(self.project)
+                if changed:
+                    self._error(
+                        "The active model differs from this saved winding: "
+                        + ", ".join(changed)
+                        + ". Open the source model before applying its routing edits."
+                    )
+                    return False
+                applied = self.apply_inputs(
+                    config_changes={"routing_editor_plan": plan},
+                    label="Edit winding interconnections",
+                    expected_fingerprint=expected,
+                )
+                if applied:
+                    expected = self.project.fingerprint
+                return applied
+
+            dialog = InterconnectionEditorDialog(session, self, apply_plan=apply)
+            dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            windows[key] = dialog
+            dialog.destroyed.connect(lambda: windows.pop(key, None))
+            dialog.show()
+
+        task = self._gradient_task(load, display, "Open interconnection editor", retain_receipt=True)
+        if task is None:
+            self._interconnection_editor_loading = False
+        else:
+            task.signals.finished.connect(lambda *_: setattr(self, "_interconnection_editor_loading", False))
 
     def _routing_analysis_dialog(self):
         """Verify and pin routing geometry off-thread, independently of editing."""
@@ -7928,6 +8380,9 @@ class CoilGenWorkbench(QMainWindow):
                 from ..application.routing_analysis import routing_analysis_available
 
                 self.routing_analysis_action.setEnabled(bool(verified and routing_analysis_available(record)))
+                from ..application.interconnection_editor import editor_available
+
+                self.routing_editor_action.setEnabled(bool(verified and editor_available(record)))
                 self.routing_analysis_action.setToolTip(
                     "Inspect this run's exact routes, physical developed support, conductor heights and saved clearance/bend witnesses."
                 )
@@ -8063,6 +8518,11 @@ class CoilGenWorkbench(QMainWindow):
             self.compute_button.setEnabled(self.project is not None and not self._submitting)
             self.compute_action.setEnabled(self.project is not None and not self._submitting)
         results_id = self._view_results_id()
+        self.view_results_button.setText(
+            "View contour result"
+            if self.states.get(results_id, {}).get("pipeline_stage") == "contours"
+            else "View results"
+        )
         self.view_results_button.setEnabled(
             self.project is not None
             and results_id is not None
@@ -8080,6 +8540,12 @@ class CoilGenWorkbench(QMainWindow):
             text = "Job runtime unavailable · see Messages"
         elif self._run_verification_error(id_):
             text = "Execution completed · evidence verification failed · see Messages"
+        elif state.get("status") in STOPPED_JOB_STATES:
+            from ..application.run_progress import stopped_run_text
+
+            status = state["status"]
+            outcome = "Execution failed" if status == "failed" else status.capitalize()
+            text = f"{outcome} · {stopped_run_text(state)}"
         else:
             status = state.get("status")
             text = {
@@ -8088,9 +8554,6 @@ class CoilGenWorkbench(QMainWindow):
                 f"{state.get('stage') or 'worker running'}",
                 "cancelling": "Cancelling · waiting for the worker to stop",
                 "completed": "Execution completed · review engineering checks",
-                "failed": f"Execution failed · {state.get('error') or state.get('stage') or 'see Messages'}",
-                "cancelled": "Cancelled · no completed result",
-                "interrupted": "Interrupted · compute again or resume a verified checkpoint",
             }.get(
                 status,
                 "Verified saved run · review engineering checks"
@@ -8486,47 +8949,18 @@ class CoilGenWorkbench(QMainWindow):
         return original
 
     def _open_print_former_export(self, source_id, record):
-        from ..application.cad import PRINT_FORMER_SCOPE, export_catalog
+        from ..application.cad import PRINT_FORMER_SCOPE
 
-        previous = getattr(self, "print_former_export_window", None)
-        key = export_record_key(record)
-        if previous is not None and previous.content.widget().record_key == key:
-            previous.open_panel()
+        if source_id != self._selected_run or self.runs.get(source_id) is not record:
             return
-        if self._geometry_export_task is not None:
-            self.statusBar().showMessage("Geometry export is already running", 5000)
+        self.navigate_workflow("export")
+        panel = getattr(self, "geometry_export_panel", None)
+        if panel is None or panel.record_key != export_record_key(record):
             return
-        try:
-            options = tuple(option for option in export_catalog(record) if option.scope == PRINT_FORMER_SCOPE)
-        except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
-            self._error(f"Saved former geometry verification failed: {exc}")
-            return
-        if not options:
-            self._error("The selected run has no verified former STL.")
-            return
-        has_companion = self._has_export_source(record)
-        panel = GeometryExportPanel(
-            record,
-            options,
-            state=GeometryExportState(names=tuple(option.name for option in options), include_project=has_companion),
-            former_only=True,
-        )
-        panel.include_project.setEnabled(has_companion)
-        panel.export_button.setStyleSheet(PRIMARY_ACTION_STYLE)
-        panel.export_button.setIcon(icon("export-conductor", foreground="primary"))
-        panel.export_requested.connect(
-            lambda names, unit, include_project: self._geometry_export_dialog(
-                names, unit, include_project, source_id=source_id, source_panel=panel
-            )
-        )
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(panel)
-        if previous is not None:
-            previous.close()
-            previous.deleteLater()
-        self.print_former_export_window = PanelWindow("Export print former — CoilGen2", scroll, self, size=(790, 590))
-        self.print_former_export_window.open_panel()
+        names = [option.name for option in panel.options if option.scope == PRINT_FORMER_SCOPE]
+        if names:
+            panel.select_names(names)
+            panel.draft_ack.setChecked(False)
 
     def _geometry_export_dialog(self, names, unit, include_project, *, source_id=None, source_panel=None):
         if self._geometry_export_task is not None:
@@ -8569,6 +9003,8 @@ class CoilGenWorkbench(QMainWindow):
                 task.signals.progress.connect(self._background_work_progress)
             self._geometry_export_task = task
             feedback.receipt.directory = Path(directory).expanduser().resolve()
+            feedback.receipt_selection = (names, unit, include_project)
+            task.export_receipt = feedback.receipt
             feedback.receipt.text = "Writing verified saved geometry and provenance…"
             feedback.receipt.error, feedback.receipt.complete = "", False
             panel = getattr(self, "geometry_export_panel", None) if self._workflow_page() == "export" else None
@@ -8598,6 +9034,7 @@ class CoilGenWorkbench(QMainWindow):
         if task is None:
             return
         feedback = task.feedback_state
+        receipt = getattr(task, "export_receipt", feedback.receipt)
         source_name = read_run_metadata(task.record).get("name", task.record.directory.name)
         if error:
             if task.verification_error:
@@ -8608,13 +9045,13 @@ class CoilGenWorkbench(QMainWindow):
                 )
                 self._mark_run_verification_error(owner_id, task.verification_error, directory=task.record.directory)
                 self._update_result_state()
-            feedback.receipt.directory = Path(task.directory).expanduser().resolve()
-            feedback.receipt.text, feedback.receipt.error, feedback.receipt.complete = "", error, False
+            receipt.directory = Path(task.directory).expanduser().resolve()
+            receipt.text, receipt.error, receipt.complete = "", error, False
             message = f"Geometry export for {source_name} failed: {error}"
         else:
-            feedback.receipt.directory = package.directory
-            feedback.receipt.text = geometry_export_description(package)
-            feedback.receipt.error, feedback.receipt.complete = "", True
+            receipt.directory = package.directory
+            receipt.text = geometry_export_description(package)
+            receipt.error, receipt.complete = "", True
             message = f"Geometry export for {source_name} saved: {package.directory}"
         self.messages.appendPlainText(message)
         self.statusBar().showMessage(message, 15000)
@@ -8801,6 +9238,8 @@ class CoilGenWorkbench(QMainWindow):
             self._inspect_saved_settings(record, node)
 
     def show_run(self, id_, *, follow_latest=False):
+        if not follow_latest:
+            self.plot_stack.setCurrentWidget(self.viewport)
         with self._visible_work("Loading result geometry and review data"):
             return self._show_run(id_, follow_latest=follow_latest)
 

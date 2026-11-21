@@ -81,4 +81,36 @@
   window.CoilGenProjectUpload = {
     install(app) { app.component("coilgen-project-upload", projectUpload); },
   };
+
+  window.CoilGenGroupFocus = {
+    install(app) {
+      app.directive("group-focus", {
+        updated(row, focus) {
+          if (!focus.value || focus.oldValue) return;
+          const table = row.closest(".cg-groups-table");
+          if (!table) return;
+          const box = table.getBoundingClientRect();
+          const item = row.getBoundingClientRect();
+          if (item.top < box.top) table.scrollTop += item.top - box.top;
+          else if (item.bottom > box.bottom) table.scrollTop += item.bottom - box.bottom;
+        },
+      });
+    },
+  };
+
+  window.CoilGenSetupFocus = {
+    install(app) {
+      app.directive("setup-focus", {
+        updated(panel, binding) {
+          if (!binding.value || binding.value.sequence === binding.oldValue?.sequence) return;
+          requestAnimationFrame(() => {
+            const target = document.getElementById(binding.value.id);
+            if (!target || !panel.contains(target)) return;
+            target.scrollIntoView({ block: "nearest", inline: "nearest" });
+            if (binding.value.id.startsWith("setup-field-")) target.querySelector("input")?.focus({ preventScroll: true });
+          });
+        },
+      });
+    },
+  };
 })();

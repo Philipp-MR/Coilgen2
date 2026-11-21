@@ -562,6 +562,7 @@ class CoilGenPipeline:
                 ("Realize conductors", 5 if context.realize_for_routing else 0),
                 ("Select joint routes", 25 if routing else 0),
                 ("Check mounted crossing clearance", 10 if routing else 0),
+                ("Validate manual interconnections", 20 if self.config.routing_editor_plan is not None else 0),
                 ("Sweep conductors", 15 if not self.config.skip_sweep else 0),
                 ("Build grooved support", 3 if self._grooved_support_enabled() else 0),
                 ("Validate circuit assembly", 4 if routing else 0),
@@ -593,9 +594,21 @@ class CoilGenPipeline:
             )
             stage("grouped contour topology")
             parts = calculate_group_centers(parts)
+            if self.config.routing_group_plan is not None:
+                from .group_circuits import group_snapshot, prepare_group_circuits
+
+                regularization_diagnostics["group_editor_snapshot"] = group_snapshot(parts)
+                if self.config.routing_group_plan["mode"] != "existing":
+                    state.source_parts = parts
+                parts = prepare_group_circuits(parts, self.config)
+                primary_surface_ind = 0
             regularization_diagnostics["routing_circuit_scope"] = self.config.routing_circuit_scope
             regularization_diagnostics["routing_source_part_count"] = len(parts)
-            if self.config.routing_circuit_scope == "single" and len(parts) > 1:
+            if (
+                self.config.routing_circuit_scope == "single"
+                and len(parts) > 1
+                and (self.config.routing_group_plan is None or self.config.routing_group_plan["mode"] == "existing")
+            ):
                 parts = assemble_routing_parts(parts, primary_surface_index=primary_surface_ind)
                 state.parts = parts
                 primary_surface_ind = 0
@@ -616,6 +629,10 @@ class CoilGenPipeline:
                 progress=ProgressReporter.from_config(self.config, label="Inter-group routing"),
             )
             stage("interconnected among loop groups")
+            if self.config.routing_group_plan is not None:
+                from .group_circuits import validate_directed_circuits
+
+                validate_directed_circuits(parts)
             if context.feature_callback is not None and any(
                 part.wire_path is not None and len(part.wire_path.v) >= 2 for part in parts
             ):
@@ -646,6 +663,28 @@ class CoilGenPipeline:
             state.parts = parts
             for part in parts:
                 _raise_on_bad_route_quality(part, self.config)
+        if self.config.routing_editor_plan is not None:
+            from .interconnection_validation import validate_winding_revision
+
+            manual = context.compute(
+                "Validate manual interconnections",
+                validate_winding_revision,
+                "pipeline",
+                parts,
+                self.config.routing_editor_plan,
+                self.config,
+                target_field,
+            )
+            if manual.parts:
+                state.parts = parts = list(manual.parts)
+            regularization_diagnostics["interconnection_editor"] = manual.diagnostics
+            if not manual.accepted:
+                raise ValueError("Manual interconnection validation failed: " + "; ".join(manual.reasons))
+            for part in parts:
+                part.topology_diagnostics["interconnection_editor"]["validation"] = "passed"
+            stage("validated manual interconnections")
+            if context.feature_callback is not None:
+                context.feature_callback("interconnections", replace(state, parts=parts))
         # Parts arrive without a mesh. A body returned by route
         # selection belongs to an independently validated candidate; retain its
         # exact geometry, including any routing-specific clearance contract.
@@ -657,6 +696,10 @@ class CoilGenPipeline:
         ):
             context.feature_callback("sweep", replace(state, parts=parts))
         refresh_retained_route_diagnostics(parts)
+        if self.config.routing_group_plan is not None:
+            from .group_circuits import review_circuit_clearance
+
+            regularization_diagnostics["group_circuit_clearance"] = review_circuit_clearance(parts, self.config)
         stage("finalized swept conductor meshes")
         if self._grooved_support_enabled():
             context.compute("Build grooved support", create_grooved_support_bodies, parts, self.config)
@@ -729,9 +772,24 @@ class CoilGenPipeline:
                     + "; ".join(assembly_field.reasons)
                 )
             for part in parts:
-                certificate = part.route_diagnostics["routing_assembly_validation"]
+                certificate = part.route_diagnostics.get("routing_assembly_validation")
+                if certificate is None:
+                    continue
                 certificate["field_acceptance_checked"] = True
                 certificate["final_fixed_current_field"] = assembly_field.metrics
+        if self.config.routing_group_plan is not None:
+            from .group_route_fields import assess_group_route_field
+
+            assessment = assess_group_route_field(
+                field_layout_per_amp, field_layout_per_amp, target_field, self.config, parts[0].contour_step, 0.0
+            )
+            regularization_diagnostics["group_circuits_fixed_current_field"] = {
+                "accepted": assessment.accepted,
+                "reasons": list(assessment.reasons),
+                "fixed_current_a": float(parts[0].contour_step),
+                "circuit_count": len(parts),
+                **assessment.metrics,
+            }
         regularization_diagnostics.update(
             layout_target_residual_diagnostics(field_by_layout, target_field, self.config)
         )
@@ -767,6 +825,8 @@ class CoilGenPipeline:
             else None
         )
         _apply_result_memory_policy(parts, self.config)
+        if state.source_parts:
+            _apply_result_memory_policy(state.source_parts, self.config)
         context.record_timing("evaluated field errors")
 
         potential_step = parts[primary_surface_ind].contour_step or np.nan
@@ -796,6 +856,7 @@ class CoilGenPipeline:
             coil_lengths=coil_lengths,
             coil_cross_sections=coil_cross_sections,
             timing_summary=context.timing_summary,
+            source_parts=state.source_parts,
         )
         if gradient_slice_maps_enabled(self.config):
             slice_start = time.perf_counter()

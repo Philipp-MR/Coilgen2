@@ -166,6 +166,36 @@ def test_checkpoint_manifest_and_arrays_are_integrity_checked(tmp_path):
         PipelineCheckpoint.load(path)
 
 
+def test_version_nine_checkpoint_preserves_settings_and_source_fingerprints(tmp_path):
+    original = CoilGenPipeline(config()).run_stage("prepared")
+    path = original.save(tmp_path / "version-nine.cgstage")
+    with zipfile.ZipFile(path) as source:
+        manifest = json.loads(source.read("manifest.json"))
+        data = source.read("arrays.npz")
+    manifest["schema"] = "coilgen.pipeline-checkpoint/9"
+    manifest.pop("payload_sha256")
+    manifest["payload_sha256"] = sha256(
+        json.dumps(manifest, allow_nan=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    with zipfile.ZipFile(path, "w") as destination:
+        destination.writestr("manifest.json", json.dumps(manifest))
+        destination.writestr("arrays.npz", data)
+    loaded = PipelineCheckpoint.load(path)
+    assert loaded.config.as_dict() == original.config.as_dict()
+    assert loaded._fingerprints == original._fingerprints
+    np.testing.assert_array_equal(loaded.parts[0].mesh.vertices, original.parts[0].mesh.vertices)
+
+
+def test_identical_checkpoints_deduplicate_across_different_save_times(tmp_path, monkeypatch):
+    checkpoint = CoilGenPipeline(config()).run_stage("prepared")
+    monkeypatch.setattr(zipfile.time, "localtime", lambda *_: (2020, 1, 1, 0, 0, 0, 2, 1, 0))
+    first = checkpoint.save(tmp_path / "boundary.cgstage")
+    monkeypatch.setattr(zipfile.time, "localtime", lambda *_: (2026, 11, 21, 17, 0, 0, 5, 325, 0))
+    final = checkpoint.save(tmp_path / "final.cgstage")
+    assert first.read_bytes() == final.read_bytes()
+    assert PipelineCheckpoint.load(final).config.as_dict() == checkpoint.config.as_dict()
+
+
 @pytest.mark.parametrize(
     "unknown_field,missing_unrelated",
     [(None, False), ("unknown_routing_magic", False), ("contour_smoothing_local_fallback", False), (None, True)],

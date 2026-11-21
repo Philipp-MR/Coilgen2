@@ -13,7 +13,6 @@ from PySide6.QtWidgets import QApplication
 
 from coilgen.gui.editors import SUPPORT_EDITORS
 from coilgen.gui.visual_selectors import CircuitSelector, SurfaceGallery
-from coilgen.gui.winding_intent import WINDING_INTENTS
 
 
 @pytest.fixture(scope="module")
@@ -116,7 +115,13 @@ def test_circuit_tiles_preserve_all_winding_intentions(application):
         widget.resize(330, widget.sizeHint().height())
         widget.show()
         application.processEvents()
-        assert [widget.itemText(i) for i in range(widget.count())] == list(WINDING_INTENTS)
+        # A group plan is offered only after one has been prepared and applied.
+        assert [widget.itemText(i) for i in range(widget.count())] == [
+            "Connected circuit",
+            "Separate circuits per support",
+            "Independent closed turns",
+            "Contours only",
+        ]
         assert widget._columns == 2
         assert widget.height() <= 170
         QTest.mouseClick(widget.buttons[2], Qt.MouseButton.LeftButton)

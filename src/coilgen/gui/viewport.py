@@ -49,6 +49,8 @@ from ..application.scene_spec import (
     WINDING_COLOR,
     model_preview,
     scene_layers,
+    preferred_winding_field,
+    winding_field_paths,
 )
 from ..application.scene_views import (
     BODY_VIEWS,
@@ -332,6 +334,14 @@ class ScientificViewport(QWidget):
             action.triggered.connect(lambda _checked=False, selected=key: self.inspect_task(selected))
             self.inspection_actions[key] = action
         self.inspection_task.activated.connect(lambda index: self.inspect_task(self.inspection_task.itemData(index)))
+        self.inspection_menu.addSection("Compare routing geometry")
+        self.route_comparison = {}
+        for label, key in (("Before routing · contours", "contours"), ("After routing · connections", "routes")):
+            action = self.inspection_menu.addAction(label)
+            action.triggered.connect(
+                lambda _checked=False, plot=key: self.dataset.setCurrentIndex(self.dataset.findData(plot))
+            )
+            self.route_comparison[key] = action
         self.inspection_task.currentIndexChanged.connect(self._sync_inspection_buttons)
         # Preserve the combo contract for saved view state and programmatic users.
         self.inspection_task.hide()
@@ -763,6 +773,8 @@ class ScientificViewport(QWidget):
         return capability
 
     def _refresh_availability(self):
+        for key, action in self.route_comparison.items():
+            action.setEnabled(self._capability(key).available)
         for index in range(self.dataset.count()):
             key = self.dataset.itemData(index)
             if key is None:
@@ -1298,7 +1310,7 @@ class ScientificViewport(QWidget):
         self._located_issue = None
         self._before_issue_view = None
         self._first_view = not keep_view
-        preferred = (
+        preferred = preferred_winding_field(self._arrays, original=self.wire_current.currentIndex() == 1) or (
             self._preferred_run_dataset(_LATEST_FEATURE_PLOTS) if follow_latest else self._preferred_run_dataset()
         )
         self._source_notice = ""
@@ -1363,6 +1375,9 @@ class ScientificViewport(QWidget):
                 self.roi_layer.setChecked(True)
                 if metadata.get("target_field_component") in {"Bx", "By", "Bz"}:
                     self.component.setCurrentText(metadata["target_field_component"])
+        if not follow and model_view and had_scene:
+            self._refresh_availability()
+            return
         self._render()
 
     def follow_latest_stage_preview(self):
@@ -2080,7 +2095,7 @@ class ScientificViewport(QWidget):
                     )
                     system_count += 1
             points_available = self._model_points_available if model else self._source_points_available
-            target_is_primary = key in {"target", "preview_target"}
+            target_is_primary = key in {"target", "preview_target"} or key in WIRE_FIELDS
             if live:
                 # A second colored actor on the same points would obscure the computed field.
                 target_is_primary = target_is_primary or key in WIRE_FIELDS or key == "sheet"
@@ -2137,6 +2152,8 @@ class ScientificViewport(QWidget):
                 }
                 caption += " · surface current density from the stream function [A/m]"
             elif is_field:
+                for path in winding_field_paths(arrays, key):
+                    self._add(self.pv.lines_from_points(path), "winding", color=WINDING_COLOR, line_width=3)
                 mesh = self._field_mesh(arrays, key)
                 options = {
                     "scalars": mesh.active_scalars_name if mesh is not None else None,

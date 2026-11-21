@@ -60,6 +60,49 @@ def test_stopped_job_has_verified_recovery_without_saved_result(stopped):
     assert not plan_stopped_reuse(unrelated, [state], root).available
 
 
+def test_active_contours_and_timeout_share_verified_inspection(tmp_path):
+    from coilgen.application.group_editor import group_source, load_checkpoint_groups
+    from coilgen.application.run_progress import stopped_run_text
+
+    project = ProjectDocument.from_config(config()).update_study({"pipeline_stage": "routed"})
+    root, job_id = tmp_path / "jobs", "contour-boundary"
+    directory = root / job_id
+    request = DesignService.prepare(project, directory, pipeline_stage="routed")
+    state = {
+        "id": job_id,
+        "status": "running",
+        **{
+            key: getattr(request, key)
+            for key in (
+                "project_id",
+                "project_revision",
+                "project_fingerprint",
+                "project_model_fingerprint",
+                "pipeline_stage",
+            )
+        },
+    }
+
+    def stop(event):
+        _record_completed_boundary(state, event)
+        if event.get("completed_stage") == "contours":
+            raise DesignCancelled("Timed test stop after contours")
+
+    with progress_context(stop), pytest.raises(DesignCancelled):
+        run_design(request, directory)
+    state["request_sha256"] = json.loads((directory / "manifest.json").read_text())["request_sha256"]
+    assert group_source(project, [state])[0] is state
+    assert not plan_stopped_reuse(project, [state], root).available
+    original = load_checkpoint_groups(project, state, root, 1)
+    state.update(status="failed", error="Worker exceeded the time limit", progress_operation="Separate close joins")
+    assert load_checkpoint_groups(project, state, root, 1).rows() == original.rows()
+    assert all(word in stopped_run_text(state) for word in ("time limit", "contours", "Separate close joins"))
+    with (directory / "checkpoints/contours.cgstage").open("ab") as stream:
+        stream.write(b"changed")
+    with pytest.raises(ValueError):
+        load_checkpoint_groups(project, state, root, 1)
+
+
 def test_corrupt_later_checkpoint_retains_verified_earlier_recovery(stopped):
     project, state, root, directory = stopped
     path = directory / "checkpoints/sheet.cgstage"

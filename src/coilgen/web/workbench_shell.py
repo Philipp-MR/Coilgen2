@@ -90,9 +90,9 @@ def build_toolbar(ctrl):
             color="primary",
             prepend_icon="mdi-play-outline",
             classes="cg-compute",
-            disabled=("current_job_active || settings_dirty || preflight.some(i => i.blocking)",),
+            disabled=("current_job_active || settings_dirty || (!setup_dirty && preflight.some(i => i.blocking))",),
             title=(
-                "settings_dirty ? 'Apply or discard pending model edits first' : "
+                "setup_dirty ? 'Validate the setup and compute with these edits' : settings_dirty ? 'Apply or discard pending specialist edits first' : "
                 "current_job_active ? 'This study is already queued or computing' : "
                 "readiness?.state === 'blocking' ? readiness.title : "
                 "'Compute the editing channel to the boundary selected in Design plan'",
@@ -159,6 +159,14 @@ def build_file_dialog(ctrl):
                             click=f"file_section = '{value}'",
                         )
                 with html.Div(v_show="file_section === 'examples'"):
+                    v3.VTextField(
+                        v_model=("example_filter",),
+                        label="Find by geometry or field",
+                        placeholder="e.g. conical, biplanar, Z2",
+                        density="compact",
+                        hide_details=True,
+                        clearable=True,
+                    )
                     html.Label("Template", classes="cg-field-label", **{"for": "coilgen-gallery-template"})
                     with html.Select(
                         id="coilgen-gallery-template", v_model=("template",), disabled=("settings_dirty",)
@@ -166,15 +174,29 @@ def build_file_dialog(ctrl):
                         html.Option("Choose an example", disabled=True, value=("null",))
                         html.Option(
                             "{{ option.title }}",
-                            v_for="option in templates",
+                            v_for="option in templates.filter(t => (t.title + ' ' + t.description).toLowerCase().includes((example_filter || '').toLowerCase()))",
                             key="option.value",
                             value=("option.value",),
                         )
-                    html.P(
-                        "{{ templates.find(t => t.value === template)?.description }}",
-                        v_if="template",
-                        classes="cg-file-description",
-                    )
+                    with html.Div(v_if="template", classes="cg-gallery-preview"):
+                        html.Img(
+                            src=("templates.find(t => t.value === template)?.symbol",),
+                            alt="Support geometry",
+                            width=52,
+                            height=52,
+                        )
+                        with html.Div():
+                            html.Div(
+                                "{{ line }}",
+                                v_for="line in templates.find(t => t.value === template)?.details",
+                                key="line",
+                            )
+                    with html.Details(v_if="template"):
+                        html.Summary("Field, winding and reference checks")
+                        html.P(
+                            "{{ templates.find(t => t.value === template)?.description }}",
+                            classes="cg-file-description",
+                        )
                     with html.Div(classes="cg-file-actions"):
                         v3.VBtn(
                             "Load template",
@@ -230,18 +252,24 @@ def build_file_dialog(ctrl):
                             disabled=("settings_dirty",),
                         )
                         v3.VBtn(
-                            "Save JSON",
+                            "Save JSON to workspace",
                             click=(ctrl.save_project, "['json']"),
                             variant="text",
                             disabled=("settings_dirty",),
                         )
                     html.A(
-                        "Download project",
+                        "{{ project_download.endsWith('.json') ? 'Download project JSON' : 'Download project bundle' }}",
                         v_if="project_download",
                         href=("project_download",),
                         download=True,
                         classes="d-block mt-2",
                     )
+                v3.VBtn(
+                    "Export geometry…",
+                    v_if="export_options.length",
+                    variant="outlined",
+                    click="file_dialog = false; workspace_panel = 'center'; center_section = 'export'",
+                )
                 html.P(
                     "Apply or discard the pending edits in Model settings first.", v_if="settings_dirty", role="status"
                 )
@@ -372,7 +400,7 @@ def build_model_builder(ctrl):
                 click="workspace_panel = 'center'; center_section = 'export'",
             ):
                 html.Img(src=_tree_symbol("export-conductor"), alt="", classes="cg-tree-symbol")
-                html.Span("Export conductor geometry")
+                html.Span("Export geometry")
 
 
 def build_design_plan(ctrl):
@@ -380,7 +408,11 @@ def build_design_plan(ctrl):
     with html.Div(classes="cg-panel-body"):
         with html.Div(v_if="channels.length"):
             html.Div("{{ plan_summary }}", classes="cg-plan-summary")
-            html.P("Recorded steps describe computation. Review engineering checks in the results.", classes="cg-hint")
+            html.P(
+                "{{ summary && run_context === 'Matches the editing model' ? summary.label : 'Engineering checks appear in Results.' }}",
+                classes="cg-hint",
+            )
+            html.P("{{ worker_limit }}", classes="cg-hint")
             html.Label("Compute to", classes="cg-field-label", **{"for": "coilgen-compute-to"})
             with html.Select(id="coilgen-compute-to", v_model=("stage",), disabled=("settings_dirty",)):
                 html.Option("{{ item.title }}", v_for="item in stages", key="item.value", value=("item.value",))
@@ -394,7 +426,14 @@ def build_design_plan(ctrl):
                 )
                 with html.Ol(classes="cg-plan-steps"):
                     with html.Li(v_for="step in channel.steps", key="step.key", title=("step.help",)):
-                        html.Span("{{ step.label }}")
+                        html.Button(
+                            "{{ step.label }}",
+                            v_if="step.code === 'complete' && channel.job_id",
+                            type="button",
+                            classes="cg-stage-link",
+                            click=(ctrl.view_stage, "[channel.job_id, step.key]"),
+                        )
+                        html.Span("{{ step.label }}", v_else=True)
                         html.Span(
                             "{{ step.status }}",
                             classes="cg-step-state",
@@ -448,7 +487,7 @@ def build_activity_bar():
         with html.Div(classes="cg-activity-text", role="status"):
             html.Strong(
                 "{{ active_jobs.length > 1 ? active_jobs.length + ' active runs' : "
-                "active_jobs[0]?.caption || 'No active runs' }}"
+                "active_jobs[0]?.progress_label || active_jobs[0]?.caption || 'No active runs' }}"
             )
             html.Span(
                 "{{ [active_jobs[0].channel, active_jobs[0].stage || "
@@ -467,7 +506,6 @@ def build_activity_bar():
                 height=6,
                 raw_attrs=['aria-label="Run progress"'],
             )
-            html.Span("{{ active_jobs[0].progress_label || 'Working…' }}", classes="cg-progress-label")
             html.Span(
                 "{{ active_jobs[0].progress_detail }}",
                 v_if="active_jobs[0].progress_detail",
@@ -543,7 +581,7 @@ def _job_rows(expression, ctrl, *, active=False):
 
 def _view_job_result_button(ctrl):
     v3.VBtn(
-        "View result",
+        "{{ job.boundary === 'Generate contours' ? 'View contour result' : 'View result' }}",
         v_if="job.status === 'completed'",
         variant="outlined",
         size="small",

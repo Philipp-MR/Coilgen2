@@ -23,6 +23,26 @@ def saved_geometry():
     }
 
 
+@pytest.mark.parametrize("follow_latest", [False, True])
+def test_completed_design_shows_field_and_exact_evaluated_winding(scientific_viewport, follow_latest):
+    arrays = saved_geometry()
+    physical = arrays["vertices_m"] + [0.002, 0, 0]
+    arrays.update(
+        evaluated_winding_0_points_m=physical,
+        route_0_points_m=physical + [0.01, 0, 0],
+        routed_field_T=arrays["target_field_T"] * 0.98,
+    )
+    viewport = scientific_viewport
+    viewport.open_edges.setChecked(False)
+    viewport.display_run(arrays, follow_latest=follow_latest)
+    assert viewport.dataset.currentData() == "routed_field"
+    assert "winding" in viewport._actors.values()
+    assert viewport._dataset_mesh is not None
+    meshes = [item[0] for item in viewport.plotter.meshes]
+    assert any(np.array_equal(mesh.points, physical) for mesh in meshes)
+    assert not any(np.array_equal(mesh.points, arrays["route_0_points_m"]) for mesh in meshes)
+
+
 @pytest.mark.parametrize(
     "key, preferred",
     [

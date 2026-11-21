@@ -117,6 +117,10 @@ def test_live_browser_actions_reject_foreign_stl_and_preserve_valid_import(tmp_p
         state.mesh_upload = {"name": "uploaded.stl", "content": stl}
         browser.apply_settings()
         assert browser.session.project.values["coil_mesh_file"].startswith("asset:")
+        uploaded = browser.session.project.fingerprint
+        browser.apply_advanced()
+        assert "project changed" in state.message
+        assert browser.session.project.fingerprint == uploaded
         browser.open_advanced()
         accepted = json.loads(state.advanced_config)
         assert accepted["coil_mesh_file"].startswith("asset:")

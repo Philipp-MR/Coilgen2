@@ -8,7 +8,6 @@ import test_workbench_usability as usability
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QFontDatabase
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialog, QDockWidget
 
 from coilgen.application import ProjectDocument
@@ -55,17 +54,18 @@ def test_new_workspace_preserves_a_clear_model_view(windows, application):
     assert not hasattr(window, "panels_button")
 
 
-def test_clicking_the_already_selected_model_item_reopens_settings(windows, application):
+def test_selecting_the_same_plot_object_reopens_setup_without_editing(windows, application):
     window = windows()
     _show(window, application)
     original = window.project
     selected = window.tree.currentItem()
-    _dock(window, "settings").hide()
-    centre = window.tree.visualItemRect(selected).center()
-    QTest.mouseClick(window.tree.viewport(), Qt.MouseButton.LeftButton, pos=centre)
+    _dock(window, "model").hide()
+    window.viewport.selected.emit(selected.data(0, Qt.ItemDataRole.UserRole))
     application.processEvents()
     assert window.tree.currentItem() is selected
-    assert not _dock(window, "settings").isHidden()
+    assert not _dock(window, "model").isHidden()
+    assert window.setup_panel.details["geometry"][0].isChecked()
+    assert _dock(window, "settings").isHidden()
     assert window.project is original
     assert window.undo_stack.count() == 0
 
@@ -167,10 +167,12 @@ def test_project_json_restores_open_tabs_and_panel_visibility(windows, applicati
     assert view["model_node"] == "target"
     assert view["open_evidence_tabs"] == ["Jobs", "Project history"]
     assert view["evidence_tab"] == "Project history"
-    assert view["settings_panel_visible"] and view["evidence_panel_visible"]
+    assert view["design_setup_panel_visible"] and view["evidence_panel_visible"]
+    assert "target" in view["design_setup_expanded_sections"]
     restored = windows(loaded, tmp_path / "fresh-runtime" / "jobs")
     _show(restored, application)
-    assert not _dock(restored, "settings").isHidden()
+    assert not _dock(restored, "model").isHidden()
+    assert restored.setup_panel.details["target"][0].isChecked()
     assert restored.evidence.window_for(restored.jobs_table).isVisible()
     assert restored.evidence.window_for(restored.history_panel).isVisible()
     assert _dock(restored, "evidence") is None
@@ -185,11 +187,12 @@ def test_project_json_preserves_deliberately_closed_panels(windows, application,
     _show(source, application)
     source.evidence_actions["Jobs"].trigger()
     source.evidence.window_for(source.jobs_table).close()
-    _dock(source, "settings").hide()
+    _dock(source, "model").hide()
     path = source.save_project(tmp_path / "closed-workspace.coilgen.json")
     restored = windows(ProjectDocument.load(path), tmp_path / "fresh-runtime" / "jobs")
     _show(restored, application)
     assert _dock(restored, "settings").isHidden()
+    assert _dock(restored, "model").isHidden()
     assert not restored.evidence.any_open()
     assert not _open_tabs(restored)
     restored.evidence_actions["Jobs"].trigger()
@@ -209,7 +212,8 @@ def test_channel_workspace_survives_switching_without_a_local_history_cache(wind
     window.channel_selector.setCurrentIndex(window.channel_selector.findData("xz"))
     assert window.project is before
     assert window.tree.currentItem().data(0, Qt.ItemDataRole.UserRole) == "target"
-    assert not _dock(window, "settings").isHidden()
+    assert not _dock(window, "model").isHidden()
+    assert window.setup_panel.details["target"][0].isChecked()
     assert window.evidence.window_for(window.history_panel).isVisible()
     assert _open_tabs(window) == ["Project history"]
     window.channel_selector.setCurrentIndex(window.channel_selector.findData("gy"))

@@ -8,7 +8,7 @@ from ..basis import calculate_basis_functions, calculate_one_ring_by_mesh
 from ..field_components import field_component_values
 from ..geometry import compute_face_normals, compute_vertex_normals
 from ..geometry_kernels import _point_triangle_sq_numpy
-from ..models import CoilPart, Mesh, TargetField
+from ..models import CoilPart, Mesh, TargetField, sheet_parts
 from ..physics import calculate_sensitivity_matrix
 from ..progress import ProgressReporter
 
@@ -100,10 +100,11 @@ def check_sheet_integration(
     points = np.asarray(points_m, dtype=float)
     if points.ndim != 2 or points.shape[1:] != (3,) or not len(points) or not np.all(np.isfinite(points)):
         raise ValueError("points_m must contain finite nonempty (n,3) world coordinates in metres.")
-    if not result.coil_parts:
+    sources = sheet_parts(result)
+    if not sources:
         raise ValueError("Integration comparison requires at least one coil part with a stream function.")
-    face_count = sum(part.mesh.n_faces for part in result.coil_parts)
-    if any(not part.mesh.n_faces for part in result.coil_parts):
+    face_count = sum(part.mesh.n_faces for part in sources)
+    if any(not part.mesh.n_faces for part in sources):
         raise ValueError("Every coil part requires a nonempty triangle mesh.")
     # Reject extreme levels before exponentiation, even for arbitrary-size
     # Python integers supplied by a caller.
@@ -112,16 +113,16 @@ def check_sheet_integration(
     work = sum(len(points) * face_count * 4**level * order**2 for level in subdivisions for order in orders)
     if work > max_integration_work:
         raise ValueError(f"Requested integration work {work} exceeds budget {max_integration_work}.")
-    for part in result.coil_parts:
+    for part in sources:
         stream = np.asarray(part.stream_function)
         if stream.shape != (part.mesh.n_vertices,) or not np.all(np.isfinite(stream)):
             raise ValueError("Every coil part requires a finite stream function matching its vertices.")
     # All part operators coexist. Bound their combined allocation, including
     # conservative midpoint growth, before building any basis or field matrix.
-    upper_vertices = sum(part.mesh.n_vertices for part in result.coil_parts) + face_count * (4 ** subdivisions[-1] - 1)
+    upper_vertices = sum(part.mesh.n_vertices for part in sources) + face_count * (4 ** subdivisions[-1] - 1)
     if 3 * len(points) * upper_vertices * 8 > max_operator_bytes:
         raise ValueError("Combined sensitivity matrices exceed max_operator_bytes.")
-    for part in result.coil_parts:
+    for part in sources:
         _reject_on_sheet_samples(part.mesh, points)
     config = result.input_data
     target = TargetField(
@@ -131,7 +132,7 @@ def check_sheet_integration(
     comparisons = []
     for level in subdivisions:
         parts = []
-        for original in result.coil_parts:
+        for original in sources:
             mesh, stream = original.mesh.copy(), np.array(original.stream_function, copy=True)
             for _ in range(level):
                 mesh, stream = _subdivide_sheet(mesh, stream)

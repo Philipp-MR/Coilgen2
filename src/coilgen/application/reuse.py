@@ -105,7 +105,7 @@ def plan_reuse(project, records, *, threads: int = 1) -> ReusePlan:
     )
 
 
-def plan_stopped_reuse(project, states, jobs_directory, *, threads: int = 1) -> ReusePlan:
+def plan_stopped_reuse(project, states, jobs_directory, *, threads: int = 1, inspect_active=False) -> ReusePlan:
     """Verify retained numerical boundaries of stopped jobs, independently of results.
 
     A live display snapshot never provides recovery evidence. Older jobs without
@@ -127,7 +127,11 @@ def plan_stopped_reuse(project, states, jobs_directory, *, threads: int = 1) -> 
     matching = [
         state
         for state in states
-        if state.get("status") in {"failed", "cancelled", "interrupted"} and state.get("project_id") == project.id
+        if (
+            state.get("status") in {"failed", "cancelled", "interrupted"}
+            or (inspect_active and state.get("status") in {"running", "cancelling"})
+        )
+        and state.get("project_id") == project.id
     ]
     if not matching:
         return ReusePlan((), (), ())

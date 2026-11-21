@@ -26,6 +26,31 @@ class TemplateSpec:
     description: str
     icon: str
 
+    @property
+    def support_icon(self):
+        if self.id == "conical_harmonic":
+            return "support-frustum"
+        if "biplanar" in self.id:
+            return "biplanar-system"
+        if "shielded" in self.id:
+            return "shielded-gradient"
+        return "support-cylinder"
+
+    @property
+    def gallery_details(self):
+        if self.id == "conical_harmonic":
+            return (
+                "300 mm cone · radii 180 / 140 mm · 50 mm spherical ROI",
+                "Z2 · +10 µT at the poles, −5 µT at the equator",
+                "Reference stream function passes. Inspect discrete-wire field and routing.",
+            )
+        geometry = {
+            "support-cylinder": "Cylindrical support",
+            "biplanar-system": "Biplanar supports",
+            "shielded-gradient": "Primary and active shield",
+        }[self.support_icon]
+        return geometry, self.title, "Compute to review stream function, wire field and fabrication checks."
+
 
 _GRADIENT_WORKFLOW = (
     "Bz gradient of 20 mT/m in a 40 mm spherical DSV, with B0 = 3 T along world z. "

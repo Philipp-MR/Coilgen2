@@ -16,6 +16,39 @@ def test_default_plot_order_covers_all_saved_datasets_without_using_editing_geom
     assert set(PREFERRED_RUN_PLOTS) == DATASET_LABELS.keys() - {"support", "preview_target"}
 
 
+def test_completed_result_opens_winding_with_its_own_field(tmp_path, monkeypatch):
+    from coilgen.application.scene_spec import scene_layers, preferred_winding_field
+
+    points = np.array([[0.08, 0, 0], [0.08, 0.002, 0], [0.08, 0.002, 0.003]])
+    arrays = {
+        "target_points_m": points / 2,
+        "target_field_T": points * 1e-5,
+        "routed_field_T": points * 0.99e-5,
+        "evaluated_winding_0_points_m": points,
+        "route_0_points_m": points + 0.01,
+    }
+    record = RunRecord(tmp_path, {"name": "Edited winding"}, arrays)
+    server, browser = create_app(tmp_path, server_name="test-completed-winding-field")
+    try:
+        monkeypatch.setattr(browser.session, "load_run", lambda _id: record)
+        monkeypatch.setattr(browser.session, "export_options", lambda _: ())
+        server.state.dataset = "routes"  # Last live preview must advance at completion.
+        browser._open_run("saved-run")
+        assert server.state.dataset == server.state.result_plot == "routed_field"
+        layers, reason = scene_layers(arrays, "routed_field")
+        assert not reason
+        assert [layer.kind for layer in layers] == ["lines", "points"]
+        np.testing.assert_array_equal(layers[0].lines[0], points)
+        np.testing.assert_allclose(layers[-1].scalars, arrays["routed_field_T"][:, 2] * 1e6)
+        # A field without its recorded electrical paths cannot borrow nominal routes.
+        del arrays["evaluated_winding_0_points_m"]
+        assert preferred_winding_field(arrays) is None
+        assert all(layer.kind != "lines" for layer in scene_layers(arrays, "routed_field")[0])
+    finally:
+        browser.plotter.close()
+        browser.session.close()
+
+
 def test_browser_report_shows_percent_errors_units_and_separate_geometry_checks(tmp_path, monkeypatch):
     server, browser = create_app(tmp_path, server_name="test-readable-results")
     browser.load_template("cylinder")

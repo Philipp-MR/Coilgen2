@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 
 from ..application.live_preview import StagePreviewWatch, load_requested_preview, preferred_preview_dataset
+from ..application.scene_spec import DATASET_LABELS
 from ..application.stage_preview import load_stage_preview
 
 MODEL_DATASETS = frozenset({"support", "preview_target"})
@@ -66,8 +67,12 @@ class BrowserLivePreview:
         if browser.record is not None:
             return  # A completed run stays on screen; the preview waits.
         preferred = preferred_preview_dataset(self.preview.arrays, self.preview.metadata)
+        if getattr(state, "follow_preview", True) is False:
+            browser._update_plot_choices(self.preview.arrays)
+            state.new_preview_label = DATASET_LABELS.get(preferred, "")
+            return  # Keep the client-side vtk.js camera and plot untouched.
+        state.new_preview_label = ""
         if preferred is not None and preferred != self.auto_dataset:
-            # Follow the newest stage once; a later manual choice is kept until the next stage.
             self.auto_dataset = preferred
             if state.dataset != preferred:
                 state.dataset = preferred  # The dataset watcher renders.
@@ -79,6 +84,7 @@ class BrowserLivePreview:
         self.preview, self.error, self.auto_dataset = None, "", None
         self.watch.reset()
         browser, state = self.browser, self.browser.server.state
+        state.new_preview_label = ""
         if shown and browser.record is None and state.selected_run is None and state.dataset not in MODEL_DATASETS:
             with state:
                 state.dataset = "support"

@@ -26,7 +26,7 @@ from .preflight import check_preflight
 from .project import ProjectDocument
 from .service import DesignService
 from .support_parameters import SUPPORT_EDITORS
-from .targets import TARGET_NORMALIZATION_MODES
+from .targets import ORIGIN_KEYS, TARGET_NORMALIZATION_MODES, recognize_solid_harmonic_target, translated_expression
 
 PIPELINE_STAGES = (
     ("prepared", "Prepare model"),
@@ -180,6 +180,13 @@ def _target_region(config):
     if config.target_region_geometry is None:
         return None
     return TargetRegion.from_dict(config.target_region_geometry)
+
+
+def _origin_parameter(index):
+    def read(config, study):
+        return recognize_solid_harmonic_target(config.field_shape_function).center_m[index] * 1000
+
+    return read, lambda value, config, study: {}
 
 
 def _target_region_values(config, region):
@@ -398,6 +405,18 @@ SETTINGS = (
         "text",
         _plain("field_shape_function", str),
         help="The expression uses world coordinates. For an absolute Bz target in tesla, choose Absolute field expression.",
+    ),
+    *(
+        _field(
+            "target",
+            key,
+            f"Field-pattern origin {axis} (world)",
+            "number",
+            _origin_parameter(index),
+            unit="mm",
+            help="Moves the harmonic field independently of the sampling region.",
+        )
+        for index, (key, axis) in enumerate(zip(ORIGIN_KEYS, "xyz"))
     ),
     _field(
         "target",
@@ -725,7 +744,146 @@ class _History:
     redo: list = field(default_factory=list)
 
 
-class WorkbenchSession:
+class ProjectSettings:
+    """Pure project settings adapter; clients own history and computation."""
+
+    def __init__(self, project):
+        self.project = project
+        self.allow_incomplete = True
+
+    def _require_project(self):
+        if self.project is None:
+            raise ValueError("Open a project first.")
+        return self.project
+
+    def _replace_project(self, project):
+        self.project = project
+
+    def settings_fields(self, node: str | None = None, *, support_source=None, former_mode=None):
+        """Return fields applicable to the selected support and former, including drafts."""
+        if self.project is None:
+            return ()
+        config = self.project.config
+        source = str(_pair.displayed_support_source(self.project) if support_source is None else support_source)
+        # Preserve the existing mT/m setter for scripted form callers. The
+        # interactive amplitude field uses the expression's native units.
+        inactive = {"target_gradient_strength", *_pair.hidden_keys(self.project, source)}
+        if config.skip_postprocessing or config.contour_only_sweep_mode:
+            inactive.update(("interconnection_axis", "return_path_lift", "normal_shift_mm"))
+        if (config.support_body_mode if former_mode is None else former_mode) == "off":
+            inactive.update(
+                (
+                    "support_body_thickness_mm",
+                    "support_body_groove_clearance_mm",
+                    "support_body_groove_extra_depth_mm",
+                )
+            )
+        if self.project.study.get("requirements"):
+            inactive.update(
+                (
+                    "field_shape_function",
+                    "target_field_component",
+                    "target_gradient_normalization",
+                    "target_gradient_axis",
+                    "target_field_units",
+                    "target_amplitude_native",
+                    *_TARGET_REGION_FIELDS,
+                    "target_region_resolution",
+                )
+            )
+        elif str(config.target_field_definition_file).lower() not in {"none", ""}:
+            inactive.update(("field_shape_function", *_TARGET_REGION_FIELDS, "target_region_resolution"))
+        else:
+            try:
+                region = _target_region(config)
+            except (TypeError, ValueError):
+                inactive.update(_TARGET_REGION_FIELDS)
+            else:
+                if region is not None:
+                    if region.radius_m is None:
+                        inactive.add(_TARGET_RADIUS_FIELD)
+                    if region.shape == "enclosing_mesh":
+                        inactive.update(_TARGET_CENTER_FIELDS)
+                elif str(config.target_mesh_file).lower() not in {"none", ""}:
+                    inactive.update(_TARGET_REGION_FIELDS)
+                elif config.set_roi_into_mesh_center:
+                    inactive.update(_TARGET_CENTER_FIELDS)
+        return tuple(
+            item
+            for item in SETTINGS
+            if (
+                node is None
+                or item.node == node
+                or (node == "winding" and item.key in {"return_path_lift", "normal_shift_mm"})
+            )
+            and item.key not in inactive
+            and (
+                item.key not in ORIGIN_KEYS
+                or (
+                    "field_shape_function" not in inactive
+                    and recognize_solid_harmonic_target(config.field_shape_function) is not None
+                )
+            )
+            and (item.key not in _SUPPORT_FIELDS or _SUPPORT_FIELDS[item.key][0].source == source)
+            and (item.key != "imported_mesh_length_scale_to_m" or source.lower().endswith(".stl"))
+        )
+
+    def settings_values(self, node: str | None = None, *, support_source=None, former_mode=None) -> dict:
+        project = self._require_project()
+        config = project.config
+        values = {
+            item.key: item.get(config, project.study)
+            for item in self.settings_fields(node, support_source=support_source, former_mode=former_mode)
+        }
+        return _pair.form_values(project, values)
+
+    def apply_settings(self, values: dict, extra_changes=None):
+        """Apply form values; raises ValueError (nothing changed) when invalid.
+
+        ``extra_changes`` are config edits committed in the same revision, such
+        as clearing the shielding target after a confirmed support switch.
+        """
+        values, project = _pair.apply_pair_settings(self._require_project(), values)
+        config = project.config
+        if any(key in values for key in ORIGIN_KEYS):
+            expression = translated_expression(config.field_shape_function, values)
+            values = {key: value for key, value in values.items() if key not in ORIGIN_KEYS}
+            values["field_shape_function"] = expression
+        geometry = {key: value for key, value in values.items() if key in _SUPPORT_FIELDS}
+        target_region = {key: value for key, value in values.items() if key in _TARGET_REGION_FIELDS}
+        source = values.get("coil_mesh_file", config.coil_mesh_file)
+        config_changes, study_changes = _support_edits(config, geometry, source), {}
+        config_changes.update(_target_region_edits(config, target_region))
+        for key, value in values.items():
+            if key in geometry or key in target_region:
+                continue
+            if key == "target_amplitude_native" and target_scaling_mode(config, values) == "none":
+                continue
+            item = SETTINGS_BY_KEY[key]
+            changes = item.set(value, config, project.study)
+            (study_changes if item.study else config_changes).update(changes)
+        if source != config.coil_mesh_file:
+            config_changes["surface_is_cylinder_flag"] = source == "create cylinder mesh"
+        config_changes.update(extra_changes or {})
+        return self.apply_inputs(config_changes, study_changes, base=project)
+
+    def apply_inputs(self, config_changes, study_changes=None, *, base=None):
+        """Commit a single revision, preserving deliberately distinct mechanical backgrounds.
+
+        ``base`` is a revision of the current project already prepared by the caller.
+        """
+        project = self._require_project()
+        start = project if base is None else base
+        changes = dict(config_changes)
+        if "research_physics" not in changes and {"b_0_direction", "b_0_strength_T"}.intersection(changes):
+            changes.update(_linked_background_change(start.config, changes))
+        updated = start.update_inputs(changes, study_changes, allow_incomplete=getattr(self, "allow_incomplete", False))
+        if updated is not project:
+            self._replace_project(updated)
+        return updated
+
+
+class WorkbenchSession(ProjectSettings):
     """Qt-free state of one user's workbench: model, history, jobs, runs.
 
     ``jobs`` is a :class:`coilgen.research.jobs.JobManager` (created lazily in
@@ -948,114 +1106,6 @@ class WorkbenchSession:
         self._set_assembly(self.assembly.update_channel(self.active_channel_id, project=project))
 
     # -- settings ------------------------------------------------------
-    def settings_fields(self, node: str | None = None, *, support_source=None, former_mode=None):
-        """Return fields applicable to the selected support and former, including drafts."""
-        if self.project is None:
-            return ()
-        config = self.project.config
-        source = str(_pair.displayed_support_source(self.project) if support_source is None else support_source)
-        # Preserve the existing mT/m setter for scripted form callers. The
-        # interactive amplitude field uses the expression's native units.
-        inactive = {"target_gradient_strength", *_pair.hidden_keys(self.project, source)}
-        if config.skip_postprocessing or config.contour_only_sweep_mode:
-            inactive.update(("interconnection_axis", "return_path_lift", "normal_shift_mm"))
-        if (config.support_body_mode if former_mode is None else former_mode) == "off":
-            inactive.update(
-                (
-                    "support_body_thickness_mm",
-                    "support_body_groove_clearance_mm",
-                    "support_body_groove_extra_depth_mm",
-                )
-            )
-        if self.project.study.get("requirements"):
-            inactive.update(
-                (
-                    "field_shape_function",
-                    "target_field_component",
-                    "target_gradient_normalization",
-                    "target_gradient_axis",
-                    "target_field_units",
-                    "target_amplitude_native",
-                    *_TARGET_REGION_FIELDS,
-                    "target_region_resolution",
-                )
-            )
-        elif str(config.target_field_definition_file).lower() not in {"none", ""}:
-            inactive.update(("field_shape_function", *_TARGET_REGION_FIELDS, "target_region_resolution"))
-        else:
-            try:
-                region = _target_region(config)
-            except (TypeError, ValueError):
-                inactive.update(_TARGET_REGION_FIELDS)
-            else:
-                if region is not None:
-                    if region.radius_m is None:
-                        inactive.add(_TARGET_RADIUS_FIELD)
-                    if region.shape == "enclosing_mesh":
-                        inactive.update(_TARGET_CENTER_FIELDS)
-                elif str(config.target_mesh_file).lower() not in {"none", ""}:
-                    inactive.update(_TARGET_REGION_FIELDS)
-                elif config.set_roi_into_mesh_center:
-                    inactive.update(_TARGET_CENTER_FIELDS)
-        return tuple(
-            item
-            for item in SETTINGS
-            if (node is None or item.node == node)
-            and item.key not in inactive
-            and (item.key not in _SUPPORT_FIELDS or _SUPPORT_FIELDS[item.key][0].source == source)
-            and (item.key != "imported_mesh_length_scale_to_m" or source.lower().endswith(".stl"))
-        )
-
-    def settings_values(self, node: str | None = None, *, support_source=None, former_mode=None) -> dict:
-        project = self._require_project()
-        config = project.config
-        values = {
-            item.key: item.get(config, project.study)
-            for item in self.settings_fields(node, support_source=support_source, former_mode=former_mode)
-        }
-        return _pair.form_values(project, values)
-
-    def apply_settings(self, values: dict, extra_changes=None):
-        """Apply form values; raises ValueError (nothing changed) when invalid.
-
-        ``extra_changes`` are config edits committed in the same revision, such
-        as clearing the shielding target after a confirmed support switch.
-        """
-        values, project = _pair.apply_pair_settings(self._require_project(), values)
-        config = project.config
-        geometry = {key: value for key, value in values.items() if key in _SUPPORT_FIELDS}
-        target_region = {key: value for key, value in values.items() if key in _TARGET_REGION_FIELDS}
-        source = values.get("coil_mesh_file", config.coil_mesh_file)
-        config_changes, study_changes = _support_edits(config, geometry, source), {}
-        config_changes.update(_target_region_edits(config, target_region))
-        for key, value in values.items():
-            if key in geometry or key in target_region:
-                continue
-            if key == "target_amplitude_native" and target_scaling_mode(config, values) == "none":
-                continue
-            item = SETTINGS_BY_KEY[key]
-            changes = item.set(value, config, project.study)
-            (study_changes if item.study else config_changes).update(changes)
-        if source != config.coil_mesh_file:
-            config_changes["surface_is_cylinder_flag"] = source == "create cylinder mesh"
-        config_changes.update(extra_changes or {})
-        return self.apply_inputs(config_changes, study_changes, base=project)
-
-    def apply_inputs(self, config_changes, study_changes=None, *, base=None):
-        """Commit a single revision, preserving deliberately distinct mechanical backgrounds.
-
-        ``base`` is a revision of the current project already prepared by the caller.
-        """
-        project = self._require_project()
-        start = project if base is None else base
-        changes = dict(config_changes)
-        if "research_physics" not in changes and {"b_0_direction", "b_0_strength_T"}.intersection(changes):
-            changes.update(_linked_background_change(start.config, changes))
-        updated = start.update_inputs(changes, study_changes)
-        if updated is not project:
-            self._replace_project(updated)
-        return updated
-
     def apply_config(self, changes: dict):
         """Advanced settings: any CoilGenConfig field, validated by the engine."""
         return self.apply_inputs(changes)
@@ -1183,19 +1233,22 @@ class WorkbenchSession:
             self._replace_project(updated)
         return self.project
 
-    def compute(self, pipeline_stage=None, *, channel_id=None):
+    def compute(self, pipeline_stage=None, *, channel_id=None, temporary_stage=False):
         """Queue the active channel at ``pipeline_stage`` (default: its study)."""
-        if pipeline_stage is not None and channel_id is None:
+        if pipeline_stage is not None and channel_id is None and not temporary_stage:
             self.set_stage(pipeline_stage)
         project = self.assembly.channel(channel_id).project if channel_id is not None else self._require_project()
-        pipeline_stage = project.study["pipeline_stage"]
+        pipeline_stage = pipeline_stage if temporary_stage else project.study["pipeline_stage"]
         report = check_preflight(project, pipeline_stage=pipeline_stage)
         if not report.ready:
             raise ValueError("; ".join(issue.message for issue in report.blocking))
         from .session_evidence import retain_revision
 
         retain_revision(self.workspace, project)
-        state = submit_design(project, self.jobs, self.controls(pipeline_stage, project), service=self.service)
+        controls = self.controls(pipeline_stage, project)
+        if temporary_stage:
+            controls = {**controls, "fabricate": False}
+        state = submit_design(project, self.jobs, controls, service=self.service)
         state.setdefault("channel_id", channel_id or self.active_channel_id)
         if state["id"] not in self.states:
             self.job_ids.append(state["id"])

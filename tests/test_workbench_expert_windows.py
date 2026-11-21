@@ -30,6 +30,8 @@ def expert_window(application, tmp_path):
         viewport_factory=usability.Preview,
     )
     window.timer.stop()
+    window.show()
+    application.processEvents()
     window._advanced_dialog()
     yield window
     window._can_discard = lambda: True

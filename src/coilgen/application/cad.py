@@ -8,6 +8,7 @@ files without that manifest are not a completed package.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from hashlib import sha256
 import io
@@ -121,8 +122,8 @@ def export_draft_banner(options) -> str:
     if not drafts:
         return ""
     return (
-        f"DRAFT: {drafts} of {len(options)} files failed recorded checks and are not construction-released. "
-        "They are marked DRAFT below."
+        f"DRAFT: {drafts} of {len(options)} files are inspection exports. "
+        "Each body lists its own geometry check result."
     )
 
 
@@ -294,29 +295,76 @@ def _step_geometry(data: bytes, *, solid: bool = True):
     return unit, scale_to_m, bounds
 
 
-def _body_sources(metadata: dict) -> dict[str, tuple[str, dict]]:
+def _body_sources(metadata: Mapping) -> dict[str, tuple[str, Mapping]]:
     bodies = {}
     fabrication = metadata.get("fabrication") or {}
     for body in fabrication.get("paths", []):
-        if isinstance(body, dict) and isinstance(body.get("body_id"), str):
+        if isinstance(body, Mapping) and isinstance(body.get("body_id"), str):
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", body["body_id"]):
                 raise ValueError("Saved conductor body identifiers must be portable names.")
             bodies[body["body_id"]] = ("fabrication_review_geometry", body)
     # Grooved support formers are reviewed solids of their own, exported beside the conductors.
     for body in fabrication.get("support_bodies", []):
-        if isinstance(body, dict) and isinstance(body.get("body_id"), str):
+        if isinstance(body, Mapping) and isinstance(body.get("body_id"), str):
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", body["body_id"]):
                 raise ValueError("Saved support body identifiers must be portable names.")
             bodies[body["body_id"]] = (PRINT_FORMER_SCOPE, body)
     for body in (metadata.get("pipeline_sweeps") or {}).get("bodies", []):
-        if isinstance(body, dict) and isinstance(body.get("body_id"), str):
+        if isinstance(body, Mapping) and isinstance(body.get("body_id"), str):
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", body["body_id"]):
                 raise ValueError("Saved conductor body identifiers must be portable names.")
             bodies.setdefault(body["body_id"], ("pipeline_sweep_geometry", body))
     return bodies
 
 
-def _geometry_catalog(record: RunRecord, kinds=("solid",)) -> tuple[GeometryOption, ...]:
+def _export_artifact_body(artifact, bodies):
+    name = artifact.get("name")
+    if not isinstance(name, str):
+        raise ValueError("Malformed saved artifact name.")
+    filename = PurePosixPath(name).name
+    is_path = filename.lower().endswith(_PATH_SUFFIXES)
+    if not is_path and (
+        PurePosixPath(name).suffix.lower() not in {".stl", ".step", ".stp"}
+        or "centroid" in filename.lower()
+        or "centerline" in filename.lower()
+    ):
+        return None
+    body_id = artifact.get("body_id")
+    if body_id not in bodies:
+        # Historical artifacts identify reviewed bodies by these exact filenames.
+        matches = [
+            key
+            for key in bodies
+            if filename
+            in {
+                f"{key}_fabrication.stl",
+                f"{key}_fabrication_faceted.step",
+                f"{key}_fabrication_faceted.stp",
+                f"{key}_DRAFT_fabrication.stl",
+                f"{key}_DRAFT_fabrication_faceted.step",
+                f"{key}_fabrication_centroid.csv",
+                f"{key}_fabrication_centroid.step",
+                f"{key}.stl",
+                f"{key}_faceted.step",
+                f"{key}_faceted.stp",
+            }
+        ]
+        if len(matches) != 1:
+            return None
+        body_id = matches[0]
+    return body_id, is_path
+
+
+def has_saved_export_geometry(metadata):
+    """Read only recorded identities for the Results shortcut; export verifies the files."""
+    try:
+        bodies = _body_sources(metadata)
+        return any(_export_artifact_body(artifact, bodies) for artifact in metadata.get("artifacts", ()))
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def _geometry_catalog(record: RunRecord, kinds=("solid",), *, selected_names=None) -> tuple[GeometryOption, ...]:
     metadata = record.metadata
     bodies = _body_sources(metadata)
     report = metadata.get("fabrication") or {}
@@ -327,42 +375,15 @@ def _geometry_catalog(record: RunRecord, kinds=("solid",)) -> tuple[GeometryOpti
     task = ProgressReporter(label="CAD catalog").task("saved artifact inspection", len(artifacts))
     for artifact_ind, artifact in enumerate(artifacts):
         task.update(artifact_ind, message="checking saved solid definitions")
-        name = artifact.get("name")
-        if not isinstance(name, str):
-            raise ValueError("Malformed saved artifact name.")
+        if selected_names is not None and artifact["name"] not in selected_names:
+            continue
+        identity = _export_artifact_body(artifact, bodies)
+        if identity is None:
+            continue
+        body_id, is_path = identity
+        name = artifact["name"]
         suffix = PurePosixPath(name).suffix.lower()
-        filename = PurePosixPath(name).name
-        # The connected conductor centerline is exportable as a 3D path.
-        is_path = filename.lower().endswith(_PATH_SUFFIXES)
-        if suffix not in {".stl", ".step", ".stp"} and not is_path:
-            continue
         if ("path" if is_path else "solid") not in kinds:
-            continue
-        body_id = artifact.get("body_id")
-        if body_id not in bodies:
-            matches = [
-                id_
-                for id_ in bodies
-                if filename
-                in {
-                    f"{id_}_fabrication.stl",
-                    f"{id_}_fabrication_faceted.step",
-                    f"{id_}_fabrication_faceted.stp",
-                    f"{id_}_DRAFT_fabrication.stl",
-                    f"{id_}_DRAFT_fabrication_faceted.step",
-                    f"{id_}_fabrication_centroid.csv",
-                    f"{id_}_fabrication_centroid.step",
-                    f"{id_}.stl",
-                    f"{id_}_faceted.step",
-                    f"{id_}_faceted.stp",
-                }
-            ]
-            if len(matches) != 1:
-                # Support surfaces and centerline STEP files are deliberately
-                # absent; filenames alone cannot invent a conductor body.
-                continue
-            body_id = matches[0]
-        if not is_path and ("centroid" in filename.lower() or "centerline" in filename.lower()):
             continue
         if name in seen:
             raise ValueError(f"Duplicate saved solid artifact: {name}")
@@ -509,13 +530,18 @@ def export_geometry(
     """
     if unit not in _UNIT_SCALE:
         raise ValueError("STL export unit must be 'm' or 'mm'.")
+    if selected_names is not None:
+        selected_names = tuple(selected_names)
     if not allow_draft and any(isinstance(name, str) and is_draft_artifact(name) for name in selected_names or ()):
         failures = (record.metadata.get("fabrication") or {}).get("failure_reasons", ())
         raise ValueError(draft_export_notice(failures) + " Confirm the DRAFT export explicitly to continue.")
     with progress_scope(0, 10, "Verifying saved geometry evidence", label="CAD export"):
         record = _verified_record(record)
     with progress_scope(10, 25, "Reading saved conductor solids", label="CAD export"):
-        catalog = {option.name: option for option in _geometry_catalog(record, kinds=("solid", "path"))}
+        catalog = {
+            option.name: option
+            for option in _geometry_catalog(record, kinds=("solid", "path"), selected_names=selected_names)
+        }
     # Without an explicit choice, export the solids that are not drafts.
     names = (
         [name for name, option in catalog.items() if option.format in {"stl", "step"} and not is_draft_artifact(name)]
@@ -640,6 +666,7 @@ def export_geometry(
             "project_model_fingerprint": metadata.get("project_model_fingerprint"),
             "requested_stl_unit": unit,
             "geometry": exported,
+            "routing_circuits": (metadata.get("routing") or {}).get("parts", []),
             "project_companion": companion,
             "sheet_accepted": (metadata.get("summary") or {}).get("sheet_accepted"),
             "pipeline_sweep_checks_passed": (metadata.get("pipeline_sweeps") or {}).get("checks_passed"),

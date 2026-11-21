@@ -191,6 +191,23 @@ def test_selection_rejects_unknowns_support_and_duplicate_names(tmp_path):
     assert not destination.exists()
 
 
+def test_selected_stl_does_not_parse_unselected_step_and_accepts_an_iterator(tmp_path, monkeypatch):
+    import coilgen.application.cad as cad
+
+    record = _run(tmp_path)
+    name = f"fabrication/{BODY}_fabrication.stl"
+
+    def unselected_step(*_args, **_kwargs):
+        pytest.fail("An STL export must not parse unrelated large STEP solids")
+
+    monkeypatch.setattr(cad, "_step_geometry", unselected_step)
+    package = export_geometry(record, tmp_path / "stl-only", iter((name,)))
+    assert [row["format"] for row in package.manifest["geometry"]] == ["stl"]
+    np.testing.assert_allclose(
+        read_stl(package.paths[0]).vertices, _solid().vertices[_solid().faces].reshape(-1, 3) * 1000
+    )
+
+
 def test_conductor_path_is_listed_and_exported_explicitly(tmp_path):
     record = _run(tmp_path)
     paths = path_catalog(record)

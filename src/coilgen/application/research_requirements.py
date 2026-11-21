@@ -675,7 +675,15 @@ def _metrics(field, target, points, region, config, *, design_margin=1.0):
 
 
 def evaluate_requirements(
-    parts, config, spec, *, current_A=None, fabrication=None, complete_paths=None, design_margin=1.0
+    parts,
+    config,
+    spec,
+    *,
+    current_A=None,
+    fabrication=None,
+    complete_paths=None,
+    design_margin=1.0,
+    source_parts=None,
 ):
     """Evaluate fields from the saved stream function and routes at unchanged signed currents.
 
@@ -683,6 +691,8 @@ def evaluate_requirements(
     caller-verified complete electrical circuits. Otherwise only saved routed
     centroid paths qualify; unconnected contour copies are unavailable. No
     current fitting, normalization, target interpolation, or mesh remeshing.
+    ``source_parts`` retains each original stream-function support once when
+    ``parts`` contains several routed circuits on a shared support.
     """
     from ..evaluation import layout_field_geometry
     from ..physics import biot_savart_wire_path
@@ -698,7 +708,8 @@ def evaluate_requirements(
     ):
         raise ValueError("design_margin must be a finite fraction in (0,1].")
     design_margin = float(design_margin)
-    vectors = [part.stream_function for part in parts]
+    sources = source_parts or parts
+    vectors = [part.stream_function for part in sources]
     sheet = all(value is not None and np.all(np.isfinite(value)) for value in vectors)
     sf = np.concatenate(vectors) if sheet else None
     paths, body_ids, reason = [], [], ""
@@ -781,7 +792,9 @@ def evaluate_requirements(
                         reporter.report(
                             0, f"Reviewing {region.name} · {pose_name} · {sampling} · stream function field"
                         )
-                        sensitivity = _field_operator(parts, points, config, support, scale, centre) if sheet else None
+                        sensitivity = (
+                            _field_operator(sources, points, config, support, scale, centre) if sheet else None
+                        )
                 except FieldSamplingError as exc:
                     sensitivity = None
                     sheet_reason = str(exc)
@@ -884,7 +897,7 @@ def evaluate_requirements(
                 np.asarray(part.mesh.vertices, dtype="<f8").tobytes()
                 + np.asarray(part.mesh.faces, dtype="<i8").tobytes()
             ).hexdigest()
-            for part in parts
+            for part in sources
         ],
         "stream_function_sha256": sha256(np.asarray(sf, dtype="<f8").tobytes()).hexdigest() if sf is not None else None,
         "coverage": "listed_finite_registered_poses_and_dimensional_perturbations_only",

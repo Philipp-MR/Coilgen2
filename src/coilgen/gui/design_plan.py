@@ -447,9 +447,7 @@ def build_design_plan(
     # A terminal error may retain all recorded stages. Categorize execution
     # separately from evidence rather than allowing a negative pending count.
     waiting = max(0, waiting)
-    summary = (
-        f"{completed}/{requested} steps recorded · {complete_channels}/{len(enabled)} channels with verified results"
-    )
+    summary = f"{completed}/{requested} steps recorded · result files verified for {complete_channels}/{len(enabled)} channels"
     if running or queued:
         summary += f" · {running} running · {queued} queued"
     disabled = len(plans) - len(enabled)

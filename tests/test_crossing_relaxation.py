@@ -4,10 +4,52 @@ import numpy as np
 import pytest
 
 from coilgen.config import CoilGenConfig
-from coilgen.crossing_relaxation import _CutMotion, _positive_gap_normal, _source_quality, _swept_score
+from coilgen.crossing_relaxation import (
+    _CutMotion,
+    _constraint_axes,
+    _positive_gap_normal,
+    _source_quality,
+    _swept_score,
+)
 from coilgen.geometry import normalize_mesh
 from coilgen.models import Mesh, WireSegmentOwner
 from coilgen.paired_cut_lifts import _crossed_cuts
+
+
+@pytest.mark.parametrize("scale", [1e-6, 1.0, 1e6])
+@pytest.mark.parametrize("arrangement", ["parallel", "crossed", "coincident"])
+def test_station_separation_keeps_analytic_gap_and_axis_ties_across_units(scale, arrangement):
+    length, width, height, gap = 0.01, 0.0004, 0.0002, 0.003
+    first = np.array([[0.0, 0, 0], [length, 0, 0]])
+    copper = np.array(
+        [[x, y, z] for x in (0, length) for y in (-width / 2, width / 2) for z in (-height / 2, height / 2)]
+    )
+    tangent = np.array([1.0, 0, 0])
+    if arrangement == "crossed":
+        second = np.array([[length / 2, -length / 2, gap], [length / 2, length / 2, gap]])
+        other = copper[:, [1, 0, 2]] + [length / 2, -length / 2, gap]
+        other_tangent = np.array([0.0, 1, 0])
+        expected_gap, direction = gap - height, [0, 0, -1]
+    else:
+        offset = [0, gap if arrangement == "parallel" else 0, 0]
+        second, other = first + offset, copper + offset
+        other_tangent = tangent
+        expected_gap = gap - width if arrangement == "parallel" else 0
+        direction = [0, -1, 0] if arrangement == "parallel" else [0, 0, 0]
+    physical = np.concatenate((first, second)) * scale
+    window = (np.array([0]), np.array([1.0]))
+    normal = np.array([0.0, 0, 1])
+    cache = {
+        0: (0, 0.0, window, copper * scale, first.mean(axis=0) * scale, tangent, normal),
+        2: (1, 0.0, window, other * scale, second.mean(axis=0) * scale, other_tangent, normal),
+    }
+    pairs = [(0, 2, None), (2, 0, 0.0), (0, 2, 0.0001)]
+    result = list(_constraint_axes(physical, cache, pairs))
+    assert [row[:3] for row in result] == pairs
+    axes, distances = result[0][3:]
+    assert np.isfinite(axes).all() and np.argmax(distances) == 0
+    np.testing.assert_array_equal(axes[0], direction)
+    assert distances[0] == pytest.approx(expected_gap * scale, abs=10 * np.finfo(float).eps * scale)
 
 
 def test_clearance_score_requires_a_completed_solid():

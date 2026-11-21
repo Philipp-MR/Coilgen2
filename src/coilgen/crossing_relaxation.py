@@ -8,11 +8,46 @@ import numpy as np
 
 from .models import WirePath, WirePathGeometry, WireSegmentOwner
 from .swept_clearance import required_copper_gap
+from .progress import ProgressReporter
 
 
 def _unit(v):
     n = np.linalg.norm(v, axis=-1, keepdims=True)
     return np.divide(v, n, out=np.zeros_like(v), where=n > 1e-13)
+
+
+def _constraint_axes(physical, cache, pairs):
+    """Evaluate independent station geometry in a bounded tile, retaining pair order."""
+    from .geometry_kernels import segment_closest_parameters
+
+    selected = []
+    for a, b, gap in pairs:
+        if a not in cache or b not in cache or a == b:
+            continue
+        if cache[a][0] == cache[b][0] or not (len(cache[a][2][0]) or len(cache[b][2][0])):
+            continue
+        selected.append((a, b, gap))
+    if not selected:
+        return ()
+    a, b = np.asarray([row[:2] for row in selected], dtype=int).T
+    s, t = segment_closest_parameters(
+        physical[a], physical[a + 1] - physical[a], physical[b], physical[b + 1] - physical[b]
+    )
+    separation = (
+        physical[a]
+        + s[:, None] * (physical[a + 1] - physical[a])
+        - physical[b]
+        - t[:, None] * (physical[b + 1] - physical[b])
+    )
+    ra, rb = (np.stack([cache[index][3] for index in ids]) for ids in (a, b))
+    ca, cb = (np.stack([cache[index][4] for index in ids]) for ids in (a, b))
+    ta, tb = (np.stack([cache[index][5] for index in ids]) for ids in (a, b))
+    na, nb = (np.stack([cache[index][6] for index in ids]) for ids in (a, b))
+    axes = _unit(np.stack((separation, na, nb, np.cross(ta, na), np.cross(tb, nb), np.cross(ta, tb), ca - cb), axis=1))
+    axes = np.concatenate((axes, -axes), axis=1)
+    transpose = np.swapaxes(axes, 1, 2)
+    present = (ra @ transpose).min(axis=1) - (rb @ transpose).max(axis=1)
+    return ((*row, axis, distance) for row, axis, distance in zip(selected, axes, present))
 
 
 def _opposing_cut_legs(a, b):
@@ -176,11 +211,17 @@ class _CutMotion:
         arc = intervals.arc
         center = (arc[:-1] + arc[1:]) / 2
         active = np.zeros(len(center), dtype=bool)
-        for station in np.unique(stations):
+        stations = np.unique(stations)
+        progress = ProgressReporter.from_config(self.config, label="Copper separation")
+        neighborhoods = progress.task("Copper neighborhoods", len(stations), indeterminate=True)
+        for index, station in enumerate(stations):
+            if index % 64 == 0:
+                neighborhoods.update(index)
             dist = abs(center - center[station])
             if intervals.closed:
                 dist = np.minimum(dist, arc[-1] - dist)
             active |= dist < 2.7 * self.ramp
+        neighborhoods.done()
         low = rings.min(axis=1)
         high = rings.max(axis=1)
         if intervals.closed:
@@ -190,7 +231,10 @@ class _CutMotion:
         upper = np.maximum(high[:-1], high[1:])
         pairs_found = []
         try:
-            for batch in loft_pair_batches(lower, upper, gap + self.limit, GroupRouteValidationLimits(), {}):
+            for index, batch in enumerate(
+                loft_pair_batches(lower, upper, gap + self.limit, GroupRouteValidationLimits(), {})
+            ):
+                progress.report(None, f"Check neighboring copper: batch {index + 1}")
                 i, j = batch.T
                 keep = (active[i] | active[j]) & intervals.separate_visits(i * (2 * nsection), j * (2 * nsection))
                 pairs_found.extend((int(a), int(b), None) for a, b in batch[keep])
@@ -199,7 +243,6 @@ class _CutMotion:
         return pairs_found
 
     def constraints(self, wire, body, pairs, lateral_lanes=False):
-        from .geometry_kernels import segment_closest_parameters
         from .swept_clearance import SweepIntervals
 
         fp = body.fabrication_path
@@ -225,7 +268,13 @@ class _CutMotion:
         obstacles = [p for p in obstacles if (p[0], p[1]) not in active_pairs]
         cache = {}
         source_indices, source_fractions = self.body_stations(wire, body)
-        for station in np.unique(np.array([row[:2] for row in pairs + obstacles], dtype=int)):
+        stations = np.unique(np.array([row[:2] for row in pairs + obstacles], dtype=int))
+        station_work = ProgressReporter.from_config(self.config, label="Copper separation").task(
+            "Map copper intervals", len(stations), indeterminate=True
+        )
+        for index, station in enumerate(stations):
+            if index % 64 == 0:
+                station_work.update(index)
             next_station = (station + 1) % ring_count
             n = _unit(fp.normals[station] + fp.normals[next_station])
             center = 0.5 * (physical[station] + physical[station + 1])
@@ -240,7 +289,11 @@ class _CutMotion:
                 _unit(physical[station + 1] - physical[station]),
                 n,
             )
+        station_work.done()
         constraints = []
+        work = ProgressReporter.from_config(self.config, label="Copper separation").task(
+            "Separation constraints", len(pairs) + len(obstacles), indeterminate=True
+        )
         # Choose one consistent high/low ordering for opposing legs of the
         # same physical cut, even where the original lifts meet at mid-height.
         leads = {}
@@ -255,84 +308,79 @@ class _CutMotion:
                     direction = _unit(np.cross(tangent, direction))
                 signed = (cache[a][4] - cache[b][4]) @ direction
                 leads.setdefault(oa.connector_index, []).append(signed if oa.connector_role == "primary" else -signed)
-        for a, b, pair_gap in pairs + obstacles:
-            if a not in cache or b not in cache or a == b:
-                continue
-            i, t, wi, ra, ca, ta, na = cache[a]
-            j, u, wj, rb, cb, tb, nb = cache[b]
-            if i == j or not (len(wi[0]) or len(wj[0])):
-                continue
-            # A separating axis can be the support normal, either in-plane
-            # transverse, or the shortest connector between the station axes.
-            s, v = segment_closest_parameters(
-                physical[[a]], np.diff(physical[a : a + 2], axis=0), physical[[b]], np.diff(physical[b : b + 2], axis=0)
-            )
-            sep = (
-                physical[a]
-                + s[0] * (physical[a + 1] - physical[a])
-                - physical[b]
-                - v[0] * (physical[b + 1] - physical[b])
-            )
-            axis = _unit(np.vstack((sep, na, nb, np.cross(ta, na), np.cross(tb, nb), np.cross(ta, tb), ca - cb)))
-            axis = np.vstack((axis, -axis))
-            present = (ra @ axis.T).min(axis=0) - (rb @ axis.T).max(axis=0)
-            if pair_gap is not None and pair_gap > 1e-10:
-                direction = _positive_gap_normal(body, a, b, nsection)
-                if np.linalg.norm(direction) > 0.5:
-                    axis = np.vstack((axis, direction))
-                    present = np.r_[present, pair_gap]
-            need = required + buffer - present
+        all_pairs = pairs + obstacles
+        for start in range(0, len(all_pairs), 256):
+            work.update(start)
+            for a, b, pair_gap, axis, present in _constraint_axes(physical, cache, all_pairs[start : start + 256]):
+                i, t, wi, ra, ca, ta, na = cache[a]
+                j, u, wj, rb, cb, tb, nb = cache[b]
+                if pair_gap is not None and pair_gap > 1e-10:
+                    direction = _positive_gap_normal(body, a, b, nsection)
+                    if np.linalg.norm(direction) > 0.5:
+                        axis = np.vstack((axis, direction))
+                        present = np.r_[present, pair_gap]
+                if pair_gap is None:
+                    guard_axis = int(np.argmax(present))
+                    if present[guard_axis] < required:
+                        continue
+                need = required + buffer - present
 
-            def response(index, fraction, tangent, dirs):
-                # Tangential sliding on a straight segment cannot change its
-                # separation. Use the transverse component and clip its trial
-                # endpoint against the signed lift and lateral motion limits.
-                dirs = dirs - np.outer(dirs @ tangent, tangent)
-                k = index + int(fraction > 0.5)
-                ids = np.full(len(dirs), k)
-                trial = self.radial_limit(wire[k] + dirs * (self.limit + self.height), ids) - wire[k]
-                return trial * self.authorized[k]
+                def response(index, fraction, tangent, dirs):
+                    # Tangential sliding on a straight segment cannot change its
+                    # separation. Use the transverse component and clip its trial
+                    # endpoint against the signed lift and lateral motion limits.
+                    dirs = dirs - np.outer(dirs @ tangent, tangent)
+                    k = index + int(fraction > 0.5)
+                    ids = np.full(len(dirs), k)
+                    trial = self.radial_limit(wire[k] + dirs * (self.limit + self.height), ids) - wire[k]
+                    return trial * self.authorized[k]
 
-            up = response(i, t, ta, axis)
-            down = response(j, u, tb, -axis)
-            room = np.einsum("ij,ij->i", up - down, axis)
-            viable = (room > 1e-9) & (np.linalg.norm(axis, axis=1) > 0.5)
-            if not viable.any():
-                continue
-            # Minimize demanded fractional travel while avoiding large motion
-            # when another axis already almost separates these two solids.
-            cost = np.where(viable, need / np.maximum(room, 1e-15) + 0.15 * need / max(self.limit, 1e-12), np.inf)
-            oa, ob = self.owners[source_indices[a]], self.owners[source_indices[b]]
-            if pair_gap is None:
-                # Preserve the existing separating plane of a close, currently
-                # clear turn before the repelled branch is allowed to descend.
-                k = int(np.argmax(present))
-                if present[k] < required or not viable[k]:
+                up = response(i, t, ta, axis)
+                down = response(j, u, tb, -axis)
+                room = np.einsum("ij,ij->i", up - down, axis)
+                viable = (room > 1e-9) & (np.linalg.norm(axis, axis=1) > 0.5)
+                if not viable.any():
                     continue
-                constraints.append((min(0.0, need[k]), axis[k], room[k], i, t, up[k], wi, j, u, down[k], wj))
-                continue
-            if oa.connector_index in leads and _opposing_cut_legs(oa, ob):
-                expected = self.sign * (1 if np.median(leads[oa.connector_index]) >= 0 else -1)
-                expected *= 1 if oa.connector_role == "primary" else -1
-                preferred = _unit(na + nb)
-                if lateral_lanes:
-                    preferred = _unit(np.cross(ta if oa.connector_role == "primary" else tb, preferred))
-                # Use the same lane ordering along both opposing arms, so a
-                # correction at one witness need not swap them at the next.
-                choice = np.argmax(expected * (axis @ preferred))
-                if viable[choice] and need[choice] < room[choice] * 1.1:
-                    cost[choice] = 0.0
-                    wi = self.window(i, t, 1.7 * self.ramp)
-                    wj = self.window(j, u, 1.7 * self.ramp)
-            k = int(np.argmin(cost))
-            constraints.append((need[k], axis[k], room[k], i, t, up[k], wi, j, u, down[k], wj))
+                # Minimize demanded fractional travel while avoiding large motion
+                # when another axis already almost separates these two solids.
+                cost = np.where(viable, need / np.maximum(room, 1e-15) + 0.15 * need / max(self.limit, 1e-12), np.inf)
+                oa, ob = self.owners[source_indices[a]], self.owners[source_indices[b]]
+                if pair_gap is None:
+                    # Preserve the existing separating plane of a close, currently
+                    # clear turn before the repelled branch is allowed to descend.
+                    k = guard_axis
+                    if present[k] < required or not viable[k]:
+                        continue
+                    constraints.append((min(0.0, need[k]), axis[k], room[k], i, t, up[k], wi, j, u, down[k], wj))
+                    continue
+                if oa.connector_index in leads and _opposing_cut_legs(oa, ob):
+                    expected = self.sign * (1 if np.median(leads[oa.connector_index]) >= 0 else -1)
+                    expected *= 1 if oa.connector_role == "primary" else -1
+                    preferred = _unit(na + nb)
+                    if lateral_lanes:
+                        preferred = _unit(np.cross(ta if oa.connector_role == "primary" else tb, preferred))
+                    # Use the same lane ordering along both opposing arms, so a
+                    # correction at one witness need not swap them at the next.
+                    choice = np.argmax(expected * (axis @ preferred))
+                    if viable[choice] and need[choice] < room[choice] * 1.1:
+                        cost[choice] = 0.0
+                        wi = self.window(i, t, 1.7 * self.ramp)
+                        wj = self.window(j, u, 1.7 * self.ramp)
+                k = int(np.argmin(cost))
+                constraints.append((need[k], axis[k], room[k], i, t, up[k], wi, j, u, down[k], wj))
         constraints.sort(key=lambda x: -x[0])
+        work.done()
         return constraints
 
     def step(self, wire, constraints, scale):
         current = wire.copy()
-        for _ in range(3):
-            for need, axis, room, i, t, up, wi, j, u, down, wj in constraints:
+        work = ProgressReporter.from_config(self.config, label="Copper separation").task(
+            "Bounded separation steps", 3 * len(constraints), indeterminate=True
+        )
+        for iteration in range(3):
+            for index, (need, axis, room, i, t, up, wi, j, u, down, wj) in enumerate(constraints):
+                if index % 64 == 0:
+                    work.update(iteration * len(constraints) + index)
                 pi = (1 - t) * (current[i] - wire[i]) + t * (current[i + 1] - wire[i + 1])
                 pj = (1 - u) * (current[j] - wire[j]) + u * (current[j + 1] - wire[j + 1])
                 target = scale * need if need > 0 else need
@@ -343,6 +391,7 @@ class _CutMotion:
                     current[ids] = self.radial_limit(current[ids] + weight[:, None] * (step * direction), ids)
         if self.closed:
             current[-1] = current[0]
+        work.done()
         return current
 
 
@@ -421,6 +470,7 @@ class _GapPreview:
         self.section = len(self.path.cross_section_m)
         self.intervals = SweepIntervals(self.path, body.mesh.faces)
         self.required = required_copper_gap(motion.config)
+        self.progress = ProgressReporter.from_config(motion.config, label="Copper separation")
         self.centers = self.path.points_m
         rings = len(self.centers)
         self.rings = body.mesh.vertices[: rings * self.section].reshape(rings, self.section, 3)
@@ -452,6 +502,7 @@ class _GapPreview:
         from .geometry_kernels import triangle_pair_distances
         from .swept_clearance import loft_pair_batches
 
+        self.progress.report(None, "Preview translated copper sections")
         offset = change[self.index] * (1 - self.fraction[:, None]) + change[self.index + 1] * self.fraction[:, None]
         rings = self.rings + offset[:, None, :]
         following = np.roll(rings, -1, axis=0)
@@ -463,7 +514,10 @@ class _GapPreview:
         vertices = rings.reshape(-1, 3)
         total = 0.0
         try:
-            for pair in loft_pair_batches(lower, upper, self.required + 1e-12, GroupRouteValidationLimits(), {}):
+            for index, pair in enumerate(
+                loft_pair_batches(lower, upper, self.required + 1e-12, GroupRouteValidationLimits(), {})
+            ):
+                self.progress.report(None, f"Preview translated copper: batch {index + 1}")
                 a, b = pair.T
                 ok = self.intervals.separate_visits(a * (2 * self.section), b * (2 * self.section))
                 a, b = a[ok], b[ok]
@@ -530,6 +584,9 @@ def improve_crossing_candidate(part, config, *, max_iterations=5):
     merit = _remote_merit(part.swept_bodies[0], config)
     sweeps = 0
     for iteration in range(max_iterations):
+        ProgressReporter.from_config(config, label="Copper separation").report(
+            None, f"Relax mounted copper: iteration {iteration + 1}/{max_iterations}"
+        )
         diag = best.swept_bodies[0].diagnostics
         pairs = diag.get("copper_clearance_witness_intervals", ())
         if not len(pairs) or sweeps >= 2 * max_iterations + 2:

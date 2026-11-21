@@ -88,7 +88,7 @@ def test_dismissing_settings_dock_discards_unapplied_edits(windows, dismiss):
 
     window = windows()
     window.show()
-    window._show_dock("settings_dock")
+    window._show_dock("settings_dock", prefer_setup=False)
     dock = window.findChild(QDockWidget, "settings_dock")
     baseline = window.project
     window._draft_controls["radius_mm"].setValue(174)

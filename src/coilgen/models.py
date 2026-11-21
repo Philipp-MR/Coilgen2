@@ -334,6 +334,7 @@ class ConnectedGroup:
     spiral_in_v: np.ndarray
     spiral_out_v: np.ndarray
     outer_loop_indices: tuple[int, ...] = field(default_factory=tuple)
+    routing_spiral_order: str = "auto"
 
     def __post_init__(self) -> None:
         self.v = as_float_array(self.v, 3)
@@ -467,6 +468,8 @@ class CoilPart:
     connected_groups: list[ConnectedGroup] = field(default_factory=list)
     opening_cuts_among_groups: list[InterGroupCut] = field(default_factory=list)
     wire_path: WirePath | None = None
+    # Exact automatic route underlying a manually edited routing revision.
+    routing_editor_baseline: WirePath | None = None
     route_diagnostics: RouteDiagnostics = field(default_factory=dict)
     joint_route_diagnostics: dict[str, Any] = field(default_factory=dict)
     swept_body: Mesh | None = None
@@ -512,6 +515,19 @@ class CoilPart:
 
 
 @dataclass
+class RoutedCircuit(CoilPart):
+    """One electrical circuit in the existing single-path numerical kernels.
+
+    Meshes are source support contexts, not newly created substrates. Explicit
+    ownership keeps circuit identity independent of the numerical part index.
+    """
+
+    circuit_id: str = ""
+    source_group_keys: tuple[str, ...] = ()
+    source_support_indices: tuple[int, ...] = ()
+
+
+@dataclass
 class CoilGenResult:
     coil_parts: list[CoilPart]
     num_levels: int
@@ -539,3 +555,10 @@ class CoilGenResult:
     coil_cross_sections: np.ndarray | None = None
     timing_summary: list[dict[str, float | str]] = field(default_factory=list)
     diagnostic_cache: DiagnosticCache = field(default_factory=dict)
+    # Original FEM supports, retained once when routing partitions their groups.
+    source_parts: list[CoilPart] = field(default_factory=list)
+
+
+def sheet_parts(result):
+    """Original current sheets; electrical circuit contexts must not multiply them."""
+    return getattr(result, "source_parts", None) or result.coil_parts

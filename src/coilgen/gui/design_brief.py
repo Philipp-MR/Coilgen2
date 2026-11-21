@@ -72,6 +72,10 @@ def _circuit(config):
         return "Independent closed turns; each turn requires its own drive/feed design."
     if config.skip_postprocessing:
         return "Unconnected contours; no connected circuit is requested."
+    if config.routing_group_plan is not None and config.routing_group_plan["mode"] != "existing":
+        plan = config.routing_group_plan
+        count = len(plan["groups"]) if plan["mode"] == "per_group" else len({row["circuit"] for row in plan["groups"]})
+        return f"{count} explicit group circuit(s) at the common evaluation current; external feeds require separate review."
     if config.routing_circuit_scope == "per_part":
         return "Separate connected circuit per support part; external inter-part feeds are separate."
     return "One connected series winding across support parts; terminal/feed realization is separate."
@@ -190,6 +194,7 @@ def _build_brief(project, pending):
             "Separate circuits per support": "separate-circuits",
             "Independent closed turns": "independent-turns",
             "Contours only": "contours",
+            "Groups & circuits plan": "separate-circuits",
         }[winding_intent(config)],
     )
     terminal = str(config.layout_terminal_strategy)

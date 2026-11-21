@@ -271,6 +271,7 @@ class ProjectDocument:
         config = dict(values)
         config.setdefault("target_region_geometry", None)
         config.setdefault("contour_smoothing_local_fallback", False)
+        config.setdefault("routing_editor_plan", None)
         return config
 
     @property
@@ -282,6 +283,8 @@ class ProjectDocument:
             values.pop("target_region_geometry", None)
         if values.get("contour_smoothing_local_fallback") is False:
             values.pop("contour_smoothing_local_fallback", None)
+        if values.get("routing_editor_plan") is None:
+            values.pop("routing_editor_plan", None)
         return values
 
     @property

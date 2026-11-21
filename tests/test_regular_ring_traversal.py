@@ -152,6 +152,36 @@ def test_physical_policy_preserves_historical_group_enumeration():
     assert "regular_ring_traversal" not in part.topology_diagnostics
 
 
+@pytest.mark.parametrize("rotated", [False, True])
+def test_tilted_essential_rings_follow_surface_order_without_changing_contours(rotated):
+    part = _part(samples=32, axial_samples=16)
+    # The former area-normal threshold rejected this legitimate family on the
+    # cylindrical support and retained the 0,5,1,4,2,3 extraction order.
+    part.stream_function = part.mesh.vertices[:, 2] + 0.08 * part.mesh.vertices[:, 0]
+    extract_contours([part], CoilGenConfig(min_point_loop_number=8))
+    part.contour_lines = [part.contour_lines[i] for i in (0, 5, 1, 4, 2, 3)]
+    if rotated:
+        angle = 0.63
+        rotation = np.array([[np.cos(angle), 0, np.sin(angle)], [0, 1, 0], [-np.sin(angle), 0, np.cos(angle)]])
+        part.mesh.vertices = part.mesh.vertices @ rotation.T
+        for loop in part.contour_lines:
+            loop.v = loop.v @ rotation.T
+    original = [loop.v.copy() for loop in part.contour_lines]
+    indices = list(range(len(original)))
+    signatures = [
+        SimpleNamespace(loop_index=i, boundary_associated=True, ambiguous=False, boundary_signature=((0,), (1,)))
+        for i in indices
+    ]
+    ordered, diagnostics = regular_ring_order(
+        part, indices, signatures, np.zeros((6, 6), bool), ring_support_axis(part.mesh)
+    )
+    assert diagnostics["reason"] == "ordered_azimuth_monotone_essential_rings"
+    assert diagnostics["ordered_axial_travel_m"] < 0.5 * diagnostics["original_axial_travel_m"]
+    assert set(ordered) == set(indices)
+    for loop, before in zip(part.contour_lines, original):
+        np.testing.assert_array_equal(loop.v, before)
+
+
 def _conical_part():
     mesh = normalize_mesh(build_cylinder_mesh(0.4, 0.2, 32, 12, 1, 0, 0, 0))
     mesh.vertices[:, :2] *= (1 + 0.8 * mesh.vertices[:, 2])[:, None]

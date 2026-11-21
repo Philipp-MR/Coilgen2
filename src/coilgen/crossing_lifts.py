@@ -176,12 +176,17 @@ def _separate_close_joins(lifted, normals, arc, owners, clearance, config, ramp,
     def penalty(pairs):
         return sum((1 - d / limit) ** 2 for _, _, d in pairs)
 
-    for _ in range(5):
+    from .progress import ProgressReporter
+    from .routing_progress import RoutingProgress
+
+    progress = RoutingProgress(ProgressReporter.from_config(config, label="Crossing repair"))
+    for iteration in range(5):
         pairs = [
             (a, b, d) for a, b, d in contacts if owners[a].kind != "contour_loop" or owners[b].kind != "contour_loop"
         ]
         if not pairs:
             break
+        progress.start(f"Separate close joins · pass {iteration + 1}/5 · branch/contact pairs", 2 * len(pairs))
         a, b, d = np.asarray(pairs).T
         a, b = a.astype(int), b.astype(int)
         delta = np.diff(moved, axis=0)
@@ -189,8 +194,10 @@ def _separate_close_joins(lifted, normals, arc, owners, clearance, config, ramp,
         separation = moved[a] + ta[:, None] * delta[a] - moved[b] - tb[:, None] * delta[b]
         push = np.zeros_like(moved)
         weight = np.zeros(len(moved))
-        for i, which, fraction, direction in [(a, b, ta, separation), (b, a, tb, -separation)]:
+        for branch, (i, which, fraction, direction) in enumerate([(a, b, ta, separation), (b, a, tb, -separation)]):
             for k, index in enumerate(i):
+                if k % 128 == 0:
+                    progress.update(branch * len(i) + k)
                 if owners[index].kind == "contour_loop":
                     continue
                 normal = normals[index] * (1 - fraction[k]) + normals[index + 1] * fraction[k]
@@ -217,6 +224,7 @@ def _separate_close_joins(lifted, normals, arc, owners, clearance, config, ramp,
         if np.max(np.linalg.norm(step, axis=1)) < 1e-7:
             break
         for scale in (1.0, 0.5, 0.25):
+            progress.activity(f"Checking displaced crossing contacts at scale {scale:g}", force=True)
             motion = moved - original + scale * step
             motion *= np.minimum(1, budget / np.maximum(np.linalg.norm(motion, axis=1), 1e-15))[:, None]
             trial = original + motion

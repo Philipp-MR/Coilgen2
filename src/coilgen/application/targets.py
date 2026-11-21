@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from numbers import Real
 
@@ -93,6 +93,130 @@ def solid_harmonic_target(
     center_m=(0.0, 0.0, 0.0),
 ) -> SolidHarmonicTarget:
     return SolidHarmonicTarget(degree, order, coefficient_T, reference_radius_m, center_m)
+
+
+ORIGIN_KEYS = tuple(f"field_origin_{axis}_mm" for axis in "xyz")
+
+
+def translated_expression(original, values):
+    """Merge world-mm controls with an editable expression in one transaction."""
+    expression = values.get("field_shape_function", original)
+    previous = recognize_solid_harmonic_target(original)
+    if previous is None:
+        return expression
+    center = list(previous.center_m)
+    changed = {}
+    for index, key in enumerate(ORIGIN_KEYS):
+        if key in values and float(values[key]) != center[index] * 1000:
+            changed[index] = float(values[key]) / 1000
+    if not changed:
+        return expression
+    target = recognize_solid_harmonic_target(expression)
+    if target is None:
+        raise ValueError("Apply the new expression separately from the field-pattern origin.")
+    center = list(target.center_m)
+    for index, value in changed.items():
+        center[index] = value
+    return replace(target, center_m=tuple(center)).expression
+
+
+def target_probe_text(config):
+    """Describe world probes for a recognized absolute expression; ROI placement is independent."""
+    import numpy as np
+    from ..target import evaluate_field_expression, _target_gradient_normalization_method
+
+    target = recognize_solid_harmonic_target(config.field_shape_function)
+    if target is None or str(config.target_field_definition_file).lower() not in {"", "none"}:
+        return ""
+
+    def world(xyz):
+        return "(" + ", ".join(f"{1000 * v:g}" for v in xyz) + ") mm"
+
+    region = config.target_region_geometry or {}
+    if region.get("shape") == "enclosing_mesh" or (
+        not region and str(config.target_mesh_file).strip().lower() not in {"", "none"}
+    ):
+        roi = "defined by the imported mesh in world coordinates"
+    elif not region and config.set_roi_into_mesh_center:
+        roi = "support mesh center"
+    else:
+        roi = world(region.get("center_m", (0, 0, 0)))
+    line = f"World coordinates · Field-pattern origin {world(target.center_m)} · ROI center {roi}."
+    if (
+        config.target_field_units == "T"
+        and config.target_field_component == "Bz"
+        and _target_gradient_normalization_method(config, source="expression") == "none"
+    ):
+        radius = target.reference_radius_m
+        points = np.array([[-radius, 0, 0], [0, 0, 0], [radius, 0, 0], [0, 0, radius]])
+        values = evaluate_field_expression(target.expression, points) * 1e6
+        line += " Bz [µT] at " + " · ".join(f"{world(p)} = {v:.4g}" for p, v in zip(points, values))
+    return line
+
+
+def field_budget_text(config, margin):
+    from ..optimization import _normalise_target_error_constraint_metric
+
+    ratio = float(margin)
+    if not math.isfinite(ratio) or not 0 < ratio <= 1:
+        return "Enter a design / validation ratio greater than zero and at most one."
+    metric = _normalise_target_error_constraint_metric(config)
+    if (config.research_physics or {}).get("include_default_field_constraints") is False:
+        return "Custom field constraints · Independent verification requires a matching validation operator or dataset."
+    if metric == "std":
+        design = (
+            f"{config.target_error_std_limit_T * 1e6:g} µT"
+            if config.target_error_std_limit_T > 0
+            else f"{config.target_error_tolerance_percent:g}% of the weighted target standard deviation"
+            + (
+                f" + {config.target_error_tolerance_absolute_T * 1e6:g} µT"
+                if config.target_error_tolerance_absolute_T
+                else ""
+            )
+        )
+        return f"Design residual standard deviation limit · {design}. Independent standard deviation check unavailable."
+    if metric == "rms" and config.target_error_rms_limit_T > 0:
+        limit = config.target_error_rms_limit_T * 1e6
+        return f"Absolute RMS budget per component · Design {limit:g} µT · Independent {limit / ratio:g} µT."
+    limit = config.target_error_tolerance_percent
+    text = (
+        f"Relative RMS budget · Design {limit:g}% · Independent {limit / ratio:g}% · "
+        "100 × weighted RMS(field − target) / weighted RMS(target)."
+    )
+    if config.target_error_tolerance_absolute_T:
+        text += (
+            f" An additional {config.target_error_tolerance_absolute_T:g} T absolute {metric} term "
+            "enters the design limit before the validation ratio is applied."
+        )
+    return text
+
+
+def result_field_scope(meta):
+    """Report counts and limits from the saved record, including historical partial results."""
+    validation = meta.get("validation") or {}
+    wires = meta.get("wire_fields") or {}
+    wire = next((wires[k] for k in ("routed", "contour") if (wires.get(k) or {}).get("available")), {})
+    fixed = wire.get("at_stream_current") or {}
+    if fixed.get("available"):
+        wire = fixed
+    parts = []
+    relative = validation.get("relative_limit")
+    margin = validation.get("design_margin")
+    if validation.get("contract_kind") == "relative_rms" and relative is not None and margin:
+        parts.append(
+            f"Stream function RMS limits · Design {relative * margin * 100:g}% · Independent {relative * 100:g}%"
+        )
+    elif validation.get("limit") is not None:
+        parts.append(
+            f"Independent {validation.get('contract_kind', 'field')} limit {validation['limit']:.4g} {validation.get('unit', '')}"
+        )
+    if wire.get("sample_count"):
+        parts.append(f"Design grid {wire['sample_count']} samples")
+    if validation.get("point_count"):
+        parts.append(f"Independent grid {validation['point_count']} samples")
+    if wire.get("current_A") is not None and wire.get("current_refitted") is False:
+        parts.append(f"Wire fields at original current {wire['current_A']:.5g} A · best-fit current is diagnostic")
+    return " · ".join(parts)
 
 
 def recognize_solid_harmonic_target(expression: str) -> SolidHarmonicTarget | None:

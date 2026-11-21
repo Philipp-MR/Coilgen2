@@ -297,9 +297,9 @@ FIELDS = (
     ),
     ExpertField(
         "normal_shift_length",
-        "Normal shift distance",
-        "Conductor and support",
-        "Configured path shift along support normals, separate from profile mounting and insulation.",
+        "Return-path lift (normal shift)",
+        "Routing",
+        "Height of crossover bridges between winding layers, measured along the support normal.",
         unit="mm",
         display_scale=1e3,
     ),
@@ -946,12 +946,37 @@ class ExpertSettingsDialog(QDialog):
         self.json_editor.setFocus()
         return True
 
+    def focus_section(self, category, key=None):
+        """Navigate within the current draft without replacing pending values."""
+        self.tabs.setCurrentIndex(0)
+        self.optimization_only.setChecked(False)
+        self.search.setText(key or category)
+        target = (
+            self.fields.get(key)
+            if key
+            else next(
+                (editor for editor in self.fields.values() if editor.spec.category.casefold() == category.casefold()),
+                None,
+            )
+        )
+        if target is not None:
+            from PySide6.QtCore import QTimer
+
+            QTimer.singleShot(0, lambda: self.typed_scroll.ensureWidgetVisible(target))
+            target.control.setFocus()
+        return target is not None
+
     def _update_fields(self):
         active = isinstance(self._draft.get("research_physics"), dict)
         for key, editor in self.fields.items():
             if key not in self._typed_errors:
                 editor.set_value(_read(self._draft, key, self._defaults))
             editor.setEnabled(active or not key.startswith("research_physics."))
+            if key == "force_cut_selection" and self._draft.get("routing_group_plan") is not None:
+                editor.setEnabled(False)
+                editor.setToolTip(
+                    "The active Groups & circuits plan supplies the binding cut sides. Edit them in its group table."
+                )
         self.physics_note.setText(
             "Physical solver active. Objectives, formula constraints, bounds, equalities, energy, scenarios and acceptance policy are editable below. Each field preserves the other nested values. The complete optional JSON control can explicitly replace or disable the specification."
             if active
@@ -1101,3 +1126,11 @@ class ExpertSettingsDialog(QDialog):
     def _accept(self):
         if self.apply_changes():
             self.accept()
+
+    def closeEvent(self, event):
+        # QDialog's native close handling only finishes top-level dialogs.
+        if not self.isWindow():
+            self.reject()
+            event.accept()
+        else:
+            super().closeEvent(event)

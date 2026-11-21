@@ -110,7 +110,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "coilgen.gui" = ["assets/coilgen-logo.png", "assets/martinos-logo.png", "assets/ACKNOWLEDGMENTS.md"]
-"coilgen.web" = ["assets/project_upload.js", "assets/workbench.css", "assets/center_panel.css"]
+"coilgen.web" = ["assets/*.js", "assets/*.css"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

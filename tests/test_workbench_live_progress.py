@@ -192,12 +192,10 @@ def test_actual_stage_previews_update_graphics_without_creating_results(window):
         assert window._workbench_view_state()["dataset"] == "preview_target"
 
 
-def test_choosing_a_plot_still_advances_when_new_geometry_arrives(window):
+def test_following_worker_advances_plots_as_new_geometry_arrives(window):
     state = window.compute()
     _publish(window, state, "contours")
     _wait(lambda: window.viewport.dataset.currentData() == "contours")
-    window.viewport.dataset.setCurrentIndex(window.viewport.dataset.findData("target"))
-    window.viewport.dataset.activated.emit(window.viewport.dataset.currentIndex())
     assert window.live_preview.following
     for feature, plot, label in (
         ("interconnections", "routes", "interconnections"),
@@ -218,7 +216,6 @@ def test_pinned_plot_keeps_receiving_geometry_and_resumes_without_new_data(windo
     _wait(lambda: window.viewport.stage_preview_metadata is not None)
     window.viewport.dataset.setCurrentIndex(window.viewport.dataset.findData("target"))
     window.viewport.dataset.activated.emit(window.viewport.dataset.currentIndex())
-    window._set_live_follow(False)
     assert not window.live_preview.following
     _publish(window, state, "contours")
     _wait(lambda: window.viewport.stage_preview_metadata["pipeline_stage"] == "contours")

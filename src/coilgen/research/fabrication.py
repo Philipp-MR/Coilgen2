@@ -469,10 +469,15 @@ def _grooved_supports(parts, records, config, reasons) -> list[tuple[str, int, S
         return []
     paths = [record.path for record in records]
     supports = []
-    for part_index, part in enumerate(parts, start=1):
+    from ..group_circuits import source_support_specs
+
+    for index, support_mesh, source_ids in source_support_specs(parts):
+        part_index = index + 1
         body_id = f"part{part_index:03d}_grooved_support"
         try:
-            support = build_grooved_support(part.mesh, paths, config)
+            support = build_grooved_support(support_mesh, paths, config)
+            if source_ids:
+                support.diagnostics["source_support_indices"] = list(source_ids)
         except SupportBodyError as exc:
             reasons.append(f"{body_id}:{exc}")
             continue
