@@ -211,8 +211,6 @@ between-body clearance. Export swept conductor geometry and generate grooved
 formers for supported configurations. Cylindrical layouts can also produce
 unrolled PCB artwork.
 
-![Actual swept circular-profile conductor meshes with close views of rounded bends from the documented cylindrical and biplanar examples.](../docs/frontpage/swept_bodies.png)
-
 The gradient-engineering tools add mesh/quadrature/sampling convergence studies,
 independent winding-field checks, explicit terminals and feed paths,
 piecewise-linear drive waveforms, and measured-field comparisons with declared
