@@ -1,5 +1,19 @@
 # CoilGen2 native scientific workbench
 
+The top menus follow the work sequence: **File · Edit · Model · Run · Results · View · Help**.
+Model contains Geometry studio, Groups and circuits, gradient inputs, research
+inputs and channels. Run contains computation and study submission. Results
+contains field analysis, winding engineering and saved study reviews. View
+only controls panels and evidence windows.
+
+Menus remain accessible before opening a project and while jobs run.
+**File → Open completed run…** works from an empty workbench. Individual commands
+that require a project, verified result or authored winding explain that
+prerequisite in their tooltip. Opening a model editor with pending setup edits
+offers **Apply**, **Discard** or **Cancel**; advanced and group drafts return to
+their existing editor. Saved-result reviews do not require applying unrelated
+input drafts. Duplicate submissions and result-integrity checks remain enforced.
+
 **Help → About CoilGen2…** shows the software credits, project link and original
 CoilGen publication with all coauthors. Newly generated reports and exports
 include software provenance, separate from authorship of the coil design.
@@ -145,7 +159,7 @@ Use the **Coil results** toolbar button, the overview's **Field map**,
 **Coil stats** and **Engineering checks** actions,
 or the entries under **Results and provenance** in the Model Builder to open
 metrics, slices, errors, harmonics, coil properties or engineering checks. The
-existing **View → Detailed field analysis…** and viewport **Inspect** actions are
+existing **Results → Detailed field analysis…** and viewport **Inspect** actions are
 also available. Target-only preparations disable field pages; saved electrical or
 geometry statistics remain accessible without field samples. Failed evidence
 verification disables result actions. Each modeless analysis window stays bound
@@ -209,7 +223,7 @@ pipeline.
 
 ### Research workflows
 
-**Research studies** hosts the requirements and reviews for unusual designs:
+**Model → Research setup** defines requirements for unusual designs; **Results → Study reviews** opens their saved evidence:
 
 | Design task | Authoring and evidence |
 | --- | --- |
@@ -217,7 +231,7 @@ pipeline.
 | Beam windows, obstacles, terminal locations | **Spatial scene and route anchors** owns closed imported meshes or boxes with explicit world registration and physical roles. Deliberate 3D picking binds terminals, cut intervals and waypoints to exact winding hashes. The circuit editor can initialize editable feeds from these anchors. |
 | Motion and finite geometric manufacturing tolerances | Define separate design and held-out rigid poses, plus finite support dimension scales about an explicit center. Operators retain common nodal topology. Final wire reviews transform the same recorded paths at unchanged signed currents. **Queue / Review nominal and robust comparison** uses common evaluation datasets and poses. |
 | Multichannel and cohort shim research | **Array currents and cohort design** fits signed channel currents jointly with individual bounds and a simultaneous resistive power budget, on reverified saved winding geometry. It reports residual fields, limiting samples, rank, conditioning and saturation. POD, adaptive sectorization and contour-family studies keep training and held-out cases separate; generated projects require final winding/feed review. |
-| Unusual waveforms, shielding beside conducting structures | Author circuits and import time/current CSV in **Gradient engineering**. Import geometry-bound inductance/efficiency references in **Circuit references and coupled physics**. Review current, voltage and shared RC temperature, including finite pulse repetitions/rest. External complex frequency response, mechanical and spatial thermal records retain their own solver, excitation, material, environment, geometry and sampling contracts. |
+| Unusual waveforms, shielding beside conducting structures | Author circuits and import time/current CSV in **Results → Winding engineering**. Import geometry-bound inductance/efficiency references in **Circuit references and coupled physics**. Review current, voltage and shared RC temperature, including finite pulse repetitions/rest. External complex frequency response, mechanical and spatial thermal records retain their own solver, excitation, material, environment, geometry and sampling contracts. |
 
 These inputs are optional revisioned project study controls (`requirements`,
 `scene`, `array_study`, `dynamic_analysis`). Owned target/map/mesh/table data
@@ -429,12 +443,12 @@ before exporting a shielded design.
 ### Inspect active shielding
 
 Choose **Browse examples… → Coil systems → Actively shielded XYZ foil gradient system (Gx, Gy, Gz)**.
-Run **Channels → Compute enabled channels independently**, then open **View results** for the
+Run **Run → Compute enabled channels independently**, then open **View results** for the
 channel you want to inspect. The example targets 20 mT/m on each axis over the same
 40 mm DSV. Each channel has a primary and an outer active winding. All three use the
 same closed external observation cylinder (150 mm radius, 400 mm length).
 
-Open **View → Plot shielding surface…** or **Coil results → Shielding surface**.
+Open **Results → Plot shielding surface…** or **Coil results → Shielding surface**.
 Select the stream function, unconnected contours or routed winding according to
 the fields saved for that run. The comparison shows the primary and shield
 contributions at the same excitation, plus their vector sum. The common µT scale
@@ -474,7 +488,7 @@ for conductor settings, field definitions and script usage.
 
 **File → Load template → Coil systems → Biplanar gradients + second-order shims** creates nine
 independently driven channels: Gx/Gy/Gz, uniform Z0 and Z2/XZ/YZ/X²−Y²/XY.
-Use **Channels → Channel overview** (or the channel icon beside Enabled) to
+Use **Model → Channels → Channel overview** (or the channel icon beside Enabled) to
 compare execution, parameter compatibility and scoped field/geometry evidence.
 Use **Configuration…** for physical inputs, open a selected channel, or compute
 the enabled channels independently. Each
@@ -561,7 +575,7 @@ CoilGen keeps its surface-coil optimization and realization operations explicit:
    run without a verified original request identifies the missing evidence.
    **Inspect saved settings** from an engineering check opens the same review.
    **Close** or Escape returns to the workbench. To change physics inputs, open
-   a model editor or **Edit → Advanced settings…**. Feed authoring requires
+   a model editor or **Model → Advanced settings…**. Feed authoring requires
    verified winding evidence for the currently applied numerical model.
    Editing current channel settings and running review
    explicitly target the active revision. Integrity failures remain visible across
@@ -1173,7 +1187,7 @@ explicit world center and reference radius remain independent of ROI sampling.
 
 ## Gradient engineering workflow
 
-**Gradient engineering** provides focused editors and studies. The geometry,
+**Model → Gradient setup** provides focused input editors; **Run → Studies** queues studies and **Results → Study reviews** opens their saved evidence. The geometry,
 target, winding and validation inspectors also link to the relevant tools.
 
 - **Gradient requirements** edits the native strength, RMS/peak linearity and

@@ -1,7 +1,31 @@
 # CoilGen2 browser workbench
 
-Use **Design setup → More tools → Groups and circuits…** to prepare, identify and assign winding
+Use **Model → Groups and circuits…** to prepare, identify and assign winding
 groups with the same source-bound plan as the desktop. See [Groups and circuits](GROUPS_CIRCUITS.md).
+
+## Top menus
+
+The browser and desktop use the same top-level order:
+
+| Menu | Purpose |
+| --- | --- |
+| File | Create, open, save and export projects and results |
+| Edit | Undo, redo and resolve pending setup edits |
+| Model | Geometry studio, imported inputs, conductor profiles, groups and channels |
+| Run | Compute a design or enabled channels; inspect and cancel jobs |
+| Results | Review saved fields, engineering checks and interconnections |
+| View | Show setup, progress, results and run panels; fit the camera |
+| Help | Open the workbench guide |
+
+Menus stay available while jobs run and before a project is loaded. Commands
+that need a project or saved result open the relevant chooser and explain the
+prerequisite. Opening a different model tool preserves an unfinished specialist
+draft and brings its editor back into view. Apply or cancel that draft first.
+Valid setup edits are applied before opening Geometry studio; invalid input
+stays visible for correction. Undo and redo do not discard pending edits.
+
+The desktop also has dedicated gradient and research dialogs under Model,
+study submission under Run, and saved study reviews under Results.
 
 ## Run your first coil
 

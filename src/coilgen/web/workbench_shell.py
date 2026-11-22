@@ -71,15 +71,11 @@ def readiness_summary(config, report):
 
 
 def build_toolbar(ctrl):
+    from .menus import build_help, build_menus
+
     with html.Header(classes="cg-toolbar"):
         _wordmark("small")
-        v3.VBtn(
-            "File",
-            variant="outlined",
-            size="small",
-            append_icon="mdi-menu-down",
-            click="file_section = 'examples'; file_dialog = true",
-        )
+        build_menus(ctrl)
         html.Div("{{ project_name }}", v_if="channels.length", classes="cg-project-name", title=("project_name",))
         with html.Form(action="/logout", method="post", v_if="user !== 'local'", classes="cg-session"):
             html.Span("{{ user }}", classes="cg-user")
@@ -99,6 +95,7 @@ def build_toolbar(ctrl):
             ),
             click=ctrl.compute,
         )
+    build_help()
 
 
 def build_welcome(ctrl):

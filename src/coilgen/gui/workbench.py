@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -468,7 +469,7 @@ class CoilGenWorkbench(QMainWindow):
         self.resizeDocks([dock], [370], Qt.Orientation.Horizontal)
         self.design_plan_dock.hide()
         self.groups_button.hide()
-        self.resume_action.setVisible(False)
+        self.findChild(QToolBar, "study_toolbar").removeAction(self.resume_action)
 
     def _setup_draft_changed(self):
         self._invalidate_project_open()
@@ -802,7 +803,7 @@ class CoilGenWorkbench(QMainWindow):
     def _refresh_results_overview(self):
         if not hasattr(self, "results_overview"):
             return
-        record = self.runs.get(self._selected_run) if self.project is not None else None
+        record = self.runs.get(self._selected_run)
         error = self._run_verification_error(record) if record is not None else ""
         former_source, former_available = getattr(self, "_former_plot_source", (None, False))
         former_plot_available = former_source is record and former_available
@@ -815,7 +816,7 @@ class CoilGenWorkbench(QMainWindow):
         self._results_overview_key = key
         stale = False
         self._circuit_available = False
-        if record is not None:
+        if record is not None and self.project is not None:
             metadata = read_run_metadata(record)
             owner = metadata.get("project_id")
             fingerprint = metadata.get("project_fingerprint")
@@ -1101,7 +1102,7 @@ class CoilGenWorkbench(QMainWindow):
             self._open_evidence(page)
 
     def _refresh_view_context(self, *_args):
-        if not hasattr(self, "view_context") or self.project is None:
+        if not hasattr(self, "view_context"):
             return
         record = self.runs.get(self._selected_run)
         entry = next(
@@ -1118,8 +1119,12 @@ class CoilGenWorkbench(QMainWindow):
         context = build_view_context(
             self.project,
             record,
-            channel_label=self.assembly.channel(self._active_channel_id).name,
-            dataset_key=dataset.currentData() if dataset is not None else "support",
+            channel_label=self.assembly.channel(self._active_channel_id).name if self.assembly is not None else "",
+            dataset_key=dataset.currentData()
+            if dataset is not None
+            else "target"
+            if self.project is None and record is not None
+            else "support",
             pending=self._has_input_drafts(),
             alias=entry.alias if entry is not None else None,
             state=self.live_preview.state
@@ -1132,6 +1137,14 @@ class CoilGenWorkbench(QMainWindow):
             dataset_capability=getattr(self.viewport, "current_capability", None),
         )
         draft_note = self._expert_draft_note()
+        if self.project is None:
+            context = replace(
+                context,
+                editing_text="No project open · saved result only",
+                editing_tooltip="Open the source project to edit its model. Saved evidence remains available for review.",
+                viewing_text=context.viewing_text.replace("Another channel", "Saved result"),
+                identity="Saved result",
+            )
         if draft_note:
             context = replace(
                 context,
@@ -1397,7 +1410,12 @@ class CoilGenWorkbench(QMainWindow):
         return action
 
     def _build_actions(self):
-        file_menu = self.file_menu = self.menuBar().addMenu("File")
+        menus = {
+            name: self.menuBar().addMenu(name) for name in ("File", "Edit", "Model", "Run", "Results", "View", "Help")
+        }
+        file_menu = self.file_menu = menus["File"]
+        self.model_menu, self.run_menu, self.results_menu = menus["Model"], menus["Run"], menus["Results"]
+        self._project_menu_actions = []
         self.new_action = self._action(
             "New project…", self._new_project_dialog, QKeySequence.StandardKey.New, icon_name="project-json"
         )
@@ -1441,31 +1459,40 @@ class CoilGenWorkbench(QMainWindow):
         search.textChanged.connect(filter_examples)
         self.template_menu.aboutToShow.connect(search.clear)
         save_action = self._action("Save project", self._save_dialog, QKeySequence.StandardKey.Save, icon_name="save")
+        self._project_menu_actions.append(save_action)
         file_menu.addSeparator()
         file_menu.addAction(save_action)
-        file_menu.addAction(
-            self._action(
-                "Save project as…", lambda: self._save_dialog(True), QKeySequence.StandardKey.SaveAs, icon_name="save"
-            )
+        save_as_action = self._action(
+            "Save project as…", lambda: self._save_dialog(True), QKeySequence.StandardKey.SaveAs, icon_name="save"
         )
-        file_menu.addAction(self._action("Open completed run…", self._open_run_dialog, icon_name="run-history"))
+        file_menu.addAction(save_as_action)
+        self._project_menu_actions.append(save_as_action)
+        self.open_run_action = self._action("Open completed run…", self._open_run_dialog, icon_name="run-history")
+        file_menu.addAction(self.open_run_action)
         imports = file_menu.addMenu("Import model inputs")
         imports.addAction(self._action("Import support mesh…", self._import_mesh_dialog, icon_name="support-import"))
         imports.addAction(self._action("Import target map…", self._import_target_dialog, icon_name="target-map"))
-        file_menu.addAction(
-            self._action("Export geometry…", lambda: self.navigate_workflow("export"), icon_name="export-conductor")
+        self._project_menu_actions.append(imports.menuAction())
+        export_geometry_action = self._action(
+            "Export geometry…", lambda: self.navigate_workflow("export"), icon_name="export-conductor"
         )
+        file_menu.addAction(export_geometry_action)
+        self._project_menu_actions.append(export_geometry_action)
         exports = file_menu.addMenu("Export Python and run files")
-        exports.addAction(self._action("Active channel Python script…", self._export_dialog, icon_name="export"))
-        exports.addAction(
-            self._action("Enabled channels Python script…", self._export_assembly_dialog, icon_name="export")
-        )
+        for title, handler in (
+            ("Active channel Python script…", self._export_dialog),
+            ("Enabled channels Python script…", self._export_assembly_dialog),
+        ):
+            action = self._action(title, handler, icon_name="export")
+            exports.addAction(action)
+            self._project_menu_actions.append(action)
         exports.addAction(self._action("Selected run files…", self._export_run_dialog, icon_name="export"))
         file_menu.addSeparator()
         self.close_project_action = self._action("Close project", self.close_project)
         file_menu.addAction(self.close_project_action)
+        self._project_menu_actions.append(self.close_project_action)
         file_menu.addAction(self._action("Exit", self.close, QKeySequence.StandardKey.Quit))
-        edit_menu = self.edit_menu = self.menuBar().addMenu("Edit")
+        edit_menu = self.edit_menu = menus["Edit"]
         self.undo_action = self.undo_stack.createUndoAction(self, "Undo")
         self.undo_action.setShortcut(QKeySequence.StandardKey.Undo)
         self.undo_action.setIcon(icon("undo"))
@@ -1473,10 +1500,16 @@ class CoilGenWorkbench(QMainWindow):
         self.redo_action.setShortcut(QKeySequence.StandardKey.Redo)
         self.redo_action.setIcon(icon("redo"))
         edit_menu.addActions([self.undo_action, self.redo_action])
-        edit_menu.addAction(self._action("Advanced settings…", self._advanced_dialog, icon_name="settings"))
-        edit_menu.addAction(self._action("Geometry studio…", self._surface_editor_dialog, icon_name="mesh"))
-        edit_menu.addAction(self._action("Rename project…", self._rename_dialog, icon_name="edit"))
-        self.gradient_menu = self.menuBar().addMenu("Gradient engineering")
+        rename_action = self._action("Rename project…", self._rename_dialog, icon_name="edit")
+        edit_menu.addAction(rename_action)
+        self._project_menu_actions.append(rename_action)
+        self.model_menu.addAction(self._action("Geometry studio…", self._surface_editor_dialog, icon_name="mesh"))
+        self.model_menu.addAction(
+            self._action("Groups and circuits…", self._open_groups_editor, icon_name="connected-winding")
+        )
+        self.model_menu.addAction(self._action("Advanced settings…", self._advanced_dialog, icon_name="settings"))
+        self.gradient_menu = self.model_menu.addMenu("Gradient setup")
+        studies_menu = self.run_menu.addMenu("Studies")
         self.gradient_actions = {}
         for title, handler, symbol in (
             ("Gradient requirements…", self._gradient_requirements_dialog, "target-gradient"),
@@ -1488,18 +1521,23 @@ class CoilGenWorkbench(QMainWindow):
         ):
             action = self._action(title, handler, icon_name=symbol)
             self.gradient_actions[handler.__name__] = action
-            self.gradient_menu.addAction(action)
-        channels_menu = self.channels_menu = self.menuBar().addMenu("Channels")
+            if handler.__name__ in {"_gradient_requirements_dialog", "_gradient_geometry_dialog"}:
+                self.gradient_menu.addAction(action)
+            elif handler.__name__ == "_gradient_convergence_dialog":
+                studies_menu.addAction(action)
+                self._project_menu_actions.append(action)
+        channels_menu = self.channels_menu = self.model_menu.addMenu("Channels")
         self.channel_overview_action = self._action("Channel overview…", self._channels_dialog, icon_name="channels")
         channels_menu.addAction(self.channel_overview_action)
         channels_menu.addAction(
             self._action("Duplicate active channel…", self._add_channel_dialog, icon_name="design-variant")
         )
         channels_menu.addAction(self._action("Remove active channel", self.remove_active_channel, icon_name="remove"))
-        channels_menu.addAction(
-            self._action("Compute enabled channels independently", self.compute_channels, icon_name="compute-study")
+        self.compute_channels_action = self._action(
+            "Compute enabled channels independently", self.compute_channels, icon_name="compute-study"
         )
-        self.research_menu = self.menuBar().addMenu("Research studies")
+        self._project_menu_actions.append(self.compute_channels_action)
+        self.research_menu = self.model_menu.addMenu("Research setup")
         self.research_actions = {}
         for title, handler, symbol in (
             ("Named targets, validation and poses…", self._research_requirements_dialog, "target-gradient"),
@@ -1514,7 +1552,11 @@ class CoilGenWorkbench(QMainWindow):
         ):
             action = self._action(title, handler, icon_name=symbol)
             self.research_actions[handler.__name__] = action
-            self.research_menu.addAction(action)
+            if handler.__name__.endswith("_dialog"):
+                self.research_menu.addAction(action)
+            elif handler.__name__ == "_research_robust_comparison":
+                studies_menu.addAction(action)
+        self._project_menu_actions.extend(self.model_menu.actions())
         toolbar = self.addToolBar("Project and study")
         toolbar.setObjectName("study_toolbar")
         toolbar.setMovable(False)
@@ -1576,29 +1618,40 @@ class CoilGenWorkbench(QMainWindow):
         self.toolbar_cancel_widget.setVisible(False)
         self.compute_action = self._action("Compute selected stage", self.compute, "Ctrl+Return")
         self.addAction(self.compute_action)
-        view_menu = self.view_menu = self.menuBar().addMenu("View")
+        for action in (self.compute_action, self.compute_channels_action, self.resume_action, self.cancel_action):
+            self.run_menu.insertAction(studies_menu.menuAction(), action)
+        self.run_menu.insertSeparator(studies_menu.menuAction())
+        view_menu = self.view_menu = menus["View"]
         self.field_analysis_action = self._action(
             "Detailed field analysis…", self._field_analysis_dialog, icon_name="field-error"
         )
         self.field_analysis_action.setEnabled(False)
-        view_menu.addAction(self.field_analysis_action)
+        self.results_menu.addAction(self.field_analysis_action)
         self.shielding_action = self._action(
             "Plot shielding surface…",
             lambda: self._field_analysis_dialog(view="shielding"),
             icon_name="shielded-gradient",
         )
         self.shielding_action.setEnabled(False)
-        view_menu.addAction(self.shielding_action)
+        self.results_menu.addAction(self.shielding_action)
         self.routing_analysis_action = self._action(
             "Inspect interconnections…", self._routing_analysis_dialog, icon_name="connected-winding"
         )
         self.routing_analysis_action.setEnabled(False)
-        view_menu.addAction(self.routing_analysis_action)
+        self.results_menu.addAction(self.routing_analysis_action)
         self.routing_editor_action = self._action(
             "Edit interconnections…", self._interconnection_editor_dialog, icon_name="connected-winding"
         )
         self.routing_editor_action.setEnabled(False)
-        view_menu.addAction(self.routing_editor_action)
+        self.results_menu.addAction(self.routing_editor_action)
+        engineering = self.results_menu.addMenu("Winding engineering")
+        for key in ("_gradient_circuit_dialog", "_gradient_measured_dialog"):
+            engineering.addAction(self.gradient_actions[key])
+        reviews = self.results_menu.addMenu("Study reviews")
+        reviews.addAction(self.gradient_actions["_gradient_convergence_review"])
+        for key, action in self.research_actions.items():
+            if key.endswith("_review"):
+                reviews.addAction(action)
         self.field_results_button = QPushButton("Coil results", self)
         self.field_results_button.setObjectName("field_results_button")
         self.field_results_button.setIcon(icon("field-error"))
@@ -1650,13 +1703,17 @@ class CoilGenWorkbench(QMainWindow):
                 )
             )
             self.evidence_actions[self.evidence.tabText(index)] = action
-        help_menu = self.menuBar().addMenu("Help")
+        help_menu = menus["Help"]
         self.about_action = self._action("About CoilGen2…", self._about_dialog)
         help_menu.addAction(self.about_action)
         self.contact_action = self._action("Contact / Kontakt…", lambda: self._about_dialog(page="contact"))
         help_menu.addAction(self.contact_action)
         self.impressum_action = self._action("Impressum…", lambda: self._about_dialog(page="impressum"))
         help_menu.addAction(self.impressum_action)
+        for menu in self.menuBar().findChildren(QMenu):
+            menu.setToolTipsVisible(True)
+        for menu in menus.values():
+            menu.aboutToShow.connect(self._update_execution_feedback)
         self._adapt_toolbars()
 
     def _about_dialog(self, *, page="about"):
@@ -1681,15 +1738,11 @@ class CoilGenWorkbench(QMainWindow):
             self.design_plan_dock.hide()
         self.tree.setEnabled(active)
         self.findChild(QToolBar, "study_toolbar").setVisible(active)
-        self.edit_menu.setEnabled(active)
-        self.gradient_menu.setEnabled(active)
-        self.research_menu.setEnabled(active)
-        self.channels_menu.setEnabled(active)
-        self.view_menu.setEnabled(active)
-        for action in self.file_menu.actions():
-            if action.isSeparator():
-                continue
-            action.setEnabled(active or action.text() in {"New project…", OPEN_PROJECT_LABEL, "Load template", "Exit"})
+        # File loading, saved evidence, panel controls and Help work without a model.
+        # Keep top-level menus openable; gate only commands that edit a project.
+        for action in self._project_menu_actions:
+            action.setEnabled(active)
+            action.setToolTip(action.text() if active else "Create or open a project first.")
         self.compute_button.setEnabled(active)
         self.compute_action.setEnabled(active)
         if not active:
@@ -3818,6 +3871,7 @@ class CoilGenWorkbench(QMainWindow):
     def _check_expert_draft(self):
         groups = getattr(self, "groups_editor", None)
         if groups is not None and groups.dirty:
+            self.plot_stack.setCurrentWidget(groups)
             self._error("Apply or revert the pending Groups & circuits plan before continuing.")
             return False
         expert = getattr(self, "expert_window", None)
@@ -3847,9 +3901,26 @@ class CoilGenWorkbench(QMainWindow):
 
     def _settings_ready_for_editor(self):
         if self.project is None:
+            self.statusBar().showMessage("Create or open a project first.")
+            return False
+        if not self._check_expert_draft():
             return False
         if self._has_input_drafts():
-            self.statusBar().showMessage("Apply or discard the open settings draft before opening another editor.")
+            answer = QMessageBox.question(
+                self,
+                "Pending settings",
+                "Apply the pending settings before opening this editor, or discard those edits?",
+                QMessageBox.StandardButton.Apply
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer == QMessageBox.StandardButton.Apply:
+                return self.apply_settings()
+            if answer == QMessageBox.StandardButton.Discard:
+                self.setup_panel.reset()
+                self._discard_settings_page()
+                return True
             return False
         return True
 
@@ -4325,14 +4396,19 @@ class CoilGenWorkbench(QMainWindow):
                 self._refresh_stage_status()
                 self._update_result_state()
             self._error("Saved settings inspection failed: " + error)
-        elif task is not None and self.project is not None:
-            dialog = SavedSettingsDialog(
-                request,
-                task.project,
-                task.node,
-                self,
-                smoothing=read_run_metadata(task.record).get("contour_smoothing") or (),
-            )
+        elif task is not None:
+            if task.project is None:
+                settings = QPlainTextEdit(json.dumps(request, indent=2), self)
+                settings.setReadOnly(True)
+                dialog = PanelWindow("Verified run design choices", settings, self, size=(860, 620))
+            else:
+                dialog = SavedSettingsDialog(
+                    request,
+                    task.project,
+                    task.node,
+                    self,
+                    smoothing=read_run_metadata(task.record).get("contour_smoothing") or (),
+                )
             dialog.show()
             self.statusBar().showMessage("Verified saved settings opened read-only", 5000)
 
@@ -5554,6 +5630,9 @@ class CoilGenWorkbench(QMainWindow):
         from ..application.evidence import verify_record
         from .interconnection_editor import InterconnectionEditorDialog
 
+        if self.project is None:
+            self.statusBar().showMessage("Open the source project before editing its interconnections.")
+            return
         record = self.runs.get(self._selected_run)
         if record is None or self._run_verification_error(record) or not editor_available(record):
             self._error("Select a verified saved run containing an automatic routing checkpoint.")
@@ -5784,8 +5863,6 @@ class CoilGenWorkbench(QMainWindow):
             self._update_execution_feedback()
 
     def _research_verified_review(self, key, display, label):
-        if not self._settings_ready_for_editor():
-            return
         record = self.runs.get(self._selected_run)
         if record is None or self._run_verification_error(record):
             self._error("Select a verified completed run to review its research evidence.")
@@ -5799,7 +5876,7 @@ class CoilGenWorkbench(QMainWindow):
                 )
             return saved
 
-        self._gradient_task(verify, display, label)
+        self._gradient_task(verify, display, label, retain_receipt=True)
 
     def _research_requirements_review(self):
         from .research_requirements import ResearchRequirementsReviewDialog
@@ -5886,11 +5963,9 @@ class CoilGenWorkbench(QMainWindow):
         from ..application.comparison import compare_runs
         from .research_review import ResearchComparisonDialog
 
-        if not self._settings_ready_for_editor():
-            return
         path = (
             getattr(self, "_research_robust_path", None)
-            if getattr(self, "_research_robust_owner", None) == self.project.id
+            if self.project is not None and getattr(self, "_research_robust_owner", None) == self.project.id
             else None
         )
         if path is None:
@@ -5938,6 +6013,7 @@ class CoilGenWorkbench(QMainWindow):
             review,
             lambda value: ResearchComparisonDialog(value[0], self, source_fingerprint=value[1]).exec(),
             "Verify nominal and robust comparison",
+            retain_receipt=True,
         )
 
     def _research_scene_dialog(self):
@@ -6154,8 +6230,6 @@ class CoilGenWorkbench(QMainWindow):
     def _research_dynamic_review(self):
         from .dynamic_studies import DynamicReviewDialog
 
-        if not self._settings_ready_for_editor():
-            return
         record = self.runs.get(self._selected_run)
         if record is None or self._run_verification_error(record):
             self._error("Select a verified run with waveform or coupled-physics evidence.")
@@ -6173,6 +6247,7 @@ class CoilGenWorkbench(QMainWindow):
             lambda _project: DesignService.load_run(record.directory),
             display,
             "Verify waveform and coupled-physics evidence",
+            retain_receipt=True,
         )
 
     def _gradient_action_finished(self, value, error):
@@ -6263,8 +6338,6 @@ class CoilGenWorkbench(QMainWindow):
     def _gradient_convergence_review(self):
         from ..application.gradient_studies import ConvergenceCriterion, StudyCandidate, summarize_convergence
 
-        if not self._settings_ready_for_editor():
-            return
         path = getattr(self, "_gradient_convergence_path", None)
         if path is None:
             name, _ = QFileDialog.getOpenFileName(
@@ -6357,7 +6430,7 @@ class CoilGenWorkbench(QMainWindow):
             dialog.resize(1000, 580)
             dialog.exec()
 
-        self._gradient_task(review, display, "Verify convergence evidence")
+        self._gradient_task(review, display, "Verify convergence evidence", retain_receipt=True)
 
     def _gradient_circuit_dialog(self):
         from .gradient_tools import CircuitDriveDialog
@@ -6406,8 +6479,6 @@ class CoilGenWorkbench(QMainWindow):
         from .gradient_tools import MeasuredFieldDialog
         from ..application.gradient_studies import saved_winding_currents
 
-        if not self._settings_ready_for_editor():
-            return
         record = self.runs.get(self._selected_run)
         if record is None or self._run_verification_error(record):
             self._error("Select verified winding evidence before comparing measurements.")
@@ -6423,7 +6494,7 @@ class CoilGenWorkbench(QMainWindow):
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 self._compare_gradient_measurement(saved, dialog.result_value)
 
-        self._gradient_task(verify, edit, "Verify winding measurement reference")
+        self._gradient_task(verify, edit, "Verify winding measurement reference", retain_receipt=True)
 
     def _compare_gradient_measurement(self, record, inputs):
         from ..application.gradient_studies import MeasuredFieldMap, RigidTransform, compare_measured_winding
@@ -6506,7 +6577,7 @@ class CoilGenWorkbench(QMainWindow):
             dialog.exec()
             self.messages.appendPlainText(f"Measured winding comparison saved: {output}")
 
-        self._gradient_task(compare, show, "Compare measured winding field")
+        self._gradient_task(compare, show, "Compare measured winding field", retain_receipt=True)
 
     def _focus_job(self, id_, *, open_window=True):
         if not any(
@@ -7137,16 +7208,29 @@ class CoilGenWorkbench(QMainWindow):
             available = verified and cached[1]
             self.field_analysis_action.setEnabled(available)
             self.shielding_action.setEnabled(bool(verified and cached[2]))
-            self.shielding_action.setToolTip("Compare saved field contributions on the external suppression surface.")
+            self.shielding_action.setToolTip(
+                "Compare saved field contributions on the external suppression surface."
+                if self.shielding_action.isEnabled()
+                else "Select a verified run with an external suppression surface."
+            )
             if hasattr(self, "routing_analysis_action"):
                 from ..application.routing_analysis import routing_analysis_available
 
                 self.routing_analysis_action.setEnabled(bool(verified and routing_analysis_available(record)))
                 from ..application.interconnection_editor import editor_available
 
-                self.routing_editor_action.setEnabled(bool(verified and editor_available(record)))
+                self.routing_editor_action.setEnabled(
+                    bool(self.project is not None and verified and editor_available(record))
+                )
+                self.routing_editor_action.setToolTip(
+                    "Edit the selected run's saved winding."
+                    if self.routing_editor_action.isEnabled()
+                    else "Open the source project and a verified run with a routing checkpoint first."
+                )
                 self.routing_analysis_action.setToolTip(
                     "Inspect this run's exact routes, physical developed support, conductor heights and saved clearance/bend witnesses."
+                    if self.routing_analysis_action.isEnabled()
+                    else "Compute or open a verified run containing connected winding paths first."
                 )
             self.field_analysis_action.setToolTip(
                 "Analyze this selected run's saved fields, slice grids, error maps and spherical harmonics."
@@ -7209,15 +7293,30 @@ class CoilGenWorkbench(QMainWindow):
                 )
             )
             self.research_actions["_research_dynamic_review"].setEnabled(available)
+            self.research_actions["_research_dynamic_review"].setToolTip(
+                "Review the selected run's coupled physics."
+                if available
+                else "Select a verified run with drive or coupled-physics evidence."
+            )
             spec = self.project.study.get("requirements") if self.project else None
             self.research_actions["_research_robust_comparison"].setEnabled(
                 bool(spec and any(p["membership"] == "design" for p in spec["scenarios"]))
+            )
+            self.research_actions["_research_robust_comparison"].setToolTip(
+                "Queue nominal and robust designs."
+                if self.research_actions["_research_robust_comparison"].isEnabled()
+                else "Define design scenarios under Model → Research setup → Named targets, validation and poses first."
             )
         if hasattr(self, "gradient_actions"):
             record = self.runs.get(self._selected_run)
             verified = record is not None and not self._run_verification_error(record)
             can_author = self._circuit_available
             self.gradient_actions["_gradient_circuit_dialog"].setEnabled(can_author)
+            self.gradient_actions["_gradient_circuit_dialog"].setToolTip(
+                "Define terminals, feeds and drive for this winding."
+                if can_author
+                else "Select a verified fabrication review matching the active channel's applied model first."
+            )
             if self._workflow_page() == "winding" and self.settings.widget() is not None:
                 button = self.settings.widget().findChild(QPushButton, "gradient_engineering_winding")
                 if button is not None:
@@ -7230,6 +7329,11 @@ class CoilGenWorkbench(QMainWindow):
                         or (read_run_metadata(record).get("wire_fields") or {}).get("routed", {}).get("available")
                     )
                 )
+            )
+            self.gradient_actions["_gradient_measured_dialog"].setToolTip(
+                "Compare a measurement with this run's winding field."
+                if self.gradient_actions["_gradient_measured_dialog"].isEnabled()
+                else "Select a verified run containing evaluated winding fields first."
             )
         if not hasattr(self, "execution_label"):
             return
@@ -7252,17 +7356,17 @@ class CoilGenWorkbench(QMainWindow):
             )
             resume = actions.resume_stage
             can_cancel, can_resume = actions.can_cancel, actions.can_resume
-            # Qt treats hidden actions as unavailable. Derive visibility from
-            # job state so an action can reappear when its operation is valid.
-            self.cancel_action.setVisible(can_cancel)
+            # Keep Run commands discoverable; only the toolbar follows job activity.
+            self.cancel_action.setVisible(True)
             self.cancel_action.setEnabled(can_cancel)
+            self.cancel_action.setToolTip(
+                "Cancel the selected queued or running job." if can_cancel else "Select a queued or running job first."
+            )
             if hasattr(self, "toolbar_cancel_widget"):
                 self.toolbar_cancel_widget.setVisible(can_cancel)
                 self.toolbar_cancel_button.setEnabled(can_cancel)
             self.jobs_cancel_button.setEnabled(can_cancel)
-            self.resume_action.setVisible(
-                self.project is not None and (self._selected_run is not None or bool(selected_state))
-            )
+            self.resume_action.setVisible(True)
             self.resume_action.setEnabled(can_resume)
             self.resume_action.setText(
                 f"Resume from {_checkpoint_label(resume)}" if resume is not None else "Resume selected run"
@@ -7402,7 +7506,12 @@ class CoilGenWorkbench(QMainWindow):
             self._guidance_action(self._guidance_state.action_key)
 
     def _refresh_guidance(self):
-        if not hasattr(self, "design_overview") or self.project is None:
+        if not hasattr(self, "design_overview"):
+            return
+        if self.project is None:
+            self.acceptance_panel.set_record(
+                self.runs.get(self._selected_run), diagnostic=self._run_verification_error(self._selected_run)
+            )
             return
         # Readiness is advisory and cached for the requested study boundary.
         # Compute always performs its own fresh authoritative check.
@@ -7880,7 +7989,8 @@ class CoilGenWorkbench(QMainWindow):
         self._clear_run_verification_error(record, id_=id_)
         self.runs[id_] = record
         owner = read_run_metadata(record).get("project_id")
-        channel = next((channel for channel in self.assembly.channels if channel.project.id == owner), None)
+        channels = self.assembly.channels if self.assembly is not None else ()
+        channel = next((channel for channel in channels if channel.project.id == owner), None)
         scope = (owner, channel.id if self._collection_mode else None) if channel is not None else None
         if history_result is not None:
             loaded_scope, entry, entries, diagnostic = history_result
@@ -7944,7 +8054,9 @@ class CoilGenWorkbench(QMainWindow):
         records = [
             (id_, record)
             for id_, record in self.runs.items()
-            if read_run_metadata(record).get("project_id") in {None, self.project.id} or id_ == self._selected_run
+            if self.project is None
+            or read_run_metadata(record).get("project_id") in {None, self.project.id}
+            or id_ == self._selected_run
         ]
         self.runs_table.setRowCount(len(records))
         for row, (id_, record) in enumerate(records):
@@ -8000,6 +8112,10 @@ class CoilGenWorkbench(QMainWindow):
             self._inspect_saved_settings(record, node)
 
     def show_run(self, id_, *, follow_latest=False):
+        if self.project is None:
+            self.workspace_stack.setCurrentWidget(self.workspace)
+            self.close_project_action.setEnabled(True)
+            self.statusBar().showMessage("Viewing a saved run. Open its project to edit the model.")
         if not follow_latest:
             self.plot_stack.setCurrentWidget(self.viewport)
         with self._visible_work("Loading result geometry and review data"):
@@ -8115,9 +8231,9 @@ class CoilGenWorkbench(QMainWindow):
         self._update_execution_feedback()
 
     def _update_result_state(self):
+        self._refresh_view_context()
         if self.project is None:
             return
-        self._refresh_view_context()
         if self._selected_run is None:
             self.result_state.setText("No run selected · current model geometry")
             self.result_state.setToolTip("Compute a model or open a saved run to inspect engineering evidence.")

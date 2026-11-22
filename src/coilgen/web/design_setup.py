@@ -120,12 +120,18 @@ class BrowserDesignSetup:
         }
 
     def open_tool(self, key):
-        if not self.apply():
-            return
         if key == "advanced":
             self.browser.open_advanced()
-            self.focus("advanced")
-        elif key == "groups":
+            return
+        if key == "groups" and self.state.groups_dirty:
+            self.browser.groups.open()
+            return
+        if key == self.state.node and self.state.settings_dirty:
+            self.state.settings_dialog = True
+            return
+        if not self.browser._ready_to_submit():
+            return
+        if key == "groups":
             self.browser.groups.open()
         elif key in {"geometry", "target", "conductor"}:
             self.state.node = key
@@ -200,7 +206,6 @@ def build_design_setup(ctrl):
                 size="small",
                 variant="outlined",
                 click=ctrl.open_surface_editor,
-                disabled=("setup_dirty || settings_dirty",),
             )
             with html.Div(v_for="field in section.fields.filter(f => f.common)", key="field.key"):
                 _field()

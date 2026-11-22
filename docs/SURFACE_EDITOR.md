@@ -2,7 +2,7 @@
 
 Geometry studio creates a winding support from editable CAD primitives. Open it
 from **Support geometry → Geometry studio…** in the browser. On the desktop,
-use **Edit → Geometry studio…** or the Geometry studio button in the geometry
+use **Model → Geometry studio…** or the Geometry studio button in the geometry
 settings. Apply pending setup edits first.
 
 The editor opens the recipe attached to an existing Geometry studio surface.

@@ -55,6 +55,8 @@
   background: var(--cg-chrome);
 }
 .cg-toolbar { min-height: 51px; border-bottom: 1px solid var(--cg-border); }
+.cg-top-menus { display: flex; flex-wrap: wrap; gap: 2px; }
+.cg-top-menus .v-btn { min-width: 0; padding-inline: 7px; }
 .cg-project-name {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 14px; font-weight: 600;

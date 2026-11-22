@@ -108,7 +108,7 @@ follow afterwards. [Calculation and field evidence](../docs/images/welcome-windo
 
 ![Actual Geometry studio with an orthogonal cylindrical cutter, the resulting window, the object bar and final surface meshing controls.](../docs/images/geometry-studio-orthogonal-window.jpg)
 
-Open **Edit → Geometry studio…** on desktop or **Support geometry → Geometry
+Open **Model → Geometry studio…** on desktop or **Support geometry → Geometry
 studio…** in the browser. [Geometry studio guide](../docs/SURFACE_EDITOR.md)
 
 ### 3 · A broad support library

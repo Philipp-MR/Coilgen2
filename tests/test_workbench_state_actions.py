@@ -94,7 +94,9 @@ def test_hidden_advanced_draft_is_visible_and_resolves_before_compute(windows):
     assert window.compute_button.text() != "Resolve Advanced draft"
 
 
-def test_resume_resolves_advanced_draft_before_applying_other_edits(windows):
+def test_resume_resolves_advanced_draft_before_applying_other_edits(windows, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
     window = windows()
     original = window.project
     window._advanced_dialog()
@@ -105,7 +107,9 @@ def test_resume_resolves_advanced_draft_before_applying_other_edits(windows):
     assert window.resume_selected_run() is None
     assert window.project is original and window._draft_dirty
     assert not window.service.submissions and not expert.isHidden()
+    monkeypatch.setattr(QMessageBox, "question", lambda *_args: QMessageBox.StandardButton.Cancel)
     window._reload_expert()
+    assert window.project is original and window._draft_dirty
 
 
 def test_unavailable_connected_wire_row_does_not_display_calculated_metrics(windows, tmp_path):

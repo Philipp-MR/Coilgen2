@@ -684,17 +684,19 @@ class BrowserWorkbench:
 
     def _ready_to_submit(self):
         if self.server.state.groups_dirty:
+            self.server.state.groups_open = True
             self._notify("Apply or revert the pending Groups & circuits plan first.", "warning")
             return False
         if self._advanced_has_edits():
+            self.server.state.advanced_dialog = True
+            self.setup.focus("advanced")
             self._notify("Apply or cancel the advanced parameter edits first.", "warning")
             return False
-        if not self.setup.apply():
-            return False
         if self._check_edits():
+            self.server.state.settings_dialog = True
             self._notify("Apply or discard the pending edits in Model settings first.", "warning")
             return False
-        return True
+        return self.setup.apply()
 
     def _select_channel(self, channel_id):
         if channel_id and channel_id != self.session.active_channel_id:
@@ -950,11 +952,25 @@ class BrowserWorkbench:
 
     @_bind("undo")
     def undo(self):
+        if not self._history_edit_ready():
+            return
         self._guard(self.session.undo)
 
     @_bind("redo")
     def redo(self):
+        if not self._history_edit_ready():
+            return
         self._guard(self.session.redo)
+
+    def _history_edit_ready(self):
+        if self._advanced_has_edits() or self.server.state.groups_dirty or self._check_edits():
+            self._ready_to_submit()
+            return False
+        if self.server.state.setup_dirty:
+            self.setup.focus("geometry")
+            self._notify("Preview or revert the pending setup edits before Undo or Redo.", "info")
+            return False
+        return True
 
     def apply_fix(self, key):
         """Apply a tip's one-click fix as one undoable revision."""
@@ -1023,7 +1039,11 @@ class BrowserWorkbench:
         project = self.session.project
         if project is None:
             return
-        if self.server.state.setup_dirty and not self.setup.apply():
+        if self._advanced_has_edits():
+            self.server.state.advanced_dialog = True
+            self.setup.focus("advanced")
+            return
+        if not self._ready_to_submit():
             return
         project = self.session.project
         state = self.server.state
@@ -1038,6 +1058,7 @@ class BrowserWorkbench:
         state.advanced_category = category if isinstance(category, str) else ""
         state.advanced_key_search = state.advanced_category
         self._refresh_advanced_entries()
+        self.setup.focus("advanced")
 
     def _refresh_advanced_entries(self):
         state = self.server.state
@@ -2163,6 +2184,9 @@ class BrowserWorkbench:
         )
 
         server, ctrl = self.server, self.server.controller
+        from .menus import menu_action
+
+        ctrl.menu_action = partial(menu_action, self)
         ctrl.load_template = self.load_template
         ctrl.open_workspace_project = self.open_workspace_project
         ctrl.discard_edits = self._refresh_settings

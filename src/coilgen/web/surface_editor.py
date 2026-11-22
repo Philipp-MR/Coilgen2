@@ -55,6 +55,8 @@ class BrowserSurfaceEditor:
             self.refresh()
 
     async def open(self):
+        if not self.browser._ready_to_submit():
+            return
         self.state.surface_open = True
         if self.busy:
             return

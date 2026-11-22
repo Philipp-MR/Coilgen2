@@ -192,7 +192,9 @@ def test_workbench_queues_in_task_and_reconstructs_manifest_without_duplicating_
         ),
     )
     monkeypatch.setattr(
-        window, "_gradient_task", lambda operation, callback, label: captured.append((operation, callback, label))
+        window,
+        "_gradient_task",
+        lambda operation, callback, label, **_options: captured.append((operation, callback, label)),
     )
     monkeypatch.setattr(window, "poll_jobs", lambda: None)
     monkeypatch.setattr(window, "_focus_job", lambda *_args, **_kwargs: None)
