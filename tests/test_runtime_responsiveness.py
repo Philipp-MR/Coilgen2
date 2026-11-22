@@ -1,6 +1,5 @@
 """Slow evidence verification cannot freeze job queries or cancellation."""
 
-import queue
 import threading
 import time
 
@@ -9,26 +8,10 @@ import pytest
 from coilgen.progress import ProgressReporter, progress_context, progress_scope
 from coilgen.research.jobs import JobManager, _record_progress
 
-
-class _Events(queue.Queue):
-    def close(self):
-        pass
-
-
-class _Process:
-    alive = True
-    exitcode = 0
-
-    def is_alive(self):
-        return self.alive
-
-    def terminate(self):
-        self.alive = False
-
-    kill = terminate
-
-    def join(self, timeout=None):
-        pass
+from _coilgen_test_support.runtime_responsiveness import (
+    _Events as _Events,
+    _Process as _Process,
+)
 
 
 def _active_job(jobs, *, completed=False):

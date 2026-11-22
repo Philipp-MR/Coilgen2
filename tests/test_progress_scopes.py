@@ -8,7 +8,7 @@ import pytest
 from coilgen.pipeline import CoilGenPipeline
 from coilgen.progress import DesignCancelled, ProgressReporter, progress_context, progress_scope
 from coilgen.research.jobs import _record_progress
-from test_pipeline_stages import config
+from _coilgen_test_support.pipeline_stages import config
 
 
 def test_nested_work_allocations_retain_unknown_activity_and_exact_counts():

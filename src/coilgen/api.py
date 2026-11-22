@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import coilgen as _coilgen
 
-# Ruff cannot statically resolve the eager namespace binding below.
+# Ruff cannot statically resolve the lazy namespace binding below.
 # ruff: noqa: F822
 
 __all__ = [
@@ -220,6 +220,14 @@ __all__ = [
     "validate_solenoid_against_analytical_formulas",
 ]
 
-# Bind eagerly so direct attributes, import-star and introspection stay ordinary.
-globals().update({name: getattr(_coilgen, name) for name in __all__})
-del _coilgen
+
+def __getattr__(name):
+    if name not in __all__:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(_coilgen, name)
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(__all__))

@@ -1,6 +1,6 @@
 """Channel status uses validated portable evidence before a channel is opened."""
 
-import test_workbench_usability as usability
+from _coilgen_test_support import workbench_usability as usability
 
 from coilgen.application import ProjectAssembly, ProjectDocument
 from coilgen.application.bundles import RunArchive

@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import test_native_workbench as native
+from _coilgen_test_support import native_workbench as native
 
 from coilgen.application import ProjectDocument
 from coilgen.application.presets import preset_config

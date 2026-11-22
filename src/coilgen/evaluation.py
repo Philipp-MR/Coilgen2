@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from .config import CoilGenConfig
+from .config_semantics import normalize_field_budget_metric
 from .conductor_geometry import conductor_trace
 from .contours import contour_evaluation_points
 from .engineering_metrics import fit_bz_field_quality
@@ -208,14 +209,13 @@ def layout_target_residual_diagnostics(
     active = mask & np.isfinite(weights) & (weights > 0.0)
     finite = active & np.isfinite(target_values) & np.isfinite(layout_values)
     invalid_sample_count = int(np.count_nonzero(active & ~finite))
-    metric_key = str(getattr(config, "target_error_constraint_metric", "std"))
-    metric_key = metric_key.strip().lower().replace("-", "_")
+    metric_key = normalize_field_budget_metric(getattr(config, "target_error_constraint_metric", "std"))
     std_limit = max(float(getattr(config, "layout_target_error_std_limit_T", 0.0)), 0.0)
     rms_limit = max(float(getattr(config, "layout_target_error_rms_limit_T", 0.0)), 0.0)
-    if metric_key in {"std", "standard_deviation", "homogeneity"} or (std_limit > 0.0 and rms_limit <= 0.0):
+    if metric_key == "std" or (std_limit > 0.0 and rms_limit <= 0.0):
         metric = "std"
         limit = std_limit
-    elif metric_key in {"rms", "root_mean_square"} or rms_limit > 0.0:
+    elif metric_key == "rms" or rms_limit > 0.0:
         metric = "rms"
         limit = rms_limit
     else:

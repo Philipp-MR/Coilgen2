@@ -6,7 +6,7 @@ import pytest
 
 from coilgen.config import CoilGenConfig
 from coilgen.geometry import normalize_mesh
-from coilgen import layout
+from coilgen import layout, loop_topology
 from coilgen.manufacturing import create_swept_coil_meshes
 from coilgen.models import CoilPart, ContourLine, Mesh, WirePath
 from coilgen.progress import DesignCancelled, ProgressReporter, progress_context, progress_scope
@@ -68,8 +68,8 @@ def test_topology_nested_tasks_cannot_finish_before_remaining_supports(monkeypat
         progress.report(100, "Nested inclusion complete")
         return np.zeros((len(part.contour_lines), len(part.contour_lines)), bool)
 
-    monkeypatch.setattr(layout, "validate_intrinsic_topology_inputs", validate)
-    monkeypatch.setattr(layout, "build_intrinsic_loop_inclusion_matrix", inclusion)
+    monkeypatch.setattr(loop_topology, "validate_intrinsic_topology_inputs", validate)
+    monkeypatch.setattr(loop_topology, "build_intrinsic_loop_inclusion_matrix", inclusion)
     with progress_context(events.append), progress_scope(0, 100, overall=True):
         layout.topological_loop_grouping(parts, CoilGenConfig(topological_grouping_method="legacy"), ProgressReporter())
     assert arrivals == [0, 50]

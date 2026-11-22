@@ -10,7 +10,7 @@ import pytest
 from coilgen.application.project import ProjectDocument
 from coilgen.pipeline import CoilGenPipeline
 from coilgen.pipeline_stages import PipelineCheckpoint
-from test_pipeline_stages import config
+from _coilgen_test_support.pipeline_stages import config
 
 
 def test_pre_editor_project_preserves_identity_and_requires_other_settings():

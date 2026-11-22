@@ -2,8 +2,11 @@
 
 from PySide6.QtCore import QCoreApplication, QEvent
 
-from test_native_workbench import application as application, scientific_viewport as scientific_viewport
-from test_workbench_usability import Queue, Service
+from _coilgen_test_support.native_workbench import (
+    application as application,
+    scientific_viewport as scientific_viewport,
+)
+from _coilgen_test_support.workbench_usability import Queue, Service
 
 from coilgen.application.system_presets import system_assembly
 from coilgen.gui.workbench import CoilGenWorkbench

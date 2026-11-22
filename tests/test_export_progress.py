@@ -1,7 +1,7 @@
 """Export progress follows verified staging and exclusive publication."""
 
 import pytest
-from test_application_cad import _run
+from _coilgen_test_support.application_cad import _run
 
 from coilgen.application.cad import export_geometry
 from coilgen.application.service import DesignService

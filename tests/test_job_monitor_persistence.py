@@ -8,7 +8,7 @@ import pytest
 
 from coilgen.research import jobs as runtime
 from coilgen.research.jobs import JobManager, RuntimePolicy
-from test_runtime_responsiveness import _Events, _Process
+from _coilgen_test_support.runtime_responsiveness import _Events, _Process
 
 
 def _wait(predicate, timeout=5):

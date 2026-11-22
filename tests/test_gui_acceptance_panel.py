@@ -17,6 +17,10 @@ from coilgen.application.diagnostics import ProblemIssue
 from coilgen.gui.acceptance_panel import AcceptancePanel
 from coilgen.gui.colors import _contrast, item_foreground
 
+from _coilgen_test_support.gui_acceptance_panel import (
+    _record as _record,
+)
+
 
 @pytest.fixture(scope="module")
 def application():
@@ -30,35 +34,6 @@ def panel(application):
     widget.close()
     widget.deleteLater()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-
-
-def _record(name="first", *, failed=True):
-    return SimpleNamespace(
-        directory=Path(name),
-        metadata={
-            "project_id": "owner",
-            "project_revision": 4,
-            "artifacts": [{"name": "request.json", "sha256": "0" * 64}],
-            "pipeline_stage": "evaluated",
-            "summary": {"sheet_accepted": True, "scope": "fabrication_review"},
-            "constraints": [],
-            "wire_fields": {},
-            "pipeline_sweeps": {"checks_passed": not failed, "body_count": 1},
-            "fabrication": {
-                "ready": not failed,
-                "paths": [
-                    {
-                        "body_id": "body1",
-                        "diagnostics": {
-                            "sweep_capsule_min_centerline_distance_m": 0.001,
-                            "sweep_required_centerline_clearance_m": 0.003,
-                            "sweep_capsule_clearance_violation": failed,
-                        },
-                    }
-                ],
-            },
-        },
-    )
 
 
 def _issue(*, locatable=True, body="body1"):

@@ -14,7 +14,7 @@ from coilgen.application import DesignService, RunArchive
 from coilgen.persistence import atomic_json
 from coilgen.application.portable import load_bundle
 
-from test_application_project_bundle import _prepared_document
+from _coilgen_test_support.application_project_bundle import _prepared_document
 
 
 @pytest.fixture

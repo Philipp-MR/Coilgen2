@@ -6,15 +6,18 @@ from unittest.mock import Mock
 
 import pytest
 
-import test_workbench_usability as usability
+from _coilgen_test_support import workbench_usability as usability
 
 from PySide6.QtCore import QCoreApplication, Qt
 from PySide6.QtWidgets import QHeaderView
 
 from coilgen.application import ProjectDocument
 from coilgen.application.presets import preset_config
-from coilgen.application.service import RunRecord
 from coilgen.gui.workbench import CoilGenWorkbench
+
+from _coilgen_test_support.workbench_execution_feedback import (
+    _record as _record,
+)
 
 
 application = usability.application
@@ -27,26 +30,6 @@ def _settle_completion(window):
         QCoreApplication.processEvents()
         time.sleep(0.005)
     assert not window._run_load_tasks
-
-
-def _record(window, directory):
-    return RunRecord(
-        directory,
-        {
-            "name": window.project.name,
-            "project_id": window.project.id,
-            "project_revision": window.project.revision,
-            "project_fingerprint": window.project.fingerprint,
-            "project_model_fingerprint": window.project.model_fingerprint,
-            "summary": {"scope": "continuous_sheet", "accepted": False, "sheet_accepted": False},
-            "constraints": [],
-            "wire_fields": {},
-            "fabrication": None,
-            "warnings": [],
-            "artifacts": [],
-        },
-        {},
-    )
 
 
 def _complete(window):

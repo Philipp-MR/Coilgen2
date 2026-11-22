@@ -20,7 +20,7 @@ from coilgen.application.history import RunHistoryStore
 from coilgen.gui import project_loading
 from coilgen.gui.project_loading import ProjectOpenTask, load_document, prepare_history
 
-from test_application_project_bundle import _legacy_project, _prepared_document
+from _coilgen_test_support.application_project_bundle import _legacy_project, _prepared_document
 
 
 @pytest.fixture(scope="module")

@@ -8,7 +8,7 @@ import pytest
 
 from coilgen.models import Mesh
 from coilgen.surface_distance import SurfaceGeodesicSolver, _point_triangle_distance_sq
-from test_geodesic_cache import _grid_mesh
+from _coilgen_test_support.geodesic_cache import _grid_mesh
 
 
 def _length(points):

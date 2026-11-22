@@ -11,7 +11,7 @@ from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QStyle, QStyleOptionButton
 
-import test_native_workbench as native_tests
+from _coilgen_test_support import native_workbench as native_tests
 
 application = native_tests.application
 scientific_viewport = native_tests.scientific_viewport

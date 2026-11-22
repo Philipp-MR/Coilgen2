@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from PySide6.QtCore import QThreadPool
 
-import test_workbench_project_bundle as bundle_tests
+from _coilgen_test_support import workbench_project_bundle as bundle_tests
 from coilgen.application import DesignService, ProjectDocument
 from coilgen.application.design_studies import design_study_state
 from coilgen.application.presets import preset_config

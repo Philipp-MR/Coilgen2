@@ -7,7 +7,7 @@ import pytest
 from PySide6.QtCore import QEventLoop, QPoint, QTimer
 from PySide6.QtWidgets import QDockWidget
 
-from test_workbench_usability import application as application, windows as windows
+from _coilgen_test_support.workbench_usability import application as application, windows as windows
 
 
 def wait_until(predicate, timeout_ms=3000):

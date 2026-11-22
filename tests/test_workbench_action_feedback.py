@@ -13,7 +13,7 @@ from PySide6.QtTest import QTest
 from coilgen.gui import workbench
 from coilgen.gui.readiness import ReadinessIssue, ReadinessReport
 from coilgen.research.storage import result_metadata_digest
-from test_workbench_usability import application as application, windows as windows
+from _coilgen_test_support.workbench_usability import application as application, windows as windows
 
 
 def wait_until(predicate, timeout_ms=3000):

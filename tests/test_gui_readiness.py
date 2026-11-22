@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-import test_native_workbench as workbench_tests
+from _coilgen_test_support import native_workbench as workbench_tests
 from coilgen.application import ProjectDocument
 from coilgen.application import preflight
 from coilgen.application.assets import mesh_asset

@@ -17,8 +17,8 @@ from PySide6.QtWidgets import QFileDialog
 from coilgen.application import DesignService, ProjectAssembly, ProjectDocument, RunArchive
 from coilgen.application.presets import preset_config
 from coilgen.gui import project_loading, workbench
-from test_workbench_project_lifecycle import _owned_run
-from test_workbench_usability import application as application, windows as windows
+from _coilgen_test_support.workbench_project_lifecycle import _owned_run
+from _coilgen_test_support.workbench_usability import application as application, windows as windows
 
 
 def wait_until(predicate, timeout_ms=10000):
@@ -205,7 +205,7 @@ def test_async_collection_open_restores_saved_active_channel_and_history_scope(w
 
 
 def test_newer_source_integrity_failure_cannot_publish_older_positive_reuse(windows, tmp_path, monkeypatch):
-    from test_application_project_bundle import _prepared_document
+    from _coilgen_test_support.application_project_bundle import _prepared_document
 
     project, _record, archive = _prepared_document(tmp_path)
     project = project.with_results((archive,), session={"selected_run_id": archive.id})

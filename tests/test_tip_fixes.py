@@ -129,7 +129,7 @@ def test_browser_shows_apply_button_and_applies_fix(tmp_path):
 def qt_window(tmp_path):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     pytest.importorskip("PySide6")
-    import test_native_workbench as native
+    from _coilgen_test_support import native_workbench as native
     from PySide6.QtCore import QCoreApplication, QEvent
     from PySide6.QtWidgets import QApplication
 

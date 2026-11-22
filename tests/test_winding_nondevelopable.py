@@ -7,7 +7,7 @@ import pytest
 from coilgen.geometry import build_spherical_cap_mesh
 from coilgen.interconnection_editor import InterconnectionEditor
 from coilgen.models import CoilPart, WirePath, WireSegmentOwner
-from test_workbench_usability import application as application
+from _coilgen_test_support.workbench_usability import application as application
 
 
 @pytest.fixture(params=[1.0, 0.7], ids=["hemisphere", "ellipsoidal-cap"])
@@ -60,7 +60,7 @@ def test_native_curved_surface_disables_flat_and_seam(application, curved_part, 
     from types import SimpleNamespace
     from coilgen.config import CoilGenConfig
     from coilgen.gui.interconnection_editor import InterconnectionEditorDialog
-    from test_gui_interconnection_editor import Viewport, session_from_case, close
+    from _coilgen_test_support.gui_interconnection_editor import Viewport, session_from_case, close
 
     session = session_from_case(SimpleNamespace(part=curved_part, config=CoilGenConfig()), tmp_path)
     dialog = InterconnectionEditorDialog(session, viewport_factory=Viewport)

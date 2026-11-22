@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
 from pathlib import Path
 
@@ -12,86 +11,25 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QCoreApplication, QEvent, Signal
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtCore import QCoreApplication, QEvent
+from PySide6.QtWidgets import QWidget
 
 from coilgen.application import ProjectAssembly, ProjectDocument
-from coilgen.application.presets import EXAMPLE_TITLES, preset_config, preset_study
-from coilgen.gui.workbench import CoilGenWorkbench
+from coilgen.application.presets import preset_config, preset_study
 
+from _coilgen_test_support.native_workbench import (
+    FakeJobs as FakeJobs,
+    RenderlessPlotter as RenderlessPlotter,
+    application as application,
+    scientific_viewport as scientific_viewport,
+)
 
-class FakeViewport(QWidget):
-    selected = Signal(str)
-
-    def render_config(self, config):
-        self.config = config
-
-    def display_run(self, arrays, metadata=None, *, follow_latest=False):
-        self.arrays = arrays
-        self.metadata = metadata
-
-
-class FakeJobs:
-    def __init__(self, directory):
-        self.directory = Path(directory)
-        self.states = []
-        self.cancelled = []
-
-    def list(self):
-        return [dict(state) for state in self.states]
-
-    def cancel(self, id_):
-        self.cancelled.append(id_)
-        self.states[0]["status"] = "cancelled"
-
-
-@dataclass
-class FakeRun:
-    directory: Path
-    metadata: dict
-    arrays: dict
-
-
-class FakeService:
-    def __init__(self):
-        self.submissions = []
-        self.record = None
-
-    def submit(self, project, jobs, **controls):
-        self.submissions.append((project, controls))
-        state = {
-            "id": "f" * 32,
-            "name": project.name,
-            "status": "queued",
-            "stage": "Waiting for worker",
-            "project_revision": project.revision,
-            "project_fingerprint": project.fingerprint,
-        }
-        jobs.states.append(state)
-        return dict(state)
-
-    def load_run(self, path):
-        return self.record
-
-
-@pytest.fixture(scope="module")
-def application():
-    return QApplication.instance() or QApplication(["coilgen-gui-test"])
-
-
-@pytest.fixture
-def window(application, tmp_path):
-    jobs = FakeJobs(tmp_path / "jobs")
-    service = FakeService()
-    project = ProjectDocument.from_config(preset_config(), name=EXAMPLE_TITLES["cylinder"]).update_study(preset_study())
-    instance = CoilGenWorkbench(project, jobs=jobs, service=service, viewport_factory=FakeViewport)
-    instance.timer.stop()
-    yield instance
-    instance.undo_stack.setClean()
-    instance.close()
-    instance.undo_stack.clear()
-    instance.deleteLater()
-    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+from _coilgen_test_support.native_workbench import (
+    FakeRun as FakeRun,
+    FakeService as FakeService,
+    FakeViewport as FakeViewport,
+    window as window,
+)
 
 
 def test_physical_edit_undo_redo_and_project_roundtrip(window, tmp_path):
@@ -594,7 +532,7 @@ def test_resume_and_export_use_verified_selected_run(window, tmp_path):
     from dataclasses import asdict, replace
     from coilgen.pipeline import CoilGenPipeline
     from coilgen.persistence import file_digest
-    from test_pipeline_stages import config
+    from _coilgen_test_support.pipeline_stages import config
 
     window.apply_config(asdict(config()))
     directory = tmp_path / "run"
@@ -631,80 +569,6 @@ def test_resume_and_export_use_verified_selected_run(window, tmp_path):
     assert (destination / "field.csv").read_bytes() == field.read_bytes()
     with pytest.raises(FileExistsError):
         window.export_run_artifacts(destination)
-
-
-class RenderlessPlotter(QWidget):
-    """Exercise VTK datasets and Qt controls without an OpenGL context."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.interactor = self
-        self.iren = object()
-        self.camera_position = [(1, 1, 1), (0, 0, 0), (0, 0, 1)]
-        self.plane_widgets = []
-        self._plane_clipped_meshes = []
-        self.meshes = []
-        self.picked_point = None
-        self.closed = False
-
-    def __getattr__(self, name):
-        if name in {
-            "set_background",
-            "enable_parallel_projection",
-            "disable_parallel_projection",
-            "add_axes",
-            "show_grid",
-            "render",
-            "reset_camera",
-            "view_isometric",
-            "view_xy",
-            "view_xz",
-            "view_yz",
-        }:
-            return lambda *args, **kwargs: None
-        raise AttributeError(name)
-
-    def enable_mesh_picking(self, **kwargs):
-        self.pick = kwargs["callback"]
-
-    def add_mesh(self, mesh, **kwargs):
-        actor = object()
-        self.meshes.append((mesh, kwargs, actor))
-        return actor
-
-    def add_mesh_clip_plane(self, mesh, **kwargs):
-        self.plane_widgets.append(object())
-        self.plane_clipped_meshes.append(mesh)
-
-    @property
-    def plane_clipped_meshes(self):
-        return self._plane_clipped_meshes
-
-    def clear_plane_widgets(self):
-        self.plane_widgets.clear()
-
-    def clear(self):
-        self.meshes.clear()
-
-    def close(self):
-        self.closed = True
-
-    def render(self):
-        pass
-
-
-@pytest.fixture
-def scientific_viewport(application, monkeypatch):
-    pytest.importorskip("pyvista")
-    pyvistaqt = pytest.importorskip("pyvistaqt")
-    monkeypatch.setattr(pyvistaqt, "QtInteractor", RenderlessPlotter)
-    from coilgen.gui.viewport import ScientificViewport
-
-    viewport = ScientificViewport(synchronous_preview=True)
-    yield viewport
-    viewport.close()
-    viewport.deleteLater()
-    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 def test_scientific_viewport_units_sampling_clipping_and_picking(scientific_viewport):

@@ -280,7 +280,7 @@ def source_catalog(record, *, request=None, progress=None, cancel_check=None) ->
     b0 = record.metadata.get("config", {}).get("b_0_direction", (0, 0, 1))
     spec = None
     if request is not None and request.get("requirements") is not None:
-        from .research_requirements import ResearchRequirements
+        from ..research_requirements import ResearchRequirements
 
         spec = ResearchRequirements.from_dict(request["requirements"])
     suppression_count = None

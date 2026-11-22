@@ -6,9 +6,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-import test_gui_live_preview as live
-import test_native_workbench as native
-import test_viewport_system_meshes as system
+from _coilgen_test_support import gui_live_preview as live
+from _coilgen_test_support import native_workbench as native
+from _coilgen_test_support import viewport_system_meshes as system
 
 application = native.application
 scientific_viewport = native.scientific_viewport

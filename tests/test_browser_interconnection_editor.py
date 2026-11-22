@@ -4,58 +4,19 @@ import asyncio
 from copy import deepcopy
 from dataclasses import replace
 import json
-from types import SimpleNamespace
 
 import numpy as np
-import pytest
 
 from coilgen.application.interconnection_editor import WindingEditorSession, winding_model_changes
 from coilgen.interconnection_validation import EditorValidation
-from coilgen.models import TargetField
 from coilgen.pipeline_stages import PipelineCheckpoint, PipelineStage, PipelineState
-from coilgen.web.interconnection_editor import BrowserWindingEditor
-from test_interconnection_editor import routed as routed, inner_cut, surface_connection
+from _coilgen_test_support.interconnection_editor import routed as routed, inner_cut, surface_connection
 
-
-class State(dict):
-    def __getattr__(self, key):
-        return self.get(key)
-
-    def __setattr__(self, key, value):
-        self[key] = value
-
-    def flush(self):
-        pass
-
-
-@pytest.fixture
-def browser_editor(routed, tmp_path):
-    coords = np.array([[0, 0, 0.025], [0.003, 0, 0.025]])
-    target = TargetField(coords, np.full_like(coords, 1e-6), np.ones(2), np.zeros(2, bool), np.zeros(2, int))
-    state = PipelineState(parts=[routed.part], target_field=target, combined_mesh=routed.part.mesh, sf_b_field=target.b)
-    checkpoint = PipelineCheckpoint(PipelineStage.ROUTED, state, routed.config, tmp_path)
-    model = SimpleNamespace(id="project", config=checkpoint.config)
-    applied = []
-    browser = SimpleNamespace(
-        server=SimpleNamespace(state=State()),
-        session=SimpleNamespace(
-            workspace=tmp_path, project=model, active_channel_id="channel", apply_config=applied.append
-        ),
-        exports=tmp_path / "exports",
-        _advanced_has_edits=lambda: False,
-        record=None,
-    )
-    browser.exports.mkdir()
-    adapter = BrowserWindingEditor(browser)
-    adapter.session = WindingEditorSession(checkpoint)
-    adapter.owner = adapter._owner()
-    adapter.saved_identity = adapter.session.identity
-    adapter.refresh()
-    return adapter, applied
-
-
-def command(adapter, kind, **kwargs):
-    return adapter.action(dict(kind=kind, identity=adapter.session.identity, circuit=adapter.circuit, **kwargs))
+from _coilgen_test_support.browser_interconnection_editor import (
+    State as State,
+    browser_editor as browser_editor,
+    command as command,
+)
 
 
 def test_apply_requires_the_saved_final_field_budget(browser_editor):
@@ -287,7 +248,7 @@ def test_worker_resolved_threads_do_not_make_the_source_model_stale(browser_edit
 
 
 def test_browser_sketch_reconnect_and_bridge_messages(browser_editor):
-    from test_winding_sketch import crossing_editor
+    from _coilgen_test_support.winding_sketch import crossing_editor
 
     adapter, _ = browser_editor
 

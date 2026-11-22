@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-import test_native_workbench as native
-from test_viewport_mouse_navigation import mouse
+from _coilgen_test_support import native_workbench as native
+from _coilgen_test_support.viewport_mouse_navigation import mouse
 
 from PySide6.QtCore import QEvent, Qt
 

@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import pytest
-import test_workbench_usability as usability
+from _coilgen_test_support import workbench_usability as usability
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QFontDatabase

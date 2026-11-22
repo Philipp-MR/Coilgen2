@@ -6,8 +6,8 @@ import pytest
 from coilgen.application.cad import GeometryOption, geometry_option_label
 from coilgen.application.scene_views import VIEW_PRESETS
 from coilgen.web.result_display import result_overview
-from test_gradient_headline import _metadata, _record
-from test_view_clarity import pair
+from _coilgen_test_support.gradient_headline import _metadata, _record
+from _coilgen_test_support.view_clarity import pair
 
 
 def test_results_board_does_not_repeat_what_the_gradient_row_states(tmp_path):

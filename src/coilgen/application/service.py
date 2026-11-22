@@ -84,7 +84,7 @@ class DesignService:
 
         config = project.config
         if project.study.get("requirements") is not None:
-            from .research_requirements import requirements_validation_config
+            from ..research_requirements import requirements_validation_config
 
             config = requirements_validation_config(config)
         return validate_config(config, project_root=project.project_root)

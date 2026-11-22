@@ -6,7 +6,7 @@ import shutil
 
 import pytest
 
-import test_workbench_usability as usability_tests
+from _coilgen_test_support import workbench_usability as usability_tests
 from coilgen.application import ASSEMBLY_SCHEMA, DesignService, ProjectAssembly
 from coilgen.application.system_presets import SYSTEM_EXAMPLE_TITLES
 from coilgen.application.targets import recognize_solid_harmonic_target

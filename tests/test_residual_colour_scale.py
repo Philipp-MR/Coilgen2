@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-import test_native_workbench as workbench_tests
+from _coilgen_test_support import native_workbench as workbench_tests
 from coilgen.gui.viewport import _signed_residual_limits
 
 application = workbench_tests.application

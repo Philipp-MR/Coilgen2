@@ -4,8 +4,8 @@ from copy import deepcopy
 import time
 
 import pytest
-import test_workbench_usability as usability
-from test_native_workbench import FakeJobs
+from _coilgen_test_support import workbench_usability as usability
+from _coilgen_test_support.native_workbench import FakeJobs
 
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtTest import QTest

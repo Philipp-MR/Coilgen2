@@ -3,7 +3,7 @@
 from dataclasses import replace
 
 import pytest
-import test_workbench_usability as usability
+from _coilgen_test_support import workbench_usability as usability
 
 from coilgen.application import ProjectDocument
 from coilgen.application.presets import preset_config

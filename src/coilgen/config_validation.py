@@ -6,6 +6,14 @@ from typing import Any, Iterable
 
 import numpy as np
 
+from .config_semantics import (
+    OPTIMIZATION_METHOD_ALIASES,
+    OPTIMIZATION_METHOD_INPUTS,
+    OBJECTIVE_MODE_INPUTS,
+    FIELD_BUDGET_METRIC_INPUTS,
+    normalize_field_budget_metric,
+    normalize_objective_mode,
+)
 from .config import INTERCONNECTION_AXIS_MODES, CoilGenConfig
 from .design_context import CoilApplication, normalize_design_context
 from .engineering_limits import LEVEL_COUNT_METHODS, ENGINEERING_METHODS, contour_discretization_method
@@ -833,23 +841,7 @@ def _validate_optimization_settings(config: CoilGenConfig, error, warning) -> No
         error,
         "sf_opt_method",
         config.sf_opt_method,
-        {
-            "tikhonov",
-            "tikkonov",
-            "tikhonov_regularized_least_squares",
-            "target_error_constrained_efficiency",
-            "target-error-constrained-efficiency",
-            "efficiency_with_target_error_constraint",
-            "fixed_error_efficiency",
-            "minimum_resistance_subject_to_field_error",
-            "constrained_quadratic",
-            "cvxpy_constrained",
-            "minimum_resistance_constrained",
-            "minimum_resistance_subject_to_field_error_socp",
-            "direct_fixed_error",
-            "socp",
-            "second_order_cone",
-        },
+        OPTIMIZATION_METHOD_INPUTS,
     )
     _enum(
         error,
@@ -877,17 +869,7 @@ def _validate_optimization_settings(config: CoilGenConfig, error, warning) -> No
         error,
         "constrained_quadratic_objective_mode",
         getattr(config, "constrained_quadratic_objective_mode", "balanced"),
-        {
-            "balanced",
-            "resistance",
-            "resistance_plus_penalties",
-            "smoothness_priority",
-            "smoothness-priority",
-            "smoothest_feasible",
-            "contourability_priority",
-            "minimax_current_density",
-            "minimax-current-density",
-        },
+        OBJECTIVE_MODE_INPUTS,
     )
     _enum(
         error,
@@ -908,18 +890,7 @@ def _validate_optimization_settings(config: CoilGenConfig, error, warning) -> No
         error,
         "target_error_constraint_metric",
         config.target_error_constraint_metric,
-        {
-            "norm",
-            "l2",
-            "l2_norm",
-            "residual_norm",
-            "rms",
-            "root_mean_square",
-            "std",
-            "standard_deviation",
-            "standard-deviation",
-            "homogeneity",
-        },
+        FIELD_BUDGET_METRIC_INPUTS,
     )
     _enum(
         error,
@@ -1000,10 +971,10 @@ def _validate_optimization_settings(config: CoilGenConfig, error, warning) -> No
     target_error_percent = _finite_float(config.target_error_tolerance_percent)
     target_error_absolute = _finite_float(config.target_error_tolerance_absolute_T)
     has_absolute_norm_limit = bool(np.isfinite(target_error_absolute) and target_error_absolute > 0.0)
-    target_metric = str(config.target_error_constraint_metric).strip().lower().replace("-", "_")
-    has_absolute_field_limit = (
-        target_metric in {"std", "standard_deviation", "homogeneity"} and float(config.target_error_std_limit_T) > 0.0
-    ) or (target_metric in {"rms", "root_mean_square"} and float(config.target_error_rms_limit_T) > 0.0)
+    target_metric = normalize_field_budget_metric(config.target_error_constraint_metric)
+    has_absolute_field_limit = (target_metric == "std" and float(config.target_error_std_limit_T) > 0.0) or (
+        target_metric == "rms" and float(config.target_error_rms_limit_T) > 0.0
+    )
     if not np.isfinite(target_error_percent) or target_error_percent < 0.0:
         error("target_error_tolerance_percent", "Target error tolerance percent must be a finite non-negative number.")
     elif target_error_percent == 0.0 and not has_absolute_norm_limit and not has_absolute_field_limit:
@@ -1037,17 +1008,10 @@ def _validate_optimization_settings(config: CoilGenConfig, error, warning) -> No
         value = _finite_float(getattr(config, name, 0.0))
         if not np.isfinite(value) or value < 0.0:
             error(name, f"{name} must be finite and non-negative.")
-    objective_mode = objective_mode.strip().lower().replace("-", "_")
+    objective_mode = normalize_objective_mode(objective_mode)
     if objective_mode == "minimax_current_density":
-        if str(config.sf_opt_method).lower().replace("-", "_") not in {
-            "constrained_quadratic",
-            "cvxpy_constrained",
-            "minimum_resistance_constrained",
-            "minimum_resistance_subject_to_field_error_socp",
-            "direct_fixed_error",
-            "socp",
-            "second_order_cone",
-        }:
+        method = str(config.sf_opt_method).lower().replace("-", "_")
+        if OPTIMIZATION_METHOD_ALIASES.get(method) != "constrained_quadratic":
             error("sf_opt_method", "Minimax current density requires the direct constrained_quadratic method.")
         for name in ("stream_function_smoothness_factor", "turn_spacing_regularization_factor"):
             if _finite_float(getattr(config, name, 0.0)) > 0.0:
@@ -1058,7 +1022,7 @@ def _validate_optimization_settings(config: CoilGenConfig, error, warning) -> No
             "constrained_quadratic_resistance_tiebreak_factor",
             "Constrained-quadratic resistance tie-break factor must be finite and non-negative.",
         )
-    elif objective_mode in {"smoothness_priority", "smoothest_feasible", "contourability_priority"}:
+    elif objective_mode == "smoothness_priority":
         if tiebreak <= 0.0:
             error(
                 "constrained_quadratic_resistance_tiebreak_factor",

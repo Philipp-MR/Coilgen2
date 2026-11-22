@@ -6,7 +6,7 @@ from importlib.resources import files
 
 import pytest
 
-from test_workbench_usability import application as application, windows as windows
+from _coilgen_test_support.workbench_usability import application as application, windows as windows
 
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QPixmap

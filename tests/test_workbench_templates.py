@@ -2,7 +2,7 @@
 
 import pytest
 
-import test_workbench_usability as usability_tests
+from _coilgen_test_support import workbench_usability as usability_tests
 from coilgen.application import ProjectDocument
 from coilgen.application.templates import TEMPLATE_SPECS
 from coilgen.gui import workbench

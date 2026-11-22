@@ -388,7 +388,7 @@ def _save_partial_result(
     relative = None
     requirements_review = None
     if request.requirements is not None:
-        from ..application.research_requirements import evaluate_requirements, named_independent_sheet_validation
+        from ..research_requirements import evaluate_requirements, named_independent_sheet_validation
 
         with progress_scope(*work_ranges["validation"], "Reviewing regional checkpoint fields", overall=True):
             requirements_review, requirement_arrays = evaluate_requirements(
@@ -444,7 +444,7 @@ def _save_partial_result(
                 validation_target_T=validation["target_T"],
             )
     if requirements_review is not None:
-        from ..application.research_requirements import requirements_constraint_rows
+        from ..research_requirements import requirements_constraint_rows
 
         constraints.extend(requirements_constraint_rows(requirements_review, include_wire=False))
     sheet_passed = (
@@ -716,7 +716,7 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
     diagnostics = result.regularization_diagnostics
     requirements_review, requirements_arrays = None, {}
     if request.requirements is not None:
-        from ..application.research_requirements import evaluate_requirements, named_independent_sheet_validation
+        from ..research_requirements import evaluate_requirements, named_independent_sheet_validation
 
         with progress_scope(*work_ranges["validation"], "Checking named regions and physical poses", overall=True):
             requirements_review, requirements_arrays = evaluate_requirements(
@@ -763,7 +763,7 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
         }
     )
     if requirements_review is not None:
-        from ..application.research_requirements import requirements_constraint_rows
+        from ..research_requirements import requirements_constraint_rows
 
         constraints.extend(requirements_constraint_rows(requirements_review, include_wire=False))
     sheet_accepted = bool(diagnostics.get("constrained_solver_contract_met", False)) and all(
@@ -1012,7 +1012,7 @@ def _run_design(request: ResearchRequest | dict, output_dir: str | Path, *, thre
                     design_margin=request.design_margin,
                     source_parts=sheet_parts(result),
                 )
-        from ..application.research_requirements import requirements_constraint_rows
+        from ..research_requirements import requirements_constraint_rows
 
         if not (result.input_data.skip_postprocessing and not request.fabricate):
             constraints.extend(

@@ -12,7 +12,7 @@ from coilgen.application.stage_preview import MANIFEST_NAME
 from coilgen.application import ProjectAssembly, ProjectDocument
 from coilgen.gui.design_progress import ComputationIndicator
 
-from test_workbench_usability import (
+from _coilgen_test_support.workbench_usability import (
     application as application,
     prepared_run as prepared_run,
     windows as windows,

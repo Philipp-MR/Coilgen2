@@ -20,8 +20,8 @@ from coilgen.gui.channels_panel import ChannelOverview
 from coilgen.gui.export_panel import GeometryExportPanel
 from coilgen.gui.history import HistoryPanel
 from coilgen.gui.run_context import run_compatibility, run_timestamp
-from test_gui_acceptance_panel import _record as acceptance_record
-from test_gui_export_panel import _options
+from _coilgen_test_support.gui_acceptance_panel import _record as acceptance_record
+from _coilgen_test_support.gui_export_panel import _options
 
 
 @pytest.fixture(scope="module")

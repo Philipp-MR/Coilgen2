@@ -9,11 +9,13 @@ import pytest
 pytest.importorskip("PySide6")
 from coilgen.application import DesignService, ProjectAssembly, ProjectDocument
 from coilgen.application.presets import preset_config
-from coilgen.gui.workbench import CoilGenWorkbench
 
-import test_native_workbench as native
 
-application = native.application
+from _coilgen_test_support.workbench_project_bundle import (
+    _close as _close,
+    _window as _window,
+    application as application,
+)
 
 
 @pytest.mark.parametrize("ext", (".coilgen", ".coilgen.json"))
@@ -29,22 +31,6 @@ def test_desktop_launcher_opens_same_saved_formats_as_the_file_menu(tmp_path, mo
     assert cli.main([str(path), "--background"]) == 0
     assert opened[0][0].fingerprint == document.fingerprint
     assert opened[0][1]["project_path"] == path and opened[0][1]["background"]
-
-
-def _window(project, jobs_directory):
-    window = CoilGenWorkbench(
-        project=project,
-        jobs=native.FakeJobs(jobs_directory),
-        service=DesignService(),
-        viewport_factory=native.FakeViewport,
-    )
-    window.timer.stop()
-    return window
-
-
-def _close(window):
-    window.undo_stack.setClean()
-    window.close()
 
 
 @pytest.mark.parametrize("collection", (False, True))
@@ -87,7 +73,7 @@ def test_embedded_restore_failure_keeps_one_clear_diagnostic_and_verified_fallba
     application, tmp_path, monkeypatch, failure_stage
 ):
     from coilgen.application import RunArchive
-    from test_application_project_bundle import _prepared_document
+    from _coilgen_test_support.application_project_bundle import _prepared_document
 
     project, _record, archive = _prepared_document(tmp_path)
     view = {"source": "run", "dataset": "fabricated", "model_node": "results"}
@@ -258,7 +244,7 @@ def test_gui_compact_open_controllers_and_save_as_filter_are_accessible(applicat
 @pytest.mark.parametrize("compact", (False, True))
 def test_inputs_only_export_never_collects_completed_evidence(application, tmp_path, monkeypatch, method, compact):
     from coilgen.application import RunArchive
-    from test_application_project_bundle import _prepared_document
+    from _coilgen_test_support.application_project_bundle import _prepared_document
 
     project, _record, archive = _prepared_document(tmp_path)
     project = project.with_results((archive,), session={"selected_run_id": archive.id})
@@ -292,7 +278,7 @@ def test_inputs_only_export_never_collects_completed_evidence(application, tmp_p
 
 @pytest.mark.parametrize("method", ("export_python", "export_assembly_python"))
 def test_explicit_evidence_export_collects_and_retains_history(application, tmp_path, method):
-    from test_application_project_bundle import _prepared_document
+    from _coilgen_test_support.application_project_bundle import _prepared_document
 
     project, record, archive = _prepared_document(tmp_path)
     window = _window(project, tmp_path / "jobs")

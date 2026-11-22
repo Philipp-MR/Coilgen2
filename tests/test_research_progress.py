@@ -41,7 +41,7 @@ def test_each_completed_array_case_advances_its_allocation_without_changing_fit(
 
 
 def test_regional_field_updates_cover_every_dataset_and_pose_and_cancel_between_chunks(monkeypatch):
-    import coilgen.application.research_requirements as requirements
+    import coilgen.research_requirements as requirements
     import coilgen.evaluation as evaluation
 
     calls = []

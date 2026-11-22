@@ -6,7 +6,6 @@ import re
 import numpy as np
 import pytest
 
-import test_workbench_usability as usability_tests
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QLabel
@@ -17,8 +16,10 @@ from coilgen.geometry import load_mesh_from_config
 from coilgen.gui.conductor_preview import ConductorPreview
 from coilgen.target import define_target_field
 
-application = usability_tests.application
-windows = usability_tests.windows
+from _coilgen_test_support.workbench_target_policies import (
+    application as application,
+    windows as windows,
+)
 
 
 def target_window(windows, **overrides):

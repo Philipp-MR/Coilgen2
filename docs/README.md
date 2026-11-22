@@ -83,6 +83,8 @@ the repository root, where `pyproject.toml` and `Start CoilGen2 GUI.cmd` live.
 - [Installation](INSTALL.md): Python environment setup and dependency options.
 - [Getting Started](GETTING_STARTED.md): recommended Spyder workflow and compact
   user-facing API.
+- [Architecture](ARCHITECTURE.md): numerical ownership, shared sessions,
+  configuration semantics and compatible lazy imports.
 - [Core Concepts](CORE_CONCEPTS.md): support surfaces, target fields, stream
   functions, contours, routed wire paths, and field sources.
 - [Result Interpretation](RESULT_INTERPRETATION.md): efficiency, current, DSV

@@ -13,42 +13,16 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtGui import QFont, QFontDatabase
-from PySide6.QtWidgets import QApplication
 
-from coilgen.application import ProjectDocument
 from coilgen.application.presets import preset_config
 from coilgen.config import OptimizationSettings
 from coilgen.gui.expert_settings import ExpertSettingsDialog
 from coilgen.research.convex import ResearchPhysicsSpec
 
-
-@pytest.fixture(scope="module")
-def application():
-    return QApplication.instance() or QApplication(["expert-settings-test"])
-
-
-@pytest.fixture
-def dialogs(application):
-    created = []
-
-    def make(config=None, callback=None):
-        document = ProjectDocument.from_config(config or preset_config())
-        state = {"document": document, "calls": []}
-
-        def commit(changes, label):
-            state["calls"].append((deepcopy(changes), label))
-            state["document"] = state["document"].update_config(changes)
-            return True
-
-        dialog = ExpertSettingsDialog(config or preset_config(), callback or commit)
-        created.append(dialog)
-        return dialog, state
-
-    yield make
-    for dialog in created:
-        dialog.reject()
-        dialog.deleteLater()
-    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+from _coilgen_test_support.expert_settings import (
+    application as application,
+    dialogs as dialogs,
+)
 
 
 def test_search_matches_native_keys_labels_and_engineering_descriptions(dialogs):

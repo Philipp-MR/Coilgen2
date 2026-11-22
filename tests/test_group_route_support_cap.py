@@ -6,15 +6,15 @@ import numpy as np
 import pytest
 
 from coilgen.config import CoilGenConfig
-from coilgen.geometry import build_spherical_cap_mesh, normalize_mesh, rotation_matrix_by_vector
+from coilgen.geometry import rotation_matrix_by_vector
 from coilgen.group_route_convex_cap import convex_mesh_cap, certify_cap_body
 from coilgen.group_route_support import check_group_route_support_domain, certify_group_route_support
 from coilgen.manufacturing import create_swept_coil_bodies
 from coilgen.models import CoilPart, WirePath, WirePathGeometry
 
-
-def cap():
-    return normalize_mesh(build_spherical_cap_mesh(0.08, np.pi / 2, 24, 8, 0, 0, 1, 0, 0, 0, 0))
+from _coilgen_test_support.group_route_support_cap import (
+    cap as cap,
+)
 
 
 def test_convex_hemisphere_is_verified_from_actual_mesh_and_rigid_transform():

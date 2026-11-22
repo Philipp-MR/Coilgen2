@@ -7,36 +7,19 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QCoreApplication, QEvent, QTimer, Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QDockWidget, QPushButton, QToolBar
+from PySide6.QtWidgets import QDialog, QDialogButtonBox, QDockWidget, QPushButton, QToolBar
 
 from coilgen.application import ProjectDocument
 from coilgen.application.presets import preset_config
 from coilgen.gui.choice_dialogs import GraphicalChoiceCombo
 from coilgen.gui.project_start import NewProjectDialog
-from coilgen.gui.workbench import CoilGenWorkbench
-from test_workbench_usability import Preview, Queue, Service
 
-
-@pytest.fixture(scope="module")
-def application():
-    return QApplication.instance() or QApplication(["workbench-empty-test"])
-
-
-@pytest.fixture
-def window(application, tmp_path):
-    instance = CoilGenWorkbench(jobs=Queue(tmp_path / "jobs"), service=Service(), viewport_factory=Preview)
-    instance.timer.stop()
-    instance.show()
-    application.processEvents()
-    yield instance
-    instance._draft_dirty = False
-    instance.undo_stack.setClean()
-    instance.close()
-    instance.undo_stack.clear()
-    instance.deleteLater()
-    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+from _coilgen_test_support.workbench_empty import (
+    application as application,
+    window as window,
+)
 
 
 def test_empty_startup_has_no_hidden_default_document(window):

@@ -6,9 +6,9 @@ import time
 
 import numpy as np
 import pytest
-import test_workbench_usability as usability
-from test_application_cad import _run
-from test_gui_export_panel import _options, _record
+from _coilgen_test_support import workbench_usability as usability
+from _coilgen_test_support.application_cad import _run
+from _coilgen_test_support.gui_export_panel import _options, _record
 
 from PySide6.QtCore import QCoreApplication, QEvent, QThread, Qt
 from PySide6.QtGui import QDesktopServices

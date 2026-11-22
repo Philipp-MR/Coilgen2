@@ -6,8 +6,8 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-import test_workbench_target_policies as target_tests
-import test_native_workbench as native_tests
+from _coilgen_test_support import workbench_target_policies as target_tests
+from _coilgen_test_support import native_workbench as native_tests
 from coilgen.application import ProjectDocument
 from coilgen.application.presets import preset_config
 

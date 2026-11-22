@@ -5,7 +5,7 @@ from copy import deepcopy
 import numpy as np
 import pytest
 
-from test_axial_ring_cut_symmetry import _fixture
+from _coilgen_test_support.axial_ring_cut_symmetry import _fixture
 from coilgen import layout
 from coilgen.config import CoilGenConfig
 from coilgen.joint_cut_variants import propose_joint_cut_variants

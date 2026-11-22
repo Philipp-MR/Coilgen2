@@ -2,9 +2,9 @@
 
 from unittest.mock import Mock
 
-import test_workbench_usability as usability
-import test_stopped_checkpoint_recovery as recovery
-from test_workbench_completed_run_loading import wait as wait_for
+from _coilgen_test_support import workbench_usability as usability
+from _coilgen_test_support import stopped_checkpoint_recovery as recovery
+from _coilgen_test_support.workbench_completed_run_loading import wait as wait_for
 
 from coilgen.application.reuse import ReusableStage, ReusePlan
 from coilgen.application.service import RunRecord

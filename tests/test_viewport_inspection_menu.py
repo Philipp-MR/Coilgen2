@@ -12,7 +12,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 
-import test_native_workbench as native_tests
+from _coilgen_test_support import native_workbench as native_tests
 
 from coilgen.application.presets import preset_config
 from coilgen.gui.viewport import _preview_data

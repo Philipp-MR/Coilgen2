@@ -13,7 +13,7 @@ from coilgen.geometry import build_cylinder_mesh, normalize_mesh
 from coilgen.manufacturing import _SurfaceProjector
 from coilgen.models import WirePathGeometry
 
-from test_group_route_support_bvh import cylinder, plane
+from _coilgen_test_support.group_route_support_bvh import cylinder, plane
 
 
 def fixture(angle=0.0012, geometry=WirePathGeometry.SURFACE):

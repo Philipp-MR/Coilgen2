@@ -9,7 +9,7 @@ from coilgen.application import DesignService, ProjectDocument
 from coilgen.application.reuse import plan_reuse
 from coilgen.pipeline import CoilGenPipeline
 from coilgen.pipeline_stages import PipelineStage
-from test_pipeline_stages import config
+from _coilgen_test_support.pipeline_stages import config
 
 
 def test_boundary_observer_preserves_script_outputs_and_earlier_state():

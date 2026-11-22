@@ -10,7 +10,7 @@ from coilgen.application.service import RunRecord
 from coilgen.application.stage_preview import publish_stage_preview
 from coilgen.web.app import create_app
 
-from test_stage_previews import DIGEST, checkpoint, request
+from _coilgen_test_support.stage_previews import DIGEST, checkpoint, request
 
 
 def _job(job_id="live-job"):

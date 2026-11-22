@@ -22,7 +22,7 @@ from coilgen.application.service import RunRecord
 from coilgen.attribution import software_attribution
 from coilgen.gui.gradient_tools import ConvergenceDialog, GradientGeometryDialog, MeasuredFieldDialog
 from coilgen.research.jobs import JobManager, RuntimePolicy
-from test_workbench_usability import application as application, windows as windows
+from _coilgen_test_support.workbench_usability import application as application, windows as windows
 
 
 def _project():

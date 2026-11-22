@@ -6,7 +6,7 @@ from coilgen.application.live_preview import StagePreviewWatch, preferred_previe
 from coilgen.application.run_progress import clock, run_progress
 from coilgen.application.stage_preview import MANIFEST_NAME, load_stage_preview, publish_stage_preview
 
-from test_stage_previews import DIGEST, checkpoint, request
+from _coilgen_test_support.stage_previews import DIGEST, checkpoint, request
 
 
 NOW = datetime(2026, 11, 10, 12, 3, 10, tzinfo=timezone.utc)

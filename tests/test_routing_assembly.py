@@ -190,7 +190,7 @@ def test_assembly_rejects_missing_or_duplicated_group_coverage():
 
 
 def _completed_assembly(**kwargs):
-    from test_group_route_support import _swept_circle
+    from _coilgen_test_support.group_route_support import _swept_circle
 
     part, config = _swept_circle(**kwargs)
     part.wire_path.v[-1] = part.wire_path.v[0]

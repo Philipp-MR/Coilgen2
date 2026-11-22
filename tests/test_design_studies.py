@@ -18,8 +18,8 @@ from coilgen.application.design_studies import (
     set_study_notes_batch,
 )
 from coilgen.application.project import _INPUT_FIELDS
-from test_application_project_bundle import _prepared_document
-from test_run_history import write_run
+from _coilgen_test_support.application_project_bundle import _prepared_document
+from _coilgen_test_support.run_history import write_run
 
 
 def test_baseline_and_decision_notes_do_not_change_numerical_identity(tmp_path):

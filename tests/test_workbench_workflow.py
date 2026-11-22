@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import Mock
 
-import test_workbench_usability as usability
+from _coilgen_test_support import workbench_usability as usability
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest

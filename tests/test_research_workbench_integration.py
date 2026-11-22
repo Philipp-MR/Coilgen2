@@ -178,9 +178,9 @@ def test_modeless_spatial_editor_retains_owner_and_rejects_stale_edits(tmp_path,
         window._set_project(duplicate, channel_id=assembly.channels[1].id)
         assert editor.result() == QDialog.DialogCode.Rejected
     elif transition == "stale_accept":
-        # The finish guard also protects against an owner change that bypasses
-        # the normal navigation lifecycle; numerical identity alone is equal.
-        window.project = duplicate
+        # Change the shared model directly, bypassing native navigation callbacks.
+        # The finish guard must distinguish owners with equal numerical identity.
+        window.model.select(assembly.channels[1].id)
         editor.accept()
         assert "belongs to another project" in window.messages.toPlainText()
     elif transition == "close_project":

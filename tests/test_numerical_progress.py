@@ -368,7 +368,9 @@ def test_cvxpy_first_solver_success_does_not_count_unused_fallback_attempts(monk
     cvxpy = pytest.importorskip("cvxpy")
     if "CLARABEL" not in cvxpy.installed_solvers():
         pytest.skip("CLARABEL is required for this solver-progress regression")
-    monkeypatch.setattr(optimization, "_cvxpy_conic_solver_order", lambda *_: ["CLARABEL", "SCS"])
+    from coilgen import optimization_cvxpy
+
+    monkeypatch.setattr(optimization_cvxpy, "_cvxpy_conic_solver_order", lambda *_: ["CLARABEL", "SCS"])
     block = optimization.ResidualConstraintBlock("field", np.eye(1), np.ones(1), 0.1, 1.0, 10.0, 0.0)
     events = []
     with progress_context(events.append):

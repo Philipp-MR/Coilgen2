@@ -1,53 +1,51 @@
-"""Portable scientific projects and application operations, without GUI imports."""
+"""Portable application services, imported only when requested."""
 
-from .dependencies import DependencyPlan, dependency_plan
-from .project import PROJECT_SCHEMA, ProjectDocument
-from .service import DesignService, RunRecord
-from .preflight import PreflightIssue, PreflightReport, check_preflight
-from .evidence import SourceHealth, VerificationReport, dataset_capabilities, resolve_dataset, verify_run_source
-from .execution import ExecutionEvent, ExecutionPlan, RunActions, execution_reuse, plan_execution, run_actions
-from .assembly import ASSEMBLY_SCHEMA, ChannelDocument, ProjectAssembly
-from .bundles import RunArchive
-from .design_studies import (
-    DesignStudyState,
-    RunReference,
-    create_variant,
-    design_study_state,
-    pin_baseline,
-    set_study_notes,
-    set_study_notes_batch,
-)
+from importlib import import_module as _import_module
 
-__all__ = [
-    "PROJECT_SCHEMA",
-    "ProjectDocument",
-    "DesignService",
-    "RunRecord",
-    "PreflightIssue",
-    "PreflightReport",
-    "check_preflight",
-    "SourceHealth",
-    "VerificationReport",
-    "dataset_capabilities",
-    "resolve_dataset",
-    "verify_run_source",
-    "ExecutionEvent",
-    "ExecutionPlan",
-    "RunActions",
-    "execution_reuse",
-    "plan_execution",
-    "run_actions",
-    "RunArchive",
-    "DependencyPlan",
-    "dependency_plan",
-    "ASSEMBLY_SCHEMA",
-    "ChannelDocument",
-    "ProjectAssembly",
-    "DesignStudyState",
-    "RunReference",
-    "create_variant",
-    "design_study_state",
-    "pin_baseline",
-    "set_study_notes",
-    "set_study_notes_batch",
-]
+_EXPORT_MODULES = {
+    "PROJECT_SCHEMA": "project",
+    "ProjectDocument": "project",
+    "DesignService": "service",
+    "RunRecord": "service",
+    "PreflightIssue": "preflight",
+    "PreflightReport": "preflight",
+    "check_preflight": "preflight",
+    "SourceHealth": "evidence",
+    "VerificationReport": "evidence",
+    "dataset_capabilities": "evidence",
+    "resolve_dataset": "evidence",
+    "verify_run_source": "evidence",
+    "ExecutionEvent": "execution",
+    "ExecutionPlan": "execution",
+    "RunActions": "execution",
+    "execution_reuse": "execution",
+    "plan_execution": "execution",
+    "run_actions": "execution",
+    "RunArchive": "bundles",
+    "DependencyPlan": "dependencies",
+    "dependency_plan": "dependencies",
+    "ASSEMBLY_SCHEMA": "assembly",
+    "ChannelDocument": "assembly",
+    "ProjectAssembly": "assembly",
+    "DesignStudyState": "design_studies",
+    "RunReference": "design_studies",
+    "create_variant": "design_studies",
+    "design_study_state": "design_studies",
+    "pin_baseline": "design_studies",
+    "set_study_notes": "design_studies",
+    "set_study_notes_batch": "design_studies",
+}
+__all__ = list(_EXPORT_MODULES)
+
+
+def __getattr__(name):
+    module = _EXPORT_MODULES.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(_import_module(f".{module}", __name__), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | _EXPORT_MODULES.keys())

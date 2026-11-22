@@ -10,7 +10,7 @@ pv = pytest.importorskip("pyvista")
 from coilgen.application.presets import preset_config  # noqa: E402
 from coilgen.application.scene_spec import b0_indicator_mesh  # noqa: E402
 
-import test_native_workbench as workbench_tests  # noqa: E402
+from _coilgen_test_support import native_workbench as workbench_tests  # noqa: E402
 
 application = workbench_tests.application
 scientific_viewport = workbench_tests.scientific_viewport

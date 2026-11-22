@@ -361,16 +361,16 @@ def test_public_normalizer_matches_execution_aliases_without_overwriting_choices
 
 
 def test_isolated_module_import_and_build_need_no_qt_cvxpy_numpy_or_solver(monkeypatch):
-    module_path = Path(__file__).resolve().parents[1] / "src/coilgen/gui/optimization_summary.py"
+    module_path = Path(__file__).resolve().parents[1] / "src/coilgen/application/optimization_summary.py"
     original_import = builtins.__import__
 
     def restricted_import(name, *args, **kwargs):
-        if name.split(".")[0] in {"PySide6", "cvxpy", "numpy", "coilgen"}:
+        if name.split(".")[0] in {"PySide6", "cvxpy", "numpy"}:
             raise AssertionError("Summary must not import numerical or Qt implementation: " + name)
         return original_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", restricted_import)
-    spec = importlib.util.spec_from_file_location("_isolated_optimization_summary", module_path)
+    spec = importlib.util.spec_from_file_location("coilgen.application._isolated_optimization_summary", module_path)
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)

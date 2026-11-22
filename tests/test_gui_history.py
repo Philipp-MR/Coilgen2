@@ -17,7 +17,7 @@ from coilgen.application.project import ProjectDocument
 from coilgen.application.service import DesignService
 from coilgen.gui.history import HistoryPanel
 from coilgen.gui.history import _parameter
-from test_run_history import write_run
+from _coilgen_test_support.run_history import write_run
 
 
 @pytest.fixture(scope="module")

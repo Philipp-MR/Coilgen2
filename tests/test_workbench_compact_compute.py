@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 
 import pytest
-import test_native_workbench as native
+from _coilgen_test_support import native_workbench as native
 
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtGui import QFont, QFontDatabase

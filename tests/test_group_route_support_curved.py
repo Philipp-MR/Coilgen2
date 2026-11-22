@@ -6,15 +6,15 @@ import numpy as np
 import pytest
 
 from coilgen.config import CoilGenConfig
-from coilgen.geometry import build_conical_frustum_mesh, normalize_mesh, refine_mesh, rotation_matrix_by_vector
+from coilgen.geometry import refine_mesh, rotation_matrix_by_vector
 from coilgen.group_route_convex_shell import certify_shell_body, convex_circular_shell
 from coilgen.group_route_support import certify_group_route_support, check_group_route_support_domain
 from coilgen.manufacturing import create_swept_coil_bodies
 from coilgen.models import CoilPart, WirePath, WirePathGeometry
 
-
-def _frustum(bottom=0.02, top=0.02, count=16):
-    return normalize_mesh(build_conical_frustum_mesh(0.06, bottom, top, count, 2, 1, 0, 0, 0, 0, 0, 0))
+from _coilgen_test_support.group_route_support_curved import (
+    _frustum as _frustum,
+)
 
 
 @pytest.mark.parametrize("bottom,top", [(0.02, 0.02), (0.018, 0.022), (0.022, 0.018)])

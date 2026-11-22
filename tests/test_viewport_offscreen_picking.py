@@ -9,7 +9,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtWidgets import QApplication
 
-from test_native_workbench import RenderlessPlotter
+from _coilgen_test_support.native_workbench import RenderlessPlotter
 
 
 @pytest.mark.parametrize("has_interactor", [False, True])

@@ -14,7 +14,7 @@ from coilgen.application import DesignService, ProjectDocument
 from coilgen.application.group_editor import GroupEditor, load_group_editor
 from coilgen.pipeline import CoilGenPipeline
 from coilgen.pipeline_stages import PipelineCheckpoint, PipelineStage, invalidated_stage
-from test_pipeline_stages import config as small_config
+from _coilgen_test_support.pipeline_stages import config as small_config
 
 
 @pytest.fixture(scope="module")
@@ -410,4 +410,4 @@ def test_browser_group_load_rejects_an_identical_model_under_a_new_owner(prepare
         browser.session.close()
 
 
-from test_workbench_usability import application as application, windows as windows  # noqa: E402,F401
+from _coilgen_test_support.workbench_usability import application as application, windows as windows  # noqa: E402,F401

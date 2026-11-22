@@ -107,7 +107,7 @@ def review_issues(editor, report, circuit, minimum_radius):
             else None
         )
         if kind and circuit < len(report.parts) and report.parts[circuit].fabrication_path is not None:
-            from .application.diagnostics import _frame_witness
+            from .manufacturing_witness import _frame_witness
 
             path = report.parts[circuit].fabrication_path
             frames = {

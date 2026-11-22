@@ -6,10 +6,11 @@ from dataclasses import replace
 import math
 
 from .conductor_profiles import is_rectangular_profile, round_wire_options, round_wire_profile
-from .session import ProjectSettings, SettingField, _SUPPORT_FIELDS, _field, _plain, _scaled, target_scaling_mode
+from .session import ProjectSettings
+from .settings import SettingField, _SUPPORT_FIELDS, _field, _plain, _scaled, target_scaling_mode
 from .submitted_design import choice_title
 from .targets import ORIGIN_KEYS, target_normalization_choices
-from ..gui.optimization_summary import normalize_field_budget_metric
+from ..config_semantics import normalize_field_budget_metric
 from ..target_regions import target_region_summary
 
 

@@ -3,8 +3,8 @@
 import pytest
 from coilgen.application import DesignService, RunRecord
 from coilgen.research.jobs import JobManager
-from test_workbench_usability import application as application, windows as windows
-from test_workbench_execution_feedback import _record
+from _coilgen_test_support.workbench_usability import application as application, windows as windows
+from _coilgen_test_support.workbench_execution_feedback import _record
 
 
 def test_combined_model_and_study_edit_is_one_revision_and_one_undo_step(windows):

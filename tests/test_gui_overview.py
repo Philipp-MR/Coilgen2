@@ -306,7 +306,7 @@ def test_recorded_problem_and_readiness_colors_follow_theme_without_text_changes
 def test_history_colors_distinguish_saved_completion_from_scoped_pass(application, tmp_path):
     from coilgen.application.history import RunHistoryStore
     from coilgen.gui.history import HistoryPanel
-    from test_run_history import write_run
+    from _coilgen_test_support.run_history import write_run
 
     store = RunHistoryStore(tmp_path / "history.json")
     for index, summary in enumerate(
@@ -340,7 +340,7 @@ def test_history_colors_distinguish_saved_completion_from_scoped_pass(applicatio
 
 def test_export_theme_repaint_preserves_failed_scope_and_selection(application):
     from coilgen.gui.export_panel import GeometryExportPanel
-    from test_gui_export_panel import _options, _record
+    from _coilgen_test_support.gui_export_panel import _options, _record
 
     panel = GeometryExportPanel(_record(ready=False), _options(status="failed", inspection=True))
     try:

@@ -10,7 +10,7 @@ from coilgen.application.execution import ExecutionEvent, matches_active_request
 from coilgen.application.reuse import ReusableStage, ReusePlan
 from coilgen.pipeline_stages import PipelineStage
 from coilgen.progress import DesignCancelled, ProgressReporter
-from test_application_evidence import _saved_run
+from _coilgen_test_support.application_evidence import _saved_run
 
 
 def _state(project, **changes):
@@ -227,7 +227,7 @@ def test_event_construction_does_not_parse_activity_as_a_completed_stage():
 @pytest.mark.parametrize("stage", ["prepared", "sheet"])
 def test_service_and_typed_observers_preserve_direct_pipeline_scientific_arrays(tmp_path, stage):
     from coilgen.pipeline import CoilGenPipeline
-    from test_pipeline_stages import config
+    from _coilgen_test_support.pipeline_stages import config
 
     project = ProjectDocument.from_config(config()).update_study({"pipeline_stage": stage})
     expected = CoilGenPipeline(project.config).run_stage(stage).scientific_arrays()

@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-import test_native_workbench as workbench_tests
+from _coilgen_test_support import native_workbench as workbench_tests
 
 application = workbench_tests.application
 scientific_viewport = workbench_tests.scientific_viewport

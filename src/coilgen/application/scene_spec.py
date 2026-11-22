@@ -174,7 +174,7 @@ def model_preview(config, root, requirements=None):
     arrays, message, target = {}, "", None
     imported_target = str(config.target_field_definition_file).strip().lower() not in {"", "none"}
     if requirements is not None:
-        from .research_requirements import requirements_target
+        from ..research_requirements import requirements_target
 
         target = requirements_target(requirements)
         arrays = {"target_points_m": target.coords, "target_field_T": target.b, "target_suppressed": target.suppressed}

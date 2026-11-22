@@ -2,11 +2,14 @@
 
 import numpy as np
 import pytest
-import test_native_workbench as native
+from _coilgen_test_support import native_workbench as native
 
-from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtWidgets import QApplication, QDockWidget
+
+from _coilgen_test_support.viewport_mouse_navigation import (
+    mouse as mouse,
+)
 
 
 application = native.application
@@ -26,21 +29,6 @@ def scene(scientific_viewport):
     selected = []
     viewport.selected.connect(selected.append)
     return viewport, actor, selected
-
-
-def mouse(
-    viewport,
-    kind,
-    position=(30, 30),
-    *,
-    button=Qt.MouseButton.NoButton,
-    buttons=Qt.MouseButton.NoButton,
-    modifiers=Qt.KeyboardModifier.NoModifier,
-):
-    widget = viewport.plotter.interactor
-    local = QPoint(*position)
-    event = QMouseEvent(kind, QPointF(local), QPointF(widget.mapToGlobal(local)), button, buttons, modifiers)
-    QCoreApplication.sendEvent(widget, event)
 
 
 def press(viewport, actor, *, modifiers=Qt.KeyboardModifier.NoModifier):

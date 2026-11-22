@@ -169,7 +169,7 @@ class ResearchRequest:
         )
         validation_config = config
         if self.requirements is not None:
-            from ..application.research_requirements import requirements_validation_config
+            from ..research_requirements import requirements_validation_config
 
             validation_config = requirements_validation_config(config)
         validate_config(validation_config).raise_for_errors()

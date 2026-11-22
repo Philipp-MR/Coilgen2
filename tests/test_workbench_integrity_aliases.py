@@ -3,9 +3,9 @@
 from unittest.mock import Mock
 
 import pytest
-import test_workbench_usability as usability
-from test_workbench_execution_feedback import _record
-from test_workbench_completed_run_loading import wait as wait_for
+from _coilgen_test_support import workbench_usability as usability
+from _coilgen_test_support.workbench_execution_feedback import _record
+from _coilgen_test_support.workbench_completed_run_loading import wait as wait_for
 
 from coilgen.application import ProjectAssembly, ProjectDocument
 from coilgen.application.presets import preset_config, preset_study

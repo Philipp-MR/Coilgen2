@@ -158,7 +158,7 @@ def test_repository_launcher_enters_qt_event_loop_without_live_jobs(tmp_path, lo
             from PySide6.QtCore import QTimer
             from PySide6.QtWidgets import QApplication
             import pyvistaqt
-            from test_native_workbench import RenderlessPlotter
+            from _coilgen_test_support.native_workbench import RenderlessPlotter
 
             # Windows' offscreen Qt platform has no OpenGL pixel format. Keep
             # the real scientific viewport and datasets; replace its renderer.

@@ -9,7 +9,7 @@ from PySide6.QtCore import QCoreApplication, Signal, Qt
 from PySide6.QtWidgets import QDialog, QPushButton
 
 from coilgen.application import DesignService, RunRecord
-from test_workbench_usability import application as application, windows as windows
+from _coilgen_test_support.workbench_usability import application as application, windows as windows
 
 
 def computed_record(window, directory, *, component="Bz"):

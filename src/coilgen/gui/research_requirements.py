@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 
 from .gradient_tools import EngineeringDialog, _number, _values
 from ..application.gradient_studies import RigidTransform
-from ..application.research_requirements import (
+from ..research_requirements import (
     DesiredDataset,
     PhysicalScenario,
     RegionalRequirement,

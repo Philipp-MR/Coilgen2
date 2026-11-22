@@ -13,7 +13,7 @@ from coilgen.application.templates import template_assembly
 from coilgen.geometry import load_mesh_from_config, split_disconnected_mesh
 
 try:  # Qt fixtures; the Qt tests skip without PySide6.
-    from test_workbench_usability import application as application, windows as windows
+    from _coilgen_test_support.workbench_usability import application as application, windows as windows
 except (ImportError, pytest.skip.Exception):  # pragma: no cover - installs without Qt
 
     @pytest.fixture

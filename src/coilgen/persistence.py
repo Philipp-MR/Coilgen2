@@ -148,6 +148,7 @@ def numerical_source_digest(package_root: Path) -> str:
             "__init__.py",
             "attribution.py",
             "visualization.py",
+            "field_source.py",
             "matplotlib_visualization.py",
             "plot_book.py",
             "swept_mesh_inspector.py",

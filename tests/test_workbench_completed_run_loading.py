@@ -12,7 +12,7 @@ from PySide6.QtCore import QCoreApplication, QEvent, QThreadPool, QTimer
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QCheckBox, QComboBox
 
-import test_workbench_usability as usability
+from _coilgen_test_support import workbench_usability as usability
 from coilgen.application import ProjectAssembly, ProjectDocument
 from coilgen.application.presets import preset_config
 from coilgen.application.service import RunRecord
@@ -22,16 +22,12 @@ from coilgen.gui.workbench import CoilGenWorkbench
 from coilgen.gui.viewport import ScientificViewport
 from coilgen.gui.run_loading import CompletedRunLoadTask, StoppedReuseTask
 
+from _coilgen_test_support.workbench_completed_run_loading import (
+    wait as wait,
+)
+
 
 application = usability.application
-
-
-def wait(predicate):
-    deadline = time.monotonic() + 10
-    while not predicate() and time.monotonic() < deadline:
-        QCoreApplication.processEvents()
-        time.sleep(0.005)  # Yield the GIL to the Python archive/hash worker.
-    assert predicate()
 
 
 @pytest.fixture

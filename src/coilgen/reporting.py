@@ -14,6 +14,7 @@ from .attribution import (
     software_attribution,
 )
 from .config_validation import ConfigValidationReport, validate_config
+from .config_semantics import OPTIMIZATION_METHOD_ALIASES
 from .evaluation import field_evaluation_current_source
 from .design_context import (
     CoilDesignContext,
@@ -1017,7 +1018,7 @@ def _constraint_status_summary(result: CoilGenResult) -> dict[str, str]:
     diagnostics = result.regularization_diagnostics
     config = result.input_data
     method = str(diagnostics.get("stream_function_scheme", getattr(config, "sf_opt_method", "tikhonov"))).lower()
-    target_requested = method not in {"tikhonov", "tikkonov", "tikhonov_regularized_least_squares"}
+    target_requested = OPTIMIZATION_METHOD_ALIASES.get(method, method) != "tikhonov"
 
     def positive(name: str) -> bool:
         value = getattr(config, name, 0.0)

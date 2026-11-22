@@ -6,7 +6,7 @@ import time
 
 import numpy as np
 import pytest
-import test_workbench_usability as usability
+from _coilgen_test_support import workbench_usability as usability
 
 from coilgen.gui.readiness import check_readiness
 from coilgen.application import ProjectDocument

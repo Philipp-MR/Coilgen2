@@ -9,8 +9,8 @@ from PySide6.QtWidgets import QDialog
 from coilgen.application.routing_analysis import analyze_routes
 from coilgen.gui.results_overview import ResultsOverviewPanel
 from coilgen.gui.routing_analysis import RoutingAnalysisDialog
-from test_routing_analysis import record
-from test_workbench_usability import application as application, windows as windows
+from _coilgen_test_support.routing_analysis import record
+from _coilgen_test_support.workbench_usability import application as application, windows as windows
 
 
 def test_result_board_exposes_geometry_without_field_samples(application, tmp_path):

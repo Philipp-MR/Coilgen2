@@ -5,8 +5,8 @@ import shutil
 import numpy as np
 import pytest
 
-import test_workbench_usability as usability
-from test_application_backend import _config
+from _coilgen_test_support import workbench_usability as usability
+from _coilgen_test_support.application_backend import _config
 
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 

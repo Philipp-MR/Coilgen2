@@ -5,8 +5,8 @@ from copy import deepcopy
 import numpy as np
 import pytest
 
-import test_native_workbench as native_tests
-import test_workbench_target_policies as target_tests
+from _coilgen_test_support import native_workbench as native_tests
+from _coilgen_test_support import workbench_target_policies as target_tests
 from PySide6.QtWidgets import QPushButton
 from coilgen.gui.visual_selectors import CircuitSelector, SurfaceGallery
 

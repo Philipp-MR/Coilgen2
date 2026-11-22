@@ -80,7 +80,7 @@ def plan_reuse(project, records, *, threads: int = 1) -> ReusePlan:
         plot_flag=False,
         save_stl_flag=False,
     )
-    from .research_requirements import requirements_stage_fingerprints
+    from ..research_requirements import requirements_stage_fingerprints
 
     current = requirements_stage_fingerprints(config, project.project_root, project.study.get("requirements"))
     available, stale, diagnostics = [], set(), []
@@ -135,7 +135,7 @@ def plan_stopped_reuse(project, states, jobs_directory, *, threads: int = 1, ins
     ]
     if not matching:
         return ReusePlan((), (), ())
-    from .research_requirements import requirements_stage_fingerprints
+    from ..research_requirements import requirements_stage_fingerprints
 
     current = requirements_stage_fingerprints(config, project.project_root, project.study.get("requirements"))
     available, stale, diagnostics = [], set(), []

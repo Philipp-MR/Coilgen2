@@ -11,8 +11,8 @@ from coilgen.geometry import rotation_matrix_by_vector
 from coilgen.manufacturing import create_swept_coil_bodies, conductor_cross_section_points, realize_coil_paths
 from coilgen.models import CoilPart, WirePath, WirePathGeometry
 from coilgen.sweep_surface_relief import _Envelope, _source_corridor, repair_surface_sweep
-from test_group_route_support_cap import cap
-from test_group_route_support_curved import _frustum
+from _coilgen_test_support.group_route_support_cap import cap
+from _coilgen_test_support.group_route_support_curved import _frustum
 
 
 @pytest.mark.parametrize("mesh", [_frustum(), _frustum(0.018, 0.022), cap()])

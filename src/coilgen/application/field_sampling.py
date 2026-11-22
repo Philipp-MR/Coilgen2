@@ -283,7 +283,7 @@ def _scenario(dataset, request):
         return None, None
     if request is None or request.get("requirements") is None:
         return row, None
-    from .research_requirements import ResearchRequirements
+    from ..research_requirements import ResearchRequirements
 
     spec = ResearchRequirements.from_dict(request["requirements"])
     scenario = next((item for item in spec.scenarios if item.name == row["scenario"]), None)
@@ -640,7 +640,7 @@ def _target_evaluator(record, dataset, request, row, scenario):
     from ..target import evaluate_field_expression, field_values_to_tesla
 
     if row is not None and request is not None and request.get("requirements") is not None:
-        from .research_requirements import ResearchRequirements
+        from ..research_requirements import ResearchRequirements
 
         spec = ResearchRequirements.from_dict(request["requirements"])
         region = next((item for item in spec.regions if item.name == row["region"]), None)

@@ -1,6 +1,6 @@
 """The main desktop editor has one scroll and explicit inline details."""
 
-import test_workbench_empty as native
+from _coilgen_test_support import workbench_empty as native
 import pytest
 from PySide6.QtWidgets import QDockWidget
 

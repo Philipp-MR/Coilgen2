@@ -140,7 +140,7 @@ class CoilGenPipeline:
         self.config = deepcopy(config)
         self.project_root = (Path(project_root) if project_root is not None else Path.cwd()).resolve()
         if requirements is not None:
-            from .application.research_requirements import ResearchRequirements
+            from .research_requirements import ResearchRequirements
 
             requirements = ResearchRequirements.from_dict(requirements)
         self.requirements = requirements
@@ -148,7 +148,7 @@ class CoilGenPipeline:
     def stage_fingerprints(self):
         if self.requirements is None:
             return stage_fingerprints(self.config, self.project_root)
-        from .application.research_requirements import requirements_stage_fingerprints
+        from .research_requirements import requirements_stage_fingerprints
 
         return requirements_stage_fingerprints(self.config, self.project_root, self.requirements)
 
@@ -203,7 +203,7 @@ class CoilGenPipeline:
     ):
         validation_config = self.config
         if self.requirements is not None:
-            from .application.research_requirements import requirements_validation_config
+            from .research_requirements import requirements_validation_config
 
             validation_config = requirements_validation_config(self.config)
         validate_config(validation_config, project_root=self.project_root).raise_for_errors()
@@ -233,7 +233,7 @@ class CoilGenPipeline:
         for index in range(first_stage, selected.index + 1):
             canonical_config = self.config
             if self.requirements is not None and index > 0:
-                from .application.research_requirements import requirements_evaluation_config
+                from .research_requirements import requirements_evaluation_config
 
                 self.config = requirements_evaluation_config(canonical_config)
             try:
@@ -362,7 +362,7 @@ class CoilGenPipeline:
         }
 
     def _requirements_target(self):
-        from .application.research_requirements import requirements_target
+        from .research_requirements import requirements_target
 
         return requirements_target(self.requirements)
 
@@ -379,7 +379,7 @@ class CoilGenPipeline:
             )
         )
         if self.requirements is not None:
-            from .application.research_requirements import prepare_requirement_constraints
+            from .research_requirements import prepare_requirement_constraints
 
             self.config = context.compute(
                 "Prepare named operators", prepare_requirement_constraints, state.parts, self.config, self.requirements

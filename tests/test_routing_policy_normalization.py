@@ -11,8 +11,8 @@ from coilgen.config_validation import validate_config
 from coilgen.group_routing import propose_joint_group_routes
 from coilgen.routing_objective import routing_selection_policy
 from _group_routing_cases import make_group_routing_case
-from test_regular_ring_traversal import _config, _part, _positions
-from test_regular_route_provenance import _part as provenance_part
+from _coilgen_test_support.regular_ring_traversal import _config, _part, _positions
+from _coilgen_test_support.regular_route_provenance import _part as provenance_part
 
 
 @pytest.mark.parametrize("raw,expected", [(" REGULAR ", "regular"), (" PhYsIcAl ", "physical")])

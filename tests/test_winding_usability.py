@@ -11,11 +11,11 @@ from coilgen.interconnection_editor import InterconnectionEditor
 from coilgen.interconnection_validation import EditorValidation
 from coilgen.winding_review import quick_review, review_issues, winding_sequence, local_frame
 from coilgen.winding_bridges import surface_crossing_stations
-from test_interconnection_editor import routed as routed, inner_cut
-from test_winding_sketch import crossing_editor
-from test_browser_interconnection_editor import browser_editor as browser_editor, command
-from test_gui_interconnection_editor import Viewport, session_from_case, finish, close
-from test_workbench_usability import application as application
+from _coilgen_test_support.interconnection_editor import routed as routed, inner_cut
+from _coilgen_test_support.winding_sketch import crossing_editor
+from _coilgen_test_support.browser_interconnection_editor import browser_editor as browser_editor, command
+from _coilgen_test_support.gui_interconnection_editor import Viewport, session_from_case, finish, close
+from _coilgen_test_support.workbench_usability import application as application
 
 
 def test_persistent_object_exact_preview_replay_and_atomic_undo(routed):

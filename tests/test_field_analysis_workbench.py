@@ -9,7 +9,7 @@ from coilgen.application import DesignService, ProjectDocument, RunRecord
 from coilgen.config import CoilGenConfig
 from coilgen.target import evaluate_field_expression
 from coilgen.field_units import field_values_to_tesla
-from test_workbench_usability import application as application, windows as windows
+from _coilgen_test_support.workbench_usability import application as application, windows as windows
 
 
 def native_config():

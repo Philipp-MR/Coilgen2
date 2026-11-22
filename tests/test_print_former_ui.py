@@ -9,7 +9,7 @@ import pytest
 pytest.importorskip("PySide6")
 pytest.importorskip("manifold3d")
 
-import test_workbench_usability as usability  # noqa: E402
+from _coilgen_test_support import workbench_usability as usability
 
 from coilgen.application.presets import preset_config  # noqa: E402
 from coilgen.application.scene_spec import model_preview, scene_layers  # noqa: E402

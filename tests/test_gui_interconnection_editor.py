@@ -1,34 +1,27 @@
 """Native editor controls, asynchronous edits, and real 3D picking."""
 
 import os
-import time
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 import pytest
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QWidget
 
-from coilgen.application.interconnection_editor import WindingEditorSession
 from coilgen.gui.interconnection_editor import InterconnectionEditorDialog, WindingViewport
 from coilgen.interconnection_validation import EditorValidation
-from coilgen.models import TargetField
-from coilgen.pipeline_stages import PipelineCheckpoint, PipelineStage, PipelineState
-from test_interconnection_editor import routed as routed, surface_connection, inner_cut, simple_session
-from test_workbench_usability import application as application
+from _coilgen_test_support.interconnection_editor import routed as routed, surface_connection, inner_cut, simple_session
+from _coilgen_test_support.workbench_usability import application as application
 
-
-class Viewport(QWidget):
-    selected = Signal(str)
-    cut_moved = Signal(str, object)
-    guide_moved = Signal(str, int, object)
-    message = Signal(str)
-
-    def display(self, editor, key, **options):
-        self.displayed = (editor.fingerprint, key)
+from _coilgen_test_support.gui_interconnection_editor import (
+    Viewport as Viewport,
+    close as close,
+    finish as finish,
+    session_from_case as session_from_case,
+)
 
 
 @pytest.mark.parametrize("mode", ["draw", "connect", "select"])
@@ -91,27 +84,6 @@ def test_native_cut_scope_can_narrow_an_existing_preview_to_one_turn(application
     finish(application, dialog)
     assert dialog.editor.cut_objects[0]["keys"] == [cut.key]
     close(dialog)
-
-
-def session_from_case(case, tmp_path):
-    coords = np.array([[0, 0, 0.025], [0.003, 0, 0.025]])
-    target = TargetField(coords, np.full_like(coords, 1e-6), np.ones(2), np.zeros(2, bool), np.zeros(2, int))
-    state = PipelineState(parts=[case.part], target_field=target, combined_mesh=case.part.mesh, sf_b_field=target.b)
-    return WindingEditorSession(PipelineCheckpoint(PipelineStage.ROUTED, state, case.config, tmp_path))
-
-
-def finish(application, dialog):
-    deadline = time.monotonic() + 15
-    while dialog._busy and time.monotonic() < deadline:
-        application.processEvents()
-        time.sleep(0.01)
-    assert not dialog._busy, "Editor worker did not finish"
-    application.processEvents()
-
-
-def close(dialog):
-    dialog._saved_identity = dialog.session.identity
-    dialog.close()
 
 
 def test_graphical_freehand_gesture_and_compact_controls(application, routed, tmp_path):

@@ -1,6 +1,6 @@
 """Model Builder navigation preserves requests while separating studies and results."""
 
-import test_workbench_usability as usability
+from _coilgen_test_support import workbench_usability as usability
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel

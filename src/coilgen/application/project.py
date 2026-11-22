@@ -463,7 +463,7 @@ class ProjectDocument:
         try:
             config = self.config
             if self.study.get("requirements") is not None:
-                from .research_requirements import requirements_validation_config
+                from ..research_requirements import requirements_validation_config
 
                 config = requirements_validation_config(config)
             report = validate_config(config, project_root=self.project_root)

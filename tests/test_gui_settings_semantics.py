@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-import test_expert_settings as expert_tests
+from _coilgen_test_support import expert_settings as expert_tests
 from coilgen.application import ProjectDocument
 from coilgen.application.history import HistoryEntry
 from coilgen.config import CoilGenConfig

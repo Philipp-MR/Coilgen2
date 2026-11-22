@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QDialogButtonBox, QLabel, QPushButton
 
 from coilgen.application import ProjectDocument
 from coilgen.application.presets import preset_config
-from test_workbench_usability import application as application, windows as windows
+from _coilgen_test_support.workbench_usability import application as application, windows as windows
 
 
 def native_window(windows, **overrides):
@@ -62,7 +62,7 @@ def test_imported_method_aliases_have_correct_controls_without_rewriting_values(
 
 
 def test_current_and_acceptance_drafts_reach_live_summary(windows, monkeypatch):
-    import coilgen.gui.workbench as gui
+    import coilgen.gui.settings_pages as gui
 
     observed = []
     summary = gui.build_optimization_summary

@@ -7,8 +7,8 @@ import tempfile
 import numpy as np
 import pytest
 
-import test_native_workbench as native
-import test_workbench_usability as usability
+from _coilgen_test_support import native_workbench as native
+from _coilgen_test_support import workbench_usability as usability
 
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtTest import QTest

@@ -1,22 +1,12 @@
 """Added-route costs must never include protected winding intervals."""
 
-from types import SimpleNamespace
-
-import numpy as np
-
 from coilgen.config import CoilGenConfig
 from coilgen.layout import _assign_wire_path_segment_owners
-from coilgen.models import CoilPart, ConnectedGroup, LoopGroup, Mesh, WirePath, WirePathGeometry
+from coilgen.models import WirePathGeometry
 
-
-def _part():
-    points = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 0]], dtype=float)
-    mesh = Mesh(vertices=points[:4], faces=np.array([[0, 1, 2], [0, 2, 3]]))
-    part = CoilPart(mesh)
-    part.groups = [LoopGroup(loops=[], loop_indices=[7], opened_loops=[SimpleNamespace(v=points[:2])])]
-    part.connected_groups = [ConnectedGroup(points, points[2:], points[:3], points[:3])]
-    part.wire_path = WirePath(points.copy())
-    return part
+from _coilgen_test_support.regular_route_provenance import (
+    _part as _part,
+)
 
 
 def test_regular_route_labels_exact_winding_join_and_return_separately():

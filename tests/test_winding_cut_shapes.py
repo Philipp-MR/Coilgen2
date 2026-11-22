@@ -7,7 +7,7 @@ from coilgen.models import ContourLine
 from coilgen.routing_ports import ContourArc
 from coilgen.winding_cut_shapes import CutShape
 from coilgen.interconnection_editor import InterconnectionEditor
-from test_interconnection_editor import routed as routed, inner_cut
+from _coilgen_test_support.interconnection_editor import routed as routed, inner_cut
 
 
 @pytest.mark.parametrize("kind", ["plane", "sphere", "box"])

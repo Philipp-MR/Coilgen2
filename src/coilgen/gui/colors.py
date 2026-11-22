@@ -1,5 +1,7 @@
 """Semantic GUI colors with readable contrast against the active Qt theme."""
 
+from ..application.workbench_presentation import ACTION_COLORS
+
 from PySide6.QtGui import QBrush, QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
@@ -49,3 +51,14 @@ def apply_tone(label, tone):
     palette.setColor(QPalette.ColorRole.Text, foreground)
     label.setProperty("semanticTone", tone if tone in STATUS_COLORS else "neutral")
     label.setPalette(palette)
+
+
+PRIMARY_ACTION_STYLE = f"""
+QPushButton {{ background: {ACTION_COLORS["primary"]}; color: white; border: 1px solid {ACTION_COLORS["primary"]};
+              border-radius: 5px; padding: 8px 14px; font-weight: 600; }}
+QPushButton:hover {{ background: {ACTION_COLORS["action-hover"]}; }}
+QPushButton:pressed {{ background: {ACTION_COLORS["action-pressed"]}; }}
+QPushButton:focus {{ border: 2px solid {ACTION_COLORS["action-focus"]}; }}
+QPushButton:disabled {{ background: {ACTION_COLORS["action-disabled"]}; color: {ACTION_COLORS["action-disabled-text"]};
+                        border-color: {ACTION_COLORS["action-disabled-border"]}; }}
+"""
