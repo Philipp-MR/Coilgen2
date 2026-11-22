@@ -20,6 +20,7 @@ dist/
 /CoilGenResearch/
 /tmp/
 /RESTORE-CONTEXT.txt
+/CLAUDE.md
 # Private patient/phantom workflows stay local; never publish them.
 /projects/dental_b0_local_shim/
 /projects/dental_b0_multichannel/
