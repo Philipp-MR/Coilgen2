@@ -98,6 +98,14 @@ faces to retain an open cylindrical wall with a side window. Choose the final
 mesh edge length, inspect the triangulation, and apply the support to the active
 project. Undo/redo, recipe files and saved projects retain the construction.
 
+![The windowed cylindrical support beside a computed Gy coil layout on the same surface, with winding contours surrounding the opening.](../docs/images/welcome-windowed-coil.png)
+
+The side-by-side example optimizes a **10 mT/m Y gradient** over a **40 mm
+spherical DSV** on this exact windowed surface. It shows smoothed, unconnected
+contours at the original solved current; routing, feeds and fabrication review
+follow afterwards. [Calculation and field evidence](../docs/images/welcome-windowed-coil-evidence.json) ·
+[Reproduce this layout](../docs/frontpage/windowed_coil.py)
+
 ![Actual Geometry studio with an orthogonal cylindrical cutter, the resulting window, the object bar and final surface meshing controls.](../docs/images/geometry-studio-orthogonal-window.jpg)
 
 Open **Edit → Geometry studio…** on desktop or **Support geometry → Geometry

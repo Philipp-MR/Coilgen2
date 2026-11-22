@@ -207,3 +207,22 @@ the resulting triangles with PyVista and Matplotlib. It does not optimize a coil
 
 These are geometry illustrations, not field or fabrication acceptance results.
 The existing scientific figures and earlier feature-image files are preserved.
+
+### Coil layout on the windowed cylinder
+
+Run `python docs/frontpage/windowed_coil.py` with the `research`, `gui` and `plot`
+extras to regenerate the [side-by-side support and coil layout](../images/welcome-windowed-coil.png).
+It uses the exact CAD recipe and final mesh from the geometry gallery, then
+solves a minimum-power 10 mT/m Y gradient over a 40 mm spherical DSV. Production
+contour smoothing retains the preset displacement and spacing safeguards.
+
+The rendered curves are the stored, smoothed **unconnected contours**, evaluated
+with thin-wire Biot–Savart at their original solved current on a distinct ROI
+grid. Their display tubes do not represent manufactured conductor cross-sections.
+Routing, feeds, sweeps and fabrication checks are not performed for this figure.
+Changing the ROI sampling is not a mesh or quadrature convergence study.
+
+[Compact evidence](../images/welcome-windowed-coil-evidence.json) records the
+recipe, configuration, mesh report, smoothing diagnostics, field errors, software
+versions and source/image hashes. Recomputable mesh, contour and field arrays
+are saved locally under `tmp/welcome-windowed-coil/`.
