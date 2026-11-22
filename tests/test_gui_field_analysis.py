@@ -669,6 +669,27 @@ def test_visible_dialog_does_not_shadow_qt_paint_metrics(application, record, da
     dialog.reject()
 
 
+def test_section_view_changes_keep_source_statistics_and_export_units(application, record, dataset, tmp_path):
+    dialog = dialog_with_data(record, dataset)
+    dialog.refresh_analysis(sample_grid=False)
+    wait_worker(application, dialog)
+    captured, generation = dialog.state, dialog._generation
+    before = tmp_path / "before.csv"
+    dialog.export_to(before)
+    for view in ("xy", "xz", "yz", "3d", "all"):
+        dialog.map_view.setCurrentIndex(dialog.map_view.findData(view))
+        assert dialog.map_stack.currentIndex() == (1 if view == "3d" else 0)
+        assert dialog.state is captured and dialog._generation == generation
+        assert dialog.worker is None
+    dialog.show_metrics.setChecked(True)
+    after = tmp_path / "after.csv"
+    dialog.export_to(after)
+    assert after.read_bytes() == before.read_bytes()
+    assert "150 saved samples" in dialog.map_summary.text()
+    assert dialog.section_plot.figure.axes[0].get_xlabel() == "x [mm]"
+    dialog.reject()
+
+
 def test_camera_first_fit_includes_roi_and_metric_switch_keeps_camera():
     class Plotter:
         reset_count = 0
@@ -678,6 +699,7 @@ def test_camera_first_fit_includes_roi_and_metric_switch_keeps_camera():
             self.actors = []
 
         def add_mesh(self, mesh, **kwargs):
+            self.meshes.append(mesh)
             self.actors.append(kwargs)
 
         def show_axes(self):
@@ -696,13 +718,24 @@ def test_camera_first_fit_includes_roi_and_metric_switch_keeps_camera():
             self.reset_count += 1
 
     plotter = Plotter()
+    plotter.meshes = []
+    bounds_options = []
+    plotter.show_grid = lambda **kwargs: bounds_options.append(kwargs)
     view = SimpleNamespace(
-        plotter=plotter, first=True, pv=SimpleNamespace(PolyData=lambda points: {}, lines_from_points=lambda points: {})
+        plotter=plotter,
+        first=True,
+        pv=SimpleNamespace(
+            PolyData=lambda points: {"points": points}, lines_from_points=lambda points: {"points": points}
+        ),
     )
-    points, values = np.zeros((1, 3)), np.zeros(1)
+    points, values = np.array([[0.02, 0, -0.02]]), np.zeros(1)
     gui._PointCloudView.set_field(view, points, values, "Bz", "T", (-1, 1), True)
+    assert plotter.meshes[0]["points"] == pytest.approx(np.array([[20, 0, -20]]))
+    assert bounds_options[0]["xtitle"] == "x [mm]"
+    assert bounds_options[0]["fmt"] == "%.3g"
     assert plotter.reset_count == 0
     gui._PointCloudView.set_roi(view, (np.array([[0, 0, 0], [1, 1, 1]]),))
+    assert plotter.meshes[1]["points"] == pytest.approx(np.array([[0, 0, 0], [1000, 1000, 1000]]))
     assert plotter.reset_count == 1 and len(plotter.actors) == 2
     assert all(actor["reset_camera"] is False for actor in plotter.actors)
     gui._PointCloudView.set_field(view, points, values, "Residual", "T", (-1, 1), True)

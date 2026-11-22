@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -49,6 +50,7 @@ from ..persistence import atomic_text_writer, json_value
 from ..progress import DesignCancelled
 from .coil_statistics import build_coil_statistics, display_quantity, mass_estimates
 from .run_metadata import read_run_metadata
+from .field_map_plot import draw_sample_sections
 from .shielding_plot import (
     SHIELDING_COMPONENTS,
     SHIELDING_SOURCES,
@@ -153,8 +155,9 @@ class _FigurePanel(QWidget):
         self.canvas = FigureCanvasQTAgg(self.figure)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(NavigationToolbar2QT(self.canvas, self))
-        layout.addWidget(self.canvas)
+        self.toolbar = NavigationToolbar2QT(self.canvas, self)
+        layout.addWidget(self.toolbar)
+        layout.addWidget(self.canvas, 1)
 
     def draw(self):
         self.canvas.draw_idle()
@@ -214,6 +217,7 @@ class _PointCloudView(QWidget):
         from pyvistaqt import QtInteractor
 
         self.pv, self.plotter, self.first = pv, QtInteractor(self), True
+        self.plotter.set_background("white")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         controls = QHBoxLayout()
@@ -234,20 +238,44 @@ class _PointCloudView(QWidget):
             if count <= 50_000
             else np.unique(np.r_[np.linspace(0, count - 1, 50_000, dtype=int), np.argmax(np.abs(values))])
         )
-        cloud = self.pv.PolyData(np.asarray(points)[indices])
+        cloud = self.pv.PolyData(np.asarray(points)[indices] * 1000)
         cloud["value"] = np.asarray(values)[indices]
         self.plotter.add_mesh(
             cloud,
             scalars="value",
-            cmap="coolwarm" if signed else "viridis",
+            cmap="RdBu_r" if signed else "viridis",
             clim=limits,
-            point_size=5,
+            point_size=12 if count < 2000 else 7,
             render_points_as_spheres=True,
-            scalar_bar_args={"title": f"{label} [{unit}]"},
+            lighting=False,
+            scalar_bar_args={
+                "title": f"{label} [{unit}]",
+                "vertical": True,
+                "position_x": 0.84,
+                "position_y": 0.2,
+                "height": 0.6,
+                "width": 0.08,
+                "title_font_size": 12,
+                "label_font_size": 11,
+                "n_labels": 5,
+                "fmt": "%.3g",
+                "color": "#243746",
+            },
             reset_camera=False,
         )
         self.plotter.show_axes()
-        self.plotter.show_grid(xtitle="x [m]", ytitle="y [m]", ztitle="z [m]")
+        self.plotter.show_grid(
+            xtitle="x [mm]",
+            ytitle="y [mm]",
+            ztitle="z [mm]",
+            fmt="%.3g",
+            n_xlabels=3,
+            n_ylabels=3,
+            n_zlabels=3,
+            font_size=11,
+            grid=False,
+            color="#607080",
+        )
         self.plotter.render()
 
     def save_png(self, path):
@@ -261,9 +289,9 @@ class _PointCloudView(QWidget):
     def set_roi(self, polylines):
         for index, points in enumerate(polylines):
             self.plotter.add_mesh(
-                self.pv.lines_from_points(points),
-                color="#252525",
-                line_width=1.5,
+                self.pv.lines_from_points(np.asarray(points) * 1000),
+                color="#718096",
+                line_width=1,
                 name=f"owned_roi_{index}",
                 reset_camera=False,
             )
@@ -396,7 +424,7 @@ class FieldAnalysisDialog(QDialog):
         self.resize(1250, 820)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 14, 18, 14)
-        layout.setSpacing(10)
+        layout.setSpacing(6)
         title = QLabel("Coil results")
         title_font = title.font()
         title_font.setPointSizeF(title_font.pointSizeF() * 1.6)
@@ -445,6 +473,7 @@ class FieldAnalysisDialog(QDialog):
             "One target scale from all native samples is shared by every slice; no pointwise division."
         )
         primary = QHBoxLayout()
+        primary.setContentsMargins(0, 0, 0, 0)
         primary.addWidget(
             self._control_group(
                 "Field source and current",
@@ -690,16 +719,51 @@ class FieldAnalysisDialog(QDialog):
     def _build_cloud_tab(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        note = QLabel("Native sample metrics · every finite saved sample contributes to the selected convention.")
-        note.setWordWrap(True)
-        layout.addWidget(note)
+        layout.setContentsMargins(8, 8, 8, 8)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("View"))
+        self.map_view = QComboBox()
+        self.map_view.setToolTip(
+            "Central saved planes, or labelled thin slabs for scattered samples. Grey cells have no saved value. "
+            "Use Slices to evaluate additional positions."
+        )
+        for title, key in [
+            ("Orthogonal sections", "all"),
+            ("XY section", "xy"),
+            ("XZ section", "xz"),
+            ("YZ section", "yz"),
+            ("3D samples", "3d"),
+        ]:
+            self.map_view.addItem(title, key)
+        row.addWidget(self.map_view)
+        row.addStretch()
+        self.show_metrics = QToolButton()
+        self.show_metrics.setText("Statistics and samples")
+        self.show_metrics.setCheckable(True)
+        row.addWidget(self.show_metrics)
+        self.show_plot_tools = QToolButton()
+        self.show_plot_tools.setText("Plot tools")
+        self.show_plot_tools.setCheckable(True)
+        row.addWidget(self.show_plot_tools)
+        layout.addLayout(row)
+        self.map_summary = QLabel("Loading saved field samples…")
+        self.map_summary.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        layout.addWidget(self.map_summary)
         split = QSplitter()
+        self.map_stack = QStackedWidget()
+        self.section_plot = self._plot(self.map_stack)
+        if hasattr(self.section_plot, "toolbar"):
+            self.section_plot.toolbar.hide()
+            self.show_plot_tools.toggled.connect(self.section_plot.toolbar.setVisible)
+        self.map_stack.addWidget(self.section_plot)
         try:
-            self.cloud = self._cloud_factory(split)
+            self.cloud = self._cloud_factory(self.map_stack)
         except Exception as exc:
-            self.cloud = _UnavailablePlot(str(exc), split)
-        split.addWidget(self.cloud)
+            self.cloud = _UnavailablePlot(str(exc), self.map_stack)
+        self.map_stack.addWidget(self.cloud)
+        split.addWidget(self.map_stack)
         right = QWidget()
+        right.setMinimumWidth(280)
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(10, 0, 0, 0)
         right_layout.addWidget(QLabel("Field and residual metrics"))
@@ -717,10 +781,47 @@ class FieldAnalysisDialog(QDialog):
         right_layout.addWidget(sample_note)
         right_layout.addWidget(self.samples)
         split.addWidget(right)
-        split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 2)
-        layout.addWidget(split)
-        self.tabs.addTab(page, "Metrics / 3D")
+        split.setStretchFactor(0, 4)
+        split.setStretchFactor(1, 1)
+        split.setSizes([900, 300])
+        right.hide()
+        self.show_metrics.toggled.connect(right.setVisible)
+        self.map_view.currentIndexChanged.connect(self._map_view_changed)
+        self._section_compact = None
+        if hasattr(self.section_plot, "canvas"):
+            self.section_plot.canvas.mpl_connect("resize_event", self._section_resized)
+        layout.addWidget(split, 1)
+        self.tabs.addTab(page, "Field maps")
+
+    def _map_view_changed(self, *_):
+        self.map_stack.setCurrentIndex(1 if self.map_view.currentData() == "3d" else 0)
+        self.show_plot_tools.setVisible(self.map_view.currentData() != "3d")
+        if self.state is not None:
+            self._draw_sections()
+
+    def _section_resized(self, *_):
+        figure = self.section_plot.figure
+        compact = figure.get_figwidth() / figure.get_figheight() < 1.8
+        if compact != self._section_compact and self.state is not None:
+            self._draw_sections()
+
+    def _draw_sections(self):
+        if self.section_plot.figure is None or self.map_view.currentData() == "3d":
+            return
+        state, figure = self.state, self.section_plot.figure
+        factor, unit = self._display(state)
+        self._section_compact = figure.get_figwidth() / figure.get_figheight() < 1.8
+        draw_sample_sections(
+            figure,
+            state.dataset.points_m,
+            state.mapped.values * factor,
+            state.mapped.label,
+            unit,
+            self._display_limits(state),
+            self._signed(state),
+            plane=self.map_view.currentData(),
+        )
+        self.section_plot.draw()
 
     def _build_slices_tab(self):
         page = QWidget()
@@ -1640,6 +1741,12 @@ class FieldAnalysisDialog(QDialog):
             else:
                 summary.append((key.replace("_", " "), value))
         self._set_table(self.summary, summary)
+        self.map_summary.setText(
+            "   ·   ".join(
+                [f"{key.upper()} {state.mapped.summary[key] * factor:.4g} {unit}" for key in ("rms", "peak", "mean")]
+                + [f"{len(values):,} saved samples"]
+            )
+        )
         ids = np.argsort(np.abs(values))[::-1][:256]
         self.samples.setHorizontalHeaderLabels(["x [m]", "y [m]", "z [m]", f"Map [{unit}]"])
         self._set_table(self.samples, [(*state.dataset.points_m[index], values[index]) for index in ids])
@@ -1654,6 +1761,7 @@ class FieldAnalysisDialog(QDialog):
         except Exception as exc:
             graphics_errors.append("3D rendering failed: " + str(exc))
         for title, draw in [
+            ("Section maps", self._draw_sections),
             ("Slice grid", self._draw_slices),
             ("Error distribution", self._draw_distribution),
             ("Harmonics", self._draw_harmonics),
@@ -2037,6 +2145,8 @@ class FieldAnalysisDialog(QDialog):
             return
         else:
             plot = [self.cloud, self.slice_plot, self.error_plot, self.harmonic_plot][self.tabs.currentIndex()]
+            if self.tabs.currentIndex() == 0 and self.map_view.currentData() != "3d":
+                plot = self.section_plot
         if not hasattr(plot, "save_png"):
             self.status.setText(
                 "The current graphics view is unavailable; export numerical analysis or a different plot."
