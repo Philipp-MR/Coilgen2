@@ -180,9 +180,23 @@ class BrowserWorkbench:
                     "coilgen-client": str(Path(__file__).with_name("assets")),
                     "coilgen-brand": str(Path(__file__).resolve().parents[1] / "gui" / "assets"),
                 },
-                "styles": ["coilgen-client/workbench.css", "coilgen-client/interconnection_editor.css"],
-                "scripts": ["coilgen-client/project_upload.js", "coilgen-client/interconnection_editor.js"],
-                "vue_use": ["CoilGenProjectUpload", "CoilGenGroupFocus", "CoilGenSetupFocus", "CoilGenWindingEditor"],
+                "styles": [
+                    "coilgen-client/workbench.css",
+                    "coilgen-client/interconnection_editor.css",
+                    "coilgen-client/surface_editor.css",
+                ],
+                "scripts": [
+                    "coilgen-client/project_upload.js",
+                    "coilgen-client/interconnection_editor.js",
+                    "coilgen-client/surface_editor.js",
+                ],
+                "vue_use": [
+                    "CoilGenProjectUpload",
+                    "CoilGenGroupFocus",
+                    "CoilGenSetupFocus",
+                    "CoilGenWindingEditor",
+                    "CoilGenSurfaceEditor",
+                ],
             }
         )
         self._initial_state()
@@ -195,6 +209,9 @@ class BrowserWorkbench:
         from .interconnection_editor import BrowserWindingEditor
 
         self.winding = BrowserWindingEditor(self)
+        from .surface_editor import BrowserSurfaceEditor
+
+        self.surface = BrowserSurfaceEditor(self)
         self.field_inputs = SliceInputCache()
         self.field_slices = BrowserFieldSlices(self)
         self.harmonics = BrowserHarmonics(self)
@@ -2165,6 +2182,7 @@ class BrowserWorkbench:
         ctrl.compute, ctrl.compute_channels, ctrl.cancel_job = self.compute, self.compute_channels, self.cancel_job
         ctrl.export_geometry = self.prepare_geometry
         ctrl.open_print_former = self.open_print_former
+        ctrl.open_surface_editor = self.surface.open
         ctrl.view_job_result = self.view_job_result
         ctrl.view_stage = self.view_stage
         ctrl.review_submitted_design = self.review_submitted_design
@@ -2428,6 +2446,12 @@ class BrowserWorkbench:
                                     disabled=("(settings_dirty && !profile_upload) || !channels.length",),
                                 )
                         with html.Div(v_if="node === 'geometry'", classes="mb-2"):
+                            v3.VBtn(
+                                "Geometry studio…",
+                                click=self.surface.open,
+                                disabled=("settings_dirty || !channels.length",),
+                                classes="mb-2",
+                            )
                             html.Div(
                                 "{{ settings_values.coil_mesh_file === settings_support ? geometry_help : '' }}",
                                 classes="text-caption mb-2",

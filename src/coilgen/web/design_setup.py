@@ -194,6 +194,14 @@ def build_design_setup(ctrl):
             id=("'setup-' + section.key",),
         ):
             html.H2("{{ section.title }}")
+            v3.VBtn(
+                "Geometry studio…",
+                v_if="section.key === 'geometry'",
+                size="small",
+                variant="outlined",
+                click=ctrl.open_surface_editor,
+                disabled=("setup_dirty || settings_dirty",),
+            )
             with html.Div(v_for="field in section.fields.filter(f => f.common)", key="field.key"):
                 _field()
             v3.VBtn(

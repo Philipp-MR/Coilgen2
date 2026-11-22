@@ -1476,6 +1476,7 @@ class CoilGenWorkbench(QMainWindow):
         self.redo_action.setIcon(icon("redo"))
         edit_menu.addActions([self.undo_action, self.redo_action])
         edit_menu.addAction(self._action("Advanced settings…", self._advanced_dialog, icon_name="settings"))
+        edit_menu.addAction(self._action("Geometry studio…", self._surface_editor_dialog, icon_name="mesh"))
         edit_menu.addAction(self._action("Rename project…", self._rename_dialog, icon_name="edit"))
         self.gradient_menu = self.menuBar().addMenu("Gradient engineering")
         self.gradient_actions = {}
@@ -2531,6 +2532,10 @@ class CoilGenWorkbench(QMainWindow):
                 "Saved solutions retain their settings and checks. Execution completion does not imply engineering acceptance."
             )
         elif key == "geometry":
+            surface_editor_button = QPushButton("Geometry studio…")
+            surface_editor_button.setObjectName("surface_editor_launcher")
+            surface_editor_button.clicked.connect(self._surface_editor_dialog)
+            layout.addWidget(surface_editor_button)
             note(
                 f"Source: {config.coil_mesh_file}. Generated geometry remains editable. Imported assets are owned by the saved project."
             )
@@ -6570,6 +6575,22 @@ class CoilGenWorkbench(QMainWindow):
             self.apply_inputs(
                 config, study, label="Edit gradient requirements", expected_fingerprint=project.fingerprint
             )
+
+    def _surface_editor_dialog(self):
+        from ..application.surface_model import apply_surface
+        from .surface_editor import SurfaceEditorDialog
+
+        if not self._settings_ready_for_editor():
+            return
+        project = self.project
+        try:
+            dialog = SurfaceEditorDialog(project, self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                model, mesh = dialog.result_value
+                updated = apply_surface(self.project, model, mesh, expected_fingerprint=project.fingerprint)
+                self._apply_design_document(updated, "Create CAD winding surface")
+        except (ValueError, RuntimeError, OSError, ImportError) as exc:
+            self._error(f"Geometry studio: {exc}")
 
     def _gradient_geometry_dialog(self):
         from .gradient_tools import GradientGeometryDialog

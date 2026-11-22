@@ -355,6 +355,10 @@ class DesignSetupDraft:
         if key == "setup_profile":
             return PROFILE_CHOICES.get(value, str(value))
         if key == "coil_mesh_file":
+            if str(value).lower().endswith(".npz"):
+                return "Project-owned surface"
+            if str(value).lower().endswith(".stl"):
+                return "Imported STL surface"
             return str(value).removeprefix("create ").removesuffix(" mesh").replace("_", " ").capitalize()
         if key == "target_gradient_normalization":
             return dict(target_normalization_choices(value)).get(value, str(value))

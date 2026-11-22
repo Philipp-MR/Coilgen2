@@ -505,6 +505,9 @@ def build_center_panel(workbench):
             )
         _checks_dialog(ctrl)
         build_winding_editor(workbench)
+        from .surface_editor import build_surface_editor
+
+        build_surface_editor(workbench)
         build_field_slices_dialog(ctrl)
         build_harmonics_dialog(ctrl)
         _stats_dialog()

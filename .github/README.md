@@ -74,6 +74,8 @@ For scripts without the GUI, install `python -m pip install -e ".[research,plot]
 
 ## Design and inspect
 
+- **Shape the support:** editable CAD primitives, direct manipulation, Boolean
+  subtraction, face deletion and final surface meshing.
 - **Optimize:** generated or imported support meshes, analytic or imported
   target fields, suppression regions, regularization and constrained objectives.
 - **Build the winding:** extract and smooth contours, connect loops, route
@@ -85,6 +87,25 @@ For scripts without the GUI, install `python -m pip install -e ".[research,plot]
 
 The workbench and Python scripts share the numerical engine. Saved projects
 retain editable geometry, targets and processing settings.
+
+### Geometry studio: build the winding surface
+
+Create colored cylinders, spheres, boxes and planar sheets before meshing.
+The object bar keeps dimensions, position and rotation visible while you move
+and rotate a primitive in 3D; numeric fields provide exact values in millimetres
+and degrees. Subtract one solid from another, delete individual faces to leave
+openings, then mesh the retained surface and apply it as the winding support.
+
+![Geometry studio showing an open cylinder with a spherical cut, its editable construction objects, and the final meshing controls.](../docs/images/geometry-studio.jpg)
+
+This example subtracts a sphere from a cylinder and removes the end caps and
+cavity face, leaving an open winding surface with a side window. The smooth CAD
+preview and the final solver mesh are separate; **Show mesh** inspects the new
+triangulation. Undo/redo, saved recipes and project-owned geometry retain the
+editable construction.
+
+Open **Edit → Geometry studio…** on the desktop or **Support geometry → Geometry
+studio…** in the browser. [Geometry studio guide](../docs/SURFACE_EDITOR.md).
 
 ### Conductor cross-sections and sweeping
 
