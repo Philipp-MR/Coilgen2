@@ -72,3 +72,62 @@ def test_single_point_and_flat_field_are_renderable(tmp_path):
     figure = Figure()
     draw_sample_sections(figure, [[0, 0, 0]], [0], "Bz", "µT", (-1e-12, 1e-12), True)
     figure.savefig(tmp_path / "point.png")
+
+
+def test_comparison_preserves_common_mask_and_component_difference():
+    from coilgen.application.field_presentation import field_comparison_values
+
+    actual = np.array([[[1.0, 2, 3], [4, 5, 6]], [[7, 8, 9], [10, 11, 12]]])
+    target = actual * 0.9
+    target[0, 1, 2] = np.nan
+    valid = np.array([[True, True], [False, True]])
+    before = actual.copy()
+    desired, field, residual = field_comparison_values(actual, target, "Bz", valid=valid)
+    for values in (desired, field, residual):
+        np.testing.assert_array_equal(np.isfinite(values), [[True, False], [False, True]])
+        assert not values.flags.writeable
+    np.testing.assert_allclose(residual, field - desired, equal_nan=True)
+    assert residual[1, 1] == pytest.approx(1.2)
+    np.testing.assert_array_equal(actual, before)
+
+
+def test_comparison_magnitude_difference_is_not_vector_error_and_b0_projection_is_shared():
+    from coilgen.application.field_presentation import field_comparison_values
+
+    actual, target = np.array([[3.0, 4, 0]]), np.array([[-3.0, -4, 0]])
+    desired, field, residual = field_comparison_values(actual, target, "magnitude")
+    assert desired == pytest.approx([5]) and field == pytest.approx([5])
+    assert residual == pytest.approx([0])
+    desired, field, residual = field_comparison_values(actual, target, "Bparallel", b0_direction=(2, 0, 0))
+    assert desired == pytest.approx([-3]) and field == pytest.approx([3]) and residual == pytest.approx([6])
+    assert all(np.all(np.isnan(values)) for values in field_comparison_values([[1, 2, 3]], None, "Bz"))
+
+
+@pytest.mark.parametrize("component", ["Bz", "magnitude"])
+def test_comparison_uses_identical_field_norm_and_separate_signed_residual_scale(grid, tmp_path, component):
+    from matplotlib.figure import Figure
+    from coilgen.gui.field_map_plot import draw_field_comparison
+
+    points, target = grid
+    if component == "magnitude":
+        target = np.abs(target)
+    actual = target + 0.001
+    residual = actual - target
+    figure = Figure(figsize=(11, 4))
+    shared, separate = draw_field_comparison(
+        figure,
+        points,
+        (target, actual, residual),
+        component,
+        "µT",
+        plane="xy",
+    )
+    target_plot, actual_plot, error_plot = [axis.collections[0] for axis in figure.axes[:3]]
+    assert target_plot.norm is actual_plot.norm
+    assert target_plot.get_clim() == actual_plot.get_clim() == shared
+    assert error_plot.get_clim() == separate
+    assert separate[0] == -separate[1] and separate[1] < shared[1] / 10
+    assert shared[0] == (0 if component == "magnitude" else -shared[1])
+    assert len(figure.axes) == 5  # Three maps, one shared field bar, one residual bar.
+    np.testing.assert_array_equal(target_plot.cmap(target_plot.norm(0.02)), actual_plot.cmap(actual_plot.norm(0.02)))
+    figure.savefig(tmp_path / "comparison.png")

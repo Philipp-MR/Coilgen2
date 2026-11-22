@@ -676,7 +676,7 @@ def test_section_view_changes_keep_source_statistics_and_export_units(applicatio
     captured, generation = dialog.state, dialog._generation
     before = tmp_path / "before.csv"
     dialog.export_to(before)
-    for view in ("xy", "xz", "yz", "3d", "all"):
+    for view in ("compare_xy", "compare_xz", "compare_yz", "xy", "xz", "yz", "3d", "all"):
         dialog.map_view.setCurrentIndex(dialog.map_view.findData(view))
         assert dialog.map_stack.currentIndex() == (1 if view == "3d" else 0)
         assert dialog.state is captured and dialog._generation == generation
@@ -687,6 +687,56 @@ def test_section_view_changes_keep_source_statistics_and_export_units(applicatio
     assert after.read_bytes() == before.read_bytes()
     assert "150 saved samples" in dialog.map_summary.text()
     assert dialog.section_plot.figure.axes[0].get_xlabel() == "x [mm]"
+    dialog.reject()
+
+
+@pytest.mark.parametrize("normalization", ["none", "target_rms"])
+def test_fine_comparison_uses_paired_grids_shared_scales_and_cached_plane_switches(
+    application, record, dataset, monkeypatch, normalization
+):
+    calls = []
+
+    def sampler(*args, **kwargs):
+        calls.append(kwargs)
+        return replace(fake_slices(*args, **kwargs), representation="direct_wire")
+
+    monkeypatch.setattr(gui, "sample_slices", sampler)
+    dialog = dialog_with_data(record, replace(dataset, provenance={"physical_representation": "wire"}))
+    assert dialog.map_view.currentData() == "compare_xy"
+    dialog.normalization.setCurrentIndex(dialog.normalization.findData(normalization))
+    dialog.debounce.stop()
+    dialog.refresh_analysis(sample_grid=False)
+    wait_worker(application, dialog)
+    captured, generation, limits = dialog.state, dialog._generation, dialog._comparison_limits
+    assert len(calls) == 3
+    factor = 1e6 if normalization == "none" else 100 / captured.mapped.normalization_scale_T
+    assert limits[1][1] == pytest.approx(2e-6 * factor)
+    for plane in ("xy", "xz", "yz"):
+        dialog.map_view.setCurrentIndex(dialog.map_view.findData("compare_" + plane))
+        assert dialog.state is captured and dialog._generation == generation and len(calls) == 3
+        axes = dialog.section_plot.figure.axes
+        assert len(axes) == 5
+        assert [axis.get_title(loc="left") for axis in axes[:3]] == ["Target Bz", "Actual Bz", "Residual ΔBz"]
+        assert axes[0].collections[0].norm is axes[1].collections[0].norm
+        assert axes[0].collections[0].get_clim() == limits[0]
+        assert axes[2].collections[0].get_clim() == limits[1]
+        assert axes[0].get_xlim() == axes[1].get_xlim() == axes[2].get_xlim()
+        assert axes[0].get_ylim() == axes[1].get_ylim() == axes[2].get_ylim()
+    assert "target interpolated from saved samples" in dialog.section_note.text().lower()
+    assert "Statistics" in [caption.text() for caption in dialog.field_controls.findChildren(gui.QLabel)]
+    dialog.reject()
+
+
+def test_comparison_requires_paired_target_and_restores_availability_on_source_change(application, record, dataset):
+    bare = replace(dataset, key="bare", target_T=None)
+    dialog = gui.FieldAnalysisDialog(record, auto_start=False, plot_factory=FakePlot, cloud_factory=FakeCloud)
+    dialog._catalog_loaded((dataset, bare))
+    dialog.source.setCurrentIndex(dialog.source.findData("bare"))
+    assert dialog.map_view.currentData() == "all"
+    assert not dialog.map_view.model().item(dialog.map_view.findData("compare_xy")).isEnabled()
+    dialog.source.setCurrentIndex(dialog.source.findData(dataset.key))
+    assert dialog.map_view.model().item(dialog.map_view.findData("compare_xy")).isEnabled()
+    dialog.debounce.stop()
     dialog.reject()
 
 
@@ -768,6 +818,7 @@ def test_fine_sections_preserve_global_normalization_masks_and_shared_scale(appl
 
     monkeypatch.setattr(gui, "sample_slices", sampler)
     dialog = dialog_with_data(record, source)
+    dialog.map_view.setCurrentIndex(dialog.map_view.findData("all"))
     dialog.normalization.setCurrentIndex(1)
     dialog.debounce.stop()
     dialog.refresh_analysis(sample_grid=False)

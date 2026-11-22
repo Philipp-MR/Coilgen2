@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..application.field_analysis import FieldDataset, analyze_harmonics, metric_map, owned_roi_bounds
-from ..application.field_presentation import field_provenance, paired_color_limits
+from ..application.field_presentation import field_comparison_values, field_provenance, paired_color_limits
 from ..application.field_sampling import SliceInputCache, sample_slices
 from ..application.shielding import shielding_sources, shielding_surface_fields
 from ..attribution import AUTHOR_CREDIT, SOFTWARE_NAME, software_attribution
@@ -50,7 +50,7 @@ from ..persistence import atomic_text_writer, json_value
 from ..progress import DesignCancelled
 from .coil_statistics import build_coil_statistics, display_quantity, mass_estimates
 from .run_metadata import read_run_metadata
-from .field_map_plot import draw_sample_sections
+from .field_map_plot import draw_field_comparison, draw_sample_sections
 from .shielding_plot import (
     SHIELDING_COMPONENTS,
     SHIELDING_SOURCES,
@@ -597,6 +597,7 @@ class FieldAnalysisDialog(QDialog):
         for index, (label, widget) in enumerate(controls):
             row, column = divmod(index, columns)
             caption = QLabel(label)
+            caption.setBuddy(widget)
             caption.setWordWrap(True)
             grid.addWidget(caption, 2 * row, column)
             grid.addWidget(widget, 2 * row + 1, column)
@@ -743,6 +744,9 @@ class FieldAnalysisDialog(QDialog):
             "Grey areas have no supported value. Use Slices to evaluate additional positions."
         )
         for title, key in [
+            ("Compare XY", "compare_xy"),
+            ("Compare XZ", "compare_xz"),
+            ("Compare YZ", "compare_yz"),
             ("Orthogonal sections", "all"),
             ("XY section", "xy"),
             ("XZ section", "xz"),
@@ -827,7 +831,11 @@ class FieldAnalysisDialog(QDialog):
     def _map_view_changed(self, *_):
         self.map_stack.setCurrentIndex(1 if self.map_view.currentData() == "3d" else 0)
         self.show_plot_tools.setVisible(self.map_view.currentData() != "3d")
-        if self.state is not None:
+        comparison = self.map_view.currentData().startswith("compare_")
+        for caption in self.field_controls.findChildren(QLabel):
+            if caption.buddy() is self.metric_selector:
+                caption.setText("Statistics" if comparison else "Map")
+        if self.state is not None or self._section_preview is not None:
             self._draw_sections()
 
     def _section_resized(self, *_):
@@ -847,26 +855,81 @@ class FieldAnalysisDialog(QDialog):
             return
         factor, unit = self._display(state)
         self._section_compact = figure.get_figwidth() / figure.get_figheight() < 1.8
-        draw_sample_sections(
-            figure,
-            state.dataset.points_m,
-            state.mapped.values * factor,
-            state.mapped.label,
-            unit,
-            self._display_limits(state),
-            self._signed(state),
-            plane=self.map_view.currentData(),
-            evaluated={
-                collection.plane: (collection.slices[0], values * factor, collection.representation)
-                for collection, values in zip(state.section_slices, state.section_values)
-            },
-        )
+        comparison = self.map_view.currentData().startswith("compare_")
+        if comparison:
+            self._draw_comparison(state)
+        else:
+            draw_sample_sections(
+                figure,
+                state.dataset.points_m,
+                state.mapped.values * factor,
+                state.mapped.label,
+                unit,
+                self._display_limits(state),
+                self._signed(state),
+                plane=self.map_view.currentData(),
+                evaluated={
+                    collection.plane: (collection.slices[0], values * factor, collection.representation)
+                    for collection, values in zip(state.section_slices, state.section_values)
+                },
+            )
         self.section_note.setText(
             (f"Preview {len(state.section_slices)}/3 sections · " if partial else "")
             + state.section_note
-            + " · Statistics: original saved samples."
+            + (
+                " · Target / actual: shared scale; residual: separate scale."
+                if comparison
+                else " · Statistics: original saved samples."
+            )
+            + (
+                " · Target interpolated from saved samples."
+                if comparison
+                and "target interpolated" not in state.section_note
+                and any(grid.target_representation == "display_interpolation" for grid in state.section_slices)
+                else ""
+            )
         )
         self.section_plot.draw()
+
+    def _draw_comparison(self, state):
+        """Project captured vectors; changing the comparison never runs physics."""
+        dataset, selection = state.dataset, state.selection
+        factor, unit = self._display(state)
+        if selection.normalization != "none":
+            factor = 100 / state.mapped.normalization_scale_T
+        direction = dataset.provenance.get("b0_direction", (0, 0, 1))
+
+        def values(actual, target, valid=None):
+            return tuple(
+                value * factor
+                for value in field_comparison_values(
+                    actual,
+                    target,
+                    selection.component,
+                    b0_direction=direction,
+                    valid=valid,
+                )
+            )
+
+        native = values(dataset.field_T, dataset.target_T)
+        evaluated = {}
+        for collection in state.section_slices:
+            piece = collection.slices[0]
+            valid = piece.available_mask & piece.target_valid_mask
+            if piece.roi_mask is not None:
+                valid &= piece.roi_mask
+            evaluated[collection.plane] = (piece, values(piece.field_T, piece.target_T, valid))
+        plane = self.map_view.currentData().removeprefix("compare_")
+        self._comparison_limits = draw_field_comparison(
+            self.section_plot.figure,
+            dataset.points_m,
+            native,
+            selection.component,
+            unit,
+            plane=plane,
+            evaluated=evaluated.get(plane),
+            scale_values=tuple(triple for _, triple in evaluated.values()),
+        )
 
     def _build_slices_tab(self):
         page = QWidget()
@@ -1265,6 +1328,12 @@ class FieldAnalysisDialog(QDialog):
         if dataset.target_T is None:
             self.metric_selector.setCurrentIndex(0)
             self.normalization.setCurrentIndex(0)
+        for index in range(self.map_view.count()):
+            if self.map_view.itemData(index).startswith("compare_"):
+                self.map_view.model().item(index).setEnabled(dataset.target_T is not None)
+        if dataset.target_T is None and self.map_view.currentData().startswith("compare_"):
+            self.map_view.setCurrentIndex(self.map_view.findData("all"))
+        self._map_view_changed()
         self.residual_slices.setEnabled(dataset.target_T is not None)
         self.source.setToolTip(dataset.label)
         previous = self.datasets.get(self._last_source_key)
