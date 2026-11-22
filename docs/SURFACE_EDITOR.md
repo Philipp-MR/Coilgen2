@@ -27,8 +27,8 @@ support. For channel projects this applies to the active channel.
    its operands; remove dependent operations before removing their inputs.
 5. Choose **Select face**, click a face, and **Delete face**. For example, remove
    the cylinder caps to create an open cylindrical support. To make a window
-   through its wall, subtract a sphere and remove the new spherical cavity
-   face. Face deletion leaves an opening; it does not heal or fill it.
+   through its wall, subtract a perpendicular cylinder and remove the new
+   cavity faces. Face deletion leaves an opening; it does not heal or fill it.
 6. Enter a target **mesh edge length**, choose **Mesh retained surface**, inspect
    **Show mesh**, then **Apply as winding surface**.
 
@@ -37,6 +37,13 @@ Undo/redo restores geometry edits. **Save recipe** and **Load recipe** exchange
 channel. On the desktop, save the recipe before closing if you want to keep an
 unapplied draft. Saved CoilGen projects own both the applied mesh and its CAD
 recipe, so reopening does not depend on the original file paths.
+
+![A perpendicular cylindrical cutter, the retained windowed wall and its final mesh.](images/welcome-cad-workflow.png)
+
+The illustrated recipe retains one wall with three boundary loops: the two
+open ends and one side window. The cutter stops inside the main cylinder;
+extending it through both sides would create a second window.
+[Exact recipe and mesh report](images/welcome-geometry-evidence.json).
 
 ## Geometry and numerical handoff
 

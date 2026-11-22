@@ -1,0 +1,239 @@
+{
+  "scope": "Geometry illustrations from production APIs; no field optimization or fabrication acceptance",
+  "generator_sha256": "2db3359137367df4be870919c85f0da5cd4af62a1ae7989917db14b0881a234c",
+  "figures": [
+    {
+      "file": "welcome-cad-workflow.png",
+      "sha256": "0f21b151b2351cd7daa6013f0cacf06d369131c0ef91788dceac92772575f647",
+      "model": {
+        "schema": "coilgen-surface-model-v1",
+        "nodes": [
+          {
+            "id": "object1",
+            "name": "Cylinder 1",
+            "kind": "cylinder",
+            "parameters": {
+              "radius": 0.08,
+              "height": 0.24
+            },
+            "center_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "rotation_rad": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          {
+            "id": "cutter",
+            "name": "Window cutter",
+            "kind": "cylinder",
+            "parameters": {
+              "radius": 0.045,
+              "height": 0.18
+            },
+            "center_m": [
+              0.0,
+              -0.09,
+              0.025
+            ],
+            "rotation_rad": [
+              1.5707963267948966,
+              0.0,
+              0.0
+            ]
+          },
+          {
+            "id": "cut",
+            "name": "Windowed cylinder",
+            "kind": "subtract",
+            "base": "object1",
+            "tool": "cutter"
+          }
+        ],
+        "excluded_faces": [
+          "cut:270d7595749c2aa398836e171f4343563193347acf422386d2fc7d6cd3ecfdb8",
+          "cut:97954f723fa254e69bf846ee6d71fbc395953adf4cbfeaffc4f43d559afe5d52",
+          "cut:1a1dca640645fe5c431045682e4bfef9a4e5f2fa3b329df967b428221328acc7",
+          "cut:f9ceeb82fe9632f260a1b8c9672d3b5e5fcca345a679531553f47216ec0967ff"
+        ],
+        "edge_length_m": 0.012
+      },
+      "report": {
+        "vertices": 1011,
+        "triangles": 1915,
+        "components": 1,
+        "boundary_loops": 3,
+        "area_m2": 0.11397932080259002,
+        "min_triangle_quality": 0.7612937265492097,
+        "self_intersections": 0
+      },
+      "mesher": "Gmsh 4.15.2"
+    },
+    {
+      "file": "welcome-support-library.png",
+      "sha256": "cacb1a9f011b54e6def5cf8ebb8fa6f4a4f8882e76257cc69cf6759be039acbd",
+      "supports": [
+        {
+          "name": "Cylinder",
+          "source": "create cylinder mesh",
+          "parameters": [
+            0.7857142857142857,
+            0.3,
+            128,
+            32,
+            1,
+            0,
+            0,
+            0
+          ],
+          "vertices": 4224,
+          "triangles": 8192
+        },
+        {
+          "name": "Biplanar",
+          "source": "create bi-planary mesh",
+          "parameters": [
+            0.25,
+            0.25,
+            32,
+            32,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0.2
+          ],
+          "vertices": 2178,
+          "triangles": 4096
+        },
+        {
+          "name": "Conical frustum",
+          "source": "create conical frustum mesh",
+          "parameters": [
+            0.5,
+            0.22,
+            0.16,
+            128,
+            32,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "vertices": 4224,
+          "triangles": 8192
+        },
+        {
+          "name": "Annulus",
+          "source": "create annular disc mesh",
+          "parameters": [
+            0.05,
+            0.25,
+            32,
+            128,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0
+          ],
+          "vertices": 4224,
+          "triangles": 8192
+        },
+        {
+          "name": "Elliptical cylinder",
+          "source": "create elliptical cylinder mesh",
+          "parameters": [
+            0.5,
+            0.25,
+            0.18,
+            128,
+            32,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "vertices": 4224,
+          "triangles": 8192
+        },
+        {
+          "name": "Superellipse",
+          "source": "create superellipse cylinder mesh",
+          "parameters": [
+            0.5,
+            0.25,
+            0.18,
+            4.0,
+            128,
+            32,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "vertices": 4224,
+          "triangles": 8192
+        },
+        {
+          "name": "Spherical cap",
+          "source": "create spherical cap mesh",
+          "parameters": [
+            0.25,
+            1.5707963267948966,
+            128,
+            32,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "vertices": 4097,
+          "triangles": 8064
+        },
+        {
+          "name": "Toroidal segment",
+          "source": "create toroidal segment mesh",
+          "parameters": [
+            0.35,
+            0.08,
+            -1.5707963267948966,
+            1.5707963267948966,
+            0,
+            6.283185307179586,
+            128,
+            64,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "vertices": 8256,
+          "triangles": 16384
+        }
+      ]
+    }
+  ]
+}

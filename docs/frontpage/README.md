@@ -186,3 +186,24 @@ They do not represent a completed electrical circuit or fabrication-validated wi
 feeds, return conductors, conductor cross section and downstream engineering
 can change the final field. Refer to [physical assumptions](../PHYSICAL_ASSUMPTIONS.md)
 and [result interpretation](../RESULT_INTERPRETATION.md) before using a design.
+
+## Welcome-page geometry gallery
+
+Run `python docs/frontpage/welcome_gallery.py` with the `gui` and `plot` extras
+installed to regenerate the two 3,840-pixel geometry figures and workflow SVG.
+The script calls the production CAD and generated-support APIs, then renders
+the resulting triangles with PyVista and Matplotlib. It does not optimize a coil.
+
+- [CAD workflow](../images/welcome-cad-workflow.png): an 80 mm-radius,
+  240 mm-long cylinder with a window cut by a perpendicular 45 mm-radius cylinder.
+  Removing both end caps and the cutter faces leaves one connected wall with
+  three boundary loops. The final mesh uses a 12 mm requested edge length.
+- [Support library](../images/welcome-support-library.png): eight generated
+  supports, each shown at its own viewing scale.
+- [Evidence](../images/welcome-geometry-evidence.json): the CAD recipe, mesh
+  report, Gmsh version, support parameters and generator/image SHA-256 hashes.
+- [Geometry studio screenshot](../images/geometry-studio-orthogonal-window.jpg):
+  the actual browser editor loaded with the same recipe and generated mesh.
+
+These are geometry illustrations, not field or fabrication acceptance results.
+The existing scientific figures and earlier feature-image files are preserved.

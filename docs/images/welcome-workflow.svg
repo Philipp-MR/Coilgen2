@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="230" viewBox="0 0 1800 230" role="img" aria-label="CoilGen2 workflow from support surface to field and engineering review">
+<rect width="1800" height="230" rx="18" fill="#091b2b"/>
+<text x="30" y="58" fill="#ffad72" font-family="DejaVu Sans,Arial,sans-serif" font-size="24">01</text>
+<text x="30" y="108" fill="#f4f8fc" font-family="DejaVu Sans,Arial,sans-serif" font-size="27" font-weight="700">SURFACE</text>
+<text x="30" y="150" fill="#a8c0d0" font-family="DejaVu Sans,Arial,sans-serif" font-size="20">Geometry &amp; boundaries</text>
+<path d="M275 94h28m-9 -9 9 9-9 9" fill="none" stroke="#658498" stroke-width="2"/>
+<text x="325" y="58" fill="#ffad72" font-family="DejaVu Sans,Arial,sans-serif" font-size="24">02</text>
+<text x="325" y="108" fill="#f4f8fc" font-family="DejaVu Sans,Arial,sans-serif" font-size="27" font-weight="700">TARGET</text>
+<text x="325" y="150" fill="#a8c0d0" font-family="DejaVu Sans,Arial,sans-serif" font-size="20">Field &amp; region</text>
+<path d="M570 94h28m-9 -9 9 9-9 9" fill="none" stroke="#658498" stroke-width="2"/>
+<text x="620" y="58" fill="#ffad72" font-family="DejaVu Sans,Arial,sans-serif" font-size="24">03</text>
+<text x="620" y="108" fill="#f4f8fc" font-family="DejaVu Sans,Arial,sans-serif" font-size="27" font-weight="700">CURRENT</text>
+<text x="620" y="150" fill="#a8c0d0" font-family="DejaVu Sans,Arial,sans-serif" font-size="20">Physical optimization</text>
+<path d="M865 94h28m-9 -9 9 9-9 9" fill="none" stroke="#658498" stroke-width="2"/>
+<text x="915" y="58" fill="#47dec9" font-family="DejaVu Sans,Arial,sans-serif" font-size="24">04</text>
+<text x="915" y="108" fill="#f4f8fc" font-family="DejaVu Sans,Arial,sans-serif" font-size="27" font-weight="700">WINDING</text>
+<text x="915" y="150" fill="#a8c0d0" font-family="DejaVu Sans,Arial,sans-serif" font-size="20">Contours &amp; connections</text>
+<path d="M1160 94h28m-9 -9 9 9-9 9" fill="none" stroke="#658498" stroke-width="2"/>
+<text x="1210" y="58" fill="#47dec9" font-family="DejaVu Sans,Arial,sans-serif" font-size="24">05</text>
+<text x="1210" y="108" fill="#f4f8fc" font-family="DejaVu Sans,Arial,sans-serif" font-size="27" font-weight="700">CONDUCTOR</text>
+<text x="1210" y="150" fill="#a8c0d0" font-family="DejaVu Sans,Arial,sans-serif" font-size="20">Profile &amp; mounting</text>
+<path d="M1455 94h28m-9 -9 9 9-9 9" fill="none" stroke="#658498" stroke-width="2"/>
+<text x="1505" y="58" fill="#47dec9" font-family="DejaVu Sans,Arial,sans-serif" font-size="24">06</text>
+<text x="1505" y="108" fill="#f4f8fc" font-family="DejaVu Sans,Arial,sans-serif" font-size="27" font-weight="700">REVIEW</text>
+<text x="1505" y="150" fill="#a8c0d0" font-family="DejaVu Sans,Arial,sans-serif" font-size="20">Fields &amp; engineering</text>
+</svg>
