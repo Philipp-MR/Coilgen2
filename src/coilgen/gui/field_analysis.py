@@ -76,6 +76,7 @@ class AnalysisSelection:
     harmonic_order: int
     harmonic_center_m: tuple
     harmonic_radius_m: float
+    section_resolution: int = 128
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +89,9 @@ class AnalysisState:
     error_map: object = None
     harmonics: object = None
     paired_peak: float = 0.0
+    section_slices: tuple = ()
+    section_values: tuple = ()
+    section_note: str = "Saved samples"
 
 
 class _Signals(QObject):
@@ -409,6 +413,7 @@ class FieldAnalysisDialog(QDialog):
         self._last_source_key = None
         self._slice_cache = SliceInputCache()
         self._showing_partial = False
+        self._section_preview = None
         self._plot_factory, self._cloud_factory = plot_factory or _FigurePanel, cloud_factory or _PointCloudView
         self._initial_source = self._source_alias(initial_source)
         self._requested_view = initial_view
@@ -703,6 +708,16 @@ class FieldAnalysisDialog(QDialog):
         elif field and self.datasets and not self._current():
             self._pending = True
             self.debounce.start()
+        elif (
+            self.datasets
+            and self.tabs.currentIndex() == self._VIEW_TABS["metrics"]
+            and self.state is not None
+            and self.section_resolution.currentData()
+            and not self.state.section_slices
+            and self.state.section_note == "Saved samples"
+        ):
+            self._pending = True
+            self.debounce.start()
 
     def _automatic_analysis(self):
         if self._requested_view in {"coil", "shielding"}:
@@ -724,8 +739,8 @@ class FieldAnalysisDialog(QDialog):
         row.addWidget(QLabel("View"))
         self.map_view = QComboBox()
         self.map_view.setToolTip(
-            "Central saved planes, or labelled thin slabs for scattered samples. Grey cells have no saved value. "
-            "Use Slices to evaluate additional positions."
+            "Central XY, XZ and YZ planes. Fine grids evaluate the saved physical source at unchanged current. "
+            "Grey areas have no supported value. Use Slices to evaluate additional positions."
         )
         for title, key in [
             ("Orthogonal sections", "all"),
@@ -736,6 +751,16 @@ class FieldAnalysisDialog(QDialog):
         ]:
             self.map_view.addItem(title, key)
         row.addWidget(self.map_view)
+        row.addWidget(QLabel("Grid"))
+        self.section_resolution = QComboBox()
+        for label, size in [("Saved samples", 0), ("64 × 64", 64), ("128 × 128", 128)]:
+            self.section_resolution.addItem(label, size)
+        self.section_resolution.setCurrentIndex(2)
+        self.section_resolution.setToolTip(
+            "Re-evaluate the saved field on each section; original sample statistics are retained."
+        )
+        self.section_resolution.currentIndexChanged.connect(self._changed)
+        row.addWidget(self.section_resolution)
         row.addStretch()
         self.show_metrics = QToolButton()
         self.show_metrics.setText("Statistics and samples")
@@ -749,6 +774,12 @@ class FieldAnalysisDialog(QDialog):
         self.map_summary = QLabel("Loading saved field samples…")
         self.map_summary.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         layout.addWidget(self.map_summary)
+        self.section_note = QLabel(
+            "Fine sections use the saved source and current; statistics use the original samples."
+        )
+        self.section_note.setWordWrap(True)
+        self.section_note.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        layout.addWidget(self.section_note)
         split = QSplitter()
         self.map_stack = QStackedWidget()
         self.section_plot = self._plot(self.map_stack)
@@ -805,10 +836,15 @@ class FieldAnalysisDialog(QDialog):
         if compact != self._section_compact and self.state is not None:
             self._draw_sections()
 
-    def _draw_sections(self):
+    def _draw_sections(self, state=None, *, partial=False):
         if self.section_plot.figure is None or self.map_view.currentData() == "3d":
             return
-        state, figure = self.state, self.section_plot.figure
+        state = state or self._section_preview or self.state
+        figure = self.section_plot.figure
+        if state is None:
+            figure.clear()
+            self.section_plot.draw()
+            return
         factor, unit = self._display(state)
         self._section_compact = figure.get_figwidth() / figure.get_figheight() < 1.8
         draw_sample_sections(
@@ -820,6 +856,15 @@ class FieldAnalysisDialog(QDialog):
             self._display_limits(state),
             self._signed(state),
             plane=self.map_view.currentData(),
+            evaluated={
+                collection.plane: (collection.slices[0], values * factor, collection.representation)
+                for collection, values in zip(state.section_slices, state.section_values)
+            },
+        )
+        self.section_note.setText(
+            (f"Preview {len(state.section_slices)}/3 sections · " if partial else "")
+            + state.section_note
+            + " · Statistics: original saved samples."
         )
         self.section_plot.draw()
 
@@ -1165,6 +1210,7 @@ class FieldAnalysisDialog(QDialog):
             self.units,
             self.sampling,
             self.normalization,
+            self.section_resolution,
             self.refresh,
             self.fit,
         ]:
@@ -1292,6 +1338,7 @@ class FieldAnalysisDialog(QDialog):
             self.order.value(),
             harmonic_center,
             radius,
+            self.section_resolution.currentData(),
         )
 
     def _changed(self, *_):
@@ -1328,6 +1375,7 @@ class FieldAnalysisDialog(QDialog):
         sample_grid = self._grid_requested
         self._grid_requested = False
         previous = self.state
+        evaluate_sections = self.tabs.currentIndex() == self._VIEW_TABS["metrics"]
 
         def slice_controls(item):
             return (item.source_key, item.plane, item.center_m, item.size_m, item.offsets_m, item.resolution)
@@ -1420,6 +1468,8 @@ class FieldAnalysisDialog(QDialog):
                 else None
             )
             captured = capture_slices(slices)
+            if evaluate_sections or (previous is not None and previous.section_slices):
+                captured = self._fine_sections(captured, previous, task, evaluate=evaluate_sections)
             task.report(100, "Field views ready")
 
             def harmonic_controls(item):
@@ -1440,6 +1490,91 @@ class FieldAnalysisDialog(QDialog):
             return ("analysis", replace(captured, harmonics=harmonics))
 
         self._start(operation)
+
+    def _fine_sections(self, state, previous, task, *, evaluate=True):
+        """Evaluate unchanged physical vectors once; recolour without reevaluation."""
+        from ..application.evidence import EvidenceIntegrityError
+
+        dataset, selection = state.dataset, state.selection
+        resolution = selection.section_resolution
+        if not resolution:
+            return state
+        if dataset.provenance.get("physical_representation") not in {"wire", "sheet"} and dataset.key != "target":
+            return replace(state, section_note="Saved samples · physical source unavailable for fine evaluation")
+        reused = (
+            previous.section_slices
+            if previous is not None
+            and previous.dataset is dataset
+            and previous.selection.section_resolution == resolution
+            and len(previous.section_slices) == 3
+            else ()
+        )
+        if not evaluate and not reused:
+            return state
+        bounds = owned_roi_bounds(dataset.target_geometry)
+        if bounds is None:
+            bounds = np.stack((dataset.points_m.min(axis=0), dataset.points_m.max(axis=0)))
+        center, span = bounds.mean(axis=0), bounds[1] - bounds[0]
+        span = np.maximum(span, max(float(span.max()) * 0.05, 1e-6))
+        collections, values = [], []
+        peak = state.paired_peak
+        task.publish(
+            ("sections", replace(state, section_note=f"Evaluating {resolution} × {resolution} physical sections"))
+        )
+        if reused:
+            self._slice_cache.request(self.record, cancel_check=task.check)
+        try:
+            for index, (plane, axes) in enumerate((("xy", (0, 1, 2)), ("xz", (0, 2, 1)), ("yz", (1, 2, 0)))):
+                task.check()
+                horizontal, vertical, normal = axes
+                collection = (
+                    reused[index]
+                    if reused
+                    else sample_slices(
+                        self.record,
+                        dataset,
+                        plane=plane,
+                        offsets_m=(float(center[normal]),),
+                        centre_m=tuple(center),
+                        size_m=(float(span[horizontal]), float(span[vertical])),
+                        resolution=resolution,
+                        representation="direct",
+                        cache=self._slice_cache,
+                        cancel_check=task.check,
+                        progress=lambda percent, message, index=index, plane=plane: task.report(
+                            None if percent is None else 10 + 85 * (index + percent / 100) / 3,
+                            f"Fine {plane.upper()} section {index + 1}/3 · {message}",
+                        ),
+                    )
+                )
+                if collection.representation not in {"direct_wire", "direct_sheet", "owned_analytic_target"}:
+                    raise ValueError("The selected source cannot be directly evaluated.")
+                piece = collection.slices[0]
+                scalar = self._slice_values(dataset, state.mapped, piece, selection)
+                if piece.roi_mask is not None:
+                    scalar = np.where(piece.roi_mask, scalar, np.nan)
+                    scalar.setflags(write=False)
+                collections.append(collection)
+                values.append(scalar)
+                peak = max(peak, self._paired_peak(dataset, state.mapped, collection, selection, roi_only=True))
+                target_note = (
+                    " · target interpolated from saved samples"
+                    if selection.metric != "field" and collection.target_representation == "display_interpolation"
+                    else ""
+                )
+                refined = replace(
+                    state,
+                    section_slices=tuple(collections),
+                    section_values=tuple(values),
+                    paired_peak=peak,
+                    section_note=f"{resolution} × {resolution} per plane · directly evaluated saved field{target_note}",
+                )
+                task.publish(("sections", refined))
+        except (DesignCancelled, InterruptedError, EvidenceIntegrityError):
+            raise
+        except (ValueError, KeyError, OSError) as exc:
+            return replace(state, section_note=f"Saved samples · fine evaluation unavailable: {exc}")
+        return refined
 
     @staticmethod
     def _slice_values(dataset, mapped, piece, selection):
@@ -1471,17 +1606,20 @@ class FieldAnalysisDialog(QDialog):
         return values
 
     @staticmethod
-    def _paired_peak(dataset, mapped, slices, selection):
+    def _paired_peak(dataset, mapped, slices, selection, *, roi_only=False):
         if selection.metric not in {"field", "target"} or dataset.target_T is None:
             return 0.0
         is_field = selection.metric == "field"
         vectors = [dataset.target_T if is_field else dataset.field_T]
         for piece in slices.slices if slices is not None else ():
+            valid = np.asarray(piece.available_mask).copy()
+            if roi_only and piece.roi_mask is not None:
+                valid &= piece.roi_mask
             if is_field:
                 if piece.target_T is not None:
-                    vectors.append(piece.target_T[piece.available_mask & piece.target_valid_mask])
+                    vectors.append(piece.target_T[valid & piece.target_valid_mask])
             else:
-                vectors.append(piece.field_T[piece.available_mask])
+                vectors.append(piece.field_T[valid])
         component = "BdotB0" if selection.component == "Bparallel" else selection.component
         b0 = dataset.provenance.get("b0_direction", (0, 0, 1))
         projections = (
@@ -1552,12 +1690,17 @@ class FieldAnalysisDialog(QDialog):
         self.progressDetails.emit({"percent": percent, "progress_indeterminate": percent is None, "message": message})
 
     def _publish_slice_preview(self, worker, state):
-        if (
-            worker is not self.worker
-            or worker.generation != self._generation
-            or worker.cancel.is_set()
-            or self.tabs.currentIndex() != self._VIEW_TABS["slices"]
-        ):
+        if worker is not self.worker or worker.generation != self._generation or worker.cancel.is_set():
+            return
+        if isinstance(state, tuple) and state[0] == "sections":
+            if self.tabs.currentIndex() == self._VIEW_TABS["metrics"]:
+                self._section_preview = state[1]
+                try:
+                    self._draw_sections(state[1], partial=True)
+                except (RuntimeError, TypeError, ValueError) as exc:
+                    self.status.setText(f"Section preview rendering failed: {exc}")
+            return
+        if self.tabs.currentIndex() != self._VIEW_TABS["slices"]:
             return
         try:
             self._draw_slices(state, partial=True)
@@ -1577,6 +1720,11 @@ class FieldAnalysisDialog(QDialog):
             self._finish_close()
             return
         stale = worker.generation != self._generation
+        if self._section_preview is not None:
+            self._section_preview = None
+            if error or stale:
+                self._draw_sections()
+                self.section_note.setText("Fine evaluation cancelled or superseded; no partial grid was saved.")
         if self._showing_partial:
             self._showing_partial = False
             if error or stale:
@@ -1677,7 +1825,7 @@ class FieldAnalysisDialog(QDialog):
         factor, _ = self._display(state)
         peaks = (
             float(np.max(np.abs(values[np.isfinite(values)]), initial=0.0))
-            for values in (state.mapped.values, *state.slice_values)
+            for values in (state.mapped.values, *state.slice_values, *state.section_values)
         )
         return paired_color_limits((max(peaks) * factor,), (state.paired_peak * factor,), signed=self._signed(state))
 
@@ -2052,6 +2200,9 @@ class FieldAnalysisDialog(QDialog):
                 "metric": state.mapped,
                 "slices": state.slices,
                 "slice_scalar_values": state.slice_values,
+                "section_grids": state.section_slices,
+                "section_scalar_values": state.section_values,
+                "section_note": state.section_note,
                 "harmonics": state.harmonics,
                 "display_note": "Native fields and slice fields are SI tesla; normalized metrics are percentages of a global target scale.",
             }

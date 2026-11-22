@@ -690,6 +690,184 @@ def test_section_view_changes_keep_source_statistics_and_export_units(applicatio
     dialog.reject()
 
 
+def test_fine_sections_evaluate_signed_wire_current_and_cache_vectors(application, tmp_path, monkeypatch):
+    from itertools import product
+    from coilgen.application.field_analysis import source_catalog
+    from coilgen.physics import biot_savart_wire_path
+
+    path = np.array([[-0.1, 0, 0], [0.1, 0, 0]])
+    points = np.array(list(product((-0.08, 0.08), repeat=3)))
+    actual = -2 * biot_savart_wire_path(path, points)
+    record = RunRecord(
+        tmp_path,
+        {
+            "wire_fields": {
+                "routed": {
+                    "available": True,
+                    "current_A": 99,
+                    "at_stream_current": {"available": True, "current_A": -2},
+                }
+            }
+        },
+        {"target_points_m": points, "evaluated_winding_0_points_m": path, "routed_field_at_stream_current_T": actual},
+    )
+    source = next(item for item in source_catalog(record) if item.key == "routed_at_stream_current")
+    dialog = gui.FieldAnalysisDialog(
+        record, initial_source=source.key, auto_start=False, plot_factory=FakePlot, cloud_factory=FakeCloud
+    )
+    # Include the base source so its original-current variant is selectable.
+    dialog._catalog_loaded((replace(source, key="routed"), source))
+    dialog.section_resolution.setCurrentIndex(dialog.section_resolution.findData(64))
+    dialog.debounce.stop()
+    calls, sampler = [], gui.sample_slices
+
+    def counted(*args, **kwargs):
+        calls.append(kwargs)
+        return sampler(*args, **kwargs)
+
+    monkeypatch.setattr(gui, "sample_slices", counted)
+    dialog.refresh_analysis(sample_grid=False)
+    wait_worker(application, dialog)
+    state = dialog.state
+    assert len(calls) == 3 and all(call["representation"] == "direct" for call in calls)
+    assert all(grid.representation == "direct_wire" for grid in state.section_slices)
+    piece = state.section_slices[0].slices[0]
+    assert piece.field_T.shape == (64, 64, 3)
+    # Independent finite straight-wire formula, at genuinely new sample points.
+    x, y = piece.coordinates_m[..., 0], piece.coordinates_m[..., 1]
+    expected = -2e-7 / y * ((0.1 - x) / np.sqrt((0.1 - x) ** 2 + y**2) + (0.1 + x) / np.sqrt((0.1 + x) ** 2 + y**2))
+    np.testing.assert_allclose(piece.field_T[..., 2], expected, rtol=2e-13)
+    np.testing.assert_array_equal(state.mapped.values, actual[:, 2])
+    assert not np.isin(piece.coordinates_m[20, 20, 0], points[:, 0])
+    assert all(not grid.provenance["analysis_current_refitted"] for grid in state.section_slices)
+    for component in ("Bx", "Bz"):
+        dialog.component.setCurrentIndex(dialog.component.findData(component))
+        dialog.units.setCurrentIndex(1)
+        dialog.debounce.stop()
+        dialog.refresh_analysis(sample_grid=False)
+        wait_worker(application, dialog)
+    assert len(calls) == 3
+    assert dialog.state.section_slices == state.section_slices
+    np.testing.assert_array_equal(record.array("routed_field_at_stream_current_T"), actual)
+    path = tmp_path / "fine.json"
+    dialog.export_to(path)
+    exported = json.loads(path.read_text())
+    assert len(exported["section_grids"]) == 3
+    assert exported["section_grids"][0]["representation"] == "direct_wire"
+    assert np.shape(exported["section_scalar_values"][0]) == (64, 64)
+    dialog.reject()
+
+
+def test_fine_sections_preserve_global_normalization_masks_and_shared_scale(application, record, dataset, monkeypatch):
+    source = replace(dataset, provenance={"physical_representation": "wire"})
+    calls = []
+
+    def sampler(*args, **kwargs):
+        calls.append(kwargs)
+        return replace(fake_slices(*args, **kwargs), representation="direct_wire")
+
+    monkeypatch.setattr(gui, "sample_slices", sampler)
+    dialog = dialog_with_data(record, source)
+    dialog.normalization.setCurrentIndex(1)
+    dialog.debounce.stop()
+    dialog.refresh_analysis(sample_grid=False)
+    wait_worker(application, dialog)
+    state = dialog.state
+    expected = 100 * 2e-6 / np.sqrt(np.mean(dataset.target_T[:, 2] ** 2))
+    assert len(state.section_values) == 3
+    for values, collection in zip(state.section_values, state.section_slices):
+        assert values[np.isfinite(values)] == pytest.approx(expected)
+        assert np.isnan(values[0, 0]) and np.isnan(values[1, 1])
+        assert np.all(np.isnan(values[~collection.slices[0].roi_mask]))
+    assert all(axis.collections[0].get_clim() == dialog._color_limits for axis in dialog.section_plot.figure.axes[:3])
+    native = state.mapped.values.copy()
+    dialog.section_resolution.setCurrentIndex(0)
+    dialog.debounce.stop()
+    dialog.refresh_analysis(sample_grid=False)
+    wait_worker(application, dialog)
+    assert not dialog.state.section_slices and len(calls) == 3
+    np.testing.assert_array_equal(dialog.state.mapped.values, native)
+    dialog.reject()
+
+
+def test_fine_section_preview_cancellation_cannot_publish_or_export_partial_grid(
+    application, record, dataset, monkeypatch
+):
+    import time
+
+    release = Event()
+    count = 0
+
+    def sampler(*args, **kwargs):
+        nonlocal count
+        count += 1
+        if count == 2:
+            assert release.wait(8)
+            kwargs["cancel_check"]()
+        return replace(fake_slices(*args, **kwargs), representation="direct_wire")
+
+    monkeypatch.setattr(gui, "sample_slices", sampler)
+    dialog = dialog_with_data(record, replace(dataset, provenance={"physical_representation": "wire"}))
+    dialog.refresh_analysis(sample_grid=False)
+    try:
+        deadline = time.monotonic() + 5
+        while (
+            dialog._section_preview is None or len(dialog._section_preview.section_slices) < 1
+        ) and time.monotonic() < deadline:
+            application.processEvents()
+            time.sleep(0.005)
+        assert "Preview 1/3" in dialog.section_note.text()
+        assert dialog.state is None and not dialog.export_plot.isEnabled() and not dialog.export_data.isEnabled()
+        dialog._cancel()
+    finally:
+        release.set()
+    wait_worker(application, dialog)
+    assert dialog.state is None and dialog._section_preview is None
+    assert not dialog.export_plot.isEnabled() and not dialog.export_data.isEnabled()
+    assert "cancelled" in dialog.status.text()
+    dialog.reject()
+
+
+def test_unavailable_direct_source_keeps_native_values_and_explains_fallback(application, record, dataset, monkeypatch):
+    def unavailable(*args, **kwargs):
+        assert kwargs["representation"] == "direct"
+        raise ValueError("Saved physical geometry missing")
+
+    monkeypatch.setattr(gui, "sample_slices", unavailable)
+    dialog = dialog_with_data(record, replace(dataset, provenance={"physical_representation": "wire"}))
+    dialog.refresh_analysis(sample_grid=False)
+    wait_worker(application, dialog)
+    assert not dialog.state.section_slices
+    assert "Saved physical geometry missing" in dialog.section_note.text()
+    assert dialog.state.mapped.values == pytest.approx(np.full(len(dataset.points_m), 2e-6))
+    assert dialog.export_data.isEnabled()
+    dialog.reject()
+
+
+def test_fine_field_and_target_share_scale_without_outside_roi_extrema(application, record, dataset, monkeypatch):
+    def sampler(*args, **kwargs):
+        collection = fake_slices(*args, **kwargs)
+        piece = collection.slices[0]
+        actual = piece.field_T.copy()
+        actual[~piece.roi_mask] = 1.0
+        return replace(collection, representation="direct_wire", slices=(replace(piece, field_T=actual),))
+
+    monkeypatch.setattr(gui, "sample_slices", sampler)
+    dialog = dialog_with_data(record, replace(dataset, provenance={"physical_representation": "wire"}))
+    dialog.metric_selector.setCurrentIndex(dialog.metric_selector.findData("field"))
+    dialog.debounce.stop()
+    dialog.refresh_analysis(sample_grid=False)
+    wait_worker(application, dialog)
+    limits = dialog._color_limits
+    assert limits[1] < 100  # µT: the 1 T outside the displayed ROI must not set the scale.
+    dialog.metric_selector.setCurrentIndex(dialog.metric_selector.findData("target"))
+    dialog.debounce.stop()
+    dialog.refresh_analysis(sample_grid=False)
+    wait_worker(application, dialog)
+    assert dialog._color_limits == pytest.approx(limits)
+    dialog.reject()
+
+
 def test_camera_first_fit_includes_roi_and_metric_switch_keeps_camera():
     class Plotter:
         reset_count = 0

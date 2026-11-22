@@ -56,8 +56,8 @@ def sample_section(points_m, values, plane):
     )
 
 
-def draw_sample_sections(figure, points_m, values, label, unit, limits, signed, *, plane="all"):
-    """Use one honest physical scale for every section and retain native holes."""
+def draw_sample_sections(figure, points_m, values, label, unit, limits, signed, *, plane="all", evaluated=None):
+    """Draw native observations or explicitly evaluated grids on one scale."""
     from matplotlib import colormaps
     from matplotlib.cm import ScalarMappable
     from matplotlib.colors import Normalize
@@ -73,13 +73,29 @@ def draw_sample_sections(figure, points_m, values, label, unit, limits, signed, 
     norm = Normalize(*limits)
     visible = []
     for axis, name in zip(axes.flat, planes):
-        section = sample_section(points_m, values, name)
+        fine = (evaluated or {}).get(name)
+        if fine is not None:
+            piece, scalar, representation = fine
+            horizontal, vertical, normal = {"xy": (0, 1, 2), "xz": (0, 2, 1), "yz": (1, 2, 0)}[name]
+            points = piece.coordinates_m * 1000
+            section = SampleSection(
+                (horizontal, vertical, normal),
+                points.reshape(-1, 3),
+                scalar.ravel(),
+                (piece.offset_m * 1000, piece.offset_m * 1000),
+                (points[0, :, horizontal], points[:, 0, vertical], scalar),
+            )
+        else:
+            section = sample_section(points_m, values, name)
         horizontal, vertical, normal = section.axes
         axis.set_facecolor("#e8edf2")
         if section.grid is not None:
             u, v, cells = section.grid
             masked = np.ma.masked_invalid(cells)
-            axis.pcolormesh(u, v, masked, shading="nearest", cmap=cmap, norm=norm, rasterized=True)
+            if fine is not None and masked.count():
+                axis.contourf(u, v, masked, levels=np.linspace(*limits, 81), cmap=cmap, norm=norm, corner_mask=False)
+            else:
+                axis.pcolormesh(u, v, masked, shading="nearest", cmap=cmap, norm=norm, rasterized=True)
             # Lines emphasize field structure but never bridge missing cells.
             finite = cells[np.isfinite(cells)]
             if len(finite) and np.ptp(finite) > max(abs(limits[0]), abs(limits[1])) * 1e-8:
@@ -104,12 +120,18 @@ def draw_sample_sections(figure, points_m, values, label, unit, limits, signed, 
         low, high = section.normal_range_mm
         position = f"{low:.4g}" if np.isclose(low, high, rtol=0, atol=1e-10) else f"{low:.4g} … {high:.4g}"
         kind = "saved plane" if low == high else "sample slab"
+        if fine is not None:
+            kind = f"{scalar.shape[1]} × {scalar.shape[0]} grid"
+            for outline in piece.outlines_m:
+                axis.plot(outline[:, horizontal] * 1000, outline[:, vertical] * 1000, color="#607080", linewidth=0.7)
+            axis.set_xlim(float(u.min()), float(u.max()))
+            axis.set_ylim(float(v.min()), float(v.max()))
         axis.set_title(f"{name.upper()} · {'xyz'[normal]} = {position} mm\n{kind}", fontsize=10, loc="left", pad=7)
         axis.set_xlabel(f"{'xyz'[horizontal]} [mm]", fontsize=10)
         axis.set_ylabel(f"{'xyz'[vertical]} [mm]", fontsize=10)
         axis.set_aspect("equal", adjustable="box")
-        axis.xaxis.set_major_locator(MaxNLocator(5))
-        axis.yaxis.set_major_locator(MaxNLocator(5))
+        axis.xaxis.set_major_locator(MaxNLocator(4))
+        axis.yaxis.set_major_locator(MaxNLocator(4))
         axis.tick_params(labelsize=9, length=3, colors="#405466")
         for spine in axis.spines.values():
             spine.set_color("#c4cfd9")
