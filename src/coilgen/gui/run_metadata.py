@@ -1,9 +1,10 @@
 """Read immutable evidence for presentation without copying wire witnesses."""
 
 from collections.abc import Mapping
+from ..application.interfaces import RunRecordView
 
 
-def read_run_metadata(record):
+def read_run_metadata(record: RunRecordView | Mapping | None):
     """Borrow an immutable application view; retain legacy adapter support."""
     if record is None:
         return {}

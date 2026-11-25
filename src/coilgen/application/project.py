@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from ..attribution import AUTHOR_NAME, PROJECT_URL, SOFTWARE_NAME, SOFTWARE_VERSION
 from ..config import CoilGenConfig
+from ..config_schema import config_fields
 from ..geometry import geometry_factory
 from ..object_registry import (
     get_in_memory_mesh,
@@ -24,6 +25,9 @@ from ..object_registry import (
 )
 from ..persistence import atomic_json, atomic_text, json_value
 from .assets import InputAsset, mesh_asset, project_reference_path, target_asset
+
+
+from ..config_migrations import CONFIG_VERSION, migrate_project_config, project_identity_values
 
 
 PROJECT_SCHEMA = "coilgen-project-v2"
@@ -43,7 +47,7 @@ _INPUT_FIELDS = {
     "preoptimized_stream_function_file",
     "sf_source_file",
 }
-_CONFIG_FIELDS = {item.name for item in fields(CoilGenConfig)}
+_CONFIG_FIELDS = frozenset(config_fields())
 _ASSET_PREFIX = "asset:"
 
 
@@ -266,26 +270,12 @@ class ProjectDocument:
         return sha256(encoded).hexdigest()
 
     @staticmethod
-    def _stored_config(values):
-        """Supply only opt-in fields introduced after the original project schema."""
-        config = dict(values)
-        config.setdefault("target_region_geometry", None)
-        config.setdefault("contour_smoothing_local_fallback", False)
-        config.setdefault("routing_editor_plan", None)
-        return config
+    def _stored_config(values, *, version=0):
+        return migrate_project_config(values, version=version)
 
     @property
     def _identity_values(self) -> dict:
-        values = self.values
-        # The opt-in region adds no physical input when inactive. Preserve
-        # identities of pre-region project JSON and its saved result evidence.
-        if values.get("target_region_geometry") is None:
-            values.pop("target_region_geometry", None)
-        if values.get("contour_smoothing_local_fallback") is False:
-            values.pop("contour_smoothing_local_fallback", None)
-        if values.get("routing_editor_plan") is None:
-            values.pop("routing_editor_plan", None)
-        return values
+        return project_identity_values(self.values)
 
     @property
     def _asset_formats(self) -> dict:
@@ -536,6 +526,7 @@ class ProjectDocument:
         """Single-file representation: inputs and completed evidence are inline."""
         return {
             "schema": PROJECT_SCHEMA,
+            "config_version": CONFIG_VERSION,
             "id": self.id,
             "name": self.name,
             "revision": self.revision,
@@ -564,7 +555,7 @@ class ProjectDocument:
         root = Path.cwd() if project_root is None else Path(project_root).expanduser().resolve()
         expected = {"schema", "id", "name", "revision", "config", "assets"}
         schema = value.get("schema") if isinstance(value, dict) else None
-        optional = {"study", "results", "session"} if schema == PROJECT_SCHEMA else {"study"}
+        optional = {"study", "results", "session", "config_version"} if schema == PROJECT_SCHEMA else {"study"}
         if (
             not isinstance(value, dict)
             or not expected <= set(value)
@@ -575,7 +566,7 @@ class ProjectDocument:
         if not isinstance(value["config"], dict) or not isinstance(value["assets"], dict):
             raise ValueError("Project config and assets must be JSON objects.")
         json.dumps(value, allow_nan=False)
-        config_values = cls._stored_config(value["config"])
+        config_values = cls._stored_config(value["config"], version=value.get("config_version", 0))
         assets = {}
         for id_, descriptor in value["assets"].items():
             if value["schema"] == PROJECT_SCHEMA:
@@ -642,13 +633,22 @@ class ProjectDocument:
         config.output_directory = directory
         return ResearchRequest.from_config(config, name=self.name, **controls)
 
-    def export_script(self, path: str | Path, *, compact=False, include_results=False) -> Path:
+    def export_script(self, path: str | Path, *, compact=False, include_results=False, standalone=False) -> Path:
         """Export a runnable script and inputs; saved results are optional.
 
         A fresh solve needs the owned model and study, not prior result archives.
         Use ``include_results=True`` to publish a complete evidence companion.
+        Use ``standalone=True`` for one editable Python file with embedded inputs,
+        without a companion or saved results.
         """
         path = Path(path).expanduser().resolve()
+        if standalone:
+            if compact or include_results:
+                raise ValueError("Standalone Python contains inputs only; compact/results require a companion export.")
+            from .python_export import design_script
+
+            atomic_text(path, design_script(self))
+            return path
         project_path = path.with_suffix(".coilgen" if compact else ".coilgen.json")
         (self if include_results else self.inputs_only()).save(project_path)
         text = (

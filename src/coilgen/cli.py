@@ -41,6 +41,7 @@ def main(argv=None) -> int:
     )
     export.add_argument("project", type=Path)
     export.add_argument("output", type=Path)
+    export.add_argument("--standalone", action="store_true", help="One editable Python file with embedded inputs")
     commands.add_parser("capabilities", help="Print installed numerical solver capabilities")
     args = parser.parse_args(argv)
     try:
@@ -81,7 +82,7 @@ def main(argv=None) -> int:
             )
             return 0
         if args.command == "export-script":
-            print(project.export_python(args.output))
+            print(project.export_python(args.output, standalone=args.standalone))
             return 0
         from .progress import progress_context
         from .research.jobs import RuntimePolicy

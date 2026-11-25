@@ -17,6 +17,8 @@ from ..persistence import (
     file_digest as file_digest,
     json_value as json_value,
     numerical_source_digest,
+    result_source_digest,
+    NUMERICAL_PACKAGES,
     source_digest,
 )
 
@@ -43,18 +45,7 @@ def operator_fingerprint(value: Any) -> Any:
 
 def environment_manifest() -> dict:
     packages = {}
-    for name in (
-        "coilgen-python",
-        "numpy",
-        "scipy",
-        "cvxpy",
-        "clarabel",
-        "scs",
-        "ecos",
-        "numba",
-        "llvmlite",
-        "threadpoolctl",
-    ):
+    for name in ("coilgen-python", *NUMERICAL_PACKAGES):
         try:
             packages[name] = version(name)
         except PackageNotFoundError:
@@ -82,6 +73,7 @@ def request_identity(request: dict, resolved: dict) -> tuple[str, dict]:
         "resolved_config": resolved,
         "source_sha256": source_digest(package_root),
         "numerical_source_sha256": numerical_source_digest(package_root),
+        "result_source_sha256": result_source_digest(package_root),
         "input_files": inputs,
         "environment": environment_manifest(),
     }
@@ -112,7 +104,7 @@ def request_identity(request: dict, resolved: dict) -> tuple[str, dict]:
         request=controls,
         resolved_config=config_identity,
         input_files={key: item["sha256"] for key, item in inputs.items()},
-        source_sha256=manifest["numerical_source_sha256"],
+        source_sha256=manifest["result_source_sha256"],
     )
     encoded = json.dumps(
         json_value(identity, nonfinite="raise"), sort_keys=True, separators=(",", ":"), allow_nan=False

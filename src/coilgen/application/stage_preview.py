@@ -242,7 +242,7 @@ def publish_stage_preview(directory, checkpoint, request, request_sha256, *, max
     """
     max_bytes = _byte_limit(max_bytes)
     stage = PipelineStage(checkpoint.stage)
-    arrays = checkpoint.scientific_arrays(max_bytes=max_bytes)
+    arrays = checkpoint.select_arrays(copy=False, max_bytes=max_bytes)
     return _publish(directory, arrays, stage, None, request, request_sha256, max_bytes)
 
 

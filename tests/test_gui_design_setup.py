@@ -8,6 +8,31 @@ application = native.application
 window = native.window
 
 
+def test_delayed_advanced_scroll_does_not_outlive_its_qt_owner(application, monkeypatch):
+    import sys
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout
+    from coilgen.gui.design_setup import DesignSetupPanel
+
+    errors = []
+    monkeypatch.setattr(sys, "excepthook", lambda *error: errors.append(error))
+    host = QWidget()
+    host.readiness_banner = QLabel()
+    host.apply_settings = lambda: True
+    panel = DesignSetupPanel(host)
+    editor = QWidget()
+    layout = QVBoxLayout(editor)
+    layout.addWidget(QLabel("Advanced settings"))
+    layout.addLayout(QHBoxLayout())
+    editor.configure_physics = QPushButton()
+    editor.fields = {}
+    panel.show_advanced(editor)
+    host.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    application.processEvents()
+    assert errors == []
+
+
 def test_setup_replaces_tree_and_initial_plan_without_losing_tools(window, application):
     window.load_template("cylinder")
     application.processEvents()

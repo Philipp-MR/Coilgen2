@@ -92,6 +92,35 @@ def test_download_paths_preserve_literal_filename_characters(tmp_path):
     assert unquote(url.path) == f"downloads/{output.name}"
 
 
+def test_python_download_applies_setup_and_needs_no_companion(tmp_path):
+    import runpy
+    from coilgen.web.menus import menu_action
+
+    server, browser = create_app(tmp_path, server_name="test-python-download")
+    try:
+        browser.session.load_template("cylinder")
+        state = server.state
+        state.setup_values = {**state.setup_values, "cylinder_radius_mm": "93", "validation_resolution": "7"}
+        browser.setup._changed()
+        asyncio.run(menu_action(browser, "python"))
+        assert state.file_dialog and state.file_section == "save"
+        script = browser.exports / Path(unquote(state.python_download)).name
+        exported = runpy.run_path(str(script))["build_project"]()
+        assert exported.config.cylinder_mesh_parameter_list[1] == pytest.approx(0.093)
+        assert exported.study["validation_resolution"] == 7
+        assert exported.fingerprint == browser.session.project.fingerprint
+        assert "Download Python script" in state.trame__template_main
+        assert not script.with_suffix(".coilgen.json").exists()
+        state.setup_values = {**state.setup_values, "cylinder_radius_mm": "invalid"}
+        browser.setup._changed()
+        browser.export_python()
+        assert not state.python_download
+        assert len(list(browser.exports.glob("*.py"))) == 1
+    finally:
+        browser.plotter.close()
+        browser.session.close()
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node is optional for client-component tests")
 def test_native_upload_javascript_progress_and_errors():
     subprocess.run(

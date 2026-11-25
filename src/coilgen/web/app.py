@@ -339,6 +339,7 @@ class BrowserWorkbench:
                 "download_url": "",
                 "download_label": "",
                 "project_download": "",
+                "python_download": "",
                 "workspace_file": None,
                 "opening_workspace_file": None,
                 "saved_projects": list(self._workspace_files()),
@@ -460,6 +461,7 @@ class BrowserWorkbench:
         identity = (assembly.id, session.active_channel_id) if assembly else None
         switched = identity != self.editing_identity
         state.project_download = ""
+        state.python_download = ""
         if switched:
             self.follow_job_id = None
             self.editing_identity = identity
@@ -825,6 +827,20 @@ class BrowserWorkbench:
             if self._guard(self._publish_project, saved):
                 self.server.state.project_download = f"downloads/{quote(saved.name)}"
                 self._notify(f"Saved {saved.name}. Use Download project to keep a portable copy.", "success")
+
+    @_bind("export_python")
+    def export_python(self):
+        self.server.state.python_download = ""
+        if not self._ready_to_submit():
+            return
+        project = self.session.project
+        path = self.exports / f"design-{project.id}-r{project.revision}.py"
+        saved = self._guard(project.export_python, path, standalone=True)
+        if saved:
+            state = self.server.state
+            state.python_download = f"downloads/{quote(saved.name)}"
+            state.file_section, state.file_dialog = "save", True
+            self._notify("Python script ready. Download it to edit settings and run without the GUI.", "success")
 
     def _publish_project(self, saved):
         target = self.exports / saved.name
@@ -2198,6 +2214,7 @@ class BrowserWorkbench:
         ctrl.discard_edits = self._refresh_settings
         ctrl.new_project = self.new_project
         ctrl.save_project = self.save_project
+        ctrl.export_python = self.export_python
         ctrl.open_uploaded_project = self.open_uploaded_project
         ctrl.undo, ctrl.redo = self.undo, self.redo
         ctrl.apply_settings = self.apply_settings

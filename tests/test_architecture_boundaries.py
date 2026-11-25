@@ -39,7 +39,14 @@ def test_application_facade_is_provenance_only(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "module", ["coilgen", "coilgen.api", "coilgen.application", "coilgen.application.optimization_summary"]
+    "module",
+    [
+        "coilgen",
+        "coilgen.api",
+        "coilgen.application",
+        "coilgen.application.optimization_summary",
+        "coilgen.application.interfaces",
+    ],
 )
 def test_public_imports_do_not_load_optional_numerical_or_gui_packages(module):
     code = f"""

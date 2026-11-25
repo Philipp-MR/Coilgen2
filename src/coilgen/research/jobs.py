@@ -18,7 +18,7 @@ import uuid
 
 from .requests import ResearchRequest
 from .storage import DirectoryOwner, atomic_json, file_digest, request_identity, verified_result, verify_input_files
-from ..persistence import numerical_source_digest
+from ..persistence import numerical_source_digest, result_source_digest
 from ..pipeline_stages import PipelineStage
 from ..progress import update_work_progress
 
@@ -113,6 +113,10 @@ def _worker(request: dict, directory: str, events, cancel, threads: int) -> None
             run_design(frozen, Path(directory), threads=threads)
         if numerical_source_digest(Path(__file__).resolve().parents[1]) != source:
             raise RuntimeError("Numerical code changed during computation. Submit a new job under a stable version.")
+        if result_source_digest(Path(__file__).resolve().parents[1]) != manifest["result_source_sha256"]:
+            raise RuntimeError(
+                "Result evaluation code changed during computation. Submit a new job under a stable version."
+            )
         relay.flush()
         events.put({"kind": "completed"}, timeout=5)
     except DesignCancelled:
@@ -267,6 +271,7 @@ class JobManager:
                 "error": None,
                 "request_sha256": digest,
                 "submitted_numerical_source_sha256": manifest["numerical_source_sha256"],
+                "submitted_result_source_sha256": manifest["result_source_sha256"],
                 "project_id": request.project_id,
                 "project_revision": request.project_revision,
                 "project_fingerprint": request.project_fingerprint,

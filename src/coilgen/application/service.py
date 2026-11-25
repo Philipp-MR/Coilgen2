@@ -18,6 +18,7 @@ from ..persistence import json_value
 from ..research.storage import DirectoryOwner, request_identity, verified_result, verify_input_files
 from .project import ProjectDocument
 from .project import _freeze
+from .interfaces import JobRuntime
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +103,7 @@ class DesignService:
         return plan_execution(project, states=states, reuse=reuse, **request_controls)
 
     @classmethod
-    def submit_plan(cls, project: ProjectDocument, jobs, plan):
+    def submit_plan(cls, project: ProjectDocument, jobs: JobRuntime, plan):
         """Reject stale plans and recheck execution state before submitting."""
         from .execution import matches_active_request
         from ..research.jobs import JobManager
@@ -121,7 +122,7 @@ class DesignService:
         return project.snapshot(output_dir, **request_controls)
 
     @classmethod
-    def submit(cls, project: ProjectDocument, jobs, *, reuse_active=False, **request_controls) -> dict:
+    def submit(cls, project: ProjectDocument, jobs: JobRuntime, *, reuse_active=False, **request_controls) -> dict:
         root = Path(jobs.directory) / "inputs" / project.id / project.fingerprint
         request = cls.prepare(project, root, **request_controls)
         state = jobs.submit(request, reuse_active=True) if reuse_active else jobs.submit(request)
@@ -220,7 +221,7 @@ class DesignService:
             return execute_owned_design(request, directory, threads=threads)
 
     @classmethod
-    def submit_assembly(cls, assembly, jobs, **request_controls) -> dict[str, dict]:
+    def submit_assembly(cls, assembly, jobs: JobRuntime, **request_controls) -> dict[str, dict]:
         """Queue enabled channels independently, preserving their scientific scope."""
         from .assembly import ProjectAssembly
 

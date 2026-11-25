@@ -79,6 +79,59 @@ artifacts = run_coil_design(design, CoilDesignRunOptions(output_prefix="my_desig
 All geometry and conductor dimensions use meters. CoilGen still accepts the
 expert `CoilGenConfig` API for low-level studies.
 
+## Export a GUI design as Python
+
+In the desktop or browser workbench, choose **File → Export Python script…**.
+The desktop defaults to **Editable Python script**; in the browser, click
+**Download Python script** after the export is ready. The active channel's
+pending valid setup edits are applied before export. Resolve any unfinished
+specialist editor changes first.
+
+The resulting `.py` file contains editable `CONFIG = CoilGenConfig(...)` and
+`STUDY` settings, plus embedded copies of imported meshes and target maps. It
+requires no companion project file or open GUI. Design choices appear first;
+resolved defaults are also included so an updated default cannot silently
+change the design. Run it in the Python environment installed for CoilGen2:
+
+```shell
+python coilgen_design.py
+python coilgen_design.py --output new_results --threads 1
+```
+
+On Windows, setup's default interpreter is
+`%USERPROFILE%\.coilgen2\venv\Scripts\python.exe`. For a separate environment,
+install the same CoilGen checkout with `python -m pip install -e ".[full]"`.
+Imported formats and selected solvers need their corresponding dependencies.
+
+The script runs the exported stage and study, including validation and
+fabrication choices, through the same headless service used by the GUI. Results
+default to `<script-name>.results` beside the script. After changing settings,
+choose a new output directory to preserve the previous run. Importing the script
+does not compute anything; notebooks and Spyder can call `build_project()` or
+`run(output_dir="new_results")`. For numerical replay, retain the same CoilGen
+source revision, dependencies and thread count.
+
+Existing direct calls to `run_coilgen(config)`, `CoilGenPipeline(config).run()`
+and design objects such as `CylinderCoilDesign(...).run()` remain supported.
+They run the numerical pipeline; the exported service also preserves GUI study
+controls and writes standard result artifacts. The standalone export captures
+the current editable model, not the currently displayed result or uncommitted
+winding/PCB editor drafts. Assemblies export the active channel; the desktop's
+**Export Python and run files → Enabled channels Python script…** retains the
+existing independent-channel replay with a companion project.
+
+Programmatic equivalent:
+
+```python
+project.export_python("coilgen_design.py", standalone=True)
+```
+
+Or convert a saved single-channel project:
+
+```shell
+coilgen export-script design.coilgen coilgen_design.py --standalone
+```
+
 ## Result Interpretation
 
 Each standard example now writes:

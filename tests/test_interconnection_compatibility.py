@@ -16,6 +16,7 @@ from _coilgen_test_support.pipeline_stages import config
 def test_pre_editor_project_preserves_identity_and_requires_other_settings():
     project = ProjectDocument.from_config(config())
     value = project.to_dict()
+    value.pop("config_version")  # Reproduce an unversioned historical project.
     value["config"].pop("routing_editor_plan")
     restored = ProjectDocument.from_dict(value)
     assert restored.config.routing_editor_plan is None

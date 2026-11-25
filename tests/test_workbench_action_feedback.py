@@ -2,7 +2,6 @@
 
 from copy import deepcopy
 from threading import Event
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -13,6 +12,7 @@ from PySide6.QtTest import QTest
 from coilgen.gui import workbench
 from coilgen.gui.readiness import ReadinessIssue, ReadinessReport
 from coilgen.research.storage import result_metadata_digest
+from _coilgen_test_support.native_workbench import FakeRun
 from _coilgen_test_support.workbench_usability import application as application, windows as windows
 
 
@@ -56,13 +56,15 @@ def test_native_numeric_draft_marks_clean_document_without_changing_model(window
     assert window.project is original and window.undo_stack.count() == 0
 
 
-def test_opening_another_settings_editor_cannot_commit_the_active_draft(windows):
+def test_opening_another_settings_editor_cannot_commit_the_active_draft(windows, monkeypatch):
     window = windows()
     original = window.project
     window._draft_controls["radius_mm"].setValue(174)
+    question = Mock(return_value=workbench.QMessageBox.StandardButton.Cancel)
+    monkeypatch.setattr(workbench.QMessageBox, "question", question)
     window._gradient_requirements_dialog()
     window._advanced_dialog()
-    assert "Apply or discard" in window.statusBar().currentMessage()
+    assert question.call_count == 2
     assert window.project is original and window.undo_stack.count() == 0
     assert window._draft_dirty and window._draft_controls["radius_mm"].value() == 174
 
@@ -359,12 +361,8 @@ def test_completed_notice_preserves_user_selected_result_and_plot_until_action(
         "pipeline_stage": "evaluated",
         "summary": {"scope": "continuous_sheet", "sheet_accepted": False},
     }
-    old = SimpleNamespace(
-        directory=tmp_path / "earlier", metadata={**metadata, "name": "Earlier inspected trial"}, arrays={}
-    )
-    finished = SimpleNamespace(
-        directory=tmp_path / "finished", metadata={**metadata, "name": "New completed trial"}, arrays={}
-    )
+    old = FakeRun(directory=tmp_path / "earlier", metadata={**metadata, "name": "Earlier inspected trial"}, arrays={})
+    finished = FakeRun(directory=tmp_path / "finished", metadata={**metadata, "name": "New completed trial"}, arrays={})
     window.runs["earlier"] = old
     window.show_run("earlier")
     window.viewport.state = {"dataset": "target", "units": "µT"}
@@ -461,7 +459,7 @@ def test_background_outcome_survives_project_close_and_arrives_on_welcome_screen
     assert window.execution_progress.maximum() == 100 and window.execution_progress.value() == 0
     assert window.execution_progress.format() == "Unreported"
     assert not window.compute_button.isEnabled() and not window.compute_action.isEnabled()
-    assert not window.view_results_button.isEnabled() and not window.resume_action.isVisible()
+    assert not window.view_results_button.isEnabled() and not window.resume_action.isEnabled()
 
 
 def test_verified_engineering_failure_notice_keeps_its_exact_scope_after_project_close(windows, tmp_path):
@@ -475,7 +473,7 @@ def test_verified_engineering_failure_notice_keeps_its_exact_scope_after_project
     }
     window.jobs.states = [state]
     window.poll_jobs()
-    record = SimpleNamespace(
+    record = FakeRun(
         directory=tmp_path / state["id"],
         arrays={},
         metadata={
@@ -611,7 +609,7 @@ def test_completed_notice_explicitly_reloads_lost_record_after_reopen_without_ap
     }
     window.jobs.states = [state]
     window.poll_jobs()
-    record = SimpleNamespace(
+    record = FakeRun(
         directory=window.jobs.directory / state["id"],
         arrays={},
         metadata={
@@ -666,12 +664,12 @@ def test_cached_completed_notice_reverifies_source_and_preserves_prior_plot_and_
         "pipeline_stage": "evaluated",
         "summary": {"scope": "continuous_sheet", "sheet_accepted": False},
     }
-    old = SimpleNamespace(
+    old = FakeRun(
         directory=tmp_path / "earlier",
         metadata={**deepcopy(metadata), "name": "Previously inspected result"},
         arrays={},
     )
-    cached = SimpleNamespace(
+    cached = FakeRun(
         directory=tmp_path / "cached", metadata={**deepcopy(metadata), "name": "Cached completed result"}, arrays={}
     )
     window.runs["earlier"] = old
@@ -696,7 +694,7 @@ def test_cached_completed_notice_reverifies_source_and_preserves_prior_plot_and_
         replaced = deepcopy(cached.metadata)
         replaced["summary"]["sheet_accepted"] = True
         replaced["metadata_sha256"] = result_metadata_digest(replaced)
-        fresh = SimpleNamespace(directory=cached.directory, metadata=replaced, arrays={})
+        fresh = FakeRun(directory=cached.directory, metadata=replaced, arrays={})
         loader = Mock(return_value=fresh)
         diagnostic = "Saved run metadata changed after selection"
     monkeypatch.setattr(window.service, "load_run", loader)
@@ -735,7 +733,7 @@ def test_welcome_selected_active_job_can_be_cancelled_without_reopening_project(
     assert window.execution_progress.maximum() == 0
     assert window.cancel_action.isEnabled() and window.cancel_action.isVisible()
     assert not window.compute_button.isEnabled() and not window.view_results_button.isEnabled()
-    assert not window.resume_action.isVisible()
+    assert not window.resume_action.isEnabled()
 
     def cancel(id_):
         assert id_ == state["id"]
@@ -750,5 +748,5 @@ def test_welcome_selected_active_job_can_be_cancelled_without_reopening_project(
     assert "Cancelled" in window.execution_label.text()
     assert window.execution_label.property("semanticTone") == "warning"
     assert window.execution_progress.maximum() == 100 and window.execution_progress.format() == "Unreported"
-    assert not window.cancel_action.isEnabled() and not window.resume_action.isVisible()
+    assert not window.cancel_action.isEnabled() and not window.resume_action.isEnabled()
     assert not window.compute_button.isEnabled() and not window.view_results_button.isEnabled()

@@ -7,6 +7,8 @@ _EXPORT_MODULES = {
     "ProjectDocument": "project",
     "DesignService": "service",
     "RunRecord": "service",
+    "RunRecordView": "interfaces",
+    "JobRuntime": "interfaces",
     "PreflightIssue": "preflight",
     "PreflightReport": "preflight",
     "check_preflight": "preflight",

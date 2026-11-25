@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
+
+from .config_schema import settings_view
 
 
 @dataclass(frozen=True, slots=True)
@@ -823,24 +825,24 @@ class CoilGenConfig:
 
     @property
     def mesh_settings(self) -> MeshSettings:
-        return MeshSettings(**{item.name: getattr(self, item.name) for item in fields(MeshSettings)})
+        return settings_view(self, MeshSettings)
 
     @property
     def target_settings(self) -> TargetSettings:
-        return TargetSettings(**{item.name: getattr(self, item.name) for item in fields(TargetSettings)})
+        return settings_view(self, TargetSettings)
 
     @property
     def optimization_settings(self) -> OptimizationSettings:
-        return OptimizationSettings(**{item.name: getattr(self, item.name) for item in fields(OptimizationSettings)})
+        return settings_view(self, OptimizationSettings)
 
     @property
     def routing_settings(self) -> RoutingSettings:
-        return RoutingSettings(**{item.name: getattr(self, item.name) for item in fields(RoutingSettings)})
+        return settings_view(self, RoutingSettings)
 
     @property
     def performance_settings(self) -> PerformanceSettings:
-        return PerformanceSettings(**{item.name: getattr(self, item.name) for item in fields(PerformanceSettings)})
+        return settings_view(self, PerformanceSettings)
 
     @property
     def manufacturing_settings(self) -> ManufacturingSettings:
-        return ManufacturingSettings(**{item.name: getattr(self, item.name) for item in fields(ManufacturingSettings)})
+        return settings_view(self, ManufacturingSettings)

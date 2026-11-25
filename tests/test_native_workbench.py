@@ -112,6 +112,37 @@ def test_export_preserves_selected_stage_and_native_model(window, tmp_path):
     assert exported.fingerprint == window.project.fingerprint
 
 
+def test_file_menu_exports_editable_python_with_pending_setup(window, tmp_path, monkeypatch):
+    import runpy
+    from PySide6.QtWidgets import QFileDialog
+
+    window.setup_panel._edit("cylinder_radius_mm", "93")
+    window.setup_panel._edit("validation_resolution", "7")
+    path = tmp_path / "editable"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: (str(path), "Editable Python script (*.py)"))
+    assert window.export_python_action in window.file_menu.actions()
+    window.export_python_action.trigger()
+    script = path.with_suffix(".py")
+    exported = runpy.run_path(str(script))["build_project"]()
+    assert exported.config.cylinder_mesh_parameter_list[1] == pytest.approx(0.093)
+    assert exported.study["validation_resolution"] == 7
+    assert exported.fingerprint == window.project.fingerprint
+    assert not script.with_suffix(".coilgen.json").exists()
+    # Export is not a project save; discard this test's model when closing.
+    window._can_discard = lambda: True
+    assert not window._has_input_drafts()
+
+
+def test_invalid_setup_blocks_standalone_python_export(window, tmp_path):
+    window.setup_panel.draft.update({"cylinder_radius_mm": "invalid"})
+    original = window.project
+    with pytest.raises(ValueError, match="pending settings"):
+        window.export_python(tmp_path / "invalid.py", standalone=True)
+    assert window.project is original
+    assert not (tmp_path / "invalid.py").exists()
+    window.setup_panel.reset()
+
+
 def test_biplanar_preset_exposes_physical_spacing(window):
     window.new_project("biplanar")
     window.select_node("geometry")

@@ -296,6 +296,7 @@ def test_completed_regional_sheet_and_input_mesh_round_trip_in_one_json(tmp_path
 def test_old_json_migration_preserves_prior_fingerprints_and_stays_narrow():
     project = ProjectDocument.new()
     value = project.to_dict()
+    value.pop("config_version")  # Reproduce an unversioned historical project.
     value["config"].pop("target_region_geometry")
     value["config"].pop("contour_smoothing_local_fallback")
     value["config"].pop("routing_editor_plan")

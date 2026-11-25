@@ -273,7 +273,9 @@ Startup offers **Browse examples…**, **Open project…**
 and **New blank project…**. **File → New project…** (Ctrl+N) creates a named design with no
 support or target selected. It can be saved immediately.
 **File → Import model inputs** contains mesh and field-map import. **File →
-Export Python and run files** contains replay scripts and recorded worker
+Export Python script…** creates a single editable `.py` file with embedded
+inputs for the active channel. See [Python export and execution](GETTING_STARTED.md#export-a-gui-design-as-python).
+**File → Export Python and run files** contains companion-file replay scripts and recorded worker
 files. **File → Export conductor geometry…** opens CAD export.
 Templates are explicit starting choices under **File → Load template**. Passing
 a project path at startup opens that saved design. **File → Close project**

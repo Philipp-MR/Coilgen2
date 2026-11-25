@@ -29,7 +29,12 @@ def adapter(tmp_path):
         workspace=tmp_path, project=ProjectDocument.from_config(preset_config("cylinder")), active_channel_id="coil"
     )
     session._replace_project = lambda project: setattr(session, "project", project)
-    browser = SimpleNamespace(session=session, server=SimpleNamespace(state=State()), _advanced_has_edits=lambda: False)
+    browser = SimpleNamespace(
+        session=session,
+        server=SimpleNamespace(state=State()),
+        _advanced_has_edits=lambda: False,
+        _ready_to_submit=lambda: True,
+    )
     return BrowserSurfaceEditor(browser)
 
 

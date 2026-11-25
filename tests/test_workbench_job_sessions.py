@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from unittest.mock import Mock
 
 import pytest
+from coilgen.gui import execution_controller
 from _coilgen_test_support import workbench_usability as usability
 
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
@@ -230,7 +231,7 @@ def test_all_independent_channel_submissions_belong_to_current_session(session_w
 
 def test_lazy_runtime_snapshots_persisted_ids_before_submitting(session_windows, monkeypatch):
     window, queue = session_windows(states=(_state("persisted"),), lazy=True)
-    monkeypatch.setattr(workbench, "JobManager", lambda *_args, **_kwargs: queue)
+    monkeypatch.setattr(execution_controller, "JobManager", lambda *_args, **_kwargs: queue)
     state = window.compute()
     assert window._previous_job_ids == {"persisted"}
     assert window._session_job_ids == {state["id"]}

@@ -20,6 +20,7 @@ from .execution import plan_execution
 from .preflight import check_preflight
 from .project import ProjectDocument
 from .service import DesignService
+from .interfaces import JobRuntime
 from .targets import ORIGIN_KEYS, recognize_solid_harmonic_target, translated_expression
 from .settings import (
     SettingField as SettingField,
@@ -142,6 +143,7 @@ ACTIONS = (
     SessionAction("load_template", "Load template", "File"),
     SessionAction("open_project", "Open project", "File"),
     SessionAction("save_project", "Save project", "File"),
+    SessionAction("export_python", "Export Python script", "File"),
     SessionAction("import_support_mesh", "Import support mesh (STL)", "File"),
     SessionAction("undo", "Undo", "Edit"),
     SessionAction("redo", "Redo", "Edit"),
@@ -310,7 +312,7 @@ class WorkbenchSession(ProjectSettings):
     Listeners receive ``(event, payload)`` after every state change.
     """
 
-    def __init__(self, workspace, *, jobs=None, policy=None, service=None, project_loader=None):
+    def __init__(self, workspace, *, jobs: JobRuntime | None = None, policy=None, service=None, project_loader=None):
         from .session_evidence import load_assembly
 
         self.workspace = Path(workspace).expanduser().resolve()

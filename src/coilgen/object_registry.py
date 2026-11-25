@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import dataclass
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 from .models import Mesh, TargetField
 
@@ -8,6 +11,59 @@ from .models import Mesh, TargetField
 _MEMORY_PREFIX = "memory"
 _MESHES: dict[str, Mesh] = {}
 _TARGET_FIELDS: dict[str, TargetField] = {}
+_OWNED_INPUTS: WeakValueDictionary[str, _InputOwner] = WeakValueDictionary()
+
+
+@dataclass
+class _InputOwner:
+    value: Mesh | TargetField
+
+
+class _OwnedInputKey(str):
+    """A config keeps its input alive; copies share the private snapshot.
+
+    Keys are same-process references, just like explicit registry entries.
+    Projects capture the referenced data before crossing process boundaries.
+    """
+
+    def __new__(cls, key: str, owner: _InputOwner):
+        instance = super().__new__(cls, key)
+        instance._owner = _OWNED_INPUTS.get(str(instance), owner)
+        _OWNED_INPUTS[str(instance)] = instance._owner
+        return instance
+
+    def __deepcopy__(self, memo):
+        return self
+
+    def __reduce__(self):
+        return _OwnedInputKey, (str(self), self._owner)
+
+
+def own_in_memory_mesh(mesh: Mesh) -> str:
+    """Create an isolated mesh reference whose lifetime follows its config."""
+    return _OwnedInputKey(_make_key("mesh"), _InputOwner(deepcopy(mesh)))
+
+
+def own_in_memory_target_field(target: TargetField) -> str:
+    """Create an isolated target reference whose lifetime follows its config."""
+    return _OwnedInputKey(_make_key("target"), _InputOwner(deepcopy(target)))
+
+
+def _registered_input(key: str, registry: dict, expected_type: type):
+    clean = str(key).strip()
+    owner = _OWNED_INPUTS.get(clean)
+    value = owner.value if owner is not None else registry[clean]
+    if not isinstance(value, expected_type):
+        raise KeyError(clean)
+    return deepcopy(value)
+
+
+def _register(value, kind: str, key: str | None, registry: dict) -> str:
+    memory_key = _make_key(kind, key)
+    if memory_key in _OWNED_INPUTS:
+        raise ValueError("Cannot replace an input owned by another configuration.")
+    registry[memory_key] = deepcopy(value)
+    return memory_key
 
 
 def _make_key(kind: str, key: str | None = None) -> str:
@@ -29,14 +85,12 @@ def is_in_memory_target_key(value: object) -> bool:
 def register_in_memory_mesh(mesh: Mesh, *, key: str | None = None) -> str:
     """Register a mesh for same-process use by ``CoilGenConfig``."""
 
-    memory_key = _make_key("mesh", key)
-    _MESHES[memory_key] = mesh.copy()
-    return memory_key
+    return _register(mesh, "mesh", key, _MESHES)
 
 
 def get_in_memory_mesh(key: str) -> Mesh:
     try:
-        return _MESHES[str(key).strip()].copy()
+        return _registered_input(key, _MESHES, Mesh)
     except KeyError as exc:
         raise KeyError(f"No in-memory mesh is registered under {key!r}.") from exc
 
@@ -44,45 +98,14 @@ def get_in_memory_mesh(key: str) -> Mesh:
 def register_in_memory_target_field(target_field: TargetField, *, key: str | None = None) -> str:
     """Register a target field for same-process use by ``CoilGenConfig``."""
 
-    memory_key = _make_key("target", key)
-    _TARGET_FIELDS[memory_key] = TargetField(
-        coords=target_field.coords.copy(),
-        b=target_field.b.copy(),
-        weights=target_field.weights.copy(),
-        suppressed=target_field.suppressed.copy(),
-        target_field_group_inds=target_field.target_field_group_inds.copy(),
-        target_gradient_dbdxyz=None
-        if target_field.target_gradient_dbdxyz is None
-        else target_field.target_gradient_dbdxyz.copy(),
-        suppression_normals=None
-        if target_field.suppression_normals is None
-        else target_field.suppression_normals.copy(),
-        suppression_area_weights=None
-        if target_field.suppression_area_weights is None
-        else target_field.suppression_area_weights.copy(),
-        target_diagnostics=dict(target_field.target_diagnostics),
-    )
-    return memory_key
+    return _register(target_field, "target", key, _TARGET_FIELDS)
 
 
 def get_in_memory_target_field(key: str) -> TargetField:
     try:
-        target = _TARGET_FIELDS[str(key).strip()]
+        return _registered_input(key, _TARGET_FIELDS, TargetField)
     except KeyError as exc:
         raise KeyError(f"No in-memory target field is registered under {key!r}.") from exc
-    return TargetField(
-        coords=target.coords.copy(),
-        b=target.b.copy(),
-        weights=target.weights.copy(),
-        suppressed=target.suppressed.copy(),
-        target_field_group_inds=target.target_field_group_inds.copy(),
-        target_gradient_dbdxyz=None if target.target_gradient_dbdxyz is None else target.target_gradient_dbdxyz.copy(),
-        suppression_normals=None if target.suppression_normals is None else target.suppression_normals.copy(),
-        suppression_area_weights=None
-        if target.suppression_area_weights is None
-        else target.suppression_area_weights.copy(),
-        target_diagnostics=dict(target.target_diagnostics),
-    )
 
 
 def clear_in_memory_objects() -> None:
@@ -90,3 +113,4 @@ def clear_in_memory_objects() -> None:
 
     _MESHES.clear()
     _TARGET_FIELDS.clear()
+    _OWNED_INPUTS.clear()

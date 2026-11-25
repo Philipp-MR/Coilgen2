@@ -11,6 +11,7 @@ MENUS = {
         ("examples", "Browse examples…"),
         ("open", "Open project…"),
         ("save", "Save / download…"),
+        ("python", "Export Python script…"),
         ("export", "Export geometry…"),
         ("pcb", "PCB layout / export…"),
     ),
@@ -78,6 +79,7 @@ async def menu_action(browser, key):
         return
     if browser.session.project is None and key in {
         "save",
+        "python",
         "surface",
         "advanced",
         "geometry",
@@ -124,6 +126,7 @@ async def menu_action(browser, key):
         browser._notify("Keep at least one channel in the project. Use File to start another design.", "info")
         return
     actions = {
+        "python": browser.export_python,
         "surface": browser.surface.open,
         "advanced": browser.open_advanced,
         "undo": browser.undo,

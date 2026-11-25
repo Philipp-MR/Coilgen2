@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 
 from ..application.session_model import SessionModel, ModelEdit, ModelSnapshot
 from ..application import DesignService, ProjectAssembly, ProjectDocument, dependency_plan
-from ..application.templates import TEMPLATE_SPECS, template_assembly, template_spec
+from ..application.templates import TEMPLATE_SPECS
 from ..application.targets import recognize_solid_harmonic_target, solid_harmonic_target, target_normalization_choices
 from ..application.reuse import plan_reuse, plan_stopped_reuse, ReusePlan
 from ..application.evidence import SourceHealth
@@ -64,13 +64,12 @@ from ..application.execution import (
     execution_reuse,
     matches_active_request,
     matches_project,
-    plan_execution,
     run_actions,
 )
 from ..application.history import RunHistoryStore
 from ..application.service import RunRecord
+from ..application.interfaces import RunRecordView, JobRuntime
 from ..application.diagnostics import run_verdicts
-from ..application.bundles import RunArchive
 from ..application.design_studies import (
     DesignStudyState,
     design_study_state,
@@ -79,9 +78,9 @@ from ..application.design_studies import (
     set_study_notes,
     set_study_notes_batch,
 )
-from ..attribution import AUTHOR_CREDIT, AUTHOR_NAME, PROJECT_URL, SOFTWARE_VERSION, software_attribution
+from ..attribution import AUTHOR_CREDIT, software_attribution
 from ..application.preflight import overall_readiness, section_readiness
-from ..application.session import request_controls, stage_study_changes, submit_recorded_design
+from ..application.session import request_controls, stage_study_changes
 from ..application.workbench_presentation import (
     BROWSE_EXAMPLES_LABEL,
     COMPUTE_CAPTIONS,
@@ -92,7 +91,7 @@ from ..application.workbench_presentation import (
     RUNS_LABEL,
     is_finalizing_fabrication,
 )
-from ..persistence import atomic_text, json_value
+from ..persistence import json_value
 from ..research.jobs import JobManager, RuntimePolicy
 from ..research.storage import result_metadata_digest
 from .viewport import create_viewport
@@ -139,12 +138,15 @@ from .activity_feedback import ComputationFeedback
 from .design_plan import build_design_plan, recorded_stage_keys
 from .design_plan_panel import DesignPlanPanel
 from .live_preview import LivePreviewController
-from .run_loading import CompletedRunLoadTask, StoppedReuseTask
+from .run_loading import StoppedReuseTask
 from .run_metadata import has_saved_request, read_run_metadata
 from .results_overview import ResultsOverviewPanel
 from .job_outcomes import JobOutcomeNotice, build_job_outcome
 from .about import AboutDialog
 from .branding import LogoLabel
+from .document_controller import DocumentController
+from .execution_controller import ExecutionController
+from .result_controller import ResultController
 
 
 NODES = (
@@ -178,6 +180,7 @@ SESSION_ACTION_METHODS = {
     "load_template": "load_template",
     "open_project": "open_project",
     "save_project": "save_project",
+    "export_python": "export_python",
     "import_support_mesh": "import_mesh",
     "undo": "undo_action",
     "redo": "redo_action",
@@ -258,7 +261,7 @@ class CoilGenWorkbench(QMainWindow):
         project=None,
         *,
         jobs_directory=None,
-        jobs=None,
+        jobs: JobRuntime | None = None,
         service=None,
         viewport_factory=None,
         parent=None,
@@ -268,6 +271,9 @@ class CoilGenWorkbench(QMainWindow):
         self.setObjectName("coilgen_workbench")
         self.resize(1440, 930)
         self.model = SessionModel()
+        self.document_controller = DocumentController(self)
+        self.execution_controller = ExecutionController(self)
+        self.result_controller = ResultController(self)
         assembly = (
             project
             if isinstance(project, ProjectAssembly)
@@ -301,7 +307,7 @@ class CoilGenWorkbench(QMainWindow):
         self._history_key = None
         self._restore_diagnostics = {}
         self.project_path = None
-        self.runs = {}
+        self.runs: dict[str, RunRecordView] = {}
         self.states = {}
         self._session_started_at = datetime.now(timezone.utc)
         self._session_job_ids = set()
@@ -1478,6 +1484,9 @@ class CoilGenWorkbench(QMainWindow):
         )
         file_menu.addAction(export_geometry_action)
         self._project_menu_actions.append(export_geometry_action)
+        self.export_python_action = self._action("Export Python script…", self._export_dialog, icon_name="export")
+        file_menu.addAction(self.export_python_action)
+        self._project_menu_actions.append(self.export_python_action)
         exports = file_menu.addMenu("Export Python and run files")
         for title, handler in (
             ("Active channel Python script…", self._export_dialog),
@@ -4456,332 +4465,47 @@ class CoilGenWorkbench(QMainWindow):
             self.viewport.locate_issue(issue)
 
     def save_project(self, path):
-        if self.project is None:
-            raise ValueError("Create or open a project before saving.")
-        if not self._apply_document_inputs():
-            raise ValueError(
-                "Correct pending settings, or apply/discard the retained Advanced settings draft before saving."
-            )
-        with self._visible_work("Saving project and results"):
-            portable = self._portable_assembly()
-            options = {"progress": self._portable_progress} if Path(path).suffix.lower() == ".coilgen" else {}
-            self.project_path = Path(
-                portable.save(path, **options)
-                if self._collection_mode or len(self.assembly.channels) > 1
-                else portable.channel(self._active_channel_id).project.save(path, **options)
-            )
-            self.assembly = portable
-            self.project = portable.channel(self._active_channel_id).project
-            self.undo_stack.setClean()
-            self._save_session()
-            self.statusBar().showMessage(f"Saved {self.project_path}", 5000)
-            return self.project_path
+        return self.document_controller.save_project(path)
 
     def _portable_assembly(self):
-        """Embed all available completed evidence, retaining per-channel ownership."""
-        self._save_session()
-        channels = []
-        for channel in self.assembly.channels:
-            project = channel.project
-            scope = channel.id if self._collection_mode else None
-            try:
-                entries = self.history.restore(project.id, channel_id=scope) if self.history is not None else ()
-            except (OSError, ValueError, TypeError, RuntimeError) as exc:
-                entries = ()
-                self.messages.appendPlainText(f"Local history cache unavailable; saving owned project evidence: {exc}")
-            aliases = {entry.directory.resolve(): entry.alias for entry in entries}
-            records = {
-                entry.run.directory.resolve(): entry.run
-                for entry in entries
-                if entry.verified and not self._run_verification_error(entry.run)
-            }
-            records.update(
-                {
-                    record.directory.resolve(): record
-                    for id_, record in self.runs.items()
-                    if not self._run_verification_error(record)
-                    and (
-                        read_run_metadata(record).get("project_id") == project.id
-                        or (
-                            not read_run_metadata(record).get("project_id")
-                            and project.id == self.project.id
-                            and id_ == self._selected_run
-                        )
-                    )
-                }
-            )
-            saved = {archive.id: archive for archive in project.saved_runs}
-            paths = {}
-            for directory, record in records.items():
-                metadata = {key: value for key, value in read_run_metadata(record).items() if key != "job"}
-                previous = next(
-                    (
-                        archive
-                        for archive in saved.values()
-                        if archive.metadata.get("request_sha256") == metadata.get("request_sha256")
-                        and result_metadata_digest(archive.metadata) == result_metadata_digest(metadata)
-                    ),
-                    None,
-                )
-                archive = (
-                    replace(previous, alias=aliases.get(directory, previous.alias))
-                    if previous is not None
-                    else RunArchive.capture(
-                        record,
-                        alias=aliases.get(directory),
-                        source_project=self._export_source(record)
-                        if self._has_export_source(record, retained_only=True)
-                        else None,
-                    )
-                )
-                saved[archive.id] = archive
-                paths[directory] = archive.id
-            session = project.session
-            if project.id == self.project.id:
-                selected = self.runs.get(self._selected_run)
-                session = {
-                    **session,
-                    "selected_run_id": paths.get(selected.directory.resolve()) if selected else None,
-                    "view_state": self._workbench_view_state(),
-                }
-            elif self.history is not None:
-                try:
-                    state = self.history.session(project.id, channel_id=scope)
-                except (OSError, ValueError, TypeError, RuntimeError):
-                    state = session
-                selected = next((entry for entry in entries if entry.id == state.get("selected_id")), None)
-                session = {
-                    **session,
-                    "selected_run_id": paths.get(selected.directory.resolve()) if selected else None,
-                    "view_state": state.get("view_state", {}),
-                }
-            if project.id != self.project.id and (project.id, scope) in self._panel_views:
-                session = {**session, "view_state": self._panel_views[(project.id, scope)]}
-            if any(not entry.verified for entry in entries):
-                session["unavailable_runs"] = [
-                    {"alias": entry.alias, "diagnostic": entry.diagnostic} for entry in entries if not entry.verified
-                ]
-            session["active_channel_id"] = self._active_channel_id if self._collection_mode else None
-            channels.append(replace(channel, project=project.with_results(tuple(saved.values()), session=session)))
-        return replace(self.assembly, channels=tuple(channels))
+        return self.document_controller._portable_assembly()
 
     def open_project(self, path):
-        self._invalidate_project_open()
-        with self._visible_work("Opening project and verifying embedded results"):
-            return self._open_project(path)
+        return self.document_controller.open_project(path)
 
     def _open_project(self, path):
-        from .project_loading import load_document
-
-        return self._install_project(load_document(path, progress=self._portable_progress), path)
+        return self.document_controller._open_project(path)
 
     def _install_project(self, document, path, *, prepared_history=None, prepared_reuse=None, readiness=None):
-        assembly = document if isinstance(document, ProjectAssembly) else None
-        project = document if isinstance(document, ProjectDocument) else None
-        # Validation precedes discarding the previous owner's editor.
-        self._discard_project_editors()
-        self._draft_dirty = False
-        self.undo_stack.clear()
-        self.project_path = Path(path)
-        self._history_key = None
-        self._panel_views.clear()
-        self._collection_mode = assembly is not None
-        self._prepared_project_history = prepared_history
-        self._prepared_project_reuse = prepared_reuse
-        self._restoring_project_view = prepared_history is not None
-        if readiness is not None:
-            active = assembly.channel(self._saved_active_channel(assembly)).project if assembly else project
-            self._guidance_readiness_key = (active.fingerprint, active.study["pipeline_stage"])
-            self._guidance_readiness = readiness
-        try:
-            self._set_assembly(assembly or ProjectAssembly.new(project.name, (project,)))
-        finally:
-            self._prepared_project_history = None
-            self._prepared_project_reuse = None
-            self._restoring_project_view = False
-        if prepared_history is not None:
-            self._node_changed(self._current_node or self.tree.currentItem())
-        self.undo_stack.setClean()
-        self.statusBar().showMessage(f"Opened {self.project.name} · revision {self.project.revision}", 7000)
-        return document
+        return self.document_controller._install_project(
+            document, path, prepared_history=prepared_history, prepared_reuse=prepared_reuse, readiness=readiness
+        )
 
     def _invalidate_project_open(self, *_args):
-        task = self._project_open_task
-        if task is None:
-            return
-        self._project_open_generation += 1
-        self._project_open_task = None
-        self._foreground_work.pop(task, None)
-        task.cancel()
-        self._project_open_cancel.hide()
-        self._refresh_computation_indicator()
-        self.statusBar().showMessage("Project opening cancelled; current work is retained.", 7000)
+        return self.document_controller._invalidate_project_open(*_args)
 
     def _start_project_open(self, path):
-        from .project_loading import ProjectOpenTask
-
-        self._invalidate_project_open()
-        if self._closing:
-            return None
-        self._project_open_generation += 1
-        token = self._project_open_generation
-        task = ProjectOpenTask(
-            path,
-            self.jobs_directory.parent / "embedded-runs",
-            history=self.history,
-            token=token,
-            jobs_directory=self.jobs_directory,
-            states=tuple(state for id_, state in self.states.items() if not self._run_verification_error(id_)),
-            records=tuple(record for record in self.runs.values() if not self._run_verification_error(record)),
-            threads=getattr(getattr(self.jobs, "policy", None), "threads_per_worker", 1),
-        )
-        task.verification_generations = dict(self._source_verification_generations)
-        self._project_open_task = task
-        task.signals.progress.connect(self._project_open_progress)
-        task.signals.finished.connect(self._project_open_ready)
-        if not hasattr(self, "_project_open_cancel"):
-            self._project_open_cancel = QToolButton(self)
-            self._project_open_cancel.setText("Cancel opening")
-            self._project_open_cancel.clicked.connect(self._invalidate_project_open)
-            self.statusBar().addPermanentWidget(self._project_open_cancel)
-        self._project_open_cancel.show()
-        self._foreground_work[task] = f"Opening {Path(path).name} · verifying saved evidence"
-        self._refresh_computation_indicator()
-        QThreadPool.globalInstance().start(task)
-        return task
+        return self.document_controller._start_project_open(path)
 
     def _project_open_progress(self, token, message):
-        task = self._project_open_task
-        if task is None or self._closing or token != self._project_open_generation:
-            return
-        self._foreground_work[task] = "Opening project · " + message
-        self.statusBar().showMessage(message)
-        self._refresh_computation_indicator()
+        return self.document_controller._project_open_progress(token, message)
 
     def _project_open_ready(self, token, result, error):
-        task = self._project_open_task
-        if task is None or self._closing or token != self._project_open_generation:
-            return
-        self._project_open_task = None
-        self._foreground_work.pop(task, None)
-        self._project_open_cancel.hide()
-        self._refresh_computation_indicator()
-        if error:
-            if error != "Cancelled":
-                self._error(f"Cannot open project: {error}")
-            return
-        with self._visible_work("Restoring verified project view"):
-            try:
-                reuse = result.reuse
-                if reuse is not None:
-                    reuse = replace(
-                        reuse,
-                        available=tuple(
-                            entry
-                            for entry in reuse.available
-                            if not self._source_health.known_error(entry.run_directory)
-                            and self._source_verification_generations.get(entry.run_directory, 0)
-                            == task.verification_generations.get(entry.run_directory, 0)
-                        ),
-                    )
-                self._install_project(
-                    result.document,
-                    result.path,
-                    prepared_history=result.history,
-                    prepared_reuse=reuse,
-                    readiness=result.readiness,
-                )
-            except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
-                self._error(f"Cannot restore project view: {exc}")
+        return self.document_controller._project_open_ready(token, result, error)
 
     def new_project(self, kind=None, *, name="New coil design", project=None, discard_checked=False):
-        """Create an unconfigured document; explicit legacy kinds load templates."""
-        from .project_start import blank_project
-
-        if kind is not None:
-            return self.load_template(kind)
-        if not discard_checked and not self._can_discard():
-            return None
-        document = project if project is not None else blank_project(name)
-        self._clear_project()
-        self._set_assembly(ProjectAssembly.new(document.name, (document,)))
-        self.undo_stack.setClean()
-        self._inspect_node("geometry")
-        self.statusBar().showMessage("New project · choose a support and target field", 5000)
-        return document
+        return self.document_controller.new_project(kind, name=name, project=project, discard_checked=discard_checked)
 
     def load_template(self, kind="cylinder"):
-        """Load configured inputs ready to compute; settings remain optional."""
-        template = template_spec(kind)
-        if not self._can_discard():
-            return
-        try:
-            assembly = template_assembly(kind)
-        except (ValueError, TypeError, OSError, RuntimeError, KeyError) as exc:
-            self._error(f"Cannot load template: {exc}")
-            return
-        self._discard_project_editors()
-        self.undo_stack.clear()
-        self._draft_dirty = False
-        self.project_path = None
-        self._history_key = None
-        self._panel_views.clear()
-        self._collection_mode = len(assembly.channels) > 1
-        self._set_assembly(assembly)
-        self.messages.appendPlainText(template.description)
-        self.select_node(f"stage:{self.project.study['pipeline_stage']}")
-        self.findChild(QDockWidget, "settings_dock").hide()
-        self.undo_stack.setClean()
-        self.statusBar().showMessage(
-            f"Loaded template: {template.title} · Settings loaded. Click Compute full design; editing is optional.",
-            10000,
-        )
-        return assembly
+        return self.document_controller.load_template(kind)
 
-    def export_python(self, path, *, compact=False, include_results=False):
-        """Export a script plus owned project assets, avoiding duplicated inputs."""
-        if not self._apply_document_inputs():
-            raise ValueError("Correct the pending settings before exporting.")
-        with self._visible_work("Exporting project and Python inputs"):
-            project = (
-                self._portable_assembly().channel(self._active_channel_id).project
-                if include_results
-                else self.project.inputs_only()
-            )
-            options = {"compact": compact, "include_results": include_results} if compact or include_results else {}
-            return project.export_python(path, **options)
+    def export_python(self, path, *, compact=False, include_results=False, standalone=False):
+        return self.document_controller.export_python(
+            path, compact=compact, include_results=include_results, standalone=standalone
+        )
 
     def export_assembly_python(self, path, *, compact=False, include_results=False):
-        if not self._apply_document_inputs():
-            raise ValueError("Correct pending settings before exporting.")
-        with self._visible_work("Exporting channel system and Python inputs"):
-            path = Path(path)
-            project_path = path.with_suffix(".coilgen" if compact else ".coilgen-assembly.json")
-            assembly = (
-                self._portable_assembly()
-                if include_results
-                else replace(
-                    self.assembly,
-                    channels=tuple(
-                        replace(channel, project=channel.project.inputs_only()) for channel in self.assembly.channels
-                    ),
-                )
-            )
-            assembly.save(project_path, **({"progress": self._portable_progress} if compact else {}))
-            source = (
-                '"""Independent CoilGen2 channels; coupling and assembly checks require separate evaluation."""\n'
-                f"# Generated with CoilGen2 - version {SOFTWARE_VERSION}.\n"
-                f"# Software maintainer: {AUTHOR_NAME}.\n"
-                f"# Project: {PROJECT_URL}\n"
-                "from pathlib import Path\n"
-                "from coilgen.application import DesignService, ProjectAssembly\n\n"
-                "if __name__ == '__main__':\n"
-                f"    project = ProjectAssembly.load(Path(__file__).with_name({project_path.name!r}))\n"
-                "    results = DesignService.run_assembly(project, Path(__file__).with_suffix('') / 'runs')\n"
-                "    print(results)\n"
-            )
-            atomic_text(path, source)
-            return path
+        return self.document_controller.export_assembly_python(path, compact=compact, include_results=include_results)
 
     def _can_discard(self):
         if self.project is None:
@@ -4852,14 +4576,18 @@ class CoilGenWorkbench(QMainWindow):
     def _export_dialog(self):
         path, selected_filter = QFileDialog.getSaveFileName(
             self,
-            "Export reproducible script",
+            "Export active design as Python",
             "coilgen_design.py",
-            "Python with compact inputs (*.py);;Python with JSON inputs (*.py)",
+            "Editable Python script (*.py);;Python with compact inputs (*.py);;Python with JSON inputs (*.py)",
         )
         if path:
             try:
-                self.export_python(path, compact="compact" in selected_filter)
-                self.statusBar().showMessage(f"Exported {path} and owned project inputs", 5000)
+                if Path(path).suffix.lower() != ".py":
+                    path += ".py"
+                standalone = "compact" not in selected_filter and "JSON" not in selected_filter
+                self.export_python(path, compact="compact" in selected_filter, standalone=standalone)
+                detail = " (editable settings and embedded inputs)" if standalone else " and owned project inputs"
+                self.statusBar().showMessage(f"Exported {path}{detail}", 5000)
             except (ValueError, TypeError, OSError) as exc:
                 self._error(f"Cannot export script: {exc}")
 
@@ -5304,73 +5032,9 @@ class CoilGenWorkbench(QMainWindow):
         self._update_execution_feedback()
 
     def compute(self, _checked=False, *, resume_checkpoint=None, pipeline_stage=None):
-        if self.project is None:
-            self.statusBar().showMessage("Create or open a project before computing.", 5000)
-            return None
-        if not self._check_expert_draft():
-            return None
-        if self._submitting:
-            return None
-        if not self.apply_settings():
-            self._report_compute_draft_error()
-            return None
-
-        self._submitting = True
-        self._update_execution_feedback()
-        try:
-            if not self._check_compute_readiness(self.project, pipeline_stage=pipeline_stage):
-                return None
-            self.poll_jobs()
-            controls = self._request_controls()
-            if pipeline_stage is not None:
-                controls = {**controls, "pipeline_stage": pipeline_stage, "fabricate": False}
-            plan = plan_execution(self.project, states=self.states.values(), **controls)
-            existing = self.states.get(plan.active_job_id)
-            if existing is not None and resume_checkpoint is None and not isinstance(self.service, DesignService):
-                self._begin_live_follow(existing)
-                self.design_plan_dock.show()
-                self.design_plan_dock.raise_()
-                self._focus_job(existing["id"], open_window=False)
-                self.statusBar().showMessage(
-                    f"This revision is already {existing['status']}; showing its design progress.", 10000
-                )
-                return existing
-            if self.jobs is None:
-                self.jobs = JobManager(self.jobs_directory, RuntimePolicy())
-                self._own_jobs = True
-            self._snapshot_existing_jobs()
-            self._refresh_stage_status()
-            state, is_new = submit_recorded_design(
-                self.project,
-                self.jobs,
-                controls,
-                workspace=self.jobs_directory.parent,
-                states=self.states,
-                service=self.service,
-                reuse=self._reuse_plan,
-                resume_checkpoint=resume_checkpoint,
-            )
-            reused = not is_new
-            if is_new:
-                self._session_job_ids.add(state["id"])
-            self._begin_live_follow(state)
-            self.design_plan_dock.show()
-            self.design_plan_dock.raise_()
-            self.statusBar().showMessage(
-                f"This revision is already {state['status']}; showing its design progress."
-                if reused
-                else f"Queued immutable revision {self.project.revision}",
-                5000,
-            )
-            self.poll_jobs()
-            self._focus_job(state["id"], open_window=False)
-            return state
-        except (ValueError, TypeError, OSError, RuntimeError, KeyError) as exc:
-            self._error(f"Cannot submit run: {exc}")
-            return None
-        finally:
-            self._submitting = False
-            self._update_execution_feedback()
+        return self.execution_controller.compute(
+            _checked, resume_checkpoint=resume_checkpoint, pipeline_stage=pipeline_stage
+        )
 
     def _same_active_job(self, state):
         return matches_active_request(state, self.project, self._request_controls())
@@ -6641,199 +6305,16 @@ class CoilGenWorkbench(QMainWindow):
         self._update_execution_feedback()
 
     def compute_channels(self):
-        if self.assembly is None:
-            self.statusBar().showMessage("Create or open a project before computing.", 5000)
-            return None
-        if self._submitting:
-            return None
-        if not self._check_expert_draft():
-            return None
-        if not self.apply_settings():
-            self._report_compute_draft_error()
-            return None
-        self._submitting = True
-        self._update_execution_feedback()
-        self.computation_indicator.repaint()
-        try:
-            enabled = [channel for channel in self.assembly.channels if channel.enabled]
-            if not enabled:
-                self.readiness_panel.set_issues(
-                    (
-                        ReadinessIssue(
-                            title="No enabled channel",
-                            message="Enable at least one channel before computing the assembly.",
-                            node="geometry",
-                            key="channel_enabled",
-                            action="Use Enabled beside the active channel selector.",
-                        ),
-                    )
-                )
-                self.statusBar().showMessage("Enable at least one channel before computing.", 15000)
-                return None
-            for channel in enabled:
-                if not self._check_compute_readiness(channel.project, channel_name=channel.name):
-                    self.channel_selector.setCurrentIndex(self.channel_selector.findData(channel.id))
-                    self._check_compute_readiness(channel.project, channel_name=channel.name)
-                    return None
-            if self.jobs is None:
-                self.jobs = JobManager(self.jobs_directory, RuntimePolicy())
-                self._own_jobs = True
-            self._snapshot_existing_jobs()
-            from ..application.session_evidence import retain_revision
-
-            for channel in enabled:
-                retain_revision(self.jobs_directory.parent, channel.project)
-            states = self.service.submit_assembly(self.assembly, self.jobs)
-            self._session_job_ids.update(state["id"] for state in states.values())
-            self.states.update({state["id"]: state for state in states.values()})
-            self.design_plan_dock.show()
-            self.design_plan_dock.raise_()
-            active_state = next((state for state in states.values() if self._live_owner_matches(state)), None)
-            if active_state is not None:
-                self._begin_live_follow(active_state)
-            self.messages.appendPlainText(
-                "Submitted independent channels. Coupled fields, circuits, mutual inductance and assembly clearance remain unverified."
-            )
-            self.poll_jobs()
-            if states:
-                self._focus_job((active_state or next(iter(states.values())))["id"], open_window=False)
-            return states
-        except (ValueError, TypeError, OSError, RuntimeError, KeyError) as exc:
-            self._error(f"Cannot submit channels: {exc}")
-            return None
-        finally:
-            self._submitting = False
-            self._update_execution_feedback()
+        return self.execution_controller.compute_channels()
 
     def poll_jobs(self):
-        if self.jobs is None:
-            self._update_execution_feedback()
-            return
-        try:
-            states = self.jobs.list()
-            self._last_job_states = tuple(states)
-            if self.project is None:
-                self.states.update((state["id"], dict(state)) for state in states)
-                self._last_runtime_error = None
-                self._fill_jobs(states)
-                self._record_job_outcomes(states)
-                self._refresh_computation_indicator()
-                return
-            self._refresh_computation_indicator()
-            self._snapshot_existing_jobs(states)
-            merged_states = []
-            stopped_changed = False
-            stopped_states = []
-            for state in states:
-                previous = self.states.get(state["id"], {})
-                # A test/legacy runtime may omit service annotations; preserve them.
-                recovered_write = "persistence_error" not in state
-                state = {**previous, **state}
-                if recovered_write:
-                    state.pop("persistence_error", None)
-                self.states[state["id"]] = state
-                changed = state.get("status") in {"failed", "cancelled", "interrupted"} and state.get(
-                    "status"
-                ) != previous.get("status")
-                stopped_changed |= changed
-                if changed:
-                    stopped_states.append(state)
-                merged_states.append(state)
-                if state["status"] == "completed" and state["id"] not in self._loaded_ids:
-                    self._start_completed_run_load(state)
-                if state["id"] == self.live_preview.job_id:
-                    self.live_preview.refresh(state)
-            self._fill_jobs(merged_states)
-            self._record_job_outcomes(merged_states)
-            if stopped_changed:
-                self._start_stopped_reuse_load(stopped_states[-1])
-            self._refresh_stage_status(refresh_reuse=False)
-            self._last_runtime_error = None
-            self._refresh_channel_overview()
-            self._update_execution_feedback()
-        except (ValueError, TypeError, OSError, RuntimeError) as exc:
-            message = f"Job runtime unavailable: {exc}"
-            if message != self._last_runtime_error:
-                self._error(message)
-                self._last_runtime_error = message
-            self._update_execution_feedback()
+        return self.execution_controller.poll_jobs()
 
     def _start_completed_run_load(self, state):
-        id_ = state["id"]
-        if self._run_load_tasks or self.assembly is None or self._closing:
-            return
-        scopes = {
-            channel.project.id: (channel.project.id, channel.id if self._collection_mode else None)
-            for channel in self.assembly.channels
-        }
-        # Jobs from a replaced project stay in the runtime; loading them must
-        # not populate the new project's history or change its selected view.
-        if state.get("project_id") not in scopes:
-            return
-        task = CompletedRunLoadTask(
-            state,
-            self.jobs.directory / id_,
-            self.service.load_run,
-            assembly_id=self.assembly.id,
-            scopes=scopes,
-            history=self.history,
-            reuse_inputs=(
-                self.project,
-                tuple(record for record in self.runs.values() if not self._run_verification_error(record)),
-                tuple(state for id_, state in self.states.items() if not self._run_verification_error(id_)),
-                self.jobs_directory,
-                getattr(getattr(self.jobs, "policy", None), "threads_per_worker", 1),
-            ),
-        )
-        self._run_load_tasks[id_] = task
-        task.history_alias_generation = self._history_alias_generation
-        task.reuse_generation = self._reuse_generation
-        task.verification_generation = self._source_verification_generations.get(task.directory.resolve(), 0)
-        self._loading_job_id = id_
-        task.signals.finished.connect(self._completed_run_loaded)
-        QThreadPool.globalInstance().start(task)
+        return self.result_controller._start_completed_run_load(state)
 
     def _completed_run_loaded(self, id_, result, error):
-        task = self._run_load_tasks.pop(id_, None)
-        self._loading_job_id = next(iter(self._run_load_tasks), None)
-        if task is None or self._closing or self.assembly is None or self.assembly.id != task.assembly_id:
-            return
-        owner = task.state.get("project_id")
-        if not any(channel.project.id == owner for channel in self.assembly.channels):
-            return
-        self._loaded_ids.add(id_)
-        if self._source_verification_generations.get(task.directory.resolve(), 0) != task.verification_generation:
-            # A later explicit check of these files outranks this older snapshot.
-            self._record_job_outcomes((self.states.get(id_, task.state),))
-            self._update_execution_feedback()
-            return
-        if error:
-            self._mark_run_verification_error(id_, error, directory=task.directory)
-            self._error(f"Completed run could not be verified: {error}", open_window=False)
-        else:
-            record, history_result, reuse = result
-            project = task.reuse_inputs[0]
-            selected_reuse = None
-            if self.project.id == project.id and self.project.fingerprint == project.fingerprint:
-                all_reuse, selected_reuse = reuse
-                if self._reuse_generation == task.reuse_generation:
-                    self._reuse_plan = all_reuse
-                    self._reuse_plan_fingerprint = project.fingerprint
-            try:
-                self._register_loaded_run(
-                    record,
-                    id_=id_,
-                    select=None,
-                    history_result=history_result,
-                    selected_reuse=selected_reuse,
-                    history_alias_generation=task.history_alias_generation,
-                )
-            except (ValueError, TypeError, OSError, RuntimeError, KeyError) as exc:
-                self._mark_run_verification_error(id_, exc, directory=task.directory)
-                self._error(f"Completed run could not be registered: {exc}", open_window=False)
-        self._record_job_outcomes((self.states.get(id_, task.state),))
-        self._refresh_stage_status(refresh_reuse=False)
-        self._update_execution_feedback()
+        return self.result_controller._completed_run_loaded(id_, result, error)
 
     def _record_job_outcomes(self, states):
         unresolved = {outcome.job_id: outcome for outcome in self.job_outcomes.outcomes}
@@ -8002,99 +7483,25 @@ class CoilGenWorkbench(QMainWindow):
             return False
 
     def cancel_selected_job(self):
-        id_ = self._selected_job_id()
-        if self.jobs is not None and self.states.get(id_, {}).get("status") in {"queued", "running"}:
-            try:
-                self.jobs.cancel(id_)
-                self.poll_jobs()
-            except (ValueError, TypeError, OSError, RuntimeError, KeyError) as exc:
-                self._error(f"Cannot cancel job: {exc}")
+        return self.execution_controller.cancel_selected_job()
 
     def load_run(self, path, *, id_=None, select=True, expected_record=None):
-        with self._visible_work("Verifying saved result · " + Path(path).name):
-            return self._load_run(path, id_=id_, select=select, expected_record=expected_record)
+        return self.result_controller.load_run(path, id_=id_, select=select, expected_record=expected_record)
 
     def _load_run(self, path, *, id_=None, select=True, expected_record=None):
-        try:
-            record = self.service.load_run(path)
-            if expected_record is not None:
-                old = {key: value for key, value in read_run_metadata(expected_record).items() if key != "job"}
-                current = {key: value for key, value in read_run_metadata(record).items() if key != "job"}
-                if result_metadata_digest(old) != result_metadata_digest(current):
-                    raise ValueError("Saved run metadata changed after selection. Reopen and verify the run.")
-        except (ValueError, TypeError, OSError, RuntimeError, KeyError) as exc:
-            self._mark_run_verification_error(id_ or str(Path(path).expanduser().resolve()), exc, directory=path)
-            raise
-        return self._register_loaded_run(record, id_=id_, select=select)
+        return self.result_controller._load_run(path, id_=id_, select=select, expected_record=expected_record)
 
     def _register_loaded_run(
         self, record, *, id_=None, select=True, history_result=None, selected_reuse=None, history_alias_generation=None
     ):
-        """Register an already verified immutable record on the GUI thread."""
-        id_ = id_ or str(record.directory)
-        self._clear_run_verification_error(record, id_=id_)
-        self.runs[id_] = record
-        owner = read_run_metadata(record).get("project_id")
-        channels = self.assembly.channels if self.assembly is not None else ()
-        channel = next((channel for channel in channels if channel.project.id == owner), None)
-        scope = (owner, channel.id if self._collection_mode else None) if channel is not None else None
-        if history_result is not None:
-            loaded_scope, entry, entries, diagnostic = history_result
-            if loaded_scope == scope and entry is not None:
-                self._history_ids[entry.id] = id_
-                if scope == self._history_key:
-                    if history_alias_generation is not None:
-                        entries = tuple(
-                            replace(item, alias=self._history_alias_edits[item.id][1])
-                            if item.id in self._history_alias_edits
-                            and self._history_alias_edits[item.id][0] > history_alias_generation
-                            else item
-                            for item in entries
-                        )
-                    self._history_entries = entries
-                    self._refresh_history_panel()
-            if diagnostic:
-                self.messages.appendPlainText(f"Run history link could not be saved: {diagnostic}")
-        elif self.history is not None and scope is not None:
-            try:
-                entry = self.history.add_run(scope[0], record, channel_id=scope[1])
-                self._history_ids[entry.id] = id_
-                if scope == self._history_key:
-                    self._history_entries = self.history.restore(scope[0], channel_id=scope[1])
-                    self._refresh_history_panel()
-            except (OSError, ValueError, TypeError, RuntimeError) as exc:
-                self.messages.appendPlainText(f"Run history link could not be saved: {exc}")
-        follow_latest = select is None
-        if follow_latest:
-            followed = self.live_preview.state
-            select = (
-                self.live_preview.following
-                and self.live_preview.job_id == id_
-                and self._live_owner_matches(followed)
-                and self._live_owner_matches(read_run_metadata(record))
-            )
-        self._fill_runs()
-        if select:
-            if selected_reuse is not None:
-                # Capability display uses the exact plan verified by the loader;
-                # choosing Resume still re-verifies mutable files before use.
-                threads = getattr(getattr(self.jobs, "policy", None), "threads_per_worker", 1)
-                self._resume_capability_key = (
-                    self.project.fingerprint,
-                    self.stage_selector.currentData(),
-                    threads,
-                    id_,
-                    id(record),
-                    None,
-                    (),
-                    self._run_verification_error(id_),
-                )
-                self._resume_capability_plan = selected_reuse
-            self.show_run(id_, follow_latest=follow_latest)
-        self._refresh_stage_status(refresh_reuse=history_result is None)
-        if select:
-            self._save_session()
-        return record
+        return self.result_controller._register_loaded_run(
+            record,
+            id_=id_,
+            select=select,
+            history_result=history_result,
+            selected_reuse=selected_reuse,
+            history_alias_generation=history_alias_generation,
+        )
 
     def _fill_runs(self):
         records = [

@@ -19,7 +19,7 @@ from .geometry import (
     offset_mesh_along_vertex_normals,
 )
 from .models import CoilGenResult
-from .object_registry import register_in_memory_mesh
+from .object_registry import own_in_memory_mesh
 from .pipeline import run_coilgen
 from .problem import PipelineGeometrySpec
 
@@ -648,7 +648,7 @@ class ParametricSurfaceCoilDesign(CoilDesign):
                 "wrap_v": self.wrap_v,
             },
         )
-        key = register_in_memory_mesh(mesh, key=f"{self.name}:parametric_surface")
+        key = own_in_memory_mesh(mesh)
         return {
             "coil_mesh_file": key,
             "surface_is_cylinder_flag": self.surface_is_cylinder,
@@ -695,7 +695,7 @@ class ShieldedCoilDesign(CoilDesign):
                 "source_design_class": type(self.primary_design).__name__,
             }
         )
-        key = register_in_memory_mesh(combined, key=f"{self.name}:generic_shielded_offset_pair")
+        key = own_in_memory_mesh(combined)
         return {
             "coil_mesh_file": key,
             "surface_is_cylinder_flag": bool(primary_config.surface_is_cylinder_flag),

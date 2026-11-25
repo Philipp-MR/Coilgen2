@@ -27,160 +27,10 @@ import zipfile
 import numpy as np
 
 from .config import CoilGenConfig
+from .config_migrations import migrate_checkpoint_payload as _migrate_config
+from .config_schema import PipelineStage as PipelineStage, config_field_stage as config_field_stage
 from .models import CoilGenResult, CoilPart, Mesh, TargetField, WirePathGeometry, WireSegmentOwner
-from .persistence import file_digest, numerical_source_digest
-
-
-class PipelineStage(str, Enum):
-    PREPARED = "prepared"
-    SHEET = "sheet"
-    CONTOURS = "contours"
-    ROUTED = "routed"
-    EVALUATED = "evaluated"
-
-    @property
-    def index(self) -> int:
-        return tuple(type(self)).index(self)
-
-
-# These are explicit exceptions to conservative preparation invalidation.
-# In particular, wire area, sheet material, current and spacing constraints are
-# deliberately not classified as routing-only settings.
-_DISPLAY_FIELDS = frozenset(
-    {
-        "progress_flag",
-        "progress_min_interval_seconds",
-        "progress_percent_step",
-        "plot_flag",
-        "plot_pointcloud_max_points",
-        "plot_pointcloud_random_seed",
-        "field_display_units",
-        "output_directory",
-        "save_stl_flag",
-        "save_wire_trace_csv",
-        "wire_trace_csv_format",
-        "wire_trace_csv_length_unit",
-        "wire_trace_csv_decimal_places",
-        "chunked_output_writing",
-    }
-)
-_CONTOUR_FIELDS = frozenset(
-    {
-        "levels",
-        "pot_offset_factor",
-        "contour_part_phase_offset_deltas",
-        "level_set_method",
-        "zero_crossing_level_strategy",
-        "min_point_loop_number",
-        "min_loop_signifcance",
-        "smooth_flag",
-        "smooth_factor",
-        "skip_calculation_min_winding_distance",
-        "skip_unconnected_contour_wire_distance",
-        "wire_distance_method",
-        "wire_distance_chunk_size",
-        "wire_distance_spatial_min_segments",
-        "area_perimeter_deletion_ratio",
-        "max_allowed_angle_within_coil_track",
-        "min_allowed_angle_within_coil_track",
-        "tiny_segment_length_percentage",
-    }
-)
-_ROUTING_FIELDS = frozenset(
-    {
-        "interconnection_cut_width",
-        "interconnection_axis",
-        "within_group_cut_width",
-        "inter_group_cut_width",
-        "interconnection_method",
-        "group_interconnection_method",
-        "normal_shift_length",
-        "normal_shift_smooth_factors",
-        "normal_sweep_smooth_factor",
-        "force_cut_selection",
-        "within_group_cut_candidate_count",
-        "min_opening_cut_span",
-        "fail_on_route_quality_issues",
-        "skip_postprocessing",
-        "skip_normal_shift",
-        "skip_sweep",
-        "make_cylndrical_pcb",
-        "contour_only_sweep_mode",
-        "pcb_interconnection_method",
-        "pcb_spiral_end_shift_factor",
-        "track_width_factor",
-        "min_inter_group_connector_clearance",
-        "suspicious_inter_group_connector_ratio",
-    }
-)
-_EVALUATION_FIELDS = frozenset(
-    {
-        "skip_inductance_calculation",
-        "inductance_source",
-        "low_memory_mode",
-        "retain_heavy_fields",
-    }
-)
-_SHEET_FIELDS = frozenset(
-    {
-        "sf_opt_method",
-        "stream_function_cost_function",
-        "tikonov_reg_factor",
-        "regularization_selection_method",
-        "conductor_thickness",
-        "specific_conductivity_conductor",
-        "conductor_cross_section_width",
-        "conductor_cross_section_height",
-        "cross_sectional_points",
-        "max_current_A",
-        "max_wire_current_A",
-        "min_wire_distance_m",
-        "min_turn_distance",
-        "surface_current_density_limit_A_per_m",
-        "engineering_contour_step_safety_factor",
-        "engineering_contour_max_levels",
-        "gradient_hardware_infeasible_policy",
-    }
-)
-
-
-_LEVEL_FIELDS = frozenset({"levels", "pot_offset_factor", "contour_level_grid_mode", "contour_level_range_percentile"})
-
-
-def config_field_stage(name: str, config: CoilGenConfig | None = None) -> PipelineStage | None:
-    """Earliest affected stage; unknown/new inputs invalidate all operators."""
-    if name in _DISPLAY_FIELDS:
-        return None
-    if name in _LEVEL_FIELDS:
-        return PipelineStage.SHEET if config is None or _level_settings_affect_sheet(config) else PipelineStage.CONTOURS
-    if name in {"skip_postprocessing", "contour_only_sweep_mode", "skip_sweep"}:
-        # These modes decide whether contour resampling is deferred and whether
-        # sparsification/pruning checks candidate solids before route creation.
-        return PipelineStage.CONTOURS
-    if name in _CONTOUR_FIELDS or name.startswith(("contour_path_", "contour_resample_", "contour_smoothing_")):
-        return PipelineStage.CONTOURS
-    if name in {"routing_group_plan", "routing_editor_plan"}:
-        return PipelineStage.ROUTED
-    if name in _ROUTING_FIELDS or name.startswith(("joint_group_routing", "routing_", "inter_group_", "sweep_")):
-        if config is None or _contours_check_manufacturing(config):
-            return PipelineStage.CONTOURS
-        return PipelineStage.ROUTED
-    if name in _EVALUATION_FIELDS or name.startswith("gradient_slice_map"):
-        return PipelineStage.EVALUATED
-    if name in _SHEET_FIELDS or name.startswith(
-        (
-            "constrained_",
-            "regularization_",
-            "l_curve_",
-            "stream_function_",
-            "optimization_solver",
-            "turn_spacing_",
-            "target_error_",
-            "suppression_error_",
-        )
-    ):
-        return PipelineStage.SHEET
-    return PipelineStage.PREPARED
+from .persistence import NUMERICAL_PACKAGES, file_digest, numerical_source_digest
 
 
 def changed_config_fields(previous: CoilGenConfig, current: CoilGenConfig) -> tuple[str, ...]:
@@ -235,6 +85,7 @@ class PipelineCheckpoint:
         self._config = deepcopy(config)
         self._project_root = Path(project_root).resolve()
         self._fingerprints = dict(fingerprints or stage_fingerprints(config, self._project_root))
+        self._display_arrays: dict[str, np.ndarray] | None = None
 
     @property
     def stage(self) -> PipelineStage:
@@ -272,15 +123,40 @@ class PipelineCheckpoint:
 
     def scientific_arrays(self, *, max_bytes: int | None = None) -> dict[str, np.ndarray]:
         """Detach only display data, without copying sensitivities or solver state."""
+        return self.select_arrays(max_bytes=max_bytes)
+
+    def _array_catalog(self) -> dict[str, np.ndarray]:
         from .scientific_arrays import scientific_arrays
 
-        state = self._state
-        arrays = scientific_arrays(
-            state.parts, state.target_field, state.combined_mesh, state.sf_b_field, source_parts=state.source_parts
-        )
+        if self._display_arrays is None:
+            state = self._state
+            self._display_arrays = scientific_arrays(
+                state.parts, state.target_field, state.combined_mesh, state.sf_b_field, source_parts=state.source_parts
+            )
+        return self._display_arrays
+
+    @property
+    def array_names(self) -> tuple[str, ...]:
+        return tuple(self._array_catalog())
+
+    def array(self, name: str, *, copy: bool = True) -> np.ndarray:
+        """Inspect one display array without copying FEM operators.
+
+        Borrowed views expose a read-only buffer and retain their snapshot's
+        storage. Existing state/parts access remains detached and mutable.
+        """
+        value = np.asarray(self._array_catalog()[name])
+        return value.copy() if copy else np.asarray(memoryview(value).toreadonly())
+
+    def select_arrays(self, names=None, *, copy: bool = True, max_bytes: int | None = None) -> dict[str, np.ndarray]:
+        if isinstance(names, str):
+            raise TypeError("Array names must be a collection, not a single string.")
+        catalog = self._array_catalog()
+        selected = tuple(catalog if names is None else names)
+        arrays = {name: catalog[name] for name in selected}
         if max_bytes is not None and sum(np.asarray(value).nbytes for value in arrays.values()) > max_bytes:
             raise ValueError("Stage preview arrays exceed the permitted size.")
-        return {key: np.array(value, copy=True) for key, value in arrays.items()}
+        return {name: self.array(name, copy=copy) for name in arrays}
 
     @property
     def diagnostics(self) -> dict[str, Any]:
@@ -428,7 +304,7 @@ def stage_fingerprints(config: CoilGenConfig, project_root: Path) -> dict[str, s
     source = numerical_source_digest(Path(__file__).parent)
     assets = _asset_fingerprints(config, Path(project_root))
     environment = {"python": list(sys.version_info[:3]), "byteorder": sys.byteorder}
-    for name in ("numpy", "scipy", "cvxpy", "clarabel", "scs", "ecos", "osqp", "numba", "llvmlite"):
+    for name in NUMERICAL_PACKAGES:
         try:
             environment[name] = version(name)
         except PackageNotFoundError:
@@ -496,37 +372,6 @@ def _field_identity(name: str, value: Any) -> str:
         if Path(str(value)).is_file():
             return file_digest(Path(str(value)))
     return _identity(value)
-
-
-def _level_settings_affect_sheet(config: CoilGenConfig) -> bool:
-    # Coupling includes hardware rescaling of the preoptimized stream function and automatic
-    # factor selection. Reusing a stream function is permitted only when every linked
-    # current/spacing/contour-step guard is disabled.
-    controls = (
-        "max_current_A",
-        "max_wire_current_A",
-        "min_wire_distance_m",
-        "min_turn_distance",
-        "surface_current_density_limit_A_per_m",
-        "turn_spacing_regularization_factor",
-        "regularization_auto_range_max_contour_step_A",
-    )
-    return any(float(getattr(config, name, 0.0)) > 0.0 for name in controls)
-
-
-def _contours_check_manufacturing(config: CoilGenConfig) -> bool:
-    return bool(
-        config.contour_only_sweep_mode
-        and not config.skip_sweep
-        and any(
-            str(getattr(config, name, "off")).strip().lower() != "off"
-            for name in (
-                "contour_sparsification_mode",
-                "contour_sparsification_pruning_mode",
-                "contour_sparsification_post_pruning_merge_mode",
-            )
-        )
-    )
 
 
 def _identity(value: Any) -> str:
@@ -623,62 +468,6 @@ def _encode(value: Any, arrays: dict[str, np.ndarray]) -> Any:
             }
         return {"$tuple" if isinstance(value, tuple) else "$list": [_encode(item, arrays) for item in value]}
     raise TypeError(f"Unsupported checkpoint value {type(value).__name__}.")
-
-
-def _migrate_config(value: Any, schema: str) -> Any:
-    """Add only the known missing config fields to authenticated old evidence.
-
-    Version 2 used physical selection; version 3 recorded its own policy. Keep
-    those policies and disable new port searches on historical evidence.
-    Unknown fields and all other missing fields still fail the strict decoder.
-    Original stage/source fingerprints are retained, so migration grants no
-    permission to resume an old numerical result under a different engine.
-    """
-    if isinstance(value, list):
-        return [_migrate_config(item, schema) for item in value]
-    if not isinstance(value, dict):
-        return value
-    migrated = {key: _migrate_config(item, schema) for key, item in value.items()}
-    if value.get("$class") == "PipelineState" and "shielding_arrays" not in migrated["fields"]:
-        migrated["fields"]["shielding_arrays"] = {"$dict": []}
-    if value.get("$class") == "ConnectedGroup":
-        migrated["fields"].setdefault("routing_spiral_order", "auto")
-    if value.get("$class") in {"PipelineState", "CoilGenResult"}:
-        migrated["fields"].setdefault("source_parts", {"$list": []})
-    if value.get("$class") == "CoilGenConfig":
-        migrated["fields"].setdefault("routing_group_plan", None)
-        migrated["fields"].setdefault("routing_editor_plan", None)
-    if value.get("$class") == "CoilPart":
-        migrated["fields"].setdefault("routing_editor_baseline", None)
-    if value.get("$class") == "CoilGenConfig" and schema not in {
-        "coilgen.pipeline-checkpoint/5",
-        "coilgen.pipeline-checkpoint/6",
-        "coilgen.pipeline-checkpoint/7",
-        "coilgen.pipeline-checkpoint/8",
-        "coilgen.pipeline-checkpoint/9",
-    }:
-        additions = (
-            {}
-            if schema == "coilgen.pipeline-checkpoint/4"
-            else {
-                # Loading old evidence must not retroactively enable new port searches.
-                "joint_group_routing_port_search_count": 0,
-                "joint_group_routing_cut_span_max_factor": 1.0,
-                "joint_group_routing_seam_search_extent_rel": 0.0,
-            }
-        )
-        if schema == "coilgen.pipeline-checkpoint/2":
-            additions.update(
-                joint_group_routing_selection_policy="physical", joint_group_routing_regular_field_tolerance_rel=0.001
-            )
-        attributes = migrated.get("fields")
-        if isinstance(attributes, dict) and "contour_smoothing_local_fallback" in attributes:
-            raise ValueError("Checkpoint data-class fields do not match the historical schema.")
-        additions["contour_smoothing_local_fallback"] = False
-        expected_legacy = {item.name for item in fields(CoilGenConfig)} - additions.keys()
-        if isinstance(attributes, dict) and set(attributes) == expected_legacy:
-            migrated["fields"] = {**attributes, **additions}
-    return migrated
 
 
 def _decode(value: Any, arrays: Any) -> Any:

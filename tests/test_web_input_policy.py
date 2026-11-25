@@ -121,6 +121,10 @@ def test_live_browser_actions_reject_foreign_stl_and_preserve_valid_import(tmp_p
         browser.apply_advanced()
         assert "project changed" in state.message
         assert browser.session.project.fingerprint == uploaded
+        # Reopening preserves unresolved edits; cancel the stale draft first,
+        # as the browser's Cancel button does before loading the new revision.
+        with state:
+            state.advanced_dialog = False
         browser.open_advanced()
         accepted = json.loads(state.advanced_config)
         assert accepted["coil_mesh_file"].startswith("asset:")

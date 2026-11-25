@@ -130,6 +130,10 @@ class FakeRun:
     metadata: dict
     arrays: dict
 
+    @property
+    def metadata_view(self):
+        return self.metadata
+
 
 class FakeService:
     def __init__(self):

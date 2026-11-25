@@ -15,6 +15,25 @@ from typing import Any, Iterator, TextIO
 import uuid
 
 
+# Distribution names, including optional geometry backends. Missing packages
+# are part of the identity too: installing a backend can change a chosen path.
+NUMERICAL_PACKAGES = (
+    "numpy",
+    "scipy",
+    "cvxpy",
+    "clarabel",
+    "scs",
+    "ecos",
+    "osqp",
+    "numba",
+    "llvmlite",
+    "threadpoolctl",
+    "manifold3d",
+    "gmsh",
+    "shapely",
+)
+
+
 def json_value(value: Any, *, nonfinite: str = "null") -> Any:
     """Convert numerical results to strict JSON; use ``raise`` for input identity.
 
@@ -160,5 +179,32 @@ def numerical_source_digest(package_root: Path) -> str:
             "research/storage.py",
             "research/studies.py",
             "research/presets.py",
+        ),
+    )
+
+
+def result_source_digest(package_root: Path) -> str:
+    """Identity of both numerical computation and engineering acceptance.
+
+    Application analyses and research orchestration can change acceptance even
+    when the pipeline arrays are unchanged. Keep these in result reuse identity
+    while allowing numerical checkpoints to survive adapter-only changes.
+    New non-presentation modules are included automatically.
+    """
+    return source_digest(
+        package_root,
+        exclude=(
+            "gui",
+            "web",
+            "cli.py",
+            "__main__.py",
+            "__init__.py",
+            "attribution.py",
+            "visualization.py",
+            "field_source.py",
+            "matplotlib_visualization.py",
+            "plot_book.py",
+            "swept_mesh_inspector.py",
+            "gradient_slice_inspector.py",
         ),
     )

@@ -211,7 +211,7 @@ class DesignSetupPanel(QWidget):
             self.controls[key].setStyleSheet("")
         self._changed()
         if rebuild:
-            QTimer.singleShot(0, self._render)
+            QTimer.singleShot(0, self, self._render)
 
     def _changed(self):
         self.status.setText(
@@ -256,7 +256,7 @@ class DesignSetupPanel(QWidget):
         self.advanced_host.layout().addWidget(editor)
         self.advanced_host.show()
         editor.show()
-        QTimer.singleShot(0, lambda: self.scroll.ensureWidgetVisible(self.advanced_host, 0, 24))
+        QTimer.singleShot(0, self, lambda: self.scroll.ensureWidgetVisible(self.advanced_host, 0, 24))
 
     def candidate(self, **kwargs):
         try:

@@ -7,6 +7,8 @@ remain independent of this transport, as they are for the original inline JSON.
 
 from __future__ import annotations
 
+from ..config_migrations import CONFIG_VERSION
+
 from hashlib import sha256
 import json
 from lzma import LZMAError
@@ -62,6 +64,7 @@ def _project_manifest(project, blobs):
         "name": project.name,
         "revision": project.revision,
         "config": project.values,
+        "config_version": CONFIG_VERSION,
         "study": project.study,
         "session": project.session,
         "assets": {
@@ -176,7 +179,8 @@ def load_bundle(path, *, progress=None, max_bytes=DEFAULT_MAX_BYTES):
             def project_references(project):
                 _exact(
                     project,
-                    ("schema", "id", "name", "revision", "config", "study", "session", "assets", "results"),
+                    ("schema", "id", "name", "revision", "config", "study", "session", "assets", "results")
+                    + (("config_version",) if "config_version" in project else ()),
                     "project",
                 )
                 if (
@@ -255,7 +259,7 @@ def load_bundle(path, *, progress=None, max_bytes=DEFAULT_MAX_BYTES):
             item["id"],
             item["name"],
             item["revision"],
-            ProjectDocument._stored_config(item["config"]),
+            ProjectDocument._stored_config(item["config"], version=item.get("config_version", 0)),
             assets,
             path.parent,
             _study=item["study"],

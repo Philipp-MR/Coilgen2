@@ -261,6 +261,22 @@ def build_file_dialog(ctrl):
                         download=True,
                         classes="d-block mt-2",
                     )
+                    html.P(
+                        "Export the active channel as editable Python, including its imported inputs.", classes="mt-4"
+                    )
+                    v3.VBtn(
+                        "Export Python script",
+                        click=ctrl.export_python,
+                        variant="tonal",
+                        disabled=("settings_dirty",),
+                    )
+                    html.A(
+                        "Download Python script",
+                        v_if="python_download",
+                        href=("python_download",),
+                        download=True,
+                        classes="d-block mt-2",
+                    )
                 v3.VBtn(
                     "Export geometry…",
                     v_if="export_options.length",

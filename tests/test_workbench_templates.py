@@ -1,11 +1,11 @@
 """Template navigation creates owned designs without submitting jobs or losing edits."""
 
 import pytest
+from coilgen.gui import document_controller
 
 from _coilgen_test_support import workbench_usability as usability_tests
 from coilgen.application import ProjectDocument
 from coilgen.application.templates import TEMPLATE_SPECS
-from coilgen.gui import workbench
 from coilgen.gui.icons import ICON_NAMES
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QDockWidget, QMessageBox, QToolButton
@@ -134,7 +134,7 @@ def test_failed_factory_keeps_current_project_and_undo(windows, monkeypatch):
     def unavailable(*_args, **_kwargs):
         raise OSError("Input creation failed")
 
-    monkeypatch.setattr(workbench, "template_assembly", unavailable)
+    monkeypatch.setattr(document_controller, "template_assembly", unavailable)
     assert window.load_template("shielded_gy") is None
     assert window.project is original and window.undo_stack.isClean()
     assert errors == ["Cannot load template: Input creation failed"]

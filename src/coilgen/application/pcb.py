@@ -25,10 +25,13 @@ from .pcb_review import connection_preview, issue_groups, review_summary
 
 
 def pcb_available(record):
-    return (
-        record is not None
-        and record.metadata_view.get("completed_stage", "evaluated") in {"routed", "evaluated"}
-        and any(a.get("name") == "pipeline_checkpoint.cgstage" for a in record.metadata_view.get("artifacts", ()))
+    if record is None:
+        return False
+    metadata = getattr(record, "metadata_view", None)
+    if metadata is None:
+        metadata = getattr(record, "metadata", {})
+    return metadata.get("completed_stage", "evaluated") in {"routed", "evaluated"} and any(
+        a.get("name") == "pipeline_checkpoint.cgstage" for a in metadata.get("artifacts", ())
     )
 
 
