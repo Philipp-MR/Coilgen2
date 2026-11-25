@@ -1644,6 +1644,10 @@ class CoilGenWorkbench(QMainWindow):
         )
         self.routing_editor_action.setEnabled(False)
         self.results_menu.addAction(self.routing_editor_action)
+        self.pcb_action = self._action("PCB layout…", self._pcb_layout_dialog, icon_name="export-conductor")
+        self.pcb_action.setEnabled(False)
+        self.results_menu.addAction(self.pcb_action)
+        file_menu.addAction(self.pcb_action)
         engineering = self.results_menu.addMenu("Winding engineering")
         for key in ("_gradient_circuit_dialog", "_gradient_measured_dialog"):
             engineering.addAction(self.gradient_actions[key])
@@ -5625,6 +5629,44 @@ class CoilGenWorkbench(QMainWindow):
                 expected_fingerprint=project.fingerprint,
             )
 
+    def _pcb_layout_dialog(self):
+        from ..application.pcb import PcbSession, pcb_available
+        from .pcb_layout import PcbLayoutDialog
+
+        record = self.runs.get(self._selected_run)
+        if record is None or self._run_verification_error(record) or not pcb_available(record):
+            self._error("Select a verified run with a routing checkpoint to create its PCB layout.")
+            return
+        windows = getattr(self, "_pcb_windows", None)
+        if windows is None:
+            windows = self._pcb_windows = {}
+        key = str(record.directory)
+        if key in windows:
+            windows[key].show()
+            windows[key].raise_()
+            return
+        if getattr(self, "_pcb_loading", False):
+            return
+        self._pcb_loading = True
+
+        def display(session):
+            if self._closing:
+                return
+            dialog = PcbLayoutDialog(session, self)
+            windows[key] = dialog
+            dialog.show()
+
+        task = self._gradient_task(
+            lambda _project: PcbSession.from_record(record, workspace=self.jobs_directory.parent),
+            display,
+            "Open PCB layout",
+            retain_receipt=True,
+        )
+        if task is None:
+            self._pcb_loading = False
+        else:
+            task.signals.finished.connect(lambda *_: setattr(self, "_pcb_loading", False))
+
     def _interconnection_editor_dialog(self):
         from ..application.interconnection_editor import WindingEditorSession, editor_available
         from ..application.evidence import verify_record
@@ -7207,6 +7249,10 @@ class CoilGenWorkbench(QMainWindow):
                 self._field_analysis_capability = cached
             available = verified and cached[1]
             self.field_analysis_action.setEnabled(available)
+            if hasattr(self, "pcb_action"):
+                from ..application.pcb import pcb_available
+
+                self.pcb_action.setEnabled(bool(verified and pcb_available(record)))
             self.shielding_action.setEnabled(bool(verified and cached[2]))
             self.shielding_action.setToolTip(
                 "Compare saved field contributions on the external suppression surface."

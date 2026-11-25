@@ -6,6 +6,10 @@ inputs and channels. Run contains computation and study submission. Results
 contains field analysis, winding engineering and saved study reviews. View
 only controls panels and evidence windows.
 
+**Results → PCB layout…** opens linked flat and wrapped views for planar PCBs
+and cylindrical flex layouts, with copper rules, connections, PCB checks and
+SVG/DXF export. See the [PCB layout guide](PCB_LAYOUT.md).
+
 Menus remain accessible before opening a project and while jobs run.
 **File → Open completed run…** works from an empty workbench. Individual commands
 that require a project, verified result or authored winding explain that

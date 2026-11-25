@@ -3,6 +3,10 @@
 Use **Model → Groups and circuits…** to prepare, identify and assign winding
 groups with the same source-bound plan as the desktop. See [Groups and circuits](GROUPS_CIRCUITS.md).
 
+Use **Results → PCB layout…** on a routed result for linked flat and wrapped
+previews, copper and connectivity checks, and SVG/DXF download. The desktop
+uses the same geometry and rules. See the [PCB layout guide](PCB_LAYOUT.md).
+
 ## Top menus
 
 The browser and desktop use the same top-level order:

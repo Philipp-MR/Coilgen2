@@ -12,6 +12,7 @@ MENUS = {
         ("open", "Open project…"),
         ("save", "Save / download…"),
         ("export", "Export geometry…"),
+        ("pcb", "PCB layout / export…"),
     ),
     "Edit": (("undo", "Undo"), ("redo", "Redo"), ("revert", "Revert setup edits")),
     "Model": (
@@ -36,6 +37,7 @@ MENUS = {
         ("harmonics", "Harmonics…"),
         ("shielding", "Shielding surface…"),
         ("winding", "Edit interconnections…"),
+        ("pcb", "PCB layout…"),
         ("submitted", "Submitted design choices…"),
     ),
     "View": (
@@ -95,7 +97,7 @@ async def menu_action(browser, key):
         browser._notify("Create or open a project from File first.", "info")
         state.file_section, state.file_dialog = "examples", True
         return
-    if key in {"metrics", "checks", "slices", "harmonics", "shielding", "winding", "submitted", "export"}:
+    if key in {"metrics", "checks", "slices", "harmonics", "shielding", "winding", "submitted", "export", "pcb"}:
         if browser.record is None or state.selected_run != state.displayed_run:
             browser._notify("Choose View results for a completed run first.", "info")
             state.runs_dialog = True
@@ -136,6 +138,7 @@ async def menu_action(browser, key):
             state.shielding_source, state.shielding_component, state.shielding_detail
         ),
         "winding": browser.winding.open,
+        "pcb": lambda: browser.pcb.open(),
         "submitted": browser.review_submitted_design,
         "fit": browser.server.controller.fit_browser_view,
     }

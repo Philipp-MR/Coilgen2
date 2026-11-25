@@ -230,6 +230,7 @@ def _metric_cards(key):
 
 def build_center_panel(workbench):
     from .interconnection_editor import build_winding_editor
+    from .pcb_layout import build_pcb_layout
 
     ctrl = workbench.server.controller
     workbench.server.enable_module({"styles": ["coilgen-client/center_panel.css"]})
@@ -318,6 +319,14 @@ def build_center_panel(workbench):
                     click=workbench.winding.open,
                     disabled=("selected_run !== displayed_run",),
                     prepend_icon="mdi-vector-polyline-edit",
+                    size="small",
+                    variant="outlined",
+                )
+                v3.VBtn(
+                    "PCB layout",
+                    click=workbench.pcb.open,
+                    disabled=("selected_run !== displayed_run",),
+                    prepend_icon="mdi-vector-square",
                     size="small",
                     variant="outlined",
                 )
@@ -505,6 +514,7 @@ def build_center_panel(workbench):
             )
         _checks_dialog(ctrl)
         build_winding_editor(workbench)
+        build_pcb_layout(workbench)
         from .surface_editor import build_surface_editor
 
         build_surface_editor(workbench)

@@ -184,11 +184,13 @@ class BrowserWorkbench:
                     "coilgen-client/workbench.css",
                     "coilgen-client/interconnection_editor.css",
                     "coilgen-client/surface_editor.css",
+                    "coilgen-client/pcb_layout.css",
                 ],
                 "scripts": [
                     "coilgen-client/project_upload.js",
                     "coilgen-client/interconnection_editor.js",
                     "coilgen-client/surface_editor.js",
+                    "coilgen-client/pcb_layout.js",
                 ],
                 "vue_use": [
                     "CoilGenProjectUpload",
@@ -196,6 +198,7 @@ class BrowserWorkbench:
                     "CoilGenSetupFocus",
                     "CoilGenWindingEditor",
                     "CoilGenSurfaceEditor",
+                    "CoilGenPcbLayout",
                 ],
             }
         )
@@ -209,6 +212,9 @@ class BrowserWorkbench:
         from .interconnection_editor import BrowserWindingEditor
 
         self.winding = BrowserWindingEditor(self)
+        from .pcb_layout import BrowserPcbLayout
+
+        self.pcb = BrowserPcbLayout(self)
         from .surface_editor import BrowserSurfaceEditor
 
         self.surface = BrowserSurfaceEditor(self)
