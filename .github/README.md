@@ -9,15 +9,15 @@ and develop the result into a connected winding. Work visually in the desktop or
 browser, or automate the same numerical engine from Python.
 
 [Get started](#get-started) · [Feature tour](#feature-tour) · [Examples](#computed-coil-examples) ·
-[Python API](#python-and-reproducible-studies) · [Documentation](../docs/README.md)
+[Python API](#python-and-reproducible-studies) · [Full desktop image tour](../docs/DESKTOP_TOUR.md) ·
+[Documentation](../docs/README.md)
 
-![Computed cylindrical and biplanar coil contours with their support dimensions and independently evaluated field errors.](../docs/frontpage/coil_designs.png)
+[![CoilGen2 desktop with design settings, a computed cylindrical Gy winding and its target field](../docs/images/desktop-tour/02-workbench.png)](../docs/DESKTOP_TOUR.md)
 
-*Two computed examples at their original solved currents. These are smoothed,
-filtered contours; routing and fabrication checks are separate stages.
-[Configurations, numerical evidence and figure sources](../docs/frontpage/README.md).*
-
-![The CoilGen2 workflow: surface, target, current optimization, winding, conductor and engineering review.](../docs/images/welcome-workflow.svg)
+The desktop images use a consistent white background, light theme and
+typography. They are captures of the actual application at twice the normal
+pixel density, with units, source labels and checks visible.
+**[Explore all 26 desktop views →](../docs/DESKTOP_TOUR.md)**
 
 ## Get started
 
@@ -65,7 +65,8 @@ Linux Gmsh installations also require the GLU runtime; see the installation guid
 | **Evaluate the result** | Field slices, residuals, harmonics, gradient fits, surface current, resistance/inductance estimates and stage-by-stage comparisons. |
 | **Review engineering** | Spacing, bend, clearance and sweep checks; independent field sampling; convergence studies; feeds, waveforms and measured-field comparison. |
 | **Work with coil systems** | Multiple channels, shared geometry views, per-channel settings and results, primary/shield configurations and explicit circuit organization. |
-| **Export and reproduce** | Portable projects, saved run evidence, checkpoints, STL/CAD packages, cylindrical PCB artwork, reports and Python studies. |
+| **Design PCB artwork** | Linked flat and wrapped views, layer and connection editing, clearance/connectivity checks and SVG/DXF export for supported surfaces. |
+| **Export and reproduce** | Portable projects, saved run evidence, checkpoints, STL/CAD packages, PCB artwork, reports and Python studies. |
 
 ### 1 · A workbench for the whole design
 
@@ -75,7 +76,7 @@ background jobs without losing the model you are editing. Saved results retain
 their submitted settings and distinguish completed computation from engineering
 acceptance.
 
-![Browser workbench showing the X²−Y² shim, its model controls, reviewed winding, field metrics and completed processing stages. The displayed engineering check has failed.](../docs/images/browser-workbench-results.jpg)
+![Native design plan beside the saved winding, showing computation stages and run choices](../docs/images/desktop-tour/05-design-plan.png)
 
 The Qt/VTK desktop and browser share projects and the numerical engine. The
 browser also supports separate team workspaces and job queues. Multi-channel
@@ -91,12 +92,17 @@ axis or enter exact millimetre and degree values. Boolean subtraction keeps its
 operands editable, and deleting individual faces creates openings in the final
 support.
 
-![A perpendicular cylinder cuts a window in the main cylindrical support; unwanted faces are removed before the retained wall is meshed.](../docs/images/welcome-cad-workflow.png)
+![Native Geometry studio showing the cylinder with a transverse opening and its surface mesh](../docs/images/desktop-tour/20-geometry-studio.png)
 
 The example uses **two perpendicular cylinders**. Remove the end caps and cutter
 faces to retain an open cylindrical wall with a side window. Choose the final
 mesh edge length, inspect the triangulation, and apply the support to the active
 project. Undo/redo, recipe files and saved projects retain the construction.
+
+<details>
+<summary>Computed coil on the windowed support</summary>
+
+![A perpendicular cylinder cuts a window in the main cylindrical support; unwanted faces are removed before the retained wall is meshed.](../docs/images/welcome-cad-workflow.png)
 
 ![The windowed cylindrical support beside a computed Gy coil layout on the same surface, with winding contours surrounding the opening.](../docs/images/welcome-windowed-coil.png)
 
@@ -106,7 +112,7 @@ contours at the original solved current; routing, feeds and fabrication review
 follow afterwards. [Calculation and field evidence](../docs/images/welcome-windowed-coil-evidence.json) ·
 [Reproduce this layout](../docs/frontpage/windowed_coil.py)
 
-![Actual Geometry studio with an orthogonal cylindrical cutter, the resulting window, the object bar and final surface meshing controls.](../docs/images/geometry-studio-orthogonal-window.jpg)
+</details>
 
 Open **Model → Geometry studio…** on desktop or **Support geometry → Geometry
 studio…** in the browser. [Geometry studio guide](../docs/SURFACE_EDITOR.md)
@@ -117,7 +123,7 @@ Use generated geometry when a parametric support is sufficient, or import an
 STL with explicit units. Geometry parameters, mesh sampling and boundaries stay
 part of the saved model.
 
-![Eight generated CoilGen2 supports: cylinder, biplanar, conical frustum, annulus, elliptical cylinder, superellipse, spherical cap and toroidal segment.](../docs/images/welcome-support-library.png)
+![Desktop support editor with surface selection, dimensions, placement and mesh settings](../docs/images/desktop-tour/06-supports.png)
 
 The graphical catalog also includes rectangular and circular planes, partial
 cylinders, circular biplanar supports and ellipsoidal caps. Primary/shield
@@ -125,12 +131,24 @@ cylinders and an external suppression surface have dedicated controls.
 [Primitive geometry reference](../docs/PRIMITIVE_GEOMETRIES.md) ·
 [Support and field-region controls](../docs/NATIVE_WORKBENCH.md#support-surfaces-and-field-regions)
 
+<details>
+<summary>Generated support examples</summary>
+
+![Eight generated CoilGen2 supports: cylinder, biplanar, conical frustum, annulus, elliptical cylinder, superellipse, spherical cap and toroidal segment.](../docs/images/welcome-support-library.png)
+
+</details>
+
 ### 4 · Targets, shims and active shielding
 
 Specify a Cartesian gradient, a solid-harmonic shim, an analytic field
 expression or an imported field map. Set the ROI's size, location and sampling;
 choose field-component and normalization conventions explicitly. Useful-field
 requirements and external suppression budgets remain separate.
+
+![Desktop setup of a shielded XYZ gradient system with primary and shield surfaces](../docs/images/desktop-tour/25-shielded-system.png)
+
+This is a configured three-channel example; the image shows its support
+geometry before computation.
 
 Primary and shield surfaces can be optimized together. Inspect their individual
 fields and the net leakage on the external surface. Imported target maps support
@@ -146,7 +164,7 @@ Tikhonov fitting, constrained quadratic optimization, continuous-sheet power,
 magnetic energy, or minimax surface current density. Control field-error
 budgets, regularization, smoothness and supported physical bounds.
 
-![Computed stream-function distributions on cylindrical and biplanar supports, with contours and physical stream-function scales.](../docs/frontpage/stream_function.png)
+![Computed stream function on the cylindrical support in the desktop workbench](../docs/images/desktop-tour/03-stream-function.png)
 
 Advanced studies expose symmetry and spectral reductions, finite field
 scenarios, force/torque limits in a prescribed background, power/energy caps,
@@ -162,7 +180,7 @@ and inspect how processing changes the field. **Groups & circuits** assigns
 contour groups to circuits, with explicit spiral order and cut-side controls.
 Automatic routing then connects the retained turns and returns.
 
-![Earlier and updated X²−Y² shim windings shown at the same scale, including a developed view of a winding lobe.](../docs/images/x2y2-reviewed-windings.png)
+![Native interconnection editor with linked flat and three-dimensional winding views](../docs/images/desktop-tour/11-interconnections.png)
 
 The **interconnection editor** lets you select and drag cuts and guide points,
 position plane/sphere/box cutting volumes, preview connections, lock sections,
@@ -179,6 +197,14 @@ Elliptical and trapezoidal profiles are supported through the profile editor.
 Set the conductor's physical size and choose centered, inner or outer mounting
 on the winding support.
 
+![Three-dimensional swept conductor in the desktop workbench](../docs/images/desktop-tour/04-swept-conductor.png)
+
+[Sweep controls](../docs/PARAMETERS.md#volumetric-sweep-controls) ·
+[Conductor settings and export views](../docs/DESKTOP_TOUR.md#6-review-engineering-checks-and-prepare-geometry)
+
+<details>
+<summary>Profile examples and field-stage comparison</summary>
+
 ![Native profile editors, production sweep meshes and the recorded field changes for an elliptical winding through path realization and mounting.](../docs/frontpage/ismrm2027/conductor-profiles.png)
 
 The figure shows actual profile-editor captures and swept geometry. Its field
@@ -188,14 +214,16 @@ The illustrated sweeps failed their configured geometric checks.
 [Figure provenance](../docs/frontpage/ismrm2027/README.md#conductor-cross-sections-and-sweeping) ·
 [Sweep controls](../docs/PARAMETERS.md#volumetric-sweep-controls)
 
+</details>
+
 ### 8 · Field analysis at every stage
 
-Compare requested fields with the optimized sheet, extracted contours,
+Compare requested fields with the optimized stream function, extracted contours,
 connected winding and mounted conductor centerlines. Inspect slices, residual
 maps, RMS and peak errors, harmonic coefficients and gradient fits. Preserve
 the current and sampling policy when comparing stages.
 
-![Calculated field maps and residuals for the cylindrical and biplanar examples, comparing their target, continuous-sheet and processed-contour fields.](../docs/frontpage/field_validation.png)
+![Desktop field analysis with target, directly evaluated field and residual on a 64 by 64 plane](../docs/images/desktop-tour/15-field-maps.png)
 
 Coil statistics include recorded current, path length, resistance and
 inductance estimates where supported, plus conductor mass and volume when
@@ -211,6 +239,12 @@ between-body clearance. Export swept conductor geometry and generate grooved
 formers for supported configurations. Cylindrical layouts can also produce
 unrolled PCB artwork.
 
+![Desktop engineering review with check statuses and evidence-gap warnings](../docs/images/desktop-tour/22-engineering-checks.png)
+
+The review distinguishes passed checks from unverified items and missing
+evidence. The [full tour](../docs/DESKTOP_TOUR.md#6-review-engineering-checks-and-prepare-geometry)
+also shows geometry export and printable-former settings.
+
 The gradient-engineering tools add mesh/quadrature/sampling convergence studies,
 independent winding-field checks, explicit terminals and feed paths,
 piecewise-linear drive waveforms, and measured-field comparisons with declared
@@ -218,6 +252,20 @@ coordinate transforms and currents. Review the scope of each result before
 using it as an engineering constraint.
 [Gradient engineering](../docs/NATIVE_WORKBENCH.md#gradient-engineering-workflow) ·
 [Exports and saved results](../docs/NATIVE_WORKBENCH.md#ownership-persistence-and-reuse)
+
+### 10 · PCB and flexible PCB artwork
+
+Select a trace in the flat artwork or wrapped preview to inspect the same
+geometry in both views. Set trace width, layers and seam position; review
+connections, clearance and connectivity; then export SVG or DXF artwork.
+
+![Desktop PCB editor with linked flat artwork and wrapped cylindrical preview](../docs/images/desktop-tour/12-pcb-layout.png)
+
+This editable draft retains unresolved checks and has no evaluated PCB field;
+it is inspection artwork, not a fabrication release. Spherical caps require a
+separate flattening strategy because they cannot unroll without distortion.
+[PCB workflow and supported surfaces](../docs/PCB_LAYOUT.md) ·
+[Connections and checks views](../docs/DESKTOP_TOUR.md#4-develop-pcb-and-flexible-pcb-artwork)
 
 ## Computed coil examples
 
@@ -286,10 +334,13 @@ qualification require additional models and evidence.
 [Examples](../docs/EXAMPLES.md) · [Contributing](../docs/CONTRIBUTING.md) ·
 [Report an issue](https://github.com/Philipp-MR/Coilgen2/issues)
 
-The new geometry illustrations are rendered directly from the production CAD
-and mesh APIs at 3,840 pixels wide. Existing workbench captures and scientific
-figures retain their original image files and numerical scope.
-[Reproduce the geometry gallery](../docs/frontpage/welcome_gallery.py) ·
+The desktop tour is captured from production Qt widgets and their rendered
+plots with a shared white theme. Saved results, editable drafts and setup
+previews are identified in the captions. The additional scientific figures
+retain their original numerical scope.
+[Desktop capture script and provenance](../docs/frontpage/README.md#desktop-feature-tour) ·
+[Full desktop gallery](../docs/DESKTOP_TOUR.md) ·
+[Geometry gallery script](../docs/frontpage/welcome_gallery.py) ·
 [Geometry evidence](../docs/images/welcome-geometry-evidence.json)
 
 ## Citation and license
