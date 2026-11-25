@@ -1,0 +1,447 @@
+{
+  "style": "White background; Fusion light theme; Segoe UI 11 pt; native 2\u00d7 pixel density",
+  "scope": "Production desktop widgets; actual verified saved result; no invented numerical state",
+  "source_run": "0d285ee7bfb14bd898c3c64b664be474",
+  "screenshots": [
+    {
+      "file": "01-welcome.png",
+      "title": "Start a design or open a portable project",
+      "pixels": [
+        2880,
+        1920
+      ],
+      "logical_size": [
+        1440,
+        960
+      ],
+      "scale": 2.0,
+      "sha256": "da53f6545681578c8b551ca2886db57bb4f13e6eff283795fd1186d2fe1a297c",
+      "vtk_registration": []
+    },
+    {
+      "file": "02-workbench.png",
+      "title": "Design setup, saved results and the 3D winding",
+      "pixels": [
+        2880,
+        1922
+      ],
+      "logical_size": [
+        1440,
+        961
+      ],
+      "scale": 2.0,
+      "sha256": "fc9a2de7dc248bef80beecd7c9aa8b210c4c511ad5ebcd763abe852ff3df1f7d",
+      "vtk_registration": [
+        {
+          "x": 385,
+          "y": 461,
+          "width": 1046,
+          "height": 411
+        }
+      ]
+    },
+    {
+      "file": "03-stream-function.png",
+      "title": "Inspect the optimized surface-current stream function",
+      "pixels": [
+        2880,
+        1920
+      ],
+      "logical_size": [
+        1440,
+        960
+      ],
+      "scale": 2.0,
+      "sha256": "f89e9072a9b6057ae6f24acdea41e632ac9030cf9f4a073832678f8c57263f0c",
+      "vtk_registration": [
+        {
+          "x": 385,
+          "y": 429,
+          "width": 1046,
+          "height": 442
+        }
+      ]
+    },
+    {
+      "file": "04-swept-conductor.png",
+      "title": "Inspect the swept conductor volume",
+      "pixels": [
+        2880,
+        1920
+      ],
+      "logical_size": [
+        1440,
+        960
+      ],
+      "scale": 2.0,
+      "sha256": "3b3e1a4fe36120824d51465c431d7a98fd9e5c3609dbf9d7c54203d35083bfb9",
+      "vtk_registration": [
+        {
+          "x": 385,
+          "y": 395,
+          "width": 1046,
+          "height": 476
+        }
+      ]
+    },
+    {
+      "file": "05-design-plan.png",
+      "title": "Follow saved stages and reproducible computations",
+      "pixels": [
+        2880,
+        1920
+      ],
+      "logical_size": [
+        1440,
+        960
+      ],
+      "scale": 2.0,
+      "sha256": "7c6f46af0328663478e109dc161023c14d418fe1a5469fc2a79fd7318a720aca",
+      "vtk_registration": [
+        {
+          "x": 385,
+          "y": 395,
+          "width": 671,
+          "height": 456
+        }
+      ]
+    },
+    {
+      "file": "06-supports.png",
+      "title": "Choose support geometry and mesh resolution",
+      "pixels": [
+        2000,
+        1440
+      ],
+      "logical_size": [
+        1000,
+        720
+      ],
+      "scale": 2.0,
+      "sha256": "023d9676cb064b31a5f7a2ca2ea675eeabf6c3c7fc8d6fb23906ee2071128fad",
+      "vtk_registration": []
+    },
+    {
+      "file": "07-target.png",
+      "title": "Define the target field and its physical region",
+      "pixels": [
+        2000,
+        1440
+      ],
+      "logical_size": [
+        1000,
+        720
+      ],
+      "scale": 2.0,
+      "sha256": "40ef7da72eb37c179eb2363d81718ff265a45320e10efc48f7ae3d8b3c91b419",
+      "vtk_registration": []
+    },
+    {
+      "file": "08-optimization.png",
+      "title": "Set objectives, regularization and field-error constraints",
+      "pixels": [
+        2000,
+        1440
+      ],
+      "logical_size": [
+        1000,
+        720
+      ],
+      "scale": 2.0,
+      "sha256": "a163436fc655605874fbb4692339c8e1207ba71577ba3709485727385da987ed",
+      "vtk_registration": []
+    },
+    {
+      "file": "09-conductor.png",
+      "title": "Define conductor dimensions and cross section",
+      "pixels": [
+        2000,
+        1440
+      ],
+      "logical_size": [
+        1000,
+        720
+      ],
+      "scale": 2.0,
+      "sha256": "9522963b6f64f3984346088a40c6e421ef1b8a227773bb31570e3488209f464b",
+      "vtk_registration": []
+    },
+    {
+      "file": "10-winding.png",
+      "title": "Control contour spacing, smoothing and routing",
+      "pixels": [
+        2000,
+        1440
+      ],
+      "logical_size": [
+        1000,
+        720
+      ],
+      "scale": 2.0,
+      "sha256": "0d7aa6f3f95ac7f0c213514f9f4cad3afee99ad484337570c8b87b9df0a25163",
+      "vtk_registration": []
+    },
+    {
+      "file": "11-interconnections.png",
+      "title": "Edit interconnections with linked 3D and flat views",
+      "pixels": [
+        2880,
+        1920
+      ],
+      "logical_size": [
+        1440,
+        960
+      ],
+      "scale": 2.0,
+      "sha256": "63627272bfbca0b7d65e98d29151ec651bdb83440d66e2f2d46812c937dea143",
+      "vtk_registration": [
+        {
+          "x": 11,
+          "y": 210,
+          "width": 754,
+          "height": 679
+        }
+      ]
+    },
+    {
+      "file": "12-pcb-layout.png",
+      "title": "Develop flat PCB artwork with a linked installed-coil preview",
+      "pixels": [
+        2880,
+        1920
+      ],
+      "logical_size": [
+        1440,
+        960
+      ],
+      "scale": 2.0,
+      "sha256": "6518ec0b159883c238fe1f13eda377c9c7ff090353575c6c36dc1cb324156679",
+      "vtk_registration": []
+    },
+    {
+      "file": "13-pcb-connections.png",
+      "title": "Preview endpoint connections, layer transitions and clearance concerns",
+      "pixels": [
+        2880,
+        1920
+      ],
+      "logical_size": [
+        1440,
+        960
+      ],
+      "scale": 2.0,
+      "sha256": "b3ffeed05ccefeafb0fc3cc223407f637aa43044f85d0ca743f7e56f99db6b0a",
+      "vtk_registration": []
+    },
+    {
+      "file": "14-pcb-checks.png",
+      "title": "Inspect grouped PCB checks and saved-path displacement",
+      "pixels": [
+        2880,
+        1920
+      ],
+      "logical_size": [
+        1440,
+        960
+      ],
+      "scale": 2.0,
+      "sha256": "59d8e99931a6c060f87bc757b504780da0758584e6df7683266a4eb5fc67772e",
+      "vtk_registration": []
+    },
+    {
+      "file": "15-field-maps.png",
+      "title": "Compare target, calculated field and residual on matched scales",
+      "pixels": [
+        2880,
+        1920
+      ],
+      "logical_size": [
+        1440,
+        960
+      ],
+      "scale": 2.0,
+      "sha256": "f96ebe925a9557dfa114ecf869e4995a9170b9f4f8659798ed48eec550798826",
+      "vtk_registration": []
+    },
+    {
+      "file": "16-field-slices.png",
+      "title": "Inspect physical field sections through the target region",
+      "pixels": [
+        2880,
+        1920
+      ],
+      "logical_size": [
+        1440,
+        960
+      ],
+      "scale": 2.0,
+      "sha256": "21371e125cb63df0267d9c0fc71954a852f65677bd46cc81acb025e1111e0ef8",
+      "vtk_registration": []
+    },
+    {
+      "file": "17-field-errors.png",
+      "title": "Inspect the spatial distribution of field error",
+      "pixels": [
+        2880,
+        1920
+      ],
+      "logical_size": [
+        1440,
+        960
+      ],
+      "scale": 2.0,
+      "sha256": "1916f3870142cb2865cca95919420b5d64b1a580f52ee3dfa20a8f5bcc146217",
+      "vtk_registration": []
+    },
+    {
+      "file": "18-harmonics.png",
+      "title": "Resolve field errors into solid-harmonic components",
+      "pixels": [
+        2880,
+        1920
+      ],
+      "logical_size": [
+        1440,
+        960
+      ],
+      "scale": 2.0,
+      "sha256": "52e781ae671ada9db60fc893805e528c442d7648b1d5337b1ccbe51985a8d846",
+      "vtk_registration": []
+    },
+    {
+      "file": "19-coil-statistics.png",
+      "title": "Review recorded current, resistance, inductance and conductor properties",
+      "pixels": [
+        2880,
+        1920
+      ],
+      "logical_size": [
+        1440,
+        960
+      ],
+      "scale": 2.0,
+      "sha256": "f8b968d014b56e5ccc6a21ebe6ed580a71152be71a01b700ed61a3a454df4506",
+      "vtk_registration": []
+    },
+    {
+      "file": "20-geometry-studio.png",
+      "title": "Build, subtract, select faces and mesh support surfaces",
+      "pixels": [
+        2880,
+        1920
+      ],
+      "logical_size": [
+        1440,
+        960
+      ],
+      "scale": 2.0,
+      "sha256": "4b04c9d0924e79929ecffee39ad6702837c38ce9ffee9ea7ec47ff52ab0be07b",
+      "vtk_registration": [
+        {
+          "x": 11,
+          "y": 79,
+          "width": 1418,
+          "height": 534
+        }
+      ]
+    },
+    {
+      "file": "21-groups-circuits.png",
+      "title": "Assign contour groups to circuits and choose spiral order",
+      "pixels": [
+        2880,
+        1920
+      ],
+      "logical_size": [
+        1440,
+        960
+      ],
+      "scale": 2.0,
+      "sha256": "36163d4a84d75f29931526f812c71dd19f68cf612a819fd3b965eb376d91b5dd",
+      "vtk_registration": []
+    },
+    {
+      "file": "22-engineering-checks.png",
+      "title": "Review saved engineering evidence and acceptance checks",
+      "pixels": [
+        2880,
+        1920
+      ],
+      "logical_size": [
+        1440,
+        960
+      ],
+      "scale": 2.0,
+      "sha256": "13ad371d7641101e22f7c5ccd289b23da24a45ac4673778787d7b1f8300fd0c1",
+      "vtk_registration": []
+    },
+    {
+      "file": "23-geometry-export.png",
+      "title": "Export conductor geometry from the selected saved result",
+      "pixels": [
+        2200,
+        1700
+      ],
+      "logical_size": [
+        1100,
+        850
+      ],
+      "scale": 2.0,
+      "sha256": "9ee65fc4cb3a9bcf1df5fa2ecc467ef1f960f62e9542c1436a31d6b78848e3c5",
+      "vtk_registration": []
+    },
+    {
+      "file": "24-print-former.png",
+      "title": "Configure a printable winding former and wire grooves",
+      "pixels": [
+        2000,
+        1440
+      ],
+      "logical_size": [
+        1000,
+        720
+      ],
+      "scale": 2.0,
+      "sha256": "364b20f27b7d6e948071c279ad5ee19bfea38c5e9d4fc0d16a8a7c500ab18652",
+      "vtk_registration": []
+    },
+    {
+      "file": "25-shielded-system.png",
+      "title": "Configure the actively shielded XYZ gradient example",
+      "pixels": [
+        2880,
+        1920
+      ],
+      "logical_size": [
+        1440,
+        960
+      ],
+      "scale": 2.0,
+      "sha256": "7b43bbd859b33d02923f486c32433d91d0fed74dca47e69193dc579a85171ada",
+      "vtk_registration": [
+        {
+          "x": 385,
+          "y": 295,
+          "width": 1046,
+          "height": 576
+        }
+      ]
+    },
+    {
+      "file": "26-channel-overview.png",
+      "title": "Manage independent channels and inspect each execution state",
+      "pixels": [
+        2880,
+        1040
+      ],
+      "logical_size": [
+        1440,
+        520
+      ],
+      "scale": 2.0,
+      "sha256": "33f12e1ad3d22dbcd519c703c503f3350535b630c8fea5338ecffdecd1144c80",
+      "vtk_registration": []
+    }
+  ],
+  "errors": []
+}

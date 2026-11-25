@@ -3,6 +3,9 @@
 [Project source](https://github.com/Philipp-MR/Coilgen2).
 [Kontakt and project information](CONTACT.md).
 
+[Explore the desktop in images](DESKTOP_TOUR.md): a white-background tour of
+geometry, winding editing, PCB layout, field analysis, engineering checks and export.
+
 For a first desktop design on Windows, run `Setup CoilGen2.cmd`, open
 `Start CoilGen2 GUI.cmd`, and choose **Browse examples… → Gradients → Cylindrical Y gradient (Gy)**. Click **Compute full design**.
 After completion, open **Jobs → View results → Run design choices** to inspect

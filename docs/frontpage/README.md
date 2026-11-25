@@ -1,6 +1,38 @@
 # Front-page figures and numerical evidence
 
-The GitHub welcome page uses actual CoilGen2 computations, with generated
+## Desktop feature tour
+
+The GitHub README links to the [desktop image tour](../DESKTOP_TOUR.md).
+Its images are actual production Qt widgets and plots, captured on white at
+2× pixel density with a consistent Fusion light palette and Segoe UI typography.
+The capture process uses private offscreen windows and does not require taking
+over an existing desktop session.
+
+In an environment with the GUI and scientific dependencies installed:
+
+```powershell
+python docs/frontpage/capture_desktop_tour.py --project path/to/example.coilgen --run path/to/saved/run
+```
+
+Use a compatible saved cylindrical Gy project and run with contour checkpoints,
+reviewed field data and swept conductor geometry. The published winding images
+use revision 3 of the `Cylindrical Gy editor test` example, run
+`0d285ee7bfb14bd898c3c64b664be474`. That local validation bundle is not included
+with the documentation; another run will have its own numerical values and labels.
+The CAD example uses `docs/images/welcome-geometry-evidence.json`, and the system
+view uses the built-in `shielded_xyz_gradient` template.
+
+Optional `--sections` values are `workbench settings pcb analysis routing groups geometry
+engineering systems`; `--output` selects another image directory. Each section
+updates its entries in `capture-manifest.json`. The capture harness restores VTK
+pixels that `QWidget.grab()` omits, at their exact widget bounds. It does not alter
+geometry or numerical results. Review the images and captions after regeneration:
+warnings, saved-sample interpolation and unavailable estimates are meaningful
+parts of the application state.
+
+## Standalone numerical figures
+
+The standalone scientific figures use actual CoilGen2 computations, with generated
 geometry and analytic targets. There are no external meshes, measured data,
 MATLAB dependencies or synthetic decorative field maps in these figures.
 
